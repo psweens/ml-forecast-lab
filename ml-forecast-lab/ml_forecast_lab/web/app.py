@@ -343,6 +343,97 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             experiments_production=prod_count,
         )
 
+    # ========== Log Routes ==========
+
+    LOG_FILE = Path("/data/ml_forecast_lab/logs/mlfl.log")
+
+    @app.get("/log", response_class=Response)
+    async def view_log(request: Request, lines: int = 500):
+        """
+        View recent log output in the browser.
+        Returns the last N lines of the log file as plain text.
+        """
+        log_text = ""
+        # Read current log + first rotated backup
+        for log_path in [LOG_FILE.with_suffix(".log.1"), LOG_FILE]:
+            if log_path.exists():
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                        log_text += f.read()
+                except Exception as e:
+                    log_text += f"\n[Error reading {log_path}: {e}]\n"
+
+        # Return last N lines
+        all_lines = log_text.splitlines()
+        tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        return Response(
+            content="\n".join(tail),
+            media_type="text/plain; charset=utf-8",
+        )
+
+    @app.get("/api/log")
+    async def api_log(
+        lines: int = 200,
+        level: str = "all",
+        search: str = "",
+    ):
+        """
+        JSON log API with filtering.
+
+        Parameters:
+            lines: max lines to return (default 200)
+            level: 'all', 'info', 'warning', 'error' (filters by level)
+            search: text search filter
+        """
+        log_text = ""
+        for log_path in [LOG_FILE.with_suffix(".log.1"), LOG_FILE]:
+            if log_path.exists():
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                        log_text += f.read()
+                except Exception:
+                    pass
+
+        all_lines = log_text.splitlines()
+
+        # Filter by level
+        if level != "all":
+            level_upper = level.upper()
+            all_lines = [
+                l for l in all_lines if f"- {level_upper} -" in l.upper()
+            ]
+
+        # Filter by search term
+        if search:
+            search_lower = search.lower()
+            all_lines = [l for l in all_lines if search_lower in l.lower()]
+
+        # Tail
+        tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+
+        return {
+            "total_lines": len(all_lines),
+            "returned_lines": len(tail),
+            "lines": tail,
+        }
+
+    @app.get("/debug_log", response_class=Response)
+    async def download_log():
+        """
+        Download the full current log file.
+        """
+        if not LOG_FILE.exists():
+            raise HTTPException(status_code=404, detail="No log file found")
+
+        with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+
+        return Response(
+            content=content,
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": "attachment; filename=mlfl.log"},
+        )
+
     @app.get("/api/models")
     async def list_models() -> List[ModelInfo]:
         """
