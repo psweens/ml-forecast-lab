@@ -15,6 +15,10 @@ homeassistant_api: true
 hassio_api: true
 hassio_role: admin
 auth_api: true
+ingress: true
+ingress_port: 5052
+panel_icon: mdi:chart-timeline-variant-shimmer
+panel_title: ML Forecast Lab
 webui: http://[HOST]:[PORT:5052]
 ports:
   5052/tcp: 5052
