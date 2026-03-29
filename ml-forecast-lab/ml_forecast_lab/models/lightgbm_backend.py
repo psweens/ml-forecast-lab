@@ -169,15 +169,17 @@ class LightGBMModel(ForecastModel):
         train_data = lgb.Dataset(
             X_train_split,
             label=y_train_split,
-            feature_names=self.feature_names_
+            free_raw_data=False,
         )
+        train_data.feature_name = self.feature_names_
 
         val_data = lgb.Dataset(
             X_val,
             label=y_val,
-            feature_names=self.feature_names_,
-            reference=train_data
+            reference=train_data,
+            free_raw_data=False,
         )
+        val_data.feature_name = self.feature_names_
 
         # Training parameters
         params = {

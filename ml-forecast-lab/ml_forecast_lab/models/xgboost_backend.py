@@ -173,7 +173,7 @@ class XGBoostModel(ForecastModel):
             tree_method=self.tree_method,
             verbosity=self.verbose,
             random_state=42,
-            feature_names=self.feature_names_,
+            early_stopping_rounds=50,
         )
 
         # Train with early stopping
@@ -181,9 +181,7 @@ class XGBoostModel(ForecastModel):
             X_train_split,
             y_train_split,
             eval_set=[(X_val, y_val)],
-            callbacks=[
-                xgb.callback.EarlyStopping(rounds=50, metric_name="rmse"),
-            ],
+            verbose=False,
         )
 
         # Extract training metadata
