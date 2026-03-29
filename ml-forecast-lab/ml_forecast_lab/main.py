@@ -119,16 +119,16 @@ class MLForecastLabApp:
 
             # Initialise ModelRegistry with all available backends
             from ml_forecast_lab.models.registry import ModelRegistry
-            from ml_forecast_lab.models.lightgbm_backend import LightGBMBackend
-            from ml_forecast_lab.models.xgboost_backend import XGBoostBackend
-            from ml_forecast_lab.models.lstm_backend import LSTMBackend
-            from ml_forecast_lab.models.cnn_backend import CNNBackend
+            from ml_forecast_lab.models.lightgbm_backend import LightGBMModel
+            from ml_forecast_lab.models.xgboost_backend import XGBoostModel
+            from ml_forecast_lab.models.lstm_backend import LSTMModel
+            from ml_forecast_lab.models.cnn_backend import CNNModel
 
             self.model_registry = ModelRegistry()
-            self.model_registry.register("lightgbm", LightGBMBackend)
-            self.model_registry.register("xgboost", XGBoostBackend)
-            self.model_registry.register("lstm", LSTMBackend)
-            self.model_registry.register("cnn", CNNBackend)
+            self.model_registry.register("lightgbm", LightGBMModel)
+            self.model_registry.register("xgboost", XGBoostModel)
+            self.model_registry.register("lstm", LSTMModel)
+            self.model_registry.register("cnn", CNNModel)
             logger.info("ModelRegistry initialised with 4 backends")
 
         except Exception as e:
