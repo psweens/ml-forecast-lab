@@ -1,0 +1,14 @@
+#!/command/execlineb -P
+# ML Forecast Lab initialisation script
+# Sets up the environment and launches the Python application
+
+with-contenv
+  if { mkdir -p /data/ml_forecast_lab }
+    if { mkdir -p /data/ml_forecast_lab/models }
+      if { mkdir -p /data/ml_forecast_lab/logs }
+        if { mkdir -p /config/ml_forecast_lab }
+          s6-echo "Initialising ML Forecast Lab application environment..."
+          s6-echo "Starting ML Forecast Lab service..."
+
+# Execute the main application module
+exec -c python3 -m ml_forecast_lab

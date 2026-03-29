@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+
+{% block title %}{{ experiment.name }} - ML Forecast Lab{% endblock %}
+
+{% block content %}
+<div class="experiment-header">
+    <div class="header-top">
+        <h1>{{ experiment.name }}</h1>
+        <span class="status-badge status-{{ experiment.mode | lower }}">{{ experiment.mode | upper }}</span>
+    </div>
+    <p class="subtitle">{{ experiment.target_entity }}</p>
+
+    <div class="action-buttons">
+        <button class="btn btn-primary"
+                id="run-benchmark-btn"
+                hx-post="/experiment/{{ experiment.name }}/run-benchmark"
+                hx-swap="none"
+                {% if is_running %}disabled{% endif %}>
+            {% if is_running %}⏳ Running...{% else %}▶ Run Benchmark{% endif %}
+        </button>
+        {% if experiment.best_model %}
+        <button class="btn btn-success"
+                hx-post="/experiment/{{ experiment.name }}/promote/{{ experiment.best_model }}"
+                hx-target="#promote-message"
+                hx-swap="innerHTML swap:2s">
+            ⭐ Promote to Production
+        </button>
+        {% endif %}
+    </div>
+    <div id="promote-message"></div>
+</div>
+
+{% if benchmark_result %}
+<!-- Model Comparison Table -->
+<section class="section">
+    <h2>Model Comparison</h2>
+    <div class="table-container">
+        <table class="metrics-table">
+            <thead>
+                <tr>
+                    <th>Model</th>
+                    <th>MAE</th>
+                    <th>RMSE</th>
+                    <th>MAPE (%)</th>
+                    <th>Train Time (s)</th>
+                    <th>Rank</th>
+                    <th>Production</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for model in models %}
+                <tr class="{% if model.rank == 1 %}best-model{% endif %}">
+                    <td class="model-name">{{ model.name }}</td>
+                    <td>
+                        <span class="metric-value">{{ "%.3f" | format(model.mae.mean) }}</span>
+                        <span class="metric-std">± {{ "%.3f" | format(model.mae.std) }}</span>
+                    </td>
+                    <td>
+                        <span class="metric-value">{{ "%.3f" | format(model.rmse.mean) }}</span>
+                        <span class="metric-std">± {{ "%.3f" | format(model.rmse.std) }}</span>
+                    </td>
+                    <td>
+                        <span class="metric-value">{{ "%.2f" | format(model.mape.mean) }}</span>
+                        <span class="metric-std">± {{ "%.2f" | format(model.mape.std) }}</span>
+                    </td>
+                    <td>{{ "%.2f" | format(model.train_time_seconds) }}</td>
+                    <td>
+                        <span class="rank-badge rank-{{ model.rank }}">{{ model.rank }}</span>
+                    </td>
+                    <td>
+                        {% if model.is_production %}
+                        <span class="badge badge-success">✓ Production</span>
+                        {% else %}
+                        <span class="badge badge-secondary">Lab</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Per-Fold Metrics (Expandable) -->
+    <details class="fold-metrics">
+        <summary>Per-Fold Metrics</summary>
+        <div class="fold-content">
+            {% for model in models %}
+            {% if model.fold_results %}
+            <div class="fold-section">
+                <h4>{{ model.name }}</h4>
+                <table class="fold-table">
+                    <thead>
+                        <tr>
+                            <th>Fold</th>
+                            <th>MAE</th>
+                            <th>RMSE</th>
+                            <th>MAPE</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for fold_idx, fold_metrics in enumerate(model.fold_results) %}
+                        <tr>
+                            <td>Fold {{ fold_idx + 1 }}</td>
+                            <td>{{ "%.3f" | format(fold_metrics.mae) }}</td>
+                            <td>{{ "%.3f" | format(fold_metrics.rmse) }}</td>
+                            <td>{{ "%.2f" | format(fold_metrics.mape) }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% endif %}
+            {% endfor %}
+        </div>
+    </details>
+</section>
+
+<!-- Forecast Chart -->
+<section class="section">
+    <h2>Forecast Chart</h2>
+    {% if forecast_data %}
+    <div id="forecast-chart" style="min-height: 500px;"></div>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const forecastData = {{ forecast_data | tojson }};
+            window.mlfl.drawForecastChart('forecast-chart', forecastData);
+        });
+    </script>
+    {% else %}
+    <div class="empty-state">
+        <p>No forecast data available yet. Run a benchmark to generate forecasts.</p>
+    </div>
+    {% endif %}
+</section>
+
+<!-- Feature Importance -->
+<section class="section">
+    <h2>Feature Importance</h2>
+    <div id="feature-importance-chart" style="min-height: 500px;"></div>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Sample feature importance data (in production, fetch from API)
+            const features = [
+                { name: 'hour_of_day', importance: 0.25 },
+                { name: 'day_of_week', importance: 0.18 },
+                { name: 'temperature', importance: 0.15 },
+                { name: 'humidity', importance: 0.12 },
+                { name: 'cloud_cover', importance: 0.10 },
+                { name: 'wind_speed', importance: 0.08 },
+                { name: 'pressure', importance: 0.07 },
+                { name: 'is_weekend', importance: 0.05 }
+            ];
+            window.mlfl.drawFeatureImportance('feature-importance-chart', features);
+        });
+    </script>
+</section>
+
+<!-- Benchmark Run Info -->
+<div class="benchmark-info">
+    <h3>Latest Benchmark Run</h3>
+    <dl>
+        <dt>Status:</dt>
+        <dd>
+            <span class="status-badge status-{{ benchmark_result.status | lower }}">
+                {{ benchmark_result.status | title }}
+            </span>
+        </dd>
+        <dt>Timestamp:</dt>
+        <dd class="monospace">{{ benchmark_result.timestamp }}</dd>
+        <dt>Best Model:</dt>
+        <dd>{{ benchmark_result.best_model_name or 'N/A' }}</dd>
+        {% if benchmark_result.error_message %}
+        <dt>Error:</dt>
+        <dd class="error">{{ benchmark_result.error_message }}</dd>
+        {% endif %}
+    </dl>
+</div>
+
+{% else %}
+<section class="section">
+    <div class="empty-state">
+        <p>No benchmark results yet. Click "Run Benchmark" to start model comparison.</p>
+    </div>
+</section>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const benchmarkBtn = document.getElementById('run-benchmark-btn');
+    if (benchmarkBtn && !benchmarkBtn.disabled && benchmarkBtn.hx-post) {
+        // When clicked, set up polling
+        benchmarkBtn.addEventListener('htmx:xhr:loadstart', function() {
+            benchmarkBtn.disabled = true;
+            benchmarkBtn.textContent = '⏳ Running...';
+            window.mlfl.pollBenchmarkStatus('{{ experiment.name }}');
+        });
+    }
+</script>
+{% endblock %}
