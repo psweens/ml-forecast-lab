@@ -86,9 +86,9 @@ def cumulative_to_interval(
     resets = diffs < 0
     if reset_daily:
         # For daily-reset sensors, also flag suspected resets based on time
-        midnight_crosses = (
-            series.index.normalize() != series.index.shift(1).normalize()
-        )
+        current_dates = series.index.normalize()
+        previous_dates = pd.Series(current_dates, index=series.index).shift(1)
+        midnight_crosses = current_dates != previous_dates
         resets = resets | (midnight_crosses & (diffs < 0.1 * series.abs().mean()))
 
     # Estimate max_increment if not provided
