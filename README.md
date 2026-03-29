@@ -40,7 +40,7 @@ The neural backends are implemented entirely in NumPy to keep the Docker image s
 
 1. In Home Assistant, go to **Settings → Add-ons → Add-on store**
 2. Click **⋮** (top right) → **Repositories**
-3. Add: `https://github.com/psweens/ha-addons`
+3. Add: `https://github.com/psweens/ml-forecast-lab`
 4. ML Forecast Lab will appear in the store — click **Install**
 
 The first build takes 10-15 minutes on a Raspberry Pi 5 (compiling LightGBM and XGBoost for ARM).
