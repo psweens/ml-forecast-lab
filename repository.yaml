@@ -1,9 +1,0 @@
----
-name: ML Forecast Lab Repository
-url: https://github.com/psweens/ml-forecast-lab
-maintainer: Paul Sweeny <paul@example.com>
-category: Machine Learning
-description: Multi-model machine learning forecasting and benchmarking system
-image: ghcr.io/psweens/ml-forecast-lab
-sources:
-  - https://github.com/psweens/ml-forecast-lab
