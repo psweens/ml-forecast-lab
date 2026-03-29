@@ -178,6 +178,12 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         allow_headers=["*"],
     )
 
+    # ========== Ingress support ==========
+
+    def _get_base_path(request: Request) -> str:
+        """Get the ingress base path from HA proxy headers, or empty string."""
+        return request.headers.get("X-Ingress-Path", "")
+
     # ========== HTML Routes ==========
 
     @app.get("/", response_class=Response)
@@ -190,6 +196,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "dashboard.html",
             {
                 "request": request,
+                "base_path": _get_base_path(request),
                 "experiments": experiments,
                 "total_experiments": len(experiments),
                 "lab_experiments": sum(
@@ -218,6 +225,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "experiment.html",
             {
                 "request": request,
+                "base_path": _get_base_path(request),
                 "experiment": exp_status,
                 "benchmark_result": benchmark_result,
                 "forecast_data": forecast_data,

@@ -81,7 +81,7 @@
             </div>
 
             <div class="card-footer">
-                <a href="/experiment/{{ exp.name }}" class="btn btn-secondary">
+                <a href="{{ base_path | default('') }}/experiment/{{ exp.name }}" class="btn btn-secondary">
                     → View Details
                 </a>
             </div>

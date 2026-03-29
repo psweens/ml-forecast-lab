@@ -4,11 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}ML Forecast Lab{% endblock %}</title>
-    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+    <link rel="stylesheet" href="{{ base_path | default('') }}/static/style.css">
     <!-- HTMX for interactive updates -->
-    <script src="https://unpkg.com/htmx.org@1.9.10" integrity="sha384-D1Kt99CQMDuVeK5mXA9Hf4/WoJCffXLEp+360W8tb+5qB2pF0wkyLnIvl+fC7wAl" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <!-- Plotly for charting -->
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script>var BASE_PATH = "{{ base_path | default('') }}";</script>
 </head>
 <body>
     <nav class="navbar">
@@ -18,8 +19,9 @@
                 <span class="brand-text">ML Forecast Lab</span>
             </div>
             <ul class="navbar-menu">
-                <li><a href="/" class="nav-link">Dashboard</a></li>
-                <li><a href="/api/status" class="nav-link">API Status</a></li>
+                <li><a href="{{ base_path | default('') }}/" class="nav-link">Dashboard</a></li>
+                <li><a href="{{ base_path | default('') }}/log" class="nav-link">Logs</a></li>
+                <li><a href="{{ base_path | default('') }}/api/status" class="nav-link">API Status</a></li>
             </ul>
         </div>
     </nav>
@@ -41,7 +43,7 @@
             pollBenchmarkStatus: function(experimentName) {
                 let pollCount = 0;
                 const pollId = setInterval(function() {
-                    fetch(`/experiment/${experimentName}/results`)
+                    fetch(`${BASE_PATH}/experiment/${experimentName}/results`)
                         .then(response => {
                             if (!response.ok) return;
                             return response.json();

@@ -13,14 +13,14 @@
     <div class="action-buttons">
         <button class="btn btn-primary"
                 id="run-benchmark-btn"
-                hx-post="/experiment/{{ experiment.name }}/run-benchmark"
+                hx-post="{{ base_path | default('') }}/experiment/{{ experiment.name }}/run-benchmark"
                 hx-swap="none"
                 {% if is_running %}disabled{% endif %}>
             {% if is_running %}⏳ Running...{% else %}▶ Run Benchmark{% endif %}
         </button>
         {% if experiment.best_model %}
         <button class="btn btn-success"
-                hx-post="/experiment/{{ experiment.name }}/promote/{{ experiment.best_model }}"
+                hx-post="{{ base_path | default('') }}/experiment/{{ experiment.name }}/promote/{{ experiment.best_model }}"
                 hx-target="#promote-message"
                 hx-swap="innerHTML swap:2s">
             ⭐ Promote to Production
