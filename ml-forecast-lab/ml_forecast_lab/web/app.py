@@ -193,8 +193,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         """
         experiments = list(app.state.appstate.experiment_statuses.values())
         return templates.TemplateResponse(
-            "dashboard.html",
-            {
+            request=request,
+            name="dashboard.html",
+            context={
                 "request": request,
                 "base_path": _get_base_path(request),
                 "experiments": experiments,
@@ -222,8 +223,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         is_running = app.state.appstate.is_benchmark_running(name)
 
         return templates.TemplateResponse(
-            "experiment.html",
-            {
+            request=request,
+            name="experiment.html",
+            context={
                 "request": request,
                 "base_path": _get_base_path(request),
                 "experiment": exp_status,
