@@ -239,7 +239,7 @@ class HAInterface:
                 json=json_data,
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
-                if resp.status == 200:
+                if resp.status in (200, 201):
                     if "application/json" in resp.headers.get("content-type", ""):
                         return await resp.json()
                     return await resp.text()
@@ -272,7 +272,7 @@ class HAInterface:
         end_iso = end.isoformat()
 
         endpoint = f"/api/history/period/{start_iso}"
-        params = {"end_time": end_iso, "entity_id": entity_id}
+        params = {"end_time": end_iso, "filter_entity_id": entity_id}
 
         result = await self.api_call("GET", endpoint, params=params)
 
