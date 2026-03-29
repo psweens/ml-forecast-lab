@@ -29,6 +29,9 @@ COPY ml_forecast_lab /app/ml_forecast_lab
 # Copy rootfs (includes s6-overlay configurations and startup scripts)
 COPY rootfs /
 
+# Make s6-overlay init script executable
+RUN chmod a+x /etc/s6-overlay/s6-rc.d/init-mlforecastlab/run
+
 # Set working directory
 WORKDIR /app
 
