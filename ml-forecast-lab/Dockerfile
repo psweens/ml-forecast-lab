@@ -26,8 +26,9 @@ RUN apt-get update \
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Copy the ML Forecast Lab package
+# Copy the ML Forecast Lab package and default config
 COPY ml_forecast_lab /app/ml_forecast_lab
+COPY mlfl.yaml /app/mlfl.yaml
 
 # Copy rootfs (includes s6-overlay configurations and startup scripts)
 COPY rootfs /

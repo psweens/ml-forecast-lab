@@ -9,7 +9,15 @@ bashio::log.info "Initialising ML Forecast Lab environment..."
 mkdir -p /data/ml_forecast_lab
 mkdir -p /data/ml_forecast_lab/models
 mkdir -p /data/ml_forecast_lab/logs
-mkdir -p /config/ml_forecast_lab
+mkdir -p /addon_configs/ml_forecast_lab
+
+# Copy default config if none exists yet
+if [ ! -f /addon_configs/ml_forecast_lab/mlfl.yaml ]; then
+    if [ -f /app/mlfl.yaml ]; then
+        cp /app/mlfl.yaml /addon_configs/ml_forecast_lab/mlfl.yaml
+        bashio::log.info "Copied default mlfl.yaml to /addon_configs/ml_forecast_lab/"
+    fi
+fi
 
 bashio::log.info "Starting ML Forecast Lab service..."
 exec python3 -m ml_forecast_lab
