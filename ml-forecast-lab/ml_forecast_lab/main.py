@@ -720,6 +720,9 @@ class MLForecastLabApp:
             # Load configuration
             await self.load_config()
 
+            # Generate dashboard YAML
+            self._generate_dashboard()
+
             # Initialise components
             await self.initialise_components()
 
@@ -733,6 +736,27 @@ class MLForecastLabApp:
             logger.info("Received keyboard interrupt")
         finally:
             await self.shutdown()
+
+    def _generate_dashboard(self):
+        """Generate ApexCharts dashboard YAML from current config."""
+        if not self.config or not self.config.experiments:
+            return
+
+        try:
+            from ml_forecast_lab.dashboard import generate_dashboard
+
+            # Write to addon config dir (same location as mlfl.yaml)
+            import glob
+            config_dirs = glob.glob("/addon_configs/*_ml_forecast_lab")
+            if config_dirs:
+                output_path = Path(config_dirs[0]) / "mlfl_dashboard.yaml"
+            else:
+                output_path = Path("/addon_configs/ml_forecast_lab/mlfl_dashboard.yaml")
+
+            generate_dashboard(self.config.experiments, output_path)
+            logger.info(f"Dashboard YAML generated at {output_path}")
+        except Exception as e:
+            logger.warning(f"Failed to generate dashboard YAML: {e}")
 
     @staticmethod
     def _setup_directories():
