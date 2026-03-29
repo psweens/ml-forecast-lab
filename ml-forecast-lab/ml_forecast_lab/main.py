@@ -6,14 +6,18 @@ and management of the main forecast/benchmark loop with FastAPI web server.
 """
 
 import asyncio
+import dataclasses
 import logging
 import os
 import signal
 import sys
-from datetime import datetime, timedelta
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+import pandas as pd
 import uvicorn
 
 logger = logging.getLogger(__name__)
@@ -45,27 +49,43 @@ class MLForecastLabApp:
         """
         Load configuration from YAML file.
 
-        Parameters
-        ----------
-        config_path : Optional[Path]
-            Path to configuration file. Defaults to /config/mlfl.yaml
+        Searches multiple paths in order:
+        1. Explicit config_path (if provided)
+        2. /addon_configs/ml_forecast_lab/mlfl.yaml
+        3. /config/mlfl.yaml
+        4. Bundled mlfl.yaml (for development)
+        5. Falls back to stub config
         """
-        if config_path is None:
-            config_path = Path("/config/mlfl.yaml")
+        search_paths = []
+        if config_path is not None:
+            search_paths.append(Path(config_path))
+        search_paths.extend([
+            Path("/addon_configs/ml_forecast_lab/mlfl.yaml"),
+            Path("/config/mlfl.yaml"),
+            Path(__file__).parent.parent / "mlfl.yaml",
+        ])
 
-        if not config_path.exists():
-            logger.warning(f"Configuration file not found: {config_path}")
+        found_path = None
+        for p in search_paths:
+            if p.exists():
+                found_path = p
+                break
+
+        if found_path is None:
+            logger.warning(
+                f"Configuration file not found in any of: "
+                f"{[str(p) for p in search_paths]}"
+            )
             logger.info("Creating stub configuration...")
-            # Create a minimal config for testing
             self.config = self._create_stub_config()
         else:
             try:
                 from ml_forecast_lab.config import load_config
 
-                self.config = load_config(config_path)
-                logger.info(f"Configuration loaded from {config_path}")
+                self.config = load_config(found_path)
+                logger.info(f"Configuration loaded from {found_path}")
             except Exception as e:
-                logger.error(f"Failed to load configuration: {e}")
+                logger.error(f"Failed to load configuration: {e}", exc_info=True)
                 self.config = self._create_stub_config()
 
     def _create_stub_config(self):
@@ -160,7 +180,7 @@ class MLForecastLabApp:
                 status = ExperimentStatus(
                     name=exp_cfg.name,
                     target_entity=exp_cfg.target_entity,
-                    mode="lab",  # Default to lab mode
+                    mode=exp_cfg.mode,
                     last_benchmark_status="pending",
                     next_update_in_seconds=self.config.update_every_minutes * 60,
                 )
@@ -236,85 +256,323 @@ class MLForecastLabApp:
                     status.last_benchmark_status = "failed"
                     self.web_app.state.appstate.end_benchmark(experiment_name)
 
+    async def _fetch_and_preprocess(self, exp_cfg) -> pd.DataFrame:
+        """
+        Fetch history and preprocess for an experiment.
+
+        Returns DataFrame with DatetimeIndex and 'y' column containing the
+        preprocessed target values, ready for feature engineering.
+        """
+        from ml_forecast_lab.ha_interface import normalise_history
+        from ml_forecast_lab.preprocessing import (
+            cumulative_to_interval,
+            resample_to_grid,
+            clip_outliers,
+            apply_log_transform,
+        )
+
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=exp_cfg.days_history)
+        freq = f"{exp_cfg.interval_minutes}min"
+        table_name = self.history_db.safe_table_name(exp_cfg.target_entity) if self.history_db else None
+
+        # --- Fetch from HA API ---
+        raw_records = await self.ha_interface.get_history(
+            exp_cfg.target_entity, start, now
+        )
+        df = normalise_history(raw_records)
+
+        if df.empty:
+            raise ValueError(
+                f"No history data returned for {exp_cfg.target_entity}"
+            )
+
+        logger.info(
+            f"Fetched {len(df)} records for {exp_cfg.target_entity}"
+        )
+
+        # --- Store in SQLite cache ---
+        if exp_cfg.database and self.history_db and table_name:
+            inserted = self.history_db.store_history(table_name, df)
+            logger.debug(f"Cached {inserted} new records in SQLite")
+
+        # --- Set DatetimeIndex ---
+        df = df.set_index("ds").sort_index()
+        series = df["value"]
+
+        # --- Cumulative to interval ---
+        if exp_cfg.source_is_cumulative:
+            series = cumulative_to_interval(
+                series,
+                interval_minutes=exp_cfg.interval_minutes,
+                reset_daily=exp_cfg.reset_daily,
+                max_increment=exp_cfg.max_increment,
+            )
+
+        # --- Resample to regular grid ---
+        series = resample_to_grid(series, freq=freq, method="mean")
+
+        # --- Clip outliers ---
+        series = clip_outliers(series, positive_only=exp_cfg.source_is_cumulative)
+
+        # --- Optional log transform ---
+        if exp_cfg.log_transform:
+            series = apply_log_transform(series)
+
+        # --- Build DataFrame ---
+        result = pd.DataFrame({"y": series}, index=series.index)
+        result = result.dropna()
+
+        logger.info(
+            f"Preprocessed {exp_cfg.target_entity}: "
+            f"{len(result)} samples at {freq} intervals"
+        )
+        return result
+
     async def _run_benchmark(self, exp_cfg):
         """
-        Run full benchmark across all enabled models.
-
-        Parameters
-        ----------
-        exp_cfg : ExperimentCfg
-            Experiment configuration
+        Run full benchmark across all enabled models using cross-validation.
         """
+        from ml_forecast_lab.features import build_features
+        from ml_forecast_lab.benchmark.runner import BenchmarkRunner
+        from ml_forecast_lab.benchmark.metrics import get_metric_registry
+        from ml_forecast_lab.web.app import (
+            BenchmarkResult as WebBenchmarkResult,
+            ModelResult as WebModelResult,
+            MetricValue,
+        )
+
         logger.info(f"Running benchmark for {exp_cfg.name}...")
 
-        # Mark as running in web app
         if self.web_app:
             self.web_app.state.appstate.start_benchmark(exp_cfg.name)
 
-        # In a real implementation, this would:
-        # 1. Fetch historical data from ha_interface
-        # 2. Prepare features using CovariateResolver
-        # 3. Run cross-validation benchmark using model_registry
-        # 4. Store results in web_app.state.appstate.benchmark_results
-        # 5. Publish results back to HA via publishing module
+        # 1. Fetch and preprocess data
+        df = await self._fetch_and_preprocess(exp_cfg)
 
-        # For now, create a stub result
-        from ml_forecast_lab.web.app import BenchmarkResult, ModelResult, MetricValue
-
-        models = []
-        for idx, model_name in enumerate(exp_cfg.models_enabled[:2]):  # Limit to 2 for demo
-            model = ModelResult(
-                name=model_name,
-                mae=MetricValue(mean=0.123 + idx * 0.01, std=0.012),
-                rmse=MetricValue(mean=0.234 + idx * 0.02, std=0.023),
-                mape=MetricValue(mean=5.6 + idx * 0.5, std=0.8),
-                train_time_seconds=12.5 + idx * 2,
-                rank=idx + 1,
-                is_production=idx == 0,
-                fold_results=[
-                    {
-                        "mae": 0.120 + idx * 0.01,
-                        "rmse": 0.230 + idx * 0.02,
-                        "mape": 5.5 + idx * 0.5,
-                    }
-                    for _ in range(exp_cfg.cv_folds)
-                ],
+        if len(df) < exp_cfg.cv_folds * 10:
+            raise ValueError(
+                f"Insufficient data for benchmark: {len(df)} samples "
+                f"(need at least {exp_cfg.cv_folds * 10})"
             )
-            models.append(model)
 
-        result = BenchmarkResult(
+        # 2. Build features on full dataset
+        features_df = build_features(
+            df,
+            target_col="y",
+            interval_minutes=exp_cfg.interval_minutes,
+            country=exp_cfg.country,
+        )
+
+        # 3. Combine features + target, drop NaN from lag warmup
+        combined = features_df.copy()
+        combined["target"] = df["y"]
+        combined = combined.dropna()
+
+        feature_cols = [c for c in combined.columns if c != "target"]
+        logger.info(
+            f"Feature matrix: {len(combined)} samples, "
+            f"{len(feature_cols)} features"
+        )
+
+        # 4. Create feature_builder callback for BenchmarkRunner
+        # BenchmarkRunner splits by index and passes df subsets here.
+        # Features are already pre-built so we just extract numpy arrays.
+        def feature_builder(df_sub, config, purpose="train"):
+            cols = [c for c in df_sub.columns if c != "target"]
+            X = df_sub[cols].values.astype(np.float32)
+            # Replace any remaining NaN with 0 for model safety
+            X = np.nan_to_num(X, nan=0.0)
+            return X
+
+        # 5. Instantiate models
+        models = {}
+        for model_name in exp_cfg.models_enabled:
+            try:
+                models[model_name] = self.model_registry.create(model_name)
+            except Exception as e:
+                logger.warning(
+                    f"Skipping model {model_name}: {e}"
+                )
+
+        if not models:
+            raise ValueError("No models could be created for benchmark")
+
+        # 6. Run benchmark
+        exp_cfg_dict = dataclasses.asdict(exp_cfg)
+        metric_registry = get_metric_registry()
+        runner = BenchmarkRunner(exp_cfg_dict, feature_builder, metric_registry)
+        bench_result = runner.run_benchmark(combined, models)
+
+        # 7. Convert runner.BenchmarkResult -> web.app.BenchmarkResult
+        web_models = []
+        for rank_idx, (model_name, runner_model_result) in enumerate(
+            sorted(
+                bench_result.model_results.items(),
+                key=lambda x: bench_result.rankings.get(x[0], 999),
+            )
+        ):
+            rank = bench_result.rankings.get(model_name, rank_idx + 1)
+
+            # Extract per-metric means and stds from fold_metrics
+            fold_metrics_list = runner_model_result.fold_metrics
+            metric_means = {}
+            metric_stds = {}
+            for metric_name in exp_cfg.metrics:
+                values = [
+                    fm.get(metric_name, np.nan)
+                    for fm in fold_metrics_list
+                    if fm
+                ]
+                metric_means[metric_name] = float(np.nanmean(values)) if values else 0.0
+                metric_stds[metric_name] = float(np.nanstd(values)) if len(values) > 1 else 0.0
+
+            web_model = WebModelResult(
+                name=model_name,
+                mae=MetricValue(
+                    mean=metric_means.get("mae", 0.0),
+                    std=metric_stds.get("mae", 0.0),
+                ),
+                rmse=MetricValue(
+                    mean=metric_means.get("rmse", 0.0),
+                    std=metric_stds.get("rmse", 0.0),
+                ),
+                mape=MetricValue(
+                    mean=metric_means.get("mape", 0.0),
+                    std=metric_stds.get("mape", 0.0),
+                ),
+                train_time_seconds=runner_model_result.mean_train_time,
+                rank=rank,
+                is_production=(model_name == bench_result.best_model),
+                fold_results=[fm for fm in fold_metrics_list if fm],
+            )
+            web_models.append(web_model)
+
+        web_result = WebBenchmarkResult(
             experiment_name=exp_cfg.name,
             timestamp=datetime.utcnow().isoformat(),
             status="completed",
-            models=models,
-            best_model_name=models[0].name if models else None,
+            models=web_models,
+            best_model_name=bench_result.best_model,
         )
 
         if self.web_app:
-            self.web_app.state.appstate.benchmark_results[exp_cfg.name] = result
+            self.web_app.state.appstate.benchmark_results[exp_cfg.name] = web_result
 
-        logger.info(f"Benchmark completed for {exp_cfg.name}")
+        logger.info(
+            f"Benchmark completed for {exp_cfg.name}: "
+            f"best={bench_result.best_model} "
+            f"({exp_cfg.production_metric}={bench_result.best_metric_value:.4f})"
+        )
 
     async def _run_production_inference(self, exp_cfg):
         """
-        Run production mode inference.
-
-        Train only the production model and generate forecasts.
-
-        Parameters
-        ----------
-        exp_cfg : ExperimentCfg
-            Experiment configuration
+        Run production mode: train best model on full data and publish forecasts.
         """
+        from ml_forecast_lab.features import build_features, create_forecast_features
+        from ml_forecast_lab.publishing import publish_forecasts
+
         logger.info(f"Running production inference for {exp_cfg.name}...")
 
-        # In a real implementation, this would:
-        # 1. Fetch historical data from ha_interface
-        # 2. Train production model using full history
-        # 3. Generate forecast for configured horizons
-        # 4. Publish forecasts back to HA via publishing module
+        # 1. Fetch and preprocess
+        df = await self._fetch_and_preprocess(exp_cfg)
 
-        logger.info(f"Production inference completed for {exp_cfg.name}")
+        # 2. Build features
+        features_df = build_features(
+            df,
+            target_col="y",
+            interval_minutes=exp_cfg.interval_minutes,
+            country=exp_cfg.country,
+        )
+        combined = features_df.copy()
+        combined["target"] = df["y"]
+        combined = combined.dropna()
+
+        feature_cols = [c for c in combined.columns if c != "target"]
+
+        X = combined[feature_cols].values.astype(np.float32)
+        X = np.nan_to_num(X, nan=0.0)
+        y = combined["target"].values.astype(np.float32)
+
+        # 3. Determine production model
+        prod_model_name = exp_cfg.production_model
+        if not prod_model_name:
+            # Try to get best model from last benchmark
+            if self.web_app:
+                bench = self.web_app.state.appstate.benchmark_results.get(
+                    exp_cfg.name
+                )
+                if bench and bench.best_model_name:
+                    prod_model_name = bench.best_model_name
+
+        if not prod_model_name:
+            prod_model_name = exp_cfg.models_enabled[0]
+            logger.info(
+                f"No production model set, defaulting to {prod_model_name}"
+            )
+
+        # 4. Create and train model on full data
+        model = self.model_registry.create(prod_model_name)
+        logger.info(f"Training {prod_model_name} on {len(X)} samples...")
+        train_start = time.time()
+        model.fit(X, y)
+        train_time = time.time() - train_start
+        logger.info(f"Training completed in {train_time:.1f}s")
+
+        # 5. Create forecast features for future horizons
+        n_lags = 12  # Must match build_features default
+        last_ts = combined.index[-1]
+        lag_values = y[-n_lags:]
+
+        forecast_features = create_forecast_features(
+            last_timestamp=last_ts,
+            interval_minutes=exp_cfg.interval_minutes,
+            horizons_minutes=exp_cfg.horizons_minutes,
+            n_lags=n_lags,
+            lag_values=lag_values,
+            country=exp_cfg.country,
+        )
+
+        # Align forecast feature columns to training columns
+        for col in feature_cols:
+            if col not in forecast_features.columns:
+                forecast_features[col] = 0.0
+        forecast_features = forecast_features[feature_cols]
+
+        X_forecast = forecast_features.values.astype(np.float32)
+        X_forecast = np.nan_to_num(X_forecast, nan=0.0)
+
+        # 6. Predict
+        y_pred = model.predict(X_forecast)
+        logger.info(
+            f"Forecast generated: {len(y_pred)} points, "
+            f"range [{y_pred.min():.2f}, {y_pred.max():.2f}]"
+        )
+
+        # 7. Build forecast DataFrame for publishing
+        ds_future = forecast_features.index
+        yhat_interval = pd.DataFrame({
+            "ds": ds_future,
+            "yhat": y_pred,
+        })
+
+        # 8. Publish to Home Assistant
+        exp_cfg_dict = dataclasses.asdict(exp_cfg)
+        success = await publish_forecasts(
+            experiment_cfg=exp_cfg_dict,
+            iface=self.ha_interface,
+            app_config={},
+            ds_future=ds_future,
+            yhat_interval=yhat_interval,
+            yhat_level=0.95,
+        )
+
+        if success:
+            logger.info(f"Production forecasts published for {exp_cfg.name}")
+        else:
+            logger.warning(
+                f"Some forecast publishes failed for {exp_cfg.name}"
+            )
 
     async def publish_heartbeat(self):
         """
@@ -329,8 +587,15 @@ class MLForecastLabApp:
             timestamp = datetime.utcnow().isoformat()
             logger.debug(f"Publishing heartbeat: {timestamp}")
 
-            # In a real implementation, this would use the publishing module
-            # to publish to Home Assistant
+            await self.ha_interface.set_state(
+                "sensor.mlfl_last_run",
+                timestamp,
+                attributes={
+                    "friendly_name": "ML Forecast Lab Last Run",
+                    "icon": "mdi:clock-check",
+                    "experiments": len(self.config.experiments) if self.config else 0,
+                },
+            )
 
         except Exception as e:
             logger.error(f"Failed to publish heartbeat: {e}")
@@ -369,11 +634,7 @@ class MLForecastLabApp:
 
                     # Run updates for each experiment
                     for exp_cfg in self.config.experiments:
-                        # Determine if experiment is in lab or production mode
-                        is_lab = (
-                            not exp_cfg.production_model
-                            or exp_cfg.production_model not in exp_cfg.models_enabled
-                        )
+                        is_lab = exp_cfg.mode == "lab"
                         await self.update_experiment(exp_cfg.name, is_lab)
 
                     # Publish heartbeat

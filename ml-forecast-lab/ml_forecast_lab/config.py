@@ -5,6 +5,9 @@ Provides dataclasses for experiment configuration, covariate specification,
 and application settings, with YAML loading capabilities.
 """
 
+from __future__ import annotations
+
+import dataclasses
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +31,9 @@ class CovariateCfg:
     scale: Optional[float] = None
     """Optional scaling factor; if None, no scaling applied."""
 
+    scaling: Optional[str] = None
+    """Optional scaling strategy name: 'standard', 'minmax', or None."""
+
     transform: Optional[str] = None
     """Optional transformation: 'log', 'sqrt', 'box_cox', or None."""
 
@@ -39,7 +45,7 @@ class CovariateCfg:
 
     def __post_init__(self) -> None:
         """Validate configuration."""
-        valid_roles = {'future', 'lagged', 'both'}
+        valid_roles = {'future', 'lagged', 'both', 'concurrent'}
         if self.role not in valid_roles:
             raise ValueError(
                 f'role must be one of {valid_roles}, got {self.role!r}'
@@ -140,8 +146,28 @@ class ExperimentCfg:
     subtract: List[str] = field(default_factory=list)
     """Entity IDs to subtract from target (e.g. solar generation from grid import)."""
 
+    mode: str = 'lab'
+    """Operational mode: 'lab' (benchmark all models) or 'production' (forecast with best model)."""
+
+    max_age: int = 365
+    """Maximum days to keep in SQLite cache."""
+
+    future_periods: int = 48
+    """Number of future periods to forecast."""
+
+    publish_name: Optional[str] = None
+    """Override name for published HA entities."""
+
+    database: bool = False
+    """Whether to cache history in SQLite."""
+
     def __post_init__(self) -> None:
         """Validate configuration."""
+        valid_modes = {'lab', 'production'}
+        if self.mode not in valid_modes:
+            raise ValueError(
+                f'mode must be one of {valid_modes}, got {self.mode!r}'
+            )
         valid_cv = {'walk_forward', 'sliding_window'}
         if self.cv_strategy not in valid_cv:
             raise ValueError(
@@ -258,6 +284,11 @@ def load_config(config_path: Path | str) -> AppConfig:
     # Parse experiments
     experiments_data = data.pop('experiments', [])
     experiments = []
+
+    exp_fields = {f.name for f in dataclasses.fields(ExperimentCfg)}
+    cov_fields = {f.name for f in dataclasses.fields(CovariateCfg)}
+    app_fields = {f.name for f in dataclasses.fields(AppConfig)} - {'experiments'}
+
     for exp_data in experiments_data:
         if not isinstance(exp_data, dict):
             raise ValueError(
@@ -266,13 +297,29 @@ def load_config(config_path: Path | str) -> AppConfig:
 
         # Parse covariates
         covariates_data = exp_data.pop('covariates', [])
-        covariates = [CovariateCfg(**cov) for cov in covariates_data]
+        covariates = []
+        for cov in covariates_data:
+            unknown_cov = set(cov) - cov_fields
+            if unknown_cov:
+                logger.warning(f'Ignoring unknown covariate fields: {unknown_cov}')
+                cov = {k: v for k, v in cov.items() if k in cov_fields}
+            covariates.append(CovariateCfg(**cov))
 
-        # Create experiment
+        # Filter unknown experiment fields
+        unknown_exp = set(exp_data) - exp_fields
+        if unknown_exp:
+            logger.warning(f'Ignoring unknown experiment fields: {unknown_exp}')
+            exp_data = {k: v for k, v in exp_data.items() if k in exp_fields}
+
         exp = ExperimentCfg(**exp_data, covariates=covariates)
         experiments.append(exp)
 
-    # Create app config
+    # Filter unknown app-level fields
+    unknown_app = set(data) - app_fields
+    if unknown_app:
+        logger.warning(f'Ignoring unknown app config fields: {unknown_app}')
+        data = {k: v for k, v in data.items() if k in app_fields}
+
     app_config = AppConfig(**data, experiments=experiments)
     logger.info(
         f'Configuration loaded: {len(app_config.experiments)} experiment(s)'
