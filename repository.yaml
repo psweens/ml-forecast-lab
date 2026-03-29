@@ -1,0 +1,5 @@
+---
+name: ML Forecast Lab Repository
+url: https://github.com/psweens/ha-addons
+maintainer: Paul Sweeney
+description: Multi-model machine learning forecasting and benchmarking for Home Assistant

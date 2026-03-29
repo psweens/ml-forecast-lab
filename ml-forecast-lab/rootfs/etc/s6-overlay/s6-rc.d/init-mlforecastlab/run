@@ -1,0 +1,15 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+# ==============================================================================
+# ML Forecast Lab - Init and run script
+# ==============================================================================
+
+bashio::log.info "Initialising ML Forecast Lab environment..."
+
+mkdir -p /data/ml_forecast_lab
+mkdir -p /data/ml_forecast_lab/models
+mkdir -p /data/ml_forecast_lab/logs
+mkdir -p /config/ml_forecast_lab
+
+bashio::log.info "Starting ML Forecast Lab service..."
+exec python3 -m ml_forecast_lab

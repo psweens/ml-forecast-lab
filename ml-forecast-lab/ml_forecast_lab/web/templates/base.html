@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}ML Forecast Lab{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+    <!-- HTMX for interactive updates -->
+    <script src="https://unpkg.com/htmx.org@1.9.10" integrity="sha384-D1Kt99CQMDuVeK5mXA9Hf4/WoJCffXLEp+360W8tb+5qB2pF0wkyLnIvl+fC7wAl" crossorigin="anonymous"></script>
+    <!-- Plotly for charting -->
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+</head>
+<body>
+    <nav class="navbar">
+        <div class="navbar-container">
+            <div class="navbar-brand">
+                <span class="brand-logo">⚙️</span>
+                <span class="brand-text">ML Forecast Lab</span>
+            </div>
+            <ul class="navbar-menu">
+                <li><a href="/" class="nav-link">Dashboard</a></li>
+                <li><a href="/api/status" class="nav-link">API Status</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer">
+        <p>&copy; 2026 ML Forecast Lab. All rights reserved.</p>
+    </footer>
+
+    <script>
+        // Utility functions for dashboard
+        window.mlfl = {
+            pollInterval: 5000, // 5 seconds
+            maxPolls: 120, // 10 minutes max
+
+            pollBenchmarkStatus: function(experimentName) {
+                let pollCount = 0;
+                const pollId = setInterval(function() {
+                    fetch(`/experiment/${experimentName}/results`)
+                        .then(response => {
+                            if (!response.ok) return;
+                            return response.json();
+                        })
+                        .then(data => {
+                            if (data && data.status === 'completed') {
+                                // Reload experiment page
+                                location.reload();
+                                clearInterval(pollId);
+                            } else if (data && data.status === 'failed') {
+                                alert('Benchmark failed: ' + (data.error_message || 'Unknown error'));
+                                clearInterval(pollId);
+                            }
+                            pollCount++;
+                            if (pollCount > window.mlfl.maxPolls) {
+                                clearInterval(pollId);
+                            }
+                        })
+                        .catch(err => {
+                            console.error('Poll error:', err);
+                            pollCount++;
+                            if (pollCount > window.mlfl.maxPolls) {
+                                clearInterval(pollId);
+                            }
+                        });
+                }, window.mlfl.pollInterval);
+            },
+
+            drawForecastChart: function(elementId, forecastData) {
+                if (!forecastData || !forecastData.points) return;
+
+                const timestamps = forecastData.points.map(p => p.timestamp);
+                const actual = forecastData.points.map(p => p.actual);
+                const predicted = forecastData.points.map(p => p.predicted_mean);
+                const lower = forecastData.points.map(p => p.predicted_lower);
+                const upper = forecastData.points.map(p => p.predicted_upper);
+
+                const trace_actual = {
+                    x: timestamps,
+                    y: actual,
+                    name: 'Actual',
+                    mode: 'lines',
+                    line: { color: '#e94560', width: 2 }
+                };
+
+                const trace_predicted = {
+                    x: timestamps,
+                    y: predicted,
+                    name: 'Predicted',
+                    mode: 'lines',
+                    line: { color: '#00d4ff', width: 2 }
+                };
+
+                const trace_upper = {
+                    x: timestamps,
+                    y: upper,
+                    name: 'Upper 95%',
+                    mode: 'lines',
+                    line: { color: 'rgba(0, 212, 255, 0)' },
+                    showlegend: false
+                };
+
+                const trace_lower = {
+                    x: timestamps,
+                    y: lower,
+                    name: 'Lower 95%',
+                    mode: 'lines',
+                    line: { color: 'rgba(0, 212, 255, 0)' },
+                    fill: 'tonexty',
+                    fillcolor: 'rgba(0, 212, 255, 0.2)',
+                    showlegend: false
+                };
+
+                const layout = {
+                    title: `Forecast: ${forecastData.experiment_name} (${forecastData.horizon_minutes}min horizon)`,
+                    xaxis: { title: 'Time' },
+                    yaxis: { title: 'Value' },
+                    hovermode: 'x unified',
+                    plot_bgcolor: '#16213e',
+                    paper_bgcolor: '#1a1a2e',
+                    font: { color: '#e0e0e0' },
+                    margin: { l: 80, r: 40, t: 60, b: 60 }
+                };
+
+                const config = { responsive: true, displayModeBar: true };
+
+                Plotly.newPlot(elementId, [trace_lower, trace_upper, trace_actual, trace_predicted], layout, config);
+            },
+
+            drawFeatureImportance: function(elementId, features) {
+                if (!features || features.length === 0) return;
+
+                // Take top 20 features
+                const topFeatures = features.slice(0, 20);
+                const names = topFeatures.map(f => f.name);
+                const importances = topFeatures.map(f => f.importance);
+
+                const trace = {
+                    x: importances,
+                    y: names,
+                    type: 'bar',
+                    orientation: 'h',
+                    marker: { color: '#0f3460' }
+                };
+
+                const layout = {
+                    title: 'Top 20 Feature Importances',
+                    xaxis: { title: 'Importance' },
+                    plot_bgcolor: '#16213e',
+                    paper_bgcolor: '#1a1a2e',
+                    font: { color: '#e0e0e0' },
+                    margin: { l: 300, r: 40, t: 60, b: 60 }
+                };
+
+                const config = { responsive: true, displayModeBar: false };
+
+                Plotly.newPlot(elementId, [trace], layout, config);
+            }
+        };
+    </script>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>
