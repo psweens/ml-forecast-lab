@@ -617,9 +617,9 @@ class MLForecastLabApp:
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-        # Calculate update interval
+        # Calculate update interval — run first cycle immediately
         update_interval = self.config.update_every_minutes * 60  # Convert to seconds
-        next_update = datetime.utcnow() + timedelta(seconds=update_interval)
+        next_update = datetime.utcnow()
 
         while self.running:
             try:
