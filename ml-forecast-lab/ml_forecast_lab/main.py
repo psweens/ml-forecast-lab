@@ -56,6 +56,8 @@ class MLForecastLabApp:
         4. Bundled mlfl.yaml (for development)
         5. Falls back to stub config
         """
+        import glob
+
         search_paths = []
         if config_path is not None:
             search_paths.append(Path(config_path))
@@ -64,6 +66,10 @@ class MLForecastLabApp:
             Path("/config/mlfl.yaml"),
             Path(__file__).parent.parent / "mlfl.yaml",
         ])
+
+        # Also check HA's hashed slug paths (e.g. /addon_configs/47b4bbf0_ml_forecast_lab/)
+        for match in glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
+            search_paths.insert(0, Path(match))
 
         found_path = None
         for p in search_paths:

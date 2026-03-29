@@ -9,13 +9,23 @@ bashio::log.info "Initialising ML Forecast Lab environment..."
 mkdir -p /data/ml_forecast_lab
 mkdir -p /data/ml_forecast_lab/models
 mkdir -p /data/ml_forecast_lab/logs
-mkdir -p /addon_configs/ml_forecast_lab
+
+# Find the addon_configs directory (HA maps it with a slug hash prefix)
+ADDON_CONFIG=""
+for dir in /addon_configs/ml_forecast_lab /addon_configs/*_ml_forecast_lab /config; do
+    if [ -d "$dir" ]; then
+        ADDON_CONFIG="$dir"
+        break
+    fi
+done
+
+bashio::log.info "Addon config directory: ${ADDON_CONFIG}"
 
 # Copy default config if none exists yet
-if [ ! -f /addon_configs/ml_forecast_lab/mlfl.yaml ]; then
+if [ -n "$ADDON_CONFIG" ] && [ ! -f "${ADDON_CONFIG}/mlfl.yaml" ]; then
     if [ -f /app/mlfl.yaml ]; then
-        cp /app/mlfl.yaml /addon_configs/ml_forecast_lab/mlfl.yaml
-        bashio::log.info "Copied default mlfl.yaml to /addon_configs/ml_forecast_lab/"
+        cp /app/mlfl.yaml "${ADDON_CONFIG}/mlfl.yaml"
+        bashio::log.info "Copied default mlfl.yaml to ${ADDON_CONFIG}/"
     fi
 fi
 
