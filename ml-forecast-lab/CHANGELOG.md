@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.2
+
+### Improvements
+- LSTM and CNN epochs increased from 50 to 100 — gives models more
+  time to converge through noisy loss landscapes
+- Early stopping patience increased from 8 to 15 — prevents premature
+  stopping when val_loss temporarily bounces up before improving
+- Training still fast thanks to BPTT fix (~2s/epoch for LSTM on Pi)
+
 ## 0.5.0
 
 ### Major Features
