@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.0
+
+### Major Features
+- Covariate integration — external HA sensor data now included as
+  features alongside temporal/lag features in model training
+- Covariates configured in mlfl.yaml are fetched from HA history API,
+  resampled to the target's interval grid, and merged into the feature
+  matrix for all models
+- Supports scaling (e.g. 0-100% → 0-1), transforms (log, sqrt),
+  binary detection, and forward-fill alignment
+- Production mode uses last known covariate value for future forecasts
+- Benchmark header shows covariate count and names
+- Feature matrix log shows breakdown: "33 features (31 temporal + 2 covariates)"
+
+### Configured Covariates for Mixergy
+- sensor.current_charge (scaled ×0.01): tank charge level as leading
+  indicator of demand — should help predict usage spikes
+- sensor.external_temperature: outdoor temperature for seasonal patterns
+
 ## 0.5.3
 
 ### New Features

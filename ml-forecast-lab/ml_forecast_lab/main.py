@@ -330,6 +330,51 @@ class MLForecastLabApp:
 
         # --- Build DataFrame ---
         result = pd.DataFrame({"y": series}, index=series.index)
+
+        # --- Fetch covariates ---
+        if exp_cfg.covariates and self.covariate_resolver:
+            logger.info(f"  Fetching {len(exp_cfg.covariates)} covariate(s)...")
+            for cov_cfg in exp_cfg.covariates:
+                try:
+                    # Build dict for CovariateResolver (expects entity_id, not entity)
+                    cov_dict = {
+                        "entity_id": cov_cfg.entity,
+                        "name": cov_cfg.entity.split(".")[-1],  # sensor.current_charge → current_charge
+                        "binary": cov_cfg.is_binary,
+                    }
+
+                    cov_series = await self.covariate_resolver.fetch_history(
+                        cov_dict, start, now, freq
+                    )
+
+                    if cov_series.empty:
+                        logger.warning(f"    No data for covariate {cov_cfg.entity}, skipping")
+                        continue
+
+                    # Apply scaling factor if configured
+                    if cov_cfg.scale is not None:
+                        cov_series = cov_series * cov_cfg.scale
+
+                    # Apply transform if configured
+                    if cov_cfg.transform is not None:
+                        from ml_forecast_lab.preprocessing import apply_transform
+                        cov_series = apply_transform(cov_series, cov_cfg.transform)
+
+                    # Align to target index and merge
+                    cov_name = cov_dict["name"]
+                    cov_aligned = cov_series.reindex(result.index, method="ffill")
+                    result[cov_name] = cov_aligned
+
+                    valid_count = result[cov_name].notna().sum()
+                    logger.info(
+                        f"    ✓ {cov_cfg.entity} → '{cov_name}': "
+                        f"{len(cov_series)} raw → {valid_count} aligned"
+                        f"{f', scaled ×{cov_cfg.scale}' if cov_cfg.scale else ''}"
+                    )
+
+                except Exception as e:
+                    logger.warning(f"    ✗ Failed to fetch {cov_cfg.entity}: {e}")
+
         result = result.dropna()
 
         # Rich data summary
@@ -432,6 +477,9 @@ class MLForecastLabApp:
         logger.info(f"  BENCHMARK: {exp_cfg.name}")
         logger.info(f"  Target: {exp_cfg.target_entity}")
         logger.info(f"  Models: {', '.join(exp_cfg.models_enabled)}")
+        logger.info(f"  Covariates: {len(exp_cfg.covariates)}" + (
+            f" ({', '.join(c.entity.split('.')[-1] for c in exp_cfg.covariates)})" if exp_cfg.covariates else ""
+        ))
         logger.info(f"  CV: {exp_cfg.cv_strategy}, {exp_cfg.cv_folds} folds, metric={exp_cfg.production_metric}")
         logger.info(f"{'=' * 60}")
 
@@ -447,7 +495,7 @@ class MLForecastLabApp:
                 f"(need at least {exp_cfg.cv_folds * 10})"
             )
 
-        # 2. Build features on full dataset
+        # 2. Build temporal + lag features from target
         features_df = build_features(
             df,
             target_col="y",
@@ -455,15 +503,22 @@ class MLForecastLabApp:
             country=exp_cfg.country,
         )
 
-        # 3. Combine features + target, drop NaN from lag warmup
+        # 3. Combine features + covariates + target, drop NaN from lag warmup
         combined = features_df.copy()
         combined["target"] = df["y"]
+
+        # Add covariate columns from df (they were merged in _fetch_and_preprocess)
+        covariate_cols = [c for c in df.columns if c != "y"]
+        for col in covariate_cols:
+            combined[col] = df[col]
+
         combined = combined.dropna()
 
         feature_cols = [c for c in combined.columns if c != "target"]
+        n_cov = len(covariate_cols)
         logger.info(
-            f"Feature matrix: {len(combined)} samples, "
-            f"{len(feature_cols)} features"
+            f"  Feature matrix: {len(combined)} samples, "
+            f"{len(feature_cols)} features ({len(feature_cols) - n_cov} temporal + {n_cov} covariates)"
         )
 
         # 4. Create feature_builder callback for BenchmarkRunner
@@ -689,7 +744,7 @@ class MLForecastLabApp:
         # 1. Fetch and preprocess
         df = await self._fetch_and_preprocess(exp_cfg)
 
-        # 2. Build features
+        # 2. Build features + covariates
         features_df = build_features(
             df,
             target_col="y",
@@ -698,6 +753,12 @@ class MLForecastLabApp:
         )
         combined = features_df.copy()
         combined["target"] = df["y"]
+
+        # Add covariate columns
+        covariate_cols = [c for c in df.columns if c != "y"]
+        for col in covariate_cols:
+            combined[col] = df[col]
+
         combined = combined.dropna()
 
         feature_cols = [c for c in combined.columns if c != "target"]
@@ -754,9 +815,14 @@ class MLForecastLabApp:
         )
 
         # Align columns to training features
+        # For covariates, use last known value (forward-fill from training data)
         for col in feature_cols:
             if col not in forecast_features.columns:
-                forecast_features[col] = 0.0
+                if col in covariate_cols and col in combined.columns:
+                    # Use last known covariate value
+                    forecast_features[col] = float(combined[col].iloc[-1])
+                else:
+                    forecast_features[col] = 0.0
         forecast_features = forecast_features[feature_cols]
 
         X_forecast = forecast_features.values.astype(np.float32)
