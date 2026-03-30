@@ -143,11 +143,18 @@
             // Store raw data for toggling
             window._holdoutData = labData;
 
-            // Helper: compute cumulative sum
-            function cumsum(arr) {
+            // Helper: daily cumulative sum (resets at midnight)
+            function cumsum(arr, timestamps) {
                 var result = [];
                 var sum = 0;
+                var lastDate = '';
                 for (var i = 0; i < arr.length; i++) {
+                    // Check if we've crossed midnight
+                    var thisDate = timestamps[i].split('T')[0];
+                    if (thisDate !== lastDate) {
+                        sum = 0;
+                        lastDate = thisDate;
+                    }
                     sum += (arr[i] !== null && arr[i] !== undefined) ? arr[i] : 0;
                     result.push(sum);
                 }
@@ -161,7 +168,7 @@
                 // Actual values
                 traces.push({
                     x: first.timestamps,
-                    y: cumulative ? cumsum(first.actuals) : first.actuals,
+                    y: cumulative ? cumsum(first.actuals, first.timestamps) : first.actuals,
                     name: 'Actual',
                     mode: 'lines',
                     line: { color: '#ffffff', width: 2.5, dash: 'dot' }
@@ -171,7 +178,7 @@
                 labData.model_predictions.forEach(function(mp) {
                     traces.push({
                         x: mp.timestamps,
-                        y: cumulative ? cumsum(mp.predictions) : mp.predictions,
+                        y: cumulative ? cumsum(mp.predictions, mp.timestamps) : mp.predictions,
                         name: mp.model_name,
                         mode: 'lines',
                         line: { color: mp.color, width: 2 }
@@ -179,10 +186,10 @@
                 });
 
                 var layout = {
-                    title: (cumulative ? 'Cumulative ' : '') + 'Model Comparison on Holdout (' +
+                    title: (cumulative ? 'Daily Cumulative ' : '') + 'Model Comparison on Holdout (' +
                            labData.holdout_start.split('T')[0] + ' to ' + labData.holdout_end.split('T')[0] + ')',
                     xaxis: { title: 'Time', gridcolor: '#2d3561' },
-                    yaxis: { title: cumulative ? 'Cumulative Value' : 'Value', gridcolor: '#2d3561' },
+                    yaxis: { title: cumulative ? 'Daily Cumulative' : 'Value', gridcolor: '#2d3561' },
                     hovermode: 'x unified',
                     plot_bgcolor: '#16213e',
                     paper_bgcolor: '#1a1a2e',
