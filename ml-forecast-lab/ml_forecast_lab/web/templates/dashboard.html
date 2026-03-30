@@ -22,7 +22,7 @@
     </div>
     <div class="action-buttons">
         <button class="btn btn-primary"
-                hx-post="/experiment/*/run-benchmark"
+                hx-post="{{ base_path | default('') }}/experiment/*/run-benchmark"
                 hx-confirm="Run all benchmarks? This may take some time."
                 hx-target="#status-message"
                 hx-swap="innerHTML swap:1s">
@@ -38,7 +38,7 @@
         <div class="experiment-card">
             <div class="card-header">
                 <h3 class="card-title">{{ exp.name }}</h3>
-                <span class="status-badge status-{{ exp.mode | lower }}">
+                <span class="status-badge status-{{ exp.mode | lower }} {% if exp.last_benchmark_status == 'running' %}training{% endif %}">
                     {{ exp.mode | upper }}
                 </span>
             </div>

@@ -226,6 +226,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             context={
                 "request": request,
                 "base_path": _get_base_path(request),
+                "active_page": "dashboard",
+                "version": "0.3.2",
                 "experiments": experiments,
                 "total_experiments": len(experiments),
                 "lab_experiments": sum(
@@ -258,6 +260,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             context={
                 "request": request,
                 "base_path": _get_base_path(request),
+                "active_page": "dashboard",
+                "version": "0.3.2",
                 "experiment": exp_status,
                 "benchmark_result": benchmark_result,
                 "forecast_data": forecast_data,
@@ -413,11 +417,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     @app.get("/log", response_class=Response)
     async def view_log(request: Request, lines: int = 500):
         """
-        View recent log output in the browser.
-        Returns the last N lines of the log file as plain text.
+        View recent log output in styled template.
         """
         log_text = ""
-        # Read current log + first rotated backup
         for log_path in [LOG_FILE.with_suffix(".log.1"), LOG_FILE]:
             if log_path.exists():
                 try:
@@ -426,12 +428,57 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 except Exception as e:
                     log_text += f"\n[Error reading {log_path}: {e}]\n"
 
-        # Return last N lines
         all_lines = log_text.splitlines()
         tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
-        return Response(
-            content="\n".join(tail),
-            media_type="text/plain; charset=utf-8",
+
+        return templates.TemplateResponse(
+            request=request,
+            name="logs.html",
+            context={
+                "request": request,
+                "base_path": _get_base_path(request),
+                "active_page": "logs",
+                "version": "0.3.2",
+                "log_content": "\n".join(tail),
+            },
+        )
+
+    @app.get("/status", response_class=Response)
+    async def status_page(request: Request):
+        """
+        System status page with styled template.
+        """
+        experiments = list(app.state.appstate.experiment_statuses.values())
+        lab_count = sum(1 for e in experiments if e.mode == "lab")
+        prod_count = sum(1 for e in experiments if e.mode == "production")
+
+        health = {
+            "status": "healthy",
+            "version": "0.3.2",
+            "experiments_total": len(experiments),
+            "experiments_lab": lab_count,
+            "experiments_production": prod_count,
+        }
+
+        models_list = [
+            {"name": "lightgbm", "display_name": "LightGBM", "description": "Gradient boosting for fast, accurate tabular predictions"},
+            {"name": "xgboost", "display_name": "XGBoost", "description": "Extreme gradient boosting with regularisation"},
+            {"name": "lstm", "display_name": "LSTM", "description": "Long short-term memory recurrent neural network"},
+            {"name": "cnn", "display_name": "CNN", "description": "1D convolutional neural network for sequence patterns"},
+        ]
+
+        return templates.TemplateResponse(
+            request=request,
+            name="status.html",
+            context={
+                "request": request,
+                "base_path": _get_base_path(request),
+                "active_page": "status",
+                "version": "0.3.2",
+                "health": health,
+                "experiments": experiments,
+                "models": models_list,
+            },
         )
 
     @app.get("/api/log")

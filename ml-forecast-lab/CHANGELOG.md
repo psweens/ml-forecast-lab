@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.3
+
+### New Features
+- Styled Logs page with colour-coded log levels and filter buttons (All/Info/Warning/Error)
+- System Status page replacing raw JSON — shows health, experiments table, model backends, API docs
+- Active nav indicator — current page highlighted with badge-style border
+- Glow-pulse animation on mode badge when training is in progress
+- Footer now shows version number and author credit
+
+### Improvements
+- Lab Mode stat number uses orange, Production Mode uses green to match badges
+- Card footer buttons equal height and centred
+- Pending status badge uses accent cyan instead of dull grey
+- Run All Benchmarks button works through ingress
+- Suppressed Uvicorn access logs
+
+## 0.3.2
+
+### New
+- CHANGELOG.md for HA update screen
+
 ## 0.3.1
 
 ### New Features

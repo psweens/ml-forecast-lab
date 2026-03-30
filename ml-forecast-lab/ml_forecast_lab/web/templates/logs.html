@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block title %}Logs - ML Forecast Lab{% endblock %}
+
+{% block content %}
+<section class="dashboard-header">
+    <h1>Application Logs</h1>
+    <p class="subtitle">Recent log output from ML Forecast Lab</p>
+    <div class="action-buttons">
+        <a href="{{ base_path | default('') }}/debug_log" class="btn btn-secondary" download>
+            ⬇ Download Full Log
+        </a>
+        <button class="btn btn-primary" onclick="location.reload()">
+            🔄 Refresh
+        </button>
+    </div>
+</section>
+
+<section class="section">
+    <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap;">
+        <button class="btn btn-secondary log-filter active" data-level="all" onclick="filterLogs('all', this)">All</button>
+        <button class="btn btn-secondary log-filter" data-level="INFO" onclick="filterLogs('INFO', this)">Info</button>
+        <button class="btn btn-secondary log-filter" data-level="WARNING" onclick="filterLogs('WARNING', this)">Warnings</button>
+        <button class="btn btn-secondary log-filter" data-level="ERROR" onclick="filterLogs('ERROR', this)">Errors</button>
+    </div>
+    <pre id="log-output" style="background: var(--bg-primary); border: 1px solid var(--border); border-radius: 0.5rem;
+        padding: 1rem; overflow-x: auto; max-height: 70vh; overflow-y: auto; font-family: 'Courier New', monospace;
+        font-size: 0.8rem; line-height: 1.5; color: var(--text-primary); white-space: pre-wrap; word-wrap: break-word;">{{ log_content }}</pre>
+</section>
+
+<style>
+    .log-filter.active { background: var(--accent-secondary); color: var(--bg-primary); }
+    #log-output .log-error { color: #e74c3c; }
+    #log-output .log-warning { color: #f39c12; }
+    #log-output .log-info { color: #2ecc71; }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Scroll to bottom of log
+    var logEl = document.getElementById('log-output');
+    logEl.scrollTop = logEl.scrollHeight;
+
+    // Colorize log lines
+    var html = logEl.innerHTML;
+    html = html.replace(/(.*ERROR.*)/g, '<span class="log-error">$1</span>');
+    html = html.replace(/(.*WARNING.*)/g, '<span class="log-warning">$1</span>');
+    logEl.innerHTML = html;
+
+    // Filter by level
+    var allLines = logEl.textContent.split('\n');
+    function filterLogs(level, btn) {
+        document.querySelectorAll('.log-filter').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        var filtered = allLines;
+        if (level !== 'all') {
+            filtered = allLines.filter(l => l.includes(' - ' + level + ' - '));
+        }
+        var text = filtered.join('\n');
+        logEl.textContent = text;
+        // Re-colorize
+        var h = logEl.innerHTML;
+        h = h.replace(/(.*ERROR.*)/g, '<span class="log-error">$1</span>');
+        h = h.replace(/(.*WARNING.*)/g, '<span class="log-warning">$1</span>');
+        logEl.innerHTML = h;
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+</script>
+{% endblock %}
