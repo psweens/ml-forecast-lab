@@ -42,6 +42,7 @@ class MLForecastLabApp:
         self.web_app = None
         self.server = None
         self.running = False
+        self._update_running = False
         self.last_update = None
         self.benchmarks_to_run = set()
 
@@ -404,11 +405,13 @@ class MLForecastLabApp:
         if not models:
             raise ValueError("No models could be created for benchmark")
 
-        # 6. Run benchmark
+        # 6. Run benchmark (in thread pool to avoid blocking web server)
         exp_cfg_dict = dataclasses.asdict(exp_cfg)
         metric_registry = get_metric_registry()
         runner = BenchmarkRunner(exp_cfg_dict, feature_builder, metric_registry)
-        bench_result = runner.run_benchmark(combined, models)
+        bench_result = await asyncio.get_event_loop().run_in_executor(
+            None, runner.run_benchmark, combined, models
+        )
 
         # 7. Generate holdout predictions from each model for visualisation
         #    Use last 20% of data as holdout, train on first 80%
@@ -441,49 +444,52 @@ class MLForecastLabApp:
             "cnn": "#e74c3c",
         }
 
-        model_predictions = []
-        feature_importance_list = []
+        def _generate_holdout_predictions():
+            """Run holdout predictions in thread pool to avoid blocking."""
+            _model_predictions = []
+            _feature_importance_list = []
 
-        for model_name in exp_cfg.models_enabled:
-            try:
-                # Create fresh model and train on 80% split
-                model = self.model_registry.create(model_name)
-                model.fit(X_train_hold, y_train_hold)
+            for m_name in exp_cfg.models_enabled:
+                try:
+                    m = self.model_registry.create(m_name)
+                    m.fit(X_train_hold, y_train_hold)
 
-                # Predict on holdout
-                y_pred = model.predict(X_holdout)
-                if y_pred.ndim > 1:
-                    y_pred = y_pred.ravel()
+                    y_p = m.predict(X_holdout)
+                    if y_p.ndim > 1:
+                        y_p = y_p.ravel()
 
-                model_predictions.append(ModelPrediction(
-                    model_name=model_name,
-                    timestamps=holdout_timestamps,
-                    actuals=[float(v) if not np.isnan(v) else None for v in y_holdout],
-                    predictions=[float(v) for v in y_pred],
-                    color=MODEL_COLORS.get(model_name, "#00d4ff"),
-                ))
+                    _model_predictions.append(ModelPrediction(
+                        model_name=m_name,
+                        timestamps=holdout_timestamps,
+                        actuals=[float(v) if not np.isnan(v) else None for v in y_holdout],
+                        predictions=[float(v) for v in y_p],
+                        color=MODEL_COLORS.get(m_name, "#00d4ff"),
+                    ))
 
-                # Extract feature importances from tree models
-                if hasattr(model, 'training_metadata') and model.training_metadata:
-                    importances = model.training_metadata.get("feature_importances", {})
-                    if importances:
-                        sorted_features = sorted(
-                            importances.items(),
-                            key=lambda x: x[1],
-                            reverse=True,
-                        )[:20]
-                        feature_importance_list.append(FeatureImportanceData(
-                            model_name=model_name,
-                            features=[
-                                {"name": name, "importance": float(imp)}
-                                for name, imp in sorted_features
-                            ],
-                        ))
+                    if hasattr(m, 'training_metadata') and m.training_metadata:
+                        importances = m.training_metadata.get("feature_importances", {})
+                        if importances:
+                            sorted_feats = sorted(
+                                importances.items(), key=lambda x: x[1], reverse=True
+                            )[:20]
+                            _feature_importance_list.append(FeatureImportanceData(
+                                model_name=m_name,
+                                features=[
+                                    {"name": name, "importance": float(imp)}
+                                    for name, imp in sorted_feats
+                                ],
+                            ))
 
-                logger.info(f"Generated holdout predictions for {model_name}")
+                    logger.info(f"Generated holdout predictions for {m_name}")
 
-            except Exception as e:
-                logger.warning(f"Failed to generate holdout predictions for {model_name}: {e}")
+                except Exception as e:
+                    logger.warning(f"Failed holdout predictions for {m_name}: {e}")
+
+            return _model_predictions, _feature_importance_list
+
+        model_predictions, feature_importance_list = await asyncio.get_event_loop().run_in_executor(
+            None, _generate_holdout_predictions
+        )
 
         # Store lab forecast data
         if model_predictions and self.web_app:
@@ -609,11 +615,13 @@ class MLForecastLabApp:
                 f"No production model set, defaulting to {prod_model_name}"
             )
 
-        # 4. Create and train model on full data
+        # 4. Create and train model on full data (in thread pool)
         model = self.model_registry.create(prod_model_name)
         logger.info(f"Training {prod_model_name} on {len(X)} samples...")
         train_start = time.time()
-        model.fit(X, y)
+        await asyncio.get_event_loop().run_in_executor(
+            None, model.fit, X, y
+        )
         train_time = time.time() - train_start
         logger.info(f"Training completed in {train_time:.1f}s")
 
@@ -672,6 +680,49 @@ class MLForecastLabApp:
                 f"Some forecast publishes failed for {exp_cfg.name}"
             )
 
+    async def _run_update_cycle(self, next_update: datetime):
+        """
+        Run a full update cycle in the background.
+
+        This runs as an asyncio task so the web server remains responsive
+        during model training.
+        """
+        self._update_running = True
+        try:
+            logger.info("=== Starting scheduled update cycle ===")
+
+            # Reload config
+            await self.load_config()
+
+            # Run updates for each experiment
+            for exp_cfg in self.config.experiments:
+                is_lab = exp_cfg.mode == "lab"
+                await self.update_experiment(exp_cfg.name, is_lab)
+
+            # Publish heartbeat
+            await self.publish_heartbeat()
+
+            logger.info(
+                f"Update cycle completed. Next update at {next_update.isoformat()}"
+            )
+
+            # Update web app state with next update time
+            if self.web_app:
+                now = datetime.utcnow()
+                for exp_cfg in self.config.experiments:
+                    status = self.web_app.state.appstate.experiment_statuses.get(
+                        exp_cfg.name
+                    )
+                    if status:
+                        status.next_update_in_seconds = int(
+                            (next_update - now).total_seconds()
+                        )
+
+        except Exception as e:
+            logger.error(f"Error in update cycle: {e}", exc_info=True)
+        finally:
+            self._update_running = False
+
     async def publish_heartbeat(self):
         """
         Publish heartbeat sensor to Home Assistant.
@@ -724,36 +775,10 @@ class MLForecastLabApp:
                 now = datetime.utcnow()
 
                 # Check if it's time for update
-                if now >= next_update:
-                    logger.info("=== Starting scheduled update cycle ===")
-
-                    # Reload config
-                    await self.load_config()
-
-                    # Run updates for each experiment
-                    for exp_cfg in self.config.experiments:
-                        is_lab = exp_cfg.mode == "lab"
-                        await self.update_experiment(exp_cfg.name, is_lab)
-
-                    # Publish heartbeat
-                    await self.publish_heartbeat()
-
-                    # Schedule next update
+                if now >= next_update and not self._update_running:
+                    # Run update cycle in background so web server stays responsive
                     next_update = datetime.utcnow() + timedelta(seconds=update_interval)
-                    logger.info(
-                        f"Update cycle completed. Next update at {next_update.isoformat()}"
-                    )
-
-                    # Update web app state with next update time
-                    if self.web_app:
-                        for exp_cfg in self.config.experiments:
-                            status = self.web_app.state.appstate.experiment_statuses.get(
-                                exp_cfg.name
-                            )
-                            if status:
-                                status.next_update_in_seconds = int(
-                                    (next_update - now).total_seconds()
-                                )
+                    asyncio.create_task(self._run_update_cycle(next_update))
 
                 # Update next_update_in_seconds counters
                 if self.web_app:
