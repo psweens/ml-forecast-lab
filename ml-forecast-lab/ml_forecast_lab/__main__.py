@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 async def main():
     """Main application entry point."""
-    logger.info("Initialising ML Forecast Lab v0.2.0...")
+    logger.info("Starting ML Forecast Lab...")
 
     # Import here to allow proper logging setup
     try:

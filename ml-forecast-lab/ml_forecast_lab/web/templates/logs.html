@@ -32,7 +32,9 @@
     .log-filter.active { background: var(--accent-secondary); color: var(--bg-primary); }
     #log-output .log-error { color: #e74c3c; }
     #log-output .log-warning { color: #f39c12; }
-    #log-output .log-info { color: #2ecc71; }
+    #log-output .log-separator { color: #00d4ff; }
+    #log-output .log-result { color: #2ecc71; }
+    #log-output .log-star { color: #f39c12; }
 </style>
 {% endblock %}
 
@@ -46,6 +48,10 @@
     var html = logEl.innerHTML;
     html = html.replace(/(.*ERROR.*)/g, '<span class="log-error">$1</span>');
     html = html.replace(/(.*WARNING.*)/g, '<span class="log-warning">$1</span>');
+    html = html.replace(/(.*[═╔╚─]{3,}.*)/g, '<span class="log-separator">$1</span>');
+    html = html.replace(/(.*✓.*)/g, '<span class="log-result">$1</span>');
+    html = html.replace(/(.*★.*)/g, '<span class="log-star">$1</span>');
+    html = html.replace(/(.*Best model:.*)/g, '<span class="log-star">$1</span>');
     logEl.innerHTML = html;
 
     // Filter by level

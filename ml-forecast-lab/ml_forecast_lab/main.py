@@ -295,13 +295,15 @@ class MLForecastLabApp:
             )
 
         logger.info(
-            f"Fetched {len(df)} records for {exp_cfg.target_entity}"
+            f"  Fetched {len(df)} records for {exp_cfg.target_entity} "
+            f"({exp_cfg.days_history} days, {start.strftime('%d %b')} to {now.strftime('%d %b %H:%M')})"
         )
 
         # --- Store in SQLite cache ---
         if exp_cfg.database and self.history_db and table_name:
             inserted = self.history_db.store_history(table_name, df)
-            logger.debug(f"Cached {inserted} new records in SQLite")
+            if inserted > 0:
+                logger.info(f"  Cached {inserted} new records in SQLite")
 
         # --- Set DatetimeIndex ---
         df = df.set_index("ds").sort_index()
@@ -330,10 +332,25 @@ class MLForecastLabApp:
         result = pd.DataFrame({"y": series}, index=series.index)
         result = result.dropna()
 
+        # Rich data summary
+        y = result["y"]
         logger.info(
-            f"Preprocessed {exp_cfg.target_entity}: "
-            f"{len(result)} samples at {freq} intervals"
+            f"  Preprocessed: {len(result)} samples at {freq} intervals"
         )
+        logger.info(
+            f"  Data range: {result.index[0].strftime('%d %b %H:%M')} → "
+            f"{result.index[-1].strftime('%d %b %H:%M')}"
+        )
+        logger.info(
+            f"  Target stats: mean={y.mean():.3f}, std={y.std():.3f}, "
+            f"min={y.min():.3f}, max={y.max():.3f}, zeros={int((y == 0).sum())}/{len(y)}"
+        )
+        if exp_cfg.source_is_cumulative:
+            logger.info(
+                f"  Cumulative→interval conversion: reset_daily={exp_cfg.reset_daily}, "
+                f"max_increment={exp_cfg.max_increment}"
+            )
+
         return result
 
     def _update_web_benchmark(self, exp_cfg, model_results, rankings, best_model_name, status="running"):
@@ -410,7 +427,13 @@ class MLForecastLabApp:
             MetricValue,
         )
 
-        logger.info(f"Running benchmark for {exp_cfg.name}...")
+        logger.info(f"")
+        logger.info(f"{'=' * 60}")
+        logger.info(f"  BENCHMARK: {exp_cfg.name}")
+        logger.info(f"  Target: {exp_cfg.target_entity}")
+        logger.info(f"  Models: {', '.join(exp_cfg.models_enabled)}")
+        logger.info(f"  CV: {exp_cfg.cv_strategy}, {exp_cfg.cv_folds} folds, metric={exp_cfg.production_metric}")
+        logger.info(f"{'=' * 60}")
 
         if self.web_app:
             self.web_app.state.appstate.start_benchmark(exp_cfg.name)
@@ -475,13 +498,22 @@ class MLForecastLabApp:
         completed_models = {}
         rankings = {}
 
-        for model_name, model in models.items():
-            logger.info(f"Benchmarking model: {model_name}")
+        for model_idx, (model_name, model) in enumerate(models.items(), 1):
+            logger.info(f"")
+            logger.info(f"  [{model_idx}/{len(models)}] Benchmarking: {model_name}")
 
             model_result = await asyncio.get_event_loop().run_in_executor(
                 None, runner.run_single_model, combined, model, fold_indices
             )
             completed_models[model_name] = model_result
+
+            # Log model result summary
+            mae_val = model_result.metrics.get("mae", np.nan)
+            rmse_val = model_result.metrics.get("rmse", np.nan)
+            logger.info(
+                f"  ✓ {model_name}: MAE={mae_val:.4f}, RMSE={rmse_val:.4f}, "
+                f"time={model_result.mean_train_time:.1f}s/fold"
+            )
 
             # Rank completed models so far
             metric_values = {
@@ -619,11 +651,27 @@ class MLForecastLabApp:
                 status="completed",
             )
 
-        logger.info(
-            f"Benchmark completed for {exp_cfg.name}: "
-            f"best={best_model_name} "
-            f"({runner.production_metric}={best_metric_value:.4f})"
-        )
+        # Final results summary table
+        logger.info(f"")
+        logger.info(f"  {'─' * 56}")
+        logger.info(f"  {'Model':<12} {'MAE':>8} {'RMSE':>8} {'MAPE':>8} {'Time':>8} {'Rank':>6}")
+        logger.info(f"  {'─' * 56}")
+        for m_name in sorted(completed_models.keys(), key=lambda x: rankings.get(x, 99)):
+            mr = completed_models[m_name]
+            rank = rankings.get(m_name, 0)
+            marker = " ★" if m_name == best_model_name else ""
+            logger.info(
+                f"  {m_name:<12} "
+                f"{mr.metrics.get('mae', np.nan):>8.4f} "
+                f"{mr.metrics.get('rmse', np.nan):>8.4f} "
+                f"{mr.metrics.get('mape', np.nan):>8.2f} "
+                f"{mr.mean_train_time:>7.1f}s "
+                f"{'#' + str(rank):>5}{marker}"
+            )
+        logger.info(f"  {'─' * 56}")
+        logger.info(f"  Best model: {best_model_name} ({runner.production_metric}={best_metric_value:.4f})")
+        logger.info(f"{'=' * 60}")
+        logger.info(f"")
 
     async def _run_production_inference(self, exp_cfg):
         """
@@ -632,7 +680,11 @@ class MLForecastLabApp:
         """
         from ml_forecast_lab.features import build_features, create_forecast_features
 
-        logger.info(f"Running production inference for {exp_cfg.name}...")
+        logger.info(f"")
+        logger.info(f"{'=' * 60}")
+        logger.info(f"  PRODUCTION: {exp_cfg.name}")
+        logger.info(f"  Target: {exp_cfg.target_entity}")
+        logger.info(f"{'=' * 60}")
 
         # 1. Fetch and preprocess
         df = await self._fetch_and_preprocess(exp_cfg)
@@ -812,10 +864,20 @@ class MLForecastLabApp:
                 status.best_model = prod_model_name
                 status.mode = "production"
 
-        logger.info(
-            f"Production inference complete for {exp_cfg.name}: "
-            f"model={prod_model_name}, {len(y_pred)} forecast points"
-        )
+        logger.info(f"")
+        logger.info(f"  {'─' * 50}")
+        logger.info(f"  Production inference complete")
+        logger.info(f"  Model: {prod_model_name}, trained in {train_time:.1f}s")
+        logger.info(f"  Forecast: {len(y_pred)} points, {future_periods * exp_cfg.interval_minutes / 60:.0f}h ahead")
+        logger.info(f"  Next interval: {next_val} {units}")
+        for h_mins in exp_cfg.horizons_minutes:
+            h_label = f"+{h_mins // 60}h" if h_mins >= 60 else f"+{h_mins}m"
+            target_ts = last_ts + pd.Timedelta(minutes=h_mins)
+            idx = (ds_future - target_ts).abs().argmin()
+            logger.info(f"    {h_label}: {round(float(y_pred[idx]), 4)} {units}")
+        logger.info(f"  {'─' * 50}")
+        logger.info(f"{'=' * 60}")
+        logger.info(f"")
 
     async def _run_update_cycle(self, next_update: datetime):
         """
@@ -966,7 +1028,12 @@ class MLForecastLabApp:
         Initialises all components and starts the main event loop with web server.
         """
         try:
-            logger.info("Initialising ML Forecast Lab v0.2.0...")
+            logger.info("")
+            logger.info("╔══════════════════════════════════════════╗")
+            logger.info("║     ML Forecast Lab v0.3.6               ║")
+            logger.info("║     Multi-model ML forecasting for HA    ║")
+            logger.info("╚══════════════════════════════════════════╝")
+            logger.info("")
 
             # Setup directories
             self._setup_directories()

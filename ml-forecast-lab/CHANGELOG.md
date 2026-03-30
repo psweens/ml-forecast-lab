@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.7
+
+### Improvements
+- Rich, informative log output inspired by Predbat:
+  - Boxed startup banner with version
+  - Section headers with ═══ separators for benchmark/production cycles
+  - Data summary with mean, std, min, max, zero count after preprocessing
+  - Per-model progress counter [1/4], [2/4] etc with ✓ on completion
+  - Aligned results table with MAE, RMSE, MAPE, Time, Rank columns
+  - ★ marker for best model in results table
+  - Production forecast summary with per-horizon values
+- Log viewer page colour-codes separators (cyan), results (green),
+  best model (orange) in addition to errors/warnings
+
 ## 0.3.6
 
 ### Bug Fixes
