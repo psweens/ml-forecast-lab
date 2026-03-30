@@ -339,6 +339,10 @@ class MLForecastLabApp:
         )
         new_df = normalise_history(raw_records)
 
+        # Normalise all timestamps to tz-naive UTC for consistency
+        if not new_df.empty and hasattr(new_df["ds"].dtype, "tz") and new_df["ds"].dt.tz is not None:
+            new_df["ds"] = new_df["ds"].dt.tz_localize(None)
+
         if not new_df.empty:
             if len(df) > 0:
                 # Merge: append new records, deduplicate by timestamp
