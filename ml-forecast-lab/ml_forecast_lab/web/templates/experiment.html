@@ -98,12 +98,12 @@
                         </tr>
                     </thead>
                     <tbody>
-                        {% for fold_idx, fold_metrics in enumerate(model.fold_results) %}
+                        {% for fold_metrics in model.fold_results %}
                         <tr>
-                            <td>Fold {{ fold_idx + 1 }}</td>
-                            <td>{{ "%.3f" | format(fold_metrics.mae) }}</td>
-                            <td>{{ "%.3f" | format(fold_metrics.rmse) }}</td>
-                            <td>{{ "%.2f" | format(fold_metrics.mape) }}</td>
+                            <td>Fold {{ loop.index }}</td>
+                            <td>{{ "%.3f" | format(fold_metrics.get('mae', 0)) }}</td>
+                            <td>{{ "%.3f" | format(fold_metrics.get('rmse', 0)) }}</td>
+                            <td>{{ "%.2f" | format(fold_metrics.get('mape', 0)) }}</td>
                         </tr>
                         {% endfor %}
                     </tbody>
