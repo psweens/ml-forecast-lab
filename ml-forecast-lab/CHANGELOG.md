@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.5
+
+### New Features
+- Info tooltips (?) on all section headers and metric columns explaining
+  what each result means and how to interpret it
+- Readable benchmark timestamp with relative time (e.g. "2h 15m ago")
+
+### Improvements
+- Footer updated to "Created by Dr Paul W. Sweeney"
+- Mode toggle button text shortened to prevent wrapping
+
 ## 0.3.4
 
 ### New Features

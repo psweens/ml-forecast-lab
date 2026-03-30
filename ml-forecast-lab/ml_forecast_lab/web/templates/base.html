@@ -109,6 +109,13 @@
         .navbar-container { flex-direction: column; gap: 1rem; } .navbar-menu { width: 100%; justify-content: center; }
         .card-field { flex-direction: column; } .field-value { text-align: left; margin-left: 0; margin-top: 0.25rem; }
     }
+    .info-tip { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
+        border-radius: 50%; background: rgba(0,212,255,0.15); color: var(--accent-secondary); font-size: 0.7rem;
+        font-weight: 700; cursor: help; margin-left: 0.4rem; position: relative; vertical-align: middle; }
+    .info-tip:hover::after { content: attr(data-tip); position: absolute; bottom: 130%; left: 50%; transform: translateX(-50%);
+        background: var(--bg-tertiary); color: var(--text-primary); padding: 0.5rem 0.75rem; border-radius: 0.4rem;
+        font-size: 0.78rem; font-weight: 400; white-space: normal; width: max-content; max-width: 300px;
+        border: 1px solid var(--border); box-shadow: 0 4px 12px rgba(0,0,0,0.4); z-index: 200; line-height: 1.4; }
     :focus-visible { outline: 2px solid var(--accent-secondary); outline-offset: 2px; }
     </style>
     <!-- HTMX for interactive updates -->
@@ -137,7 +144,7 @@
     </main>
 
     <footer class="footer">
-        <p>ML Forecast Lab v{{ version | default('0.3') }} · Built by <a href="https://github.com/psweens" target="_blank" style="color: var(--accent-secondary); text-decoration: none;">Dr Paul W. Sweeney</a></p>
+        <p>ML Forecast Lab v{{ version | default('0.3') }} · Created by <a href="https://github.com/psweens" target="_blank" style="color: var(--accent-secondary); text-decoration: none;">Dr Paul W. Sweeney</a></p>
     </footer>
 
     <script>

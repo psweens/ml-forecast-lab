@@ -33,16 +33,16 @@
 {% if benchmark_result %}
 <!-- Model Comparison Table -->
 <section class="section">
-    <h2>Model Comparison</h2>
+    <h2>Model Comparison <span class="info-tip" data-tip="Each model is trained and evaluated using walk-forward cross-validation. Lower MAE and RMSE indicate better accuracy. The rank is determined by the production metric (MAE by default). The best model is highlighted in green.">?</span></h2>
     <div class="table-container">
         <table class="metrics-table">
             <thead>
                 <tr>
                     <th>Model</th>
-                    <th>MAE</th>
-                    <th>RMSE</th>
-                    <th>MAPE (%)</th>
-                    <th>Train Time (s)</th>
+                    <th>MAE <span class="info-tip" data-tip="Mean Absolute Error — average magnitude of errors. Lower is better. ± shows variation across CV folds.">?</span></th>
+                    <th>RMSE <span class="info-tip" data-tip="Root Mean Square Error — penalises large errors more than MAE. Lower is better.">?</span></th>
+                    <th>MAPE <span class="info-tip" data-tip="Mean Absolute Percentage Error — error as a percentage of the actual value. Lower is better. Can be misleading when actual values are near zero.">?</span></th>
+                    <th>Train Time <span class="info-tip" data-tip="Average wall-clock training time per CV fold in seconds.">?</span></th>
                     <th>Rank</th>
                     <th>Production</th>
                 </tr>
@@ -117,7 +117,7 @@
 
 <!-- Multi-Model Predictions (Lab Mode) -->
 <section class="section">
-    <h2>Model Predictions on Holdout Data</h2>
+    <h2>Model Predictions on Holdout Data <span class="info-tip" data-tip="Shows how each model's predictions (coloured lines) compare to actual values (white dotted line) on the last 20% of data held out from training. Models that track the white line closely are performing well.">?</span></h2>
     {% if lab_forecast and lab_forecast.model_predictions %}
     <div id="lab-forecast-chart" style="min-height: 500px;"></div>
     <script>
@@ -173,7 +173,7 @@
 <!-- Residual Plot -->
 {% if lab_forecast and lab_forecast.model_predictions %}
 <section class="section">
-    <h2>Prediction Residuals</h2>
+    <h2>Prediction Residuals <span class="info-tip" data-tip="Residuals = Actual minus Predicted. Values near zero mean accurate predictions. Consistent positive values indicate the model underestimates; negative values indicate overestimation. Patterns in residuals (e.g. time-of-day bias) suggest the model is missing a feature.">?</span></h2>
     <div id="residual-chart" style="min-height: 400px;"></div>
     <script>
         document.addEventListener('DOMContentLoaded', function() {
@@ -223,7 +223,7 @@
 
 <!-- Feature Importance -->
 <section class="section">
-    <h2>Feature Importance</h2>
+    <h2>Feature Importance <span class="info-tip" data-tip="Shows which input features contribute most to the model's predictions. Higher importance means the feature has more influence on the forecast. Only available for tree-based models (LightGBM, XGBoost).">?</span></h2>
     {% if feature_importances %}
     {% for fi in feature_importances %}
     <h3 style="color: var(--accent-secondary); margin-bottom: 0.5rem;">{{ fi.model_name }}</h3>
@@ -273,7 +273,7 @@
             </span>
         </dd>
         <dt>Timestamp:</dt>
-        <dd class="monospace">{{ benchmark_result.timestamp }}</dd>
+        <dd class="monospace" id="benchmark-timestamp" data-iso="{{ benchmark_result.timestamp }}">{{ benchmark_result.timestamp[:19] | replace('T', ' ') }}</dd>
         <dt>Best Model:</dt>
         <dd>{{ benchmark_result.best_model_name or 'N/A' }}</dd>
         {% if benchmark_result.error_message %}
@@ -295,6 +295,20 @@
 
 {% block scripts %}
 <script>
+    // Convert timestamp to relative time
+    var tsEl = document.getElementById('benchmark-timestamp');
+    if (tsEl && tsEl.dataset.iso) {
+        var d = new Date(tsEl.dataset.iso);
+        var now = new Date();
+        var diff = Math.floor((now - d) / 1000);
+        var relative;
+        if (diff < 60) relative = 'just now';
+        else if (diff < 3600) relative = Math.floor(diff / 60) + 'm ago';
+        else if (diff < 86400) relative = Math.floor(diff / 3600) + 'h ' + Math.floor((diff % 3600) / 60) + 'm ago';
+        else relative = Math.floor(diff / 86400) + 'd ago';
+        tsEl.textContent = tsEl.textContent + ' (' + relative + ')';
+    }
+
     const benchmarkBtn = document.getElementById('run-benchmark-btn');
     if (benchmarkBtn && !benchmarkBtn.disabled && benchmarkBtn.hx-post) {
         // When clicked, set up polling
