@@ -280,7 +280,7 @@ def load_config(config_path: Path | str) -> AppConfig:
     if not config_path.exists():
         raise FileNotFoundError(f'Configuration file not found: {config_path}')
 
-    logger.info(f'Loading configuration from {config_path}')
+    logger.debug(f'Loading configuration from {config_path}')
     with open(config_path, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f)
 
@@ -327,7 +327,7 @@ def load_config(config_path: Path | str) -> AppConfig:
         data = {k: v for k, v in data.items() if k in app_fields}
 
     app_config = AppConfig(**data, experiments=experiments)
-    logger.info(
+    logger.debug(
         f'Configuration loaded: {len(app_config.experiments)} experiment(s)'
     )
     return app_config
