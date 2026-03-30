@@ -365,10 +365,34 @@ class BenchmarkRunner:
 
             train_time = time.time() - train_start
 
-            # Predict
+            # Predict — use sequence data for LSTM/CNN if available
             inference_start = time.time()
             try:
-                y_pred = model.predict(X_test)
+                if 'sequence_data' in sequence_kwargs and model.name in ('lstm', 'cnn'):
+                    # Create windowed test data matching training format
+                    try:
+                        target_col = 'target'
+                        cov_cols = [c for c in df_test.columns if c not in (target_col, *feat_names[:31])]
+                        if target_col in df_test.columns:
+                            seq_X_test, seq_y_test = create_sliding_windows(
+                                df_test, target_col, window_size=sequence_kwargs['sequence_data'].shape[1],
+                                covariate_cols=cov_cols if cov_cols else None,
+                            )
+                            y_pred = model.predict(np.zeros((len(seq_y_test), X_test.shape[1])))
+                            # Actually predict using sequence data
+                            import torch
+                            model._model.eval()
+                            with torch.no_grad():
+                                X_t = torch.FloatTensor(seq_X_test)
+                                y_pred = model._model(X_t).numpy()
+                                y_pred = np.clip(y_pred, 0.0, None).astype(np.float32)
+                            y_test = seq_y_test
+                        else:
+                            y_pred = model.predict(X_test)
+                    except Exception:
+                        y_pred = model.predict(X_test)
+                else:
+                    y_pred = model.predict(X_test)
             except Exception as e:
                 logger.error(f'Model prediction failed for fold {fold_idx}: {e}')
                 model_result.fold_metrics.append({})
