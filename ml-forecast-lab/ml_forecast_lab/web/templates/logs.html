@@ -10,9 +10,10 @@
         <a href="{{ base_path | default('') }}/debug_log" class="btn btn-secondary" download>
             ⬇ Download Full Log
         </a>
-        <button class="btn btn-primary" onclick="location.reload()">
-            🔄 Refresh
-        </button>
+        <span id="live-indicator" style="display: inline-flex; align-items: center; gap: 0.4rem; color: var(--success); font-size: 0.85rem;">
+            <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--success); animation: pulse 2s infinite;"></span>
+            Live
+        </span>
     </div>
 </section>
 
@@ -74,19 +75,48 @@
     }
     logEl.innerHTML = colorize(logEl.textContent);
 
-    // Filter by level
+    // Filter state
     var allLines = logEl.textContent.split('\n');
+    var currentFilter = 'all';
+    var autoScroll = true;
+    var lastLineCount = allLines.length;
+
+    // Detect if user scrolled up (disable auto-scroll)
+    logEl.addEventListener('scroll', function() {
+        var atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 50;
+        autoScroll = atBottom;
+    });
+
     function filterLogs(level, btn) {
         document.querySelectorAll('.log-filter').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
+        currentFilter = level;
+        applyFilter();
+    }
+
+    function applyFilter() {
         var filtered = allLines;
-        if (level !== 'all') {
+        if (currentFilter !== 'all') {
             filtered = allLines.filter(function(l) {
-                return l.toUpperCase().includes(' ' + level + ' ');
+                return l.toUpperCase().includes(' ' + currentFilter + ' ');
             });
         }
         logEl.innerHTML = colorize(filtered.join('\n'));
-        logEl.scrollTop = logEl.scrollHeight;
+        if (autoScroll) logEl.scrollTop = logEl.scrollHeight;
     }
+
+    // Auto-refresh: poll for new log lines every 3 seconds
+    setInterval(function() {
+        fetch(BASE_PATH + '/api/log?lines=500')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.lines && data.lines.length > lastLineCount) {
+                    allLines = data.lines;
+                    lastLineCount = allLines.length;
+                    applyFilter();
+                }
+            })
+            .catch(function() {});
+    }, 3000);
 </script>
 {% endblock %}
