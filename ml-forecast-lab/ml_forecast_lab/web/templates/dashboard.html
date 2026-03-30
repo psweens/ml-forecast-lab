@@ -86,13 +86,13 @@
             </div>
 
             <div class="card-footer" style="display: flex; gap: 0.75rem; justify-content: center; align-items: stretch;">
-                <a href="{{ base_path | default('') }}/experiment/{{ exp.name }}" class="btn btn-secondary" style="flex: 1; justify-content: center;">
+                <a href="{{ base_path | default('') }}/experiment/{{ exp.name }}" class="btn btn-secondary" style="flex: 1; justify-content: center; text-align: center;">
                     → View Details
                 </a>
                 <button class="btn {% if exp.mode == 'lab' %}btn-success{% else %}btn-primary{% endif %}"
-                        style="flex: 1; justify-content: center;"
+                        style="flex: 1; justify-content: center; text-align: center; white-space: nowrap;"
                         onclick="toggleMode('{{ exp.name }}', this)">
-                    {% if exp.mode == 'lab' %}⚡ Switch to Production{% else %}🔬 Switch to Lab{% endif %}
+                    {% if exp.mode == 'lab' %}⚡ Production{% else %}🔬 Lab Mode{% endif %}
                 </button>
             </div>
         </div>
