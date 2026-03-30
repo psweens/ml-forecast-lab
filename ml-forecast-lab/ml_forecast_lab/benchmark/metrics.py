@@ -6,6 +6,7 @@ registry system for flexible metric computation and custom metric registration.
 All metrics handle NaN values gracefully and return float results.
 """
 
+import inspect
 import logging
 import re
 from typing import Any, Callable, Dict, List, Optional
@@ -407,11 +408,13 @@ class MetricRegistry:
             )
 
         metric_func = self._metrics[name]
-        try:
-            return metric_func(y_true, y_pred, **kwargs)
-        except TypeError:
-            # Fallback for metrics that may have different signatures
-            return metric_func(y_true, y_pred, **kwargs)
+        # Only pass kwargs that the metric function actually accepts
+        sig = inspect.signature(metric_func)
+        accepted_params = set(sig.parameters.keys())
+        filtered_kwargs = {
+            k: v for k, v in kwargs.items() if k in accepted_params
+        }
+        return metric_func(y_true, y_pred, **filtered_kwargs)
 
     def compute_all(
         self,
