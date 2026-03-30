@@ -318,10 +318,13 @@ class BenchmarkRunner:
                 y_train = df_train.iloc[:, -1].values
                 y_test = df_test.iloc[:, -1].values
 
+            # Get feature names from dataframe columns
+            feat_names = [c for c in df_train.columns if c != 'target']
+
             # Train model
             train_start = time.time()
             try:
-                model.fit(X_train, y_train)
+                model.fit(X_train, y_train, feature_names=feat_names)
             except Exception as e:
                 logger.error(f'Model training failed for fold {fold_idx}: {e}')
                 model_result.fold_metrics.append({})

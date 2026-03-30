@@ -587,7 +587,7 @@ class MLForecastLabApp:
             for m_name in exp_cfg.models_enabled:
                 try:
                     m = self.model_registry.create(m_name)
-                    m.fit(X_train_hold, y_train_hold)
+                    m.fit(X_train_hold, y_train_hold, feature_names=feature_cols)
 
                     y_p = m.predict(X_holdout)
                     if y_p.ndim > 1:
