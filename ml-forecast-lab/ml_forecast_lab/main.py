@@ -371,6 +371,8 @@ class MLForecastLabApp:
                     # Align to target index and merge
                     cov_name = cov_dict["name"]
                     cov_aligned = cov_series.reindex(result.index, method="ffill")
+                    # Back-fill any leading NaNs and forward-fill trailing ones
+                    cov_aligned = cov_aligned.ffill().bfill()
                     result[cov_name] = cov_aligned
 
                     valid_count = result[cov_name].notna().sum()
@@ -1103,11 +1105,12 @@ class MLForecastLabApp:
         Initialises all components and starts the main event loop with web server.
         """
         try:
+            from ml_forecast_lab import __version__
             logger.info("")
-            logger.info("╔══════════════════════════════════════════╗")
-            logger.info("║     ML Forecast Lab v0.3.6               ║")
-            logger.info("║     Multi-model ML forecasting for HA    ║")
-            logger.info("╚══════════════════════════════════════════╝")
+            logger.info("╔══════════════════════════════════════════════╗")
+            logger.info(f"║  ML Forecast Lab v{__version__:<27}║")
+            logger.info("║  Multi-model ML forecasting for HA          ║")
+            logger.info("╚══════════════════════════════════════════════╝")
             logger.info("")
 
             # Setup directories

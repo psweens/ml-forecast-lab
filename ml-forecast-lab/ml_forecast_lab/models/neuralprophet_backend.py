@@ -22,6 +22,12 @@ from .base import ForecastModel
 logger = logging.getLogger(__name__)
 
 try:
+    # Suppress NeuralProphet and PyTorch Lightning FutureWarnings
+    import warnings as _w
+    _w.filterwarnings("ignore", category=FutureWarning, module="neuralprophet")
+    _w.filterwarnings("ignore", category=FutureWarning, module="pytorch_lightning")
+    _w.filterwarnings("ignore", message=".*batch_size.*", module="pytorch_lightning")
+
     from neuralprophet import NeuralProphet, set_log_level as np_set_log_level
     np_set_log_level("ERROR")  # Suppress NeuralProphet's verbose logging
     NEURALPROPHET_AVAILABLE = True
