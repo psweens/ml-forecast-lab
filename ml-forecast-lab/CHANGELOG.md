@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.3
+
+### New Features
+- Interval / Cumulative toggle switch on holdout prediction chart
+- Cumulative view shows total demand over time for comparing which
+  model tracks overall accuracy best
+- Smooth toggle animation with accent cyan knob
+
 ## 0.5.2
 
 ### Improvements
