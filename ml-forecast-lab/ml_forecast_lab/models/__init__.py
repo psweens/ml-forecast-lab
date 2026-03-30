@@ -50,5 +50,5 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# Package version
-__version__ = '0.1.0'
+# Package version — imported from parent package
+from ml_forecast_lab import __version__

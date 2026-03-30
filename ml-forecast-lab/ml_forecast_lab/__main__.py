@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 async def main():
     """Main application entry point."""
-    logger.info("Initialising ML Forecast Lab v0.1.0...")
+    logger.info("Initialising ML Forecast Lab v0.2.0...")
 
     # Import here to allow proper logging setup
     try:
@@ -72,7 +72,7 @@ async def stub_server():
     app = FastAPI(
         title="ML Forecast Lab",
         description="Multi-model ML forecasting system",
-        version="0.1.0",
+        version="0.2.0",
     )
 
     @app.get("/health")
@@ -81,7 +81,7 @@ async def stub_server():
         return {
             "status": "healthy",
             "service": "ml-forecast-lab",
-            "version": "0.1.0",
+            "version": "0.2.0",
         }
 
     @app.get("/")
@@ -89,7 +89,7 @@ async def stub_server():
         """Root endpoint."""
         return {
             "name": "ML Forecast Lab",
-            "version": "0.1.0",
+            "version": "0.2.0",
             "description": "Multi-model ML forecasting and benchmarking system",
             "endpoints": {
                 "health": "/health",

@@ -712,7 +712,7 @@ class MLForecastLabApp:
         Initialises all components and starts the main event loop with web server.
         """
         try:
-            logger.info("Initialising ML Forecast Lab v0.1.0...")
+            logger.info("Initialising ML Forecast Lab v0.2.0...")
 
             # Setup directories
             self._setup_directories()

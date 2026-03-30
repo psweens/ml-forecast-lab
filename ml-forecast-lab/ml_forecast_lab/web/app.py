@@ -148,7 +148,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     app = FastAPI(
         title="ML Forecast Lab",
         description="Multi-model ML forecasting and benchmarking system",
-        version="0.1.0",
+        version="0.2.0",
     )
 
     # Initialize state
@@ -346,7 +346,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         return HealthStatus(
             status="healthy",
             service="ml-forecast-lab",
-            version="0.1.0",
+            version="0.2.0",
             timestamp=datetime.utcnow().isoformat(),
             experiments_total=len(list(experiments)),
             experiments_lab=lab_count,
