@@ -132,6 +132,10 @@ class CovariateResolver:
                 logger.warning(f"No history for {entity_id}")
                 return pd.Series(dtype=float, name=name)
 
+            # Normalise to tz-naive for consistent resampling
+            if hasattr(df["ds"].dtype, "tz") and df["ds"].dt.tz is not None:
+                df["ds"] = df["ds"].dt.tz_localize(None)
+
             # Set datetime index
             df.set_index("ds", inplace=True)
 
