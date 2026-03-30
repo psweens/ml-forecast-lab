@@ -350,6 +350,7 @@ class BenchmarkRunner:
                 metrics_to_compute,
                 y_test,
                 y_pred,
+                y_train=y_train,
             )
 
             model_result.fold_metrics.append(fold_metrics)
