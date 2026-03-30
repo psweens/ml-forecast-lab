@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.1
+
+### Bug Fixes
+- Version banner now reads from __init__.__version__ dynamically
+  (was hardcoded as v0.3.6)
+- Covariate alignment uses ffill+bfill to prevent data loss — was
+  losing ~660 samples from dropna after merging covariates
+- NeuralProphet/PyTorch Lightning FutureWarning spam suppressed
+- All version strings in web app use centralised APP_VERSION
+- Huber loss for LSTM and CNN (robust to demand spikes)
+
 ## 1.0.0
 
 ### Major Features — PyTorch Migration
