@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0
+
+### Major Features
+- Full backpropagation through time (BPTT) for LSTM — all gate weights
+  (input, forget, cell, output) now train properly instead of just the
+  dense output layer. LSTM should now learn temporal patterns.
+- Full backpropagation for CNN — conv kernel weights, biases, and residual
+  connections all update during training. Includes backward pass through
+  dilated causal convolutions.
+- Gradient clipping (max_norm=5.0) prevents exploding gradients in both
+  neural backends
+- Feature names passed to all models for readable importance charts
+
+### Bug Fixes
+- LSTM and CNN predictions clipped to non-negative (prevents misleading
+  chart visualisations from untrained weights)
+- Reduced LSTM/CNN defaults for faster Pi training: LSTM ~3-4x faster,
+  CNN ~2x faster
+
 ## 0.4.0
 
 ### New Features

@@ -304,9 +304,162 @@ class CNNModel(ForecastModel):
         X_reshaped = X[:, : seq_len * n_features_per_step].reshape(n_samples, seq_len, n_features_per_step)
         return X_reshaped, y
 
+    def _backward_conv1d(
+        self,
+        d_out: np.ndarray,
+        x: np.ndarray,
+        kernel: np.ndarray,
+        dilation: int = 1,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Backward pass through causal dilated 1D convolution.
+
+        Parameters
+        ----------
+        d_out : np.ndarray
+            Gradient from upstream, shape (batch, seq_len, out_channels).
+        x : np.ndarray
+            Original input, shape (batch, seq_len, in_channels).
+        kernel : np.ndarray
+            Conv kernel, shape (kernel_size, in_channels, out_channels).
+        dilation : int
+            Dilation factor.
+
+        Returns
+        -------
+        d_x : np.ndarray
+            Gradient w.r.t. input, shape (batch, seq_len, in_channels).
+        d_kernel : np.ndarray
+            Gradient w.r.t. kernel, shape (kernel_size, in_channels, out_channels).
+        d_bias : np.ndarray
+            Gradient w.r.t. bias, shape (out_channels,).
+        """
+        batch_size, seq_len, in_channels = x.shape
+        kernel_size, _, out_channels = kernel.shape
+
+        # Bias gradient: sum over batch and sequence
+        d_bias = np.sum(d_out, axis=(0, 1))
+
+        # Pad input same as forward
+        pad_length = (kernel_size - 1) * dilation
+        x_padded = np.pad(x, ((0, 0), (pad_length, 0), (0, 0)), mode="constant")
+
+        d_kernel = np.zeros_like(kernel)
+        d_x_padded = np.zeros_like(x_padded)
+
+        kernel_reshaped = kernel.reshape(kernel_size * in_channels, out_channels)
+
+        for t in range(seq_len):
+            # Same receptive field extraction as forward
+            rf_indices = [t + pad_length - k * dilation for k in range(kernel_size)]
+            receptive_field = np.concatenate(
+                [x_padded[:, idx:idx + 1, :] for idx in rf_indices], axis=2
+            )  # (batch, 1, kernel*in_channels)
+            rf = receptive_field.squeeze(1)  # (batch, kernel*in_channels)
+
+            d_t = d_out[:, t, :]  # (batch, out_channels)
+
+            # Kernel gradient: rf.T @ d_t
+            d_kernel += (rf.T @ d_t).reshape(kernel_size, in_channels, out_channels)
+
+            # Input gradient: d_t @ kernel.T
+            d_rf = d_t @ kernel_reshaped.T  # (batch, kernel*in_channels)
+            d_rf = d_rf.reshape(batch_size, kernel_size, in_channels)
+
+            for k in range(kernel_size):
+                idx = rf_indices[k]
+                if 0 <= idx < x_padded.shape[1]:
+                    d_x_padded[:, idx, :] += d_rf[:, k, :]
+
+        # Remove padding from gradient
+        d_x = d_x_padded[:, pad_length:, :]
+
+        return d_x, d_kernel / batch_size, d_bias / batch_size
+
+    def _backward_cnn(
+        self,
+        d_pooled: np.ndarray,
+        cache: Dict[str, Any],
+    ) -> Dict[str, np.ndarray]:
+        """
+        Full backward pass through CNN layers.
+
+        Parameters
+        ----------
+        d_pooled : np.ndarray
+            Gradient from dense layer after pooling, shape (batch, n_filters).
+        cache : dict
+            Cache from _forward_cnn.
+
+        Returns
+        -------
+        dict[str, np.ndarray]
+            Gradients for all CNN parameters.
+        """
+        grads = {}
+        seq_len = cache["layer_inputs"][0].shape[1]
+
+        # Undo global average pooling: distribute gradient across sequence
+        d_x = np.repeat(d_pooled[:, np.newaxis, :], seq_len, axis=1) / seq_len
+
+        # Backprop through layers in reverse
+        for layer in range(self.n_layers - 1, -1, -1):
+            layer_input = cache["layer_inputs"][layer]
+            dilation = cache["dilations"][layer]
+
+            # d_x is gradient of (x_act + x_res), split into both paths
+            d_act = d_x.copy()
+            d_res = d_x.copy()
+
+            # Residual path gradient
+            res_kernel = self._params.get(f"conv_{layer}_res_kernel")
+            if res_kernel is not None:
+                # d_res flows through 1x1 conv: x_res = input @ res_kernel
+                grads[f"conv_{layer}_res_kernel"] = np.mean(
+                    np.einsum('bsi,bsj->ij', layer_input, d_res), axis=0
+                ) if layer_input.ndim == 3 else None
+
+                # Actually: sum over batch and seq
+                d_res_kernel = np.zeros_like(res_kernel)
+                for t in range(seq_len):
+                    d_res_kernel += layer_input[:, t, :].T @ d_res[:, t, :]
+                grads[f"conv_{layer}_res_kernel"] = d_res_kernel / (d_x.shape[0] * seq_len)
+
+                d_input_res = np.zeros_like(layer_input)
+                for t in range(seq_len):
+                    d_input_res[:, t, :] = d_res[:, t, :] @ res_kernel.T
+            else:
+                d_input_res = d_res
+
+            # ReLU backward: zero gradient where pre-activation was <= 0
+            # Need pre-activation (conv output before ReLU)
+            conv_out = self._causal_conv1d(
+                layer_input,
+                self._params[f"conv_{layer}_kernel"],
+                self._params[f"conv_{layer}_bias"],
+                dilation=dilation,
+            )
+            relu_mask = (conv_out > 0).astype(np.float32)
+            d_conv = d_act * relu_mask
+
+            # Conv backward
+            d_input_conv, d_kernel, d_bias = self._backward_conv1d(
+                d_conv, layer_input,
+                self._params[f"conv_{layer}_kernel"],
+                dilation=dilation,
+            )
+
+            grads[f"conv_{layer}_kernel"] = d_kernel
+            grads[f"conv_{layer}_bias"] = d_bias
+
+            # Combined gradient flowing to previous layer
+            d_x = d_input_conv + d_input_res
+
+        return grads
+
     def fit(self, X_train: np.ndarray, y_train: np.ndarray, **kwargs: Any) -> Dict[str, Any]:
         """
-        Train CNN model using mini-batch SGD with Adam optimisation.
+        Train CNN model using mini-batch SGD with Adam and full backprop.
 
         Parameters
         ----------
@@ -342,7 +495,7 @@ class CNNModel(ForecastModel):
         X_train_split, X_val_split = X_seq[:n_train], X_seq[n_train:]
         y_train_split, y_val_split = y_seq[:n_train], y_seq[n_train:]
 
-        # Initialise optimiser
+        # Initialise optimiser for ALL parameters
         optimiser = Adam(learning_rate=self.learning_rate)
 
         # Training loop
@@ -359,42 +512,57 @@ class CNNModel(ForecastModel):
                 batch_indices = indices[i : i + self.batch_size]
                 X_batch = X_train_split[batch_indices]
                 y_batch = y_train_split[batch_indices]
+                batch_size = len(y_batch)
 
                 # Forward pass
                 cnn_out, cache = self._forward_cnn(X_batch, training=True)
-                y_pred = self._forward_dense(cnn_out).ravel()
+                cnn_pooled = np.mean(cnn_out, axis=1)  # Global avg pooling
+                y_pred = (cnn_pooled @ self._params["dense_w"] + self._params["dense_b"]).ravel()
 
-                # Compute loss
+                # Compute MSE loss
                 loss = np.mean((y_pred - y_batch) ** 2)
                 epoch_loss += loss
                 n_batches += 1
 
-                # Backward pass (simplified)
-                d_output = (y_pred - y_batch) / len(y_batch)
+                # ---- Backward pass with full backprop ----
+                d_output = 2.0 * (y_pred - y_batch) / batch_size  # (batch,)
 
-                # Update dense layer
-                cnn_pooled = np.mean(cnn_out, axis=1)
-                dW_dense = (cnn_pooled.T @ d_output.reshape(-1, 1)) / len(y_batch)
-                db_dense = np.sum(d_output) / len(y_batch)
+                # Dense layer gradients
+                dW_dense = cnn_pooled.T @ d_output.reshape(-1, 1)
+                db_dense = np.array([np.sum(d_output)])
 
-                grads = {
-                    "dense_w": dW_dense,  # Keep shape (n_filters, 1)
-                    "dense_b": np.array([db_dense]),
+                # Gradient flowing back through dense to pooled output
+                d_pooled = d_output.reshape(-1, 1) @ self._params["dense_w"].T  # (batch, n_filters)
+
+                # Full backward through CNN layers
+                cnn_grads = self._backward_cnn(d_pooled, cache)
+
+                # Combine all gradients
+                all_grads = {
+                    "dense_w": dW_dense,
+                    "dense_b": db_dense,
+                    **cnn_grads,
                 }
 
-                # Update parameters
-                updated = optimiser.step(
-                    {"dense_w": self._params["dense_w"], "dense_b": self._params["dense_b"]}, grads
-                )
-                self._params["dense_w"] = updated["dense_w"]
-                self._params["dense_b"] = updated["dense_b"]
+                # Remove None entries (res_kernel for same-channel layers)
+                all_grads = {k: v for k, v in all_grads.items() if v is not None}
+
+                # Clip gradients
+                all_grads = gradient_clip(all_grads, max_norm=5.0)
+
+                # Filter params to only those with gradients
+                params_to_update = {k: self._params[k] for k in all_grads if k in self._params}
+
+                # Update ALL parameters with Adam
+                updated = optimiser.step(params_to_update, all_grads)
+                self._params.update(updated)
 
             # Validation
             val_cnn_out, _ = self._forward_cnn(X_val_split, training=False)
             val_pred = self._forward_dense(val_cnn_out).ravel()
             val_loss = np.mean((val_pred - y_val_split) ** 2)
 
-            avg_loss = epoch_loss / n_batches
+            avg_loss = epoch_loss / max(n_batches, 1)
             self._training_history["train_loss"].append(avg_loss)
             self._training_history["val_loss"].append(val_loss)
 

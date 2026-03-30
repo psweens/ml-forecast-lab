@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 
 from .base import ForecastModel
-from ._numpy_optim import Adam, sigmoid, tanh, relu, xavier_init, zeros_init, ones_init
+from ._numpy_optim import Adam, sigmoid, tanh, relu, xavier_init, zeros_init, ones_init, gradient_clip
 
 logger = logging.getLogger(__name__)
 
@@ -317,9 +317,105 @@ class LSTMModel(ForecastModel):
         X_reshaped = X[:, : seq_len * n_features_per_step].reshape(n_samples, seq_len, n_features_per_step)
         return X_reshaped, y
 
+    def _backward_lstm(
+        self,
+        d_h_last: np.ndarray,
+        cache: Dict[str, Any],
+    ) -> Dict[str, np.ndarray]:
+        """
+        Full backpropagation through time (BPTT) for all LSTM layers.
+
+        Parameters
+        ----------
+        d_h_last : np.ndarray
+            Gradient of loss w.r.t. last hidden state, shape (batch_size, hidden_size).
+        cache : dict
+            Cache from _forward_lstm containing per-layer, per-timestep cell caches.
+
+        Returns
+        -------
+        dict[str, np.ndarray]
+            Gradients for all LSTM parameters and the dense layer.
+        """
+        grads = {}
+        seq_len = len(cache["layers"][0])
+
+        # Backprop through each layer (currently single layer, but loop supports multi)
+        for layer in range(self.num_layers - 1, -1, -1):
+            layer_caches = cache["layers"][layer]
+
+            # Initialise gradients for this layer's weights
+            w_ih_key = f"lstm_{layer}_w_ih"
+            w_hh_key = f"lstm_{layer}_w_hh"
+            b_ih_key = f"lstm_{layer}_b_ih"
+            b_hh_key = f"lstm_{layer}_b_hh"
+
+            dw_ih = np.zeros_like(self._params[w_ih_key])
+            dw_hh = np.zeros_like(self._params[w_hh_key])
+            db_ih = np.zeros_like(self._params[b_ih_key])
+            db_hh = np.zeros_like(self._params[b_hh_key])
+
+            # For the last layer, dh comes from the output; only last timestep
+            dh_next = d_h_last
+            dc_next = np.zeros_like(dh_next)
+
+            # BPTT: iterate backwards through time
+            for t in range(seq_len - 1, -1, -1):
+                cell_cache = layer_caches[t]
+                c_t = cell_cache["c_t"]
+                c_prev = cell_cache["c_prev"]
+                i_t = cell_cache["i_t"]
+                f_t = cell_cache["f_t"]
+                g_t = cell_cache["g_t"]
+                o_t = cell_cache["o_t"]
+                x_t = cell_cache["x_t"]
+                h_prev = cell_cache["h_prev"]
+
+                # Only the last timestep gets the output gradient;
+                # other timesteps get gradient from the next timestep
+                if t == seq_len - 1:
+                    dh = dh_next
+                else:
+                    dh = dh_next  # Carried from t+1
+
+                # Gradient through h_t = o_t * tanh(c_t)
+                tanh_c = np.tanh(c_t)
+                do = dh * tanh_c
+                dc = dh * o_t * (1 - tanh_c ** 2) + dc_next
+
+                # Gradient through gates (pre-activation)
+                # i_t, f_t, o_t use sigmoid; g_t uses tanh
+                di = dc * g_t * i_t * (1 - i_t)       # sigmoid derivative
+                df = dc * c_prev * f_t * (1 - f_t)     # sigmoid derivative
+                dg = dc * i_t * (1 - g_t ** 2)          # tanh derivative
+                do_gate = do * o_t * (1 - o_t)          # sigmoid derivative
+
+                # Concatenate gate gradients: [di, df, dg, do]
+                hs = self.hidden_size
+                d_gates = np.concatenate([di, df, dg, do_gate], axis=1)  # (batch, 4*hidden)
+
+                # Accumulate weight gradients
+                dw_ih += x_t.T @ d_gates
+                dw_hh += h_prev.T @ d_gates
+                db_ih += np.sum(d_gates, axis=0)
+                db_hh += np.sum(d_gates, axis=0)
+
+                # Gradient flowing to previous timestep
+                dh_next = d_gates @ self._params[w_hh_key].T
+                dc_next = dc * f_t
+
+            # Normalise by batch size
+            batch_size = d_h_last.shape[0]
+            grads[w_ih_key] = dw_ih / batch_size
+            grads[w_hh_key] = dw_hh / batch_size
+            grads[b_ih_key] = db_ih / batch_size
+            grads[b_hh_key] = db_hh / batch_size
+
+        return grads
+
     def fit(self, X_train: np.ndarray, y_train: np.ndarray, **kwargs: Any) -> Dict[str, Any]:
         """
-        Train LSTM model using mini-batch SGD with Adam optimisation.
+        Train LSTM model using mini-batch SGD with Adam and full BPTT.
 
         Parameters
         ----------
@@ -355,7 +451,7 @@ class LSTMModel(ForecastModel):
         X_train_split, X_val_split = X_seq[:n_train], X_seq[n_train:]
         y_train_split, y_val_split = y_seq[:n_train], y_seq[n_train:]
 
-        # Initialise optimiser
+        # Initialise optimiser for ALL parameters
         optimiser = Adam(learning_rate=self.learning_rate)
 
         # Training loop
@@ -372,41 +468,52 @@ class LSTMModel(ForecastModel):
                 batch_indices = indices[i : i + self.batch_size]
                 X_batch = X_train_split[batch_indices]
                 y_batch = y_train_split[batch_indices]
+                batch_size = len(y_batch)
 
                 # Forward pass
                 lstm_out, cache = self._forward_lstm(X_batch, training=True)
-                y_pred = self._forward_dense(lstm_out[:, -1, :])  # Use last hidden state
+                h_last = lstm_out[:, -1, :]
+                y_pred = self._forward_dense(h_last)
 
-                # Compute loss
+                # Compute MSE loss
                 loss = np.mean((y_pred - y_batch) ** 2)
                 epoch_loss += loss
                 n_batches += 1
 
-                # Backward pass (simplified gradient computation)
-                # For full BPTT, would need to backprop through all timesteps
-                d_output = (y_pred - y_batch) / len(y_batch)
+                # ---- Backward pass with full BPTT ----
+                # Gradient of MSE w.r.t. predictions
+                d_output = 2.0 * (y_pred - y_batch) / batch_size  # (batch,)
 
-                # Update dense layer
-                h_last = lstm_out[:, -1, :]
-                dW_dense = (h_last.T @ d_output.reshape(-1, 1)) / len(y_batch)
-                db_dense = np.sum(d_output) / len(y_batch)
+                # Dense layer gradients
+                dW_dense = h_last.T @ d_output.reshape(-1, 1)
+                db_dense = np.array([np.sum(d_output)])
 
-                grads = {
-                    "dense_w": dW_dense,  # Keep shape (hidden_size, 1)
-                    "dense_b": np.array([db_dense]),
+                # Gradient flowing back to h_last
+                d_h_last = d_output.reshape(-1, 1) @ self._params["dense_w"].T  # (batch, hidden)
+
+                # Full BPTT through LSTM layers
+                lstm_grads = self._backward_lstm(d_h_last, cache)
+
+                # Combine all gradients
+                all_grads = {
+                    "dense_w": dW_dense,
+                    "dense_b": db_dense,
+                    **lstm_grads,
                 }
 
-                # Update parameters
-                updated = optimiser.step({"dense_w": self._params["dense_w"], "dense_b": self._params["dense_b"]}, grads)
-                self._params["dense_w"] = updated["dense_w"]
-                self._params["dense_b"] = updated["dense_b"]
+                # Clip gradients to prevent exploding gradients
+                all_grads = gradient_clip(all_grads, max_norm=5.0)
+
+                # Update ALL parameters with Adam
+                updated = optimiser.step(self._params, all_grads)
+                self._params.update(updated)
 
             # Validation
             val_lstm_out, _ = self._forward_lstm(X_val_split, training=False)
             val_pred = self._forward_dense(val_lstm_out[:, -1, :])
             val_loss = np.mean((val_pred - y_val_split) ** 2)
 
-            avg_loss = epoch_loss / n_batches
+            avg_loss = epoch_loss / max(n_batches, 1)
             self._training_history["train_loss"].append(avg_loss)
             self._training_history["val_loss"].append(val_loss)
 
