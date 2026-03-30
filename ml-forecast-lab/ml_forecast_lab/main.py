@@ -211,6 +211,21 @@ class MLForecastLabApp:
             )
             self.server = uvicorn.Server(config)
 
+            # Register deep analysis callback
+            async def _deep_analysis_trigger(experiment_name: str):
+                exp_cfg = None
+                for cfg in self.config.experiments:
+                    if cfg.name == experiment_name:
+                        exp_cfg = cfg
+                        break
+                if exp_cfg:
+                    try:
+                        await self._run_deep_analysis(exp_cfg)
+                    except Exception as e:
+                        logger.error(f"Deep analysis failed: {e}", exc_info=True)
+
+            self.web_app.state.appstate.deep_analysis_callback = _deep_analysis_trigger
+
             # Run in a background task
             asyncio.create_task(self.server.serve())
             logger.info(f"Web server started successfully on {host}:{port}")
@@ -998,6 +1013,227 @@ class MLForecastLabApp:
             logger.error(f"Error in update cycle: {e}", exc_info=True)
         finally:
             self._update_running = False
+
+    async def _run_deep_analysis(self, exp_cfg):
+        """
+        Run deep covariate analysis: all models × all covariate combinations.
+
+        Tests each model with:
+        1. All covariates (baseline)
+        2. No covariates (control)
+        3. Each covariate dropped one at a time
+
+        Generates recommendations based on MAE impact.
+        """
+        from ml_forecast_lab.features import build_features
+        from ml_forecast_lab.benchmark.metrics import get_metric_registry
+        from ml_forecast_lab.web.app import (
+            DeepAnalysisResult,
+            DeepAnalysisCellResult,
+        )
+
+        logger.info("")
+        logger.info(f"{'=' * 60}")
+        logger.info(f"  DEEP ANALYSIS: {exp_cfg.name}")
+        logger.info(f"  Models: {', '.join(exp_cfg.models_enabled)}")
+        logger.info(f"  Covariates: {len(exp_cfg.covariates)}")
+        logger.info(f"{'=' * 60}")
+
+        # Update status
+        if self.web_app:
+            cov_names = [c.entity.split(".")[-1] for c in exp_cfg.covariates]
+            covariate_labels = ["All covariates", "No covariates"] + [
+                f"Without {name}" for name in cov_names
+            ]
+            total_runs = len(exp_cfg.models_enabled) * len(covariate_labels)
+
+            self.web_app.state.appstate.deep_analysis_results[exp_cfg.name] = DeepAnalysisResult(
+                experiment_name=exp_cfg.name,
+                timestamp=datetime.utcnow().isoformat(),
+                status="running",
+                baseline_label="All covariates",
+                covariate_labels=covariate_labels,
+                model_names=exp_cfg.models_enabled,
+                results={},
+                recommendations=[],
+                total_runs=total_runs,
+                completed_runs=0,
+            )
+
+        # Fetch and preprocess with all covariates
+        df_full = await self._fetch_and_preprocess(exp_cfg)
+        covariate_cols = [c for c in df_full.columns if c != "y"]
+
+        # Build base features
+        features_base = build_features(
+            df_full, target_col="y",
+            interval_minutes=exp_cfg.interval_minutes,
+            country=exp_cfg.country,
+        )
+
+        # Define covariate configurations to test
+        configs = []
+
+        # 1. All covariates
+        configs.append(("All covariates", covariate_cols[:]))
+
+        # 2. No covariates
+        configs.append(("No covariates", []))
+
+        # 3. Drop one at a time
+        for cov_col in covariate_cols:
+            remaining = [c for c in covariate_cols if c != cov_col]
+            configs.append((f"Without {cov_col}", remaining))
+
+        results = {}
+        completed = 0
+
+        for config_label, cov_cols_to_use in configs:
+            results[config_label] = {}
+
+            for model_name in exp_cfg.models_enabled:
+                try:
+                    # Build combined feature matrix
+                    combined = features_base.copy()
+                    combined["target"] = df_full["y"]
+
+                    # Add only the specified covariates
+                    for col in cov_cols_to_use:
+                        combined[col] = df_full[col]
+
+                    combined = combined.dropna()
+
+                    feature_cols = [c for c in combined.columns if c != "target"]
+                    X = combined[feature_cols].values.astype(np.float32)
+                    X = np.nan_to_num(X, nan=0.0)
+                    y_all = combined["target"].values.astype(np.float32)
+
+                    # Simple train/test split (80/20)
+                    split = int(len(X) * 0.8)
+                    X_tr, X_te = X[:split], X[split:]
+                    y_tr, y_te = y_all[:split], y_all[split:]
+
+                    # Train and evaluate
+                    model = self.model_registry.create(model_name)
+
+                    def _train_and_eval():
+                        model.fit(X_tr, y_tr)
+                        y_pred = model.predict(X_te)
+                        if y_pred.ndim > 1:
+                            y_pred_flat = y_pred.ravel()
+                        else:
+                            y_pred_flat = y_pred
+                        mae_val = float(np.mean(np.abs(y_te - y_pred_flat)))
+                        rmse_val = float(np.sqrt(np.mean((y_te - y_pred_flat) ** 2)))
+                        return mae_val, rmse_val
+
+                    mae_val, rmse_val = await asyncio.get_event_loop().run_in_executor(
+                        None, _train_and_eval
+                    )
+
+                    results[config_label][model_name] = DeepAnalysisCellResult(
+                        mae=round(mae_val, 4),
+                        rmse=round(rmse_val, 4),
+                    )
+
+                    completed += 1
+                    logger.info(
+                        f"  [{completed}/{len(configs) * len(exp_cfg.models_enabled)}] "
+                        f"{config_label} × {model_name}: MAE={mae_val:.4f}"
+                    )
+
+                    # Update progress
+                    if self.web_app:
+                        da = self.web_app.state.appstate.deep_analysis_results[exp_cfg.name]
+                        da.completed_runs = completed
+                        da.results = results
+
+                except Exception as e:
+                    logger.warning(f"  Deep analysis failed for {config_label} × {model_name}: {e}")
+                    results[config_label][model_name] = DeepAnalysisCellResult(mae=np.nan, rmse=np.nan)
+                    completed += 1
+
+        # Compute % change vs baseline and generate recommendations
+        baseline = results.get("All covariates", {})
+        for config_label in results:
+            for model_name in results[config_label]:
+                cell = results[config_label][model_name]
+                baseline_mae = baseline.get(model_name, DeepAnalysisCellResult(mae=np.nan, rmse=np.nan)).mae
+                if baseline_mae > 0 and not np.isnan(cell.mae) and not np.isnan(baseline_mae):
+                    cell.change_pct = round((cell.mae - baseline_mae) / baseline_mae * 100, 1)
+
+        # Generate recommendations
+        recommendations = []
+        no_cov = results.get("No covariates", {})
+
+        # Overall covariate value
+        for model_name in exp_cfg.models_enabled:
+            base_mae = baseline.get(model_name, DeepAnalysisCellResult(mae=np.nan, rmse=np.nan)).mae
+            no_cov_mae = no_cov.get(model_name, DeepAnalysisCellResult(mae=np.nan, rmse=np.nan)).mae
+            if not np.isnan(base_mae) and not np.isnan(no_cov_mae):
+                improvement = (no_cov_mae - base_mae) / no_cov_mae * 100
+                if improvement > 5:
+                    recommendations.append({
+                        "icon": "✓",
+                        "text": f"Covariates improve {model_name} by {improvement:.1f}% — keep them",
+                        "color": "#2ecc71",
+                    })
+                elif improvement < -5:
+                    recommendations.append({
+                        "icon": "⚠",
+                        "text": f"Covariates hurt {model_name} by {abs(improvement):.1f}% — consider removing",
+                        "color": "#f39c12",
+                    })
+                else:
+                    recommendations.append({
+                        "icon": "○",
+                        "text": f"Covariates have minimal impact on {model_name} ({improvement:+.1f}%)",
+                        "color": "#b0b0b0",
+                    })
+
+        # Per-covariate recommendations (using best tree model)
+        best_tree = "lightgbm" if "lightgbm" in exp_cfg.models_enabled else exp_cfg.models_enabled[0]
+        for cov_col in covariate_cols:
+            label = f"Without {cov_col}"
+            dropped = results.get(label, {})
+            drop_mae = dropped.get(best_tree, DeepAnalysisCellResult(mae=np.nan, rmse=np.nan)).mae
+            base_mae = baseline.get(best_tree, DeepAnalysisCellResult(mae=np.nan, rmse=np.nan)).mae
+            if not np.isnan(drop_mae) and not np.isnan(base_mae) and base_mae > 0:
+                impact = (drop_mae - base_mae) / base_mae * 100
+                if impact > 5:
+                    recommendations.append({
+                        "icon": "✓",
+                        "text": f"{cov_col} is important — dropping it increases {best_tree} MAE by {impact:.1f}%",
+                        "color": "#2ecc71",
+                    })
+                elif impact < -2:
+                    recommendations.append({
+                        "icon": "✗",
+                        "text": f"{cov_col} is harmful — dropping it improves {best_tree} MAE by {abs(impact):.1f}%",
+                        "color": "#e74c3c",
+                    })
+                else:
+                    recommendations.append({
+                        "icon": "○",
+                        "text": f"{cov_col} has marginal impact on {best_tree} ({impact:+.1f}%)",
+                        "color": "#b0b0b0",
+                    })
+
+        # Store final results
+        if self.web_app:
+            da = self.web_app.state.appstate.deep_analysis_results[exp_cfg.name]
+            da.status = "completed"
+            da.results = results
+            da.recommendations = recommendations
+            da.completed_runs = completed
+
+        logger.info("")
+        logger.info(f"  Deep Analysis Complete")
+        logger.info(f"  {'─' * 50}")
+        for rec in recommendations:
+            logger.info(f"  {rec['icon']} {rec['text']}")
+        logger.info(f"  {'─' * 50}")
+        logger.info(f"{'=' * 60}")
 
     async def publish_heartbeat(self):
         """

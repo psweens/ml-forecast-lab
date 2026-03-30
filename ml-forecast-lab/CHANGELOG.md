@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1.0
+
+### Major Features
+- Deep Covariate Analysis: tests all models × all covariate combinations
+  to find which external features help which models
+- "🔬 Deep Analysis" button on experiment page triggers the analysis
+- Results table shows MAE for each model under each configuration with
+  colour-coded % change (green = improved, red = worse)
+- Automated recommendations: "✓ current_charge is important",
+  "⚠ external_temperature adds minimal value", etc.
+- Progress bar shown while analysis runs in background
+- Runs in thread pool — web UI stays responsive during analysis
+
+### Tested Configurations
+- All covariates (baseline)
+- No covariates (control)
+- Each covariate dropped one at a time
+
 ## 1.0.1
 
 ### Bug Fixes

@@ -109,6 +109,28 @@ class LabForecastData(BaseModel):
     model_predictions: List[ModelPrediction]
 
 
+class DeepAnalysisCellResult(BaseModel):
+    """Result for one model × one covariate configuration."""
+    mae: float
+    rmse: float
+    change_pct: Optional[float] = None  # % change vs baseline
+
+
+class DeepAnalysisResult(BaseModel):
+    """Full deep analysis results."""
+    experiment_name: str
+    timestamp: str
+    status: str  # 'running', 'completed', 'failed'
+    baseline_label: str  # "All covariates"
+    covariate_labels: List[str]  # ["No covariates", "Without charge", ...]
+    model_names: List[str]
+    # results[covariate_label][model_name] = DeepAnalysisCellResult
+    results: Dict[str, Dict[str, DeepAnalysisCellResult]]
+    recommendations: List[Dict[str, str]]  # [{"icon": "✓", "text": "...", "color": "green"}, ...]
+    total_runs: int = 0
+    completed_runs: int = 0
+
+
 class FeatureImportanceData(BaseModel):
     """Feature importance from a trained model."""
 
@@ -147,6 +169,8 @@ class AppState:
         self.forecast_data: Dict[str, ForecastData] = {}
         self.lab_forecast_data: Dict[str, LabForecastData] = {}
         self.feature_importances: Dict[str, List[FeatureImportanceData]] = {}
+        self.deep_analysis_results: Dict[str, DeepAnalysisResult] = {}
+        self.deep_analysis_callback = None  # Set by main app for triggering
         self.running_benchmarks: set = set()
         self.last_update: Optional[datetime] = None
         self.next_update_seconds: Optional[int] = None
@@ -257,6 +281,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         forecast_data = app.state.appstate.forecast_data.get(name)
         lab_forecast = app.state.appstate.lab_forecast_data.get(name)
         feature_imps = app.state.appstate.feature_importances.get(name, [])
+        deep_analysis = app.state.appstate.deep_analysis_results.get(name)
         is_running = app.state.appstate.is_benchmark_running(name)
 
         # Get units from experiment config
@@ -294,6 +319,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "best_model": benchmark_result.best_model_name
                 if benchmark_result
                 else None,
+                "deep_analysis": deep_analysis,
                 "units": units,
             },
         )
@@ -385,6 +411,46 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "mode": new_mode,
             }
         )
+
+    @app.post("/experiment/{name}/run-deep-analysis")
+    async def run_deep_analysis(name: str):
+        """
+        Trigger a deep covariate analysis (async, returns 202 Accepted).
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        existing = app.state.appstate.deep_analysis_results.get(name)
+        if existing and existing.status == "running":
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Deep analysis already running"},
+            )
+
+        # Trigger via callback if available
+        import asyncio
+        if app.state.appstate.deep_analysis_callback:
+            asyncio.create_task(app.state.appstate.deep_analysis_callback(name))
+
+        return JSONResponse(
+            status_code=202,
+            content={
+                "message": "Deep analysis started",
+                "experiment": name,
+                "status": "running",
+            },
+        )
+
+    @app.get("/experiment/{name}/deep-analysis")
+    async def get_deep_analysis(name: str):
+        """Get deep analysis results as JSON."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        result = app.state.appstate.deep_analysis_results.get(name)
+        if not result:
+            raise HTTPException(status_code=404, detail="No deep analysis results")
+        return result.model_dump()
 
     @app.get("/experiment/{name}/results")
     async def get_results(name: str):

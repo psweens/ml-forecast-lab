@@ -26,6 +26,12 @@
             ⭐ Promote to Production
         </button>
         {% endif %}
+        <button class="btn" style="background: #9b59b6; color: white;"
+                id="deep-analysis-btn"
+                onclick="runDeepAnalysis('{{ experiment.name }}', this)"
+                {% if deep_analysis and deep_analysis.status == 'running' %}disabled{% endif %}>
+            {% if deep_analysis and deep_analysis.status == 'running' %}⏳ Analysing...{% else %}🔬 Deep Analysis{% endif %}
+        </button>
     </div>
     <div id="promote-message"></div>
 </div>
@@ -320,6 +326,76 @@
     {% endif %}
 </section>
 
+<!-- Deep Analysis Results -->
+{% if deep_analysis %}
+<section class="section">
+    <h2>Deep Covariate Analysis <span class="info-tip">?<span class="tip-text">Tests every model with different covariate combinations to find which external features help and which ones hurt. The % change column shows impact relative to the "All covariates" baseline. Positive = worse, negative = better.</span></span></h2>
+
+    {% if deep_analysis.status == 'running' %}
+    <div style="text-align: center; padding: 2rem; color: var(--accent-secondary);">
+        <p style="font-size: 1.2rem;">⏳ Deep analysis running...</p>
+        <p style="color: var(--text-secondary);">{{ deep_analysis.completed_runs }} / {{ deep_analysis.total_runs }} combinations tested</p>
+        <div style="background: var(--bg-tertiary); border-radius: 0.5rem; height: 8px; margin-top: 1rem; max-width: 400px; margin-left: auto; margin-right: auto;">
+            <div style="background: var(--accent-secondary); height: 100%; border-radius: 0.5rem; width: {{ (deep_analysis.completed_runs / deep_analysis.total_runs * 100) if deep_analysis.total_runs > 0 else 0 }}%; transition: width 0.5s;"></div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if deep_analysis.status == 'completed' and deep_analysis.results %}
+    <!-- Results Table -->
+    <div class="table-container">
+        <table class="metrics-table">
+            <thead>
+                <tr>
+                    <th>Configuration</th>
+                    {% for model in deep_analysis.model_names %}
+                    <th>{{ model }}</th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for label in deep_analysis.covariate_labels %}
+                <tr {% if label == 'All covariates' %}class="best-model"{% endif %}>
+                    <td style="font-weight: 600;">
+                        {% if label == 'All covariates' %}📊{% elif label == 'No covariates' %}🚫{% else %}➖{% endif %}
+                        {{ label }}
+                    </td>
+                    {% for model in deep_analysis.model_names %}
+                    {% set cell = deep_analysis.results.get(label, {}).get(model) %}
+                    <td>
+                        {% if cell %}
+                        <span class="metric-value">{{ "%.4f" | format(cell.mae) }}</span>
+                        {% if cell.change_pct is not none %}
+                        <span class="metric-std" style="color: {% if cell.change_pct > 2 %}#e74c3c{% elif cell.change_pct < -2 %}#2ecc71{% else %}var(--text-secondary){% endif %};">
+                            {{ "%+.1f" | format(cell.change_pct) }}%
+                        </span>
+                        {% endif %}
+                        {% else %}
+                        <span style="color: var(--text-secondary);">—</span>
+                        {% endif %}
+                    </td>
+                    {% endfor %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Recommendations -->
+    {% if deep_analysis.recommendations %}
+    <div style="margin-top: 1.5rem; padding: 1.5rem; background: var(--bg-tertiary); border-radius: 0.5rem;">
+        <h3 style="color: var(--accent-secondary); margin-bottom: 1rem;">Recommendations</h3>
+        {% for rec in deep_analysis.recommendations %}
+        <p style="margin-bottom: 0.5rem; color: {{ rec.color }};">
+            {{ rec.icon }} {{ rec.text }}
+        </p>
+        {% endfor %}
+    </div>
+    {% endif %}
+    {% endif %}
+</section>
+{% endif %}
+
 <!-- Benchmark Run Info -->
 <div class="benchmark-info">
     <h3>Latest Benchmark Run</h3>
@@ -365,6 +441,33 @@
         else if (diff < 86400) relative = Math.floor(diff / 3600) + 'h ' + Math.floor((diff % 3600) / 60) + 'm ago';
         else relative = Math.floor(diff / 86400) + 'd ago';
         tsEl.textContent = tsEl.textContent + ' (' + relative + ')';
+    }
+
+    // Deep analysis button
+    function runDeepAnalysis(name, btn) {
+        btn.disabled = true;
+        btn.textContent = '⏳ Analysing...';
+        fetch(BASE_PATH + '/experiment/' + name + '/run-deep-analysis', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                // Poll for completion
+                var pollId = setInterval(function() {
+                    fetch(BASE_PATH + '/experiment/' + name + '/deep-analysis')
+                        .then(r => { if (r.ok) return r.json(); throw new Error('not ready'); })
+                        .then(result => {
+                            if (result.status === 'completed') {
+                                clearInterval(pollId);
+                                location.reload();
+                            }
+                        })
+                        .catch(function() {});
+                }, 5000);
+            })
+            .catch(err => {
+                alert('Failed to start deep analysis: ' + err);
+                btn.disabled = false;
+                btn.textContent = '🔬 Deep Analysis';
+            });
     }
 
     const benchmarkBtn = document.getElementById('run-benchmark-btn');
