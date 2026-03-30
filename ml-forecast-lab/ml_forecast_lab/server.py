@@ -55,10 +55,12 @@ def create_app() -> FastAPI:
     Returns:
         Configured FastAPI application instance
     """
+    from ml_forecast_lab import __version__ as APP_VERSION
+
     app = FastAPI(
         title="ML Forecast Lab API",
         description="Multi-model ML forecasting and benchmarking API for Home Assistant",
-        version="0.2.0",
+        version=APP_VERSION,
     )
 
     # State to hold the forecasting engine
@@ -78,7 +80,7 @@ def create_app() -> FastAPI:
         """Root endpoint providing API information."""
         return {
             "name": "ML Forecast Lab",
-            "version": "0.2.0",
+            "version": APP_VERSION,
             "description": "Multi-model ML forecasting and benchmarking system",
             "endpoints": {
                 "health": "/health",
@@ -93,7 +95,7 @@ def create_app() -> FastAPI:
         return HealthResponse(
             status="healthy",
             service="ml-forecast-lab",
-            version="0.2.0",
+            version=APP_VERSION,
         )
 
     @app.get("/api/models", tags=["models"])

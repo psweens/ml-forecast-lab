@@ -70,10 +70,12 @@ async def stub_server():
     from fastapi import FastAPI
     from uvicorn import Config, Server
 
+    from ml_forecast_lab import __version__ as APP_VERSION
+
     app = FastAPI(
         title="ML Forecast Lab",
         description="Multi-model ML forecasting system",
-        version="0.2.0",
+        version=APP_VERSION,
     )
 
     @app.get("/health")
@@ -82,7 +84,7 @@ async def stub_server():
         return {
             "status": "healthy",
             "service": "ml-forecast-lab",
-            "version": "0.2.0",
+            "version": APP_VERSION,
         }
 
     @app.get("/")
@@ -90,7 +92,7 @@ async def stub_server():
         """Root endpoint."""
         return {
             "name": "ML Forecast Lab",
-            "version": "0.2.0",
+            "version": APP_VERSION,
             "description": "Multi-model ML forecasting and benchmarking system",
             "endpoints": {
                 "health": "/health",

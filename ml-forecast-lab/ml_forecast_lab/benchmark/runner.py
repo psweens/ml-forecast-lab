@@ -378,8 +378,6 @@ class BenchmarkRunner:
                                 df_test, target_col, window_size=sequence_kwargs['sequence_data'].shape[1],
                                 covariate_cols=cov_cols if cov_cols else None,
                             )
-                            y_pred = model.predict(np.zeros((len(seq_y_test), X_test.shape[1])))
-                            # Actually predict using sequence data
                             import torch
                             model._model.eval()
                             with torch.no_grad():

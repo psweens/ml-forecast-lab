@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.5
+
+### Bug Fixes
+- **Live log feed**: fixed polling logic that prevented log updates
+  (compared line count instead of content, so updates were missed when
+  the log window stayed the same size). Added error handling and live
+  indicator now turns red on connection failure.
+- **Version strings**: fixed hardcoded "0.2.0" in stub server and
+  legacy server.py — now use centralised APP_VERSION from __init__.py.
+- **Feature importance chart**: bar colour changed from #0f3460 (same
+  as chart background, invisible) to #00d4ff (accent colour).
+- **LSTM/CNN prediction**: removed redundant dummy predict call before
+  the actual torch inference in benchmark runner.
+
 ## 1.2.0
 
 ### New Features
