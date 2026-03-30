@@ -336,6 +336,67 @@ class MLForecastLabApp:
         )
         return result
 
+    def _update_web_benchmark(self, exp_cfg, model_results, rankings, best_model_name, status="running"):
+        """
+        Update web app state with current benchmark progress.
+
+        Called after each model completes so the UI updates progressively.
+        """
+        from ml_forecast_lab.web.app import (
+            BenchmarkResult as WebBenchmarkResult,
+            ModelResult as WebModelResult,
+            MetricValue,
+        )
+
+        web_models = []
+        for model_name, runner_model_result in sorted(
+            model_results.items(),
+            key=lambda x: rankings.get(x[0], 999),
+        ):
+            rank = rankings.get(model_name, 0)
+            fold_metrics_list = runner_model_result.fold_metrics
+
+            metric_means = {}
+            metric_stds = {}
+            for metric_name in exp_cfg.metrics:
+                values = [
+                    fm.get(metric_name, np.nan)
+                    for fm in fold_metrics_list
+                    if fm
+                ]
+                metric_means[metric_name] = float(np.nanmean(values)) if values else 0.0
+                metric_stds[metric_name] = float(np.nanstd(values)) if len(values) > 1 else 0.0
+
+            web_models.append(WebModelResult(
+                name=model_name,
+                mae=MetricValue(
+                    mean=metric_means.get("mae", 0.0),
+                    std=metric_stds.get("mae", 0.0),
+                ),
+                rmse=MetricValue(
+                    mean=metric_means.get("rmse", 0.0),
+                    std=metric_stds.get("rmse", 0.0),
+                ),
+                mape=MetricValue(
+                    mean=metric_means.get("mape", 0.0),
+                    std=metric_stds.get("mape", 0.0),
+                ),
+                train_time_seconds=runner_model_result.mean_train_time,
+                rank=rank,
+                is_production=(model_name == best_model_name),
+                fold_results=[fm for fm in fold_metrics_list if fm],
+            ))
+
+        web_result = WebBenchmarkResult(
+            experiment_name=exp_cfg.name,
+            timestamp=datetime.utcnow().isoformat(),
+            status=status,
+            models=web_models,
+            best_model_name=best_model_name,
+        )
+
+        self.web_app.state.appstate.benchmark_results[exp_cfg.name] = web_result
+
     async def _run_benchmark(self, exp_cfg):
         """
         Run full benchmark across all enabled models using cross-validation.
@@ -405,12 +466,54 @@ class MLForecastLabApp:
         if not models:
             raise ValueError("No models could be created for benchmark")
 
-        # 6. Run benchmark (in thread pool to avoid blocking web server)
+        # 6. Run benchmark model-by-model, updating web UI after each
         exp_cfg_dict = dataclasses.asdict(exp_cfg)
         metric_registry = get_metric_registry()
         runner = BenchmarkRunner(exp_cfg_dict, feature_builder, metric_registry)
-        bench_result = await asyncio.get_event_loop().run_in_executor(
-            None, runner.run_benchmark, combined, models
+        fold_indices = runner._prepare_train_test_splits(combined)
+
+        completed_models = {}
+        rankings = {}
+
+        for model_name, model in models.items():
+            logger.info(f"Benchmarking model: {model_name}")
+
+            model_result = await asyncio.get_event_loop().run_in_executor(
+                None, runner.run_single_model, combined, model, fold_indices
+            )
+            completed_models[model_name] = model_result
+
+            # Rank completed models so far
+            metric_values = {
+                n: mr.metrics.get(runner.production_metric, np.inf)
+                for n, mr in completed_models.items()
+            }
+            sorted_models = sorted(metric_values.items(), key=lambda x: x[1])
+            rankings = {n: rank + 1 for rank, (n, _) in enumerate(sorted_models)}
+
+            # Update web UI progressively
+            if self.web_app:
+                self._update_web_benchmark(
+                    exp_cfg, completed_models, rankings,
+                    sorted_models[0][0] if sorted_models else None,
+                    status="running",
+                )
+
+        # Final ranking
+        best_model_name = sorted_models[0][0] if sorted_models else None
+        best_metric_value = sorted_models[0][1] if sorted_models else np.nan
+
+        # Build a BenchmarkResult-compatible object for downstream use
+        from ml_forecast_lab.benchmark.runner import BenchmarkResult as RunnerBenchmarkResult
+        bench_result = RunnerBenchmarkResult(
+            experiment_name=exp_cfg.name,
+            model_results=completed_models,
+            rankings=rankings,
+            best_model=best_model_name or "",
+            best_metric_value=best_metric_value,
+            metric_used=runner.production_metric,
+            cv_strategy=runner.cv_strategy,
+            n_folds=runner.cv_folds,
         )
 
         # 7. Generate holdout predictions from each model for visualisation
@@ -508,65 +611,18 @@ class MLForecastLabApp:
         if feature_importance_list and self.web_app:
             self.web_app.state.appstate.feature_importances[exp_cfg.name] = feature_importance_list
 
-        # 8. Convert runner.BenchmarkResult -> web.app.BenchmarkResult
-        web_models = []
-        for rank_idx, (model_name, runner_model_result) in enumerate(
-            sorted(
-                bench_result.model_results.items(),
-                key=lambda x: bench_result.rankings.get(x[0], 999),
-            )
-        ):
-            rank = bench_result.rankings.get(model_name, rank_idx + 1)
-
-            # Extract per-metric means and stds from fold_metrics
-            fold_metrics_list = runner_model_result.fold_metrics
-            metric_means = {}
-            metric_stds = {}
-            for metric_name in exp_cfg.metrics:
-                values = [
-                    fm.get(metric_name, np.nan)
-                    for fm in fold_metrics_list
-                    if fm
-                ]
-                metric_means[metric_name] = float(np.nanmean(values)) if values else 0.0
-                metric_stds[metric_name] = float(np.nanstd(values)) if len(values) > 1 else 0.0
-
-            web_model = WebModelResult(
-                name=model_name,
-                mae=MetricValue(
-                    mean=metric_means.get("mae", 0.0),
-                    std=metric_stds.get("mae", 0.0),
-                ),
-                rmse=MetricValue(
-                    mean=metric_means.get("rmse", 0.0),
-                    std=metric_stds.get("rmse", 0.0),
-                ),
-                mape=MetricValue(
-                    mean=metric_means.get("mape", 0.0),
-                    std=metric_stds.get("mape", 0.0),
-                ),
-                train_time_seconds=runner_model_result.mean_train_time,
-                rank=rank,
-                is_production=(model_name == bench_result.best_model),
-                fold_results=[fm for fm in fold_metrics_list if fm],
-            )
-            web_models.append(web_model)
-
-        web_result = WebBenchmarkResult(
-            experiment_name=exp_cfg.name,
-            timestamp=datetime.utcnow().isoformat(),
-            status="completed",
-            models=web_models,
-            best_model_name=bench_result.best_model,
-        )
-
+        # 8. Final web state update (mark as completed)
         if self.web_app:
-            self.web_app.state.appstate.benchmark_results[exp_cfg.name] = web_result
+            self._update_web_benchmark(
+                exp_cfg, completed_models, rankings,
+                best_model_name,
+                status="completed",
+            )
 
         logger.info(
             f"Benchmark completed for {exp_cfg.name}: "
-            f"best={bench_result.best_model} "
-            f"({exp_cfg.production_metric}={bench_result.best_metric_value:.4f})"
+            f"best={best_model_name} "
+            f"({runner.production_metric}={best_metric_value:.4f})"
         )
 
     async def _run_production_inference(self, exp_cfg):

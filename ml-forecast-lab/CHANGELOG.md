@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.4
+
+### New Features
+- Progressive benchmark results — web UI updates after each model finishes
+  its CV folds, so you see LightGBM results while LSTM is still training
+- Model comparison table builds up in real-time during benchmark
+
 ## 0.3.3
 
 ### New Features
