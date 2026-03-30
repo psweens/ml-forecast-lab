@@ -172,7 +172,7 @@ class CNNModel(ForecastModel):
             self.n_layers, self.dilation_base, self.dropout,
         )
         optimiser = torch.optim.Adam(self._model.parameters(), lr=self.learning_rate)
-        criterion = nn.MSELoss()
+        criterion = nn.HuberLoss(delta=1.0)
 
         # Training loop
         best_val_loss = float("inf")

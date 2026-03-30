@@ -128,7 +128,7 @@ class LSTMModel(ForecastModel):
         # Create model
         self._model = _LSTMNet(input_size, self.hidden_size, self.num_layers, self.dropout)
         optimiser = torch.optim.Adam(self._model.parameters(), lr=self.learning_rate)
-        criterion = nn.MSELoss()
+        criterion = nn.HuberLoss(delta=1.0)
 
         # Training loop
         best_val_loss = float("inf")
