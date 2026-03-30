@@ -498,7 +498,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         Settings page with system info, resource limits, and experiment config.
         """
         # Gather system information
-        import psutil
         cpu_count = os.cpu_count() or 4
         try:
             cpu_model = platform.processor() or platform.machine()
@@ -506,10 +505,21 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             cpu_model = platform.machine()
 
         try:
+            import psutil
             mem = psutil.virtual_memory()
             memory_total_gb = round(mem.total / (1024**3), 1)
             memory_used_gb = round(mem.used / (1024**3), 1)
             memory_percent = mem.percent
+        except ImportError:
+            # psutil not available — read from /proc/meminfo instead
+            try:
+                with open("/proc/meminfo") as f:
+                    meminfo = {line.split(":")[0]: int(line.split()[1]) for line in f if len(line.split()) >= 2}
+                memory_total_gb = round(meminfo.get("MemTotal", 0) / (1024**2), 1)
+                memory_used_gb = round((meminfo.get("MemTotal", 0) - meminfo.get("MemAvailable", 0)) / (1024**2), 1)
+                memory_percent = round(memory_used_gb / max(memory_total_gb, 0.1) * 100, 1)
+            except Exception:
+                memory_total_gb = memory_used_gb = memory_percent = 0
         except Exception:
             memory_total_gb = memory_used_gb = memory_percent = 0
 
