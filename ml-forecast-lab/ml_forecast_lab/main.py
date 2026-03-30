@@ -410,7 +410,99 @@ class MLForecastLabApp:
         runner = BenchmarkRunner(exp_cfg_dict, feature_builder, metric_registry)
         bench_result = runner.run_benchmark(combined, models)
 
-        # 7. Convert runner.BenchmarkResult -> web.app.BenchmarkResult
+        # 7. Generate holdout predictions from each model for visualisation
+        #    Use last 20% of data as holdout, train on first 80%
+        from ml_forecast_lab.web.app import (
+            ModelPrediction,
+            LabForecastData,
+            FeatureImportanceData,
+        )
+
+        holdout_frac = 0.2
+        split_idx = int(len(combined) * (1 - holdout_frac))
+        train_part = combined.iloc[:split_idx]
+        holdout_part = combined.iloc[split_idx:]
+
+        X_train_hold = train_part[feature_cols].values.astype(np.float32)
+        X_train_hold = np.nan_to_num(X_train_hold, nan=0.0)
+        y_train_hold = train_part["target"].values.astype(np.float32)
+
+        X_holdout = holdout_part[feature_cols].values.astype(np.float32)
+        X_holdout = np.nan_to_num(X_holdout, nan=0.0)
+        y_holdout = holdout_part["target"].values
+        holdout_timestamps = [
+            ts.isoformat() for ts in holdout_part.index
+        ]
+
+        MODEL_COLORS = {
+            "lightgbm": "#2ecc71",
+            "xgboost": "#3498db",
+            "lstm": "#f39c12",
+            "cnn": "#e74c3c",
+        }
+
+        model_predictions = []
+        feature_importance_list = []
+
+        for model_name in exp_cfg.models_enabled:
+            try:
+                # Create fresh model and train on 80% split
+                model = self.model_registry.create(model_name)
+                model.fit(X_train_hold, y_train_hold)
+
+                # Predict on holdout
+                y_pred = model.predict(X_holdout)
+                if y_pred.ndim > 1:
+                    y_pred = y_pred.ravel()
+
+                model_predictions.append(ModelPrediction(
+                    model_name=model_name,
+                    timestamps=holdout_timestamps,
+                    actuals=[float(v) if not np.isnan(v) else None for v in y_holdout],
+                    predictions=[float(v) for v in y_pred],
+                    color=MODEL_COLORS.get(model_name, "#00d4ff"),
+                ))
+
+                # Extract feature importances from tree models
+                if hasattr(model, 'training_metadata') and model.training_metadata:
+                    importances = model.training_metadata.get("feature_importances", {})
+                    if importances:
+                        sorted_features = sorted(
+                            importances.items(),
+                            key=lambda x: x[1],
+                            reverse=True,
+                        )[:20]
+                        feature_importance_list.append(FeatureImportanceData(
+                            model_name=model_name,
+                            features=[
+                                {"name": name, "importance": float(imp)}
+                                for name, imp in sorted_features
+                            ],
+                        ))
+
+                logger.info(f"Generated holdout predictions for {model_name}")
+
+            except Exception as e:
+                logger.warning(f"Failed to generate holdout predictions for {model_name}: {e}")
+
+        # Store lab forecast data
+        if model_predictions and self.web_app:
+            lab_forecast = LabForecastData(
+                experiment_name=exp_cfg.name,
+                holdout_start=holdout_timestamps[0] if holdout_timestamps else "",
+                holdout_end=holdout_timestamps[-1] if holdout_timestamps else "",
+                model_predictions=model_predictions,
+            )
+            self.web_app.state.appstate.lab_forecast_data[exp_cfg.name] = lab_forecast
+            logger.info(
+                f"Stored lab predictions: {len(model_predictions)} models, "
+                f"{len(holdout_timestamps)} holdout points"
+            )
+
+        if feature_importance_list and self.web_app:
+            self.web_app.state.appstate.feature_importances[exp_cfg.name] = feature_importance_list
+
+        # 8. Convert runner.BenchmarkResult -> web.app.BenchmarkResult
         web_models = []
         for rank_idx, (model_name, runner_model_result) in enumerate(
             sorted(

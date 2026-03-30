@@ -85,6 +85,32 @@ class ForecastData(BaseModel):
     model_name: Optional[str] = None
 
 
+class ModelPrediction(BaseModel):
+    """Predictions from a single model on holdout data."""
+
+    model_name: str
+    timestamps: List[str]
+    actuals: List[Optional[float]]
+    predictions: List[float]
+    color: str = "#00d4ff"
+
+
+class LabForecastData(BaseModel):
+    """Multi-model prediction data for lab mode visualisation."""
+
+    experiment_name: str
+    holdout_start: str
+    holdout_end: str
+    model_predictions: List[ModelPrediction]
+
+
+class FeatureImportanceData(BaseModel):
+    """Feature importance from a trained model."""
+
+    model_name: str
+    features: List[Dict[str, Any]]  # [{"name": "hour_of_day", "importance": 0.25}, ...]
+
+
 class ModelInfo(BaseModel):
     """Information about an available model backend."""
 
@@ -114,6 +140,8 @@ class AppState:
         self.benchmark_results: Dict[str, BenchmarkResult] = {}
         self.experiment_statuses: Dict[str, ExperimentStatus] = {}
         self.forecast_data: Dict[str, ForecastData] = {}
+        self.lab_forecast_data: Dict[str, LabForecastData] = {}
+        self.feature_importances: Dict[str, List[FeatureImportanceData]] = {}
         self.running_benchmarks: set = set()
         self.last_update: Optional[datetime] = None
         self.next_update_seconds: Optional[int] = None
@@ -220,6 +248,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         exp_status = app.state.appstate.experiment_statuses[name]
         benchmark_result = app.state.appstate.benchmark_results.get(name)
         forecast_data = app.state.appstate.forecast_data.get(name)
+        lab_forecast = app.state.appstate.lab_forecast_data.get(name)
+        feature_imps = app.state.appstate.feature_importances.get(name, [])
         is_running = app.state.appstate.is_benchmark_running(name)
 
         return templates.TemplateResponse(
@@ -231,6 +261,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "experiment": exp_status,
                 "benchmark_result": benchmark_result,
                 "forecast_data": forecast_data,
+                "lab_forecast": lab_forecast,
+                "feature_importances": feature_imps,
                 "is_running": is_running,
                 "models": benchmark_result.models if benchmark_result else [],
                 "best_model": benchmark_result.best_model_name

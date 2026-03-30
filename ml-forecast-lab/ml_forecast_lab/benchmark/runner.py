@@ -198,6 +198,7 @@ class BenchmarkRunner:
         self.cv_strategy = experiment_cfg.get('cv_strategy', 'walk_forward')
         self.cv_folds = experiment_cfg.get('cv_folds', 5)
         self.production_metric = experiment_cfg.get('production_metric', 'mae')
+        self.metrics = experiment_cfg.get('metrics', ['mae', 'rmse', 'mape'])
 
         logger.info(
             f'BenchmarkRunner initialised: '
@@ -343,9 +344,10 @@ class BenchmarkRunner:
 
             inference_time = time.time() - inference_start
 
-            # Compute metrics
+            # Compute all configured metrics
+            metrics_to_compute = list(set(self.metrics + [self.production_metric]))
             fold_metrics = self.metric_registry.compute_all(
-                [self.production_metric],
+                metrics_to_compute,
                 y_test,
                 y_pred,
             )
@@ -354,15 +356,17 @@ class BenchmarkRunner:
             model_result.train_times.append(train_time)
             model_result.inference_times.append(inference_time)
 
-        # Aggregate across folds
+        # Aggregate across folds — compute mean for all metrics
         if model_result.fold_metrics:
-            all_metric_values = [
-                fm.get(self.production_metric, np.nan)
-                for fm in model_result.fold_metrics
-            ]
-            model_result.metrics = {
-                self.production_metric: float(np.nanmean(all_metric_values))
-            }
+            metrics_to_compute = list(set(self.metrics + [self.production_metric]))
+            for metric_name in metrics_to_compute:
+                values = [
+                    fm.get(metric_name, np.nan)
+                    for fm in model_result.fold_metrics
+                    if fm
+                ]
+                if values:
+                    model_result.metrics[metric_name] = float(np.nanmean(values))
 
         logger.info(
             f'Model {model.name} completed: '

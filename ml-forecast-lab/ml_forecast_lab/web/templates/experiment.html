@@ -115,44 +115,151 @@
     </details>
 </section>
 
-<!-- Forecast Chart -->
+<!-- Multi-Model Predictions (Lab Mode) -->
 <section class="section">
-    <h2>Forecast Chart</h2>
-    {% if forecast_data %}
-    <div id="forecast-chart" style="min-height: 500px;"></div>
+    <h2>Model Predictions on Holdout Data</h2>
+    {% if lab_forecast and lab_forecast.model_predictions %}
+    <div id="lab-forecast-chart" style="min-height: 500px;"></div>
     <script>
         document.addEventListener('DOMContentLoaded', function() {
-            const forecastData = {{ forecast_data | tojson }};
-            window.mlfl.drawForecastChart('forecast-chart', forecastData);
+            const labData = {{ lab_forecast.model_dump() | tojson }};
+            const traces = [];
+
+            // Actual values (from first model — they're all the same)
+            if (labData.model_predictions.length > 0) {
+                const first = labData.model_predictions[0];
+                traces.push({
+                    x: first.timestamps,
+                    y: first.actuals,
+                    name: 'Actual',
+                    mode: 'lines',
+                    line: { color: '#ffffff', width: 2.5, dash: 'dot' }
+                });
+            }
+
+            // Each model's predictions
+            labData.model_predictions.forEach(function(mp) {
+                traces.push({
+                    x: mp.timestamps,
+                    y: mp.predictions,
+                    name: mp.model_name,
+                    mode: 'lines',
+                    line: { color: mp.color, width: 2 }
+                });
+            });
+
+            const layout = {
+                title: 'Model Comparison on Holdout (' + labData.holdout_start.split('T')[0] + ' to ' + labData.holdout_end.split('T')[0] + ')',
+                xaxis: { title: 'Time', gridcolor: '#2d3561' },
+                yaxis: { title: 'Value', gridcolor: '#2d3561' },
+                hovermode: 'x unified',
+                plot_bgcolor: '#16213e',
+                paper_bgcolor: '#1a1a2e',
+                font: { color: '#e0e0e0' },
+                legend: { orientation: 'h', y: -0.15 },
+                margin: { l: 60, r: 20, t: 50, b: 80 }
+            };
+
+            Plotly.newPlot('lab-forecast-chart', traces, layout, { responsive: true });
         });
     </script>
     {% else %}
     <div class="empty-state">
-        <p>No forecast data available yet. Run a benchmark to generate forecasts.</p>
+        <p>No holdout predictions yet. Run a benchmark to generate model comparison charts.</p>
     </div>
     {% endif %}
 </section>
 
+<!-- Residual Plot -->
+{% if lab_forecast and lab_forecast.model_predictions %}
+<section class="section">
+    <h2>Prediction Residuals</h2>
+    <div id="residual-chart" style="min-height: 400px;"></div>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const labData = {{ lab_forecast.model_dump() | tojson }};
+            const traces = [];
+
+            labData.model_predictions.forEach(function(mp) {
+                const residuals = mp.actuals.map(function(a, i) {
+                    return (a !== null && a !== undefined) ? a - mp.predictions[i] : null;
+                });
+                traces.push({
+                    x: mp.timestamps,
+                    y: residuals,
+                    name: mp.model_name,
+                    mode: 'lines',
+                    line: { color: mp.color, width: 1.5 }
+                });
+            });
+
+            // Zero line
+            traces.push({
+                x: labData.model_predictions[0].timestamps,
+                y: labData.model_predictions[0].timestamps.map(function() { return 0; }),
+                name: 'Zero',
+                mode: 'lines',
+                line: { color: '#ffffff', width: 1, dash: 'dash' },
+                showlegend: false
+            });
+
+            const layout = {
+                title: 'Residuals (Actual - Predicted)',
+                xaxis: { title: 'Time', gridcolor: '#2d3561' },
+                yaxis: { title: 'Residual', gridcolor: '#2d3561', zeroline: true, zerolinecolor: '#ffffff' },
+                hovermode: 'x unified',
+                plot_bgcolor: '#16213e',
+                paper_bgcolor: '#1a1a2e',
+                font: { color: '#e0e0e0' },
+                legend: { orientation: 'h', y: -0.15 },
+                margin: { l: 60, r: 20, t: 50, b: 80 }
+            };
+
+            Plotly.newPlot('residual-chart', traces, layout, { responsive: true });
+        });
+    </script>
+</section>
+{% endif %}
+
 <!-- Feature Importance -->
 <section class="section">
     <h2>Feature Importance</h2>
-    <div id="feature-importance-chart" style="min-height: 500px;"></div>
+    {% if feature_importances %}
+    {% for fi in feature_importances %}
+    <h3 style="color: var(--accent-secondary); margin-bottom: 0.5rem;">{{ fi.model_name }}</h3>
+    <div id="feature-importance-{{ fi.model_name }}" style="min-height: 400px;"></div>
     <script>
         document.addEventListener('DOMContentLoaded', function() {
-            // Sample feature importance data (in production, fetch from API)
-            const features = [
-                { name: 'hour_of_day', importance: 0.25 },
-                { name: 'day_of_week', importance: 0.18 },
-                { name: 'temperature', importance: 0.15 },
-                { name: 'humidity', importance: 0.12 },
-                { name: 'cloud_cover', importance: 0.10 },
-                { name: 'wind_speed', importance: 0.08 },
-                { name: 'pressure', importance: 0.07 },
-                { name: 'is_weekend', importance: 0.05 }
-            ];
-            window.mlfl.drawFeatureImportance('feature-importance-chart', features);
+            const features = {{ fi.features | tojson }};
+            const names = features.map(f => f.name).reverse();
+            const importances = features.map(f => f.importance).reverse();
+
+            const trace = {
+                x: importances,
+                y: names,
+                type: 'bar',
+                orientation: 'h',
+                marker: { color: '#0f3460' }
+            };
+
+            const layout = {
+                title: '{{ fi.model_name }} — Top Features',
+                xaxis: { title: 'Importance', gridcolor: '#2d3561' },
+                plot_bgcolor: '#16213e',
+                paper_bgcolor: '#1a1a2e',
+                font: { color: '#e0e0e0' },
+                margin: { l: 200, r: 20, t: 50, b: 50 }
+            };
+
+            Plotly.newPlot('feature-importance-{{ fi.model_name }}', [trace], layout, { responsive: true, displayModeBar: false });
         });
     </script>
+    {% endfor %}
+    {% else %}
+    <div class="empty-state">
+        <p>Feature importance data will appear after a benchmark run with tree-based models.</p>
+    </div>
+    {% endif %}
 </section>
 
 <!-- Benchmark Run Info -->
