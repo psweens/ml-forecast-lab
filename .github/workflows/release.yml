@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Verify config.yaml version matches tag
+        run: |
+          CONFIG_VERSION=$(grep '^version:' ml-forecast-lab/config.yaml | awk '{print $2}')
+          TAG_VERSION="${{ steps.version.outputs.version }}"
+          if [ "$CONFIG_VERSION" != "$TAG_VERSION" ]; then
+            echo "ERROR: config.yaml version ($CONFIG_VERSION) does not match tag (v$TAG_VERSION)"
+            exit 1
+          fi
+          echo "Version verified: $TAG_VERSION"
+
+      - name: Generate changelog from commits
+        id: changelog
+        run: |
+          # Get commits since last tag
+          PREV_TAG=$(git tag --sort=-version:refname | head -2 | tail -1)
+          if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "v${{ steps.version.outputs.version }}" ]; then
+            COMMITS=$(git log --oneline --no-merges HEAD~20..HEAD)
+          else
+            COMMITS=$(git log --oneline --no-merges ${PREV_TAG}..HEAD)
+          fi
+
+          # Write to file for the release body
+          {
+            echo "## What's Changed"
+            echo ""
+            echo "$COMMITS" | while read line; do
+              echo "- $line"
+            done
+            echo ""
+            echo "---"
+            echo "*Full changelog: ${PREV_TAG:-initial}...v${{ steps.version.outputs.version }}*"
+          } > CHANGELOG.md
+
+          cat CHANGELOG.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "v${{ steps.version.outputs.version }}"
+          body_path: CHANGELOG.md
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, 'rc') || contains(steps.version.outputs.version, 'beta') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,68 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  version-check:
+    name: Verify version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check version strings match
+        run: |
+          CONFIG_VER=$(grep '^version:' ml-forecast-lab/config.yaml | awk '{print $2}')
+          INIT_VER=$(grep '__version__' ml-forecast-lab/ml_forecast_lab/__init__.py | head -1 | grep -oP '"\K[^"]+')
+
+          echo "config.yaml:  $CONFIG_VER"
+          echo "__init__.py:  $INIT_VER"
+
+          if [ "$CONFIG_VER" != "$INIT_VER" ]; then
+            echo "ERROR: Version mismatch between config.yaml ($CONFIG_VER) and __init__.py ($INIT_VER)"
+            exit 1
+          fi
+
+          echo "Versions match: $CONFIG_VER"
+
+  syntax-check:
+    name: Python syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install pyyaml numpy pandas aiohttp
+
+      - name: Compile all Python files
+        run: |
+          cd ml-forecast-lab
+          python -m py_compile ml_forecast_lab/config.py
+          python -m py_compile ml_forecast_lab/main.py
+          python -m py_compile ml_forecast_lab/web/app.py
+          python -m py_compile ml_forecast_lab/__main__.py
+          python -m py_compile ml_forecast_lab/ha_interface.py
+          python -m py_compile ml_forecast_lab/preprocessing.py
+          python -m py_compile ml_forecast_lab/features.py
+          echo "All Python files compile successfully"
+
+      - name: Validate config parsing
+        run: |
+          cd ml-forecast-lab
+          python -c "
+          from ml_forecast_lab.config import load_config
+          cfg = load_config('mlfl.yaml')
+          print(f'Config OK: {len(cfg.experiments)} experiment(s)')
+          for exp in cfg.experiments:
+              print(f'  - {exp.name}: {exp.target_entity} ({exp.mode})')
+          "
