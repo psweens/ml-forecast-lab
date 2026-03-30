@@ -30,11 +30,16 @@
 
 <style>
     .log-filter.active { background: var(--accent-secondary); color: var(--bg-primary); }
-    #log-output .log-error { color: #e74c3c; }
+    #log-output .log-error { color: #e74c3c; font-weight: 600; }
     #log-output .log-warning { color: #f39c12; }
-    #log-output .log-separator { color: #00d4ff; }
+    #log-output .log-separator { color: #00d4ff; opacity: 0.8; }
     #log-output .log-result { color: #2ecc71; }
-    #log-output .log-star { color: #f39c12; }
+    #log-output .log-star { color: #f39c12; font-weight: 600; }
+    #log-output .log-benchmark { color: #00d4ff; font-weight: 600; }
+    #log-output .log-stats { color: #b0b0b0; }
+    #log-output .log-model { color: #9b59b6; }
+    #log-output .log-timestamp { color: #5a6a7a; }
+    #log-output .log-production { color: #2ecc71; font-weight: 600; }
 </style>
 {% endblock %}
 
@@ -45,14 +50,29 @@
     logEl.scrollTop = logEl.scrollHeight;
 
     // Colorize log lines
-    var html = logEl.innerHTML;
-    html = html.replace(/(.*ERROR.*)/g, '<span class="log-error">$1</span>');
-    html = html.replace(/(.*WARNING.*)/g, '<span class="log-warning">$1</span>');
-    html = html.replace(/(.*[═╔╚─]{3,}.*)/g, '<span class="log-separator">$1</span>');
-    html = html.replace(/(.*✓.*)/g, '<span class="log-result">$1</span>');
-    html = html.replace(/(.*★.*)/g, '<span class="log-star">$1</span>');
-    html = html.replace(/(.*Best model:.*)/g, '<span class="log-star">$1</span>');
-    logEl.innerHTML = html;
+    function colorize(text) {
+        var lines = text.split('\n');
+        return lines.map(function(line) {
+            // Errors and warnings first (highest priority)
+            if (line.includes('ERROR')) return '<span class="log-error">' + line + '</span>';
+            if (line.includes('WARNING')) return '<span class="log-warning">' + line + '</span>';
+            // Section separators and headers
+            if (/[═╔╚─]{3,}/.test(line)) return '<span class="log-separator">' + line + '</span>';
+            if (/BENCHMARK:|PRODUCTION:/.test(line)) return '<span class="log-benchmark">' + line + '</span>';
+            // Results
+            if (line.includes('★') || line.includes('Best model:')) return '<span class="log-star">' + line + '</span>';
+            if (line.includes('✓')) return '<span class="log-result">' + line + '</span>';
+            // Model benchmarking lines
+            if (/\[\d+\/\d+\] Benchmarking:/.test(line)) return '<span class="log-model">' + line + '</span>';
+            // Data stats
+            if (/Target stats:|Data range:|Preprocessed:|Fetched \d+/.test(line)) return '<span class="log-stats">' + line + '</span>';
+            // Production forecast
+            if (/Production inference complete|forecast points|Published/.test(line)) return '<span class="log-production">' + line + '</span>';
+            // Dim the timestamp prefix
+            return line.replace(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[\d,]* \w+\s*)/, '<span class="log-timestamp">$1</span>');
+        }).join('\n');
+    }
+    logEl.innerHTML = colorize(logEl.textContent);
 
     // Filter by level
     var allLines = logEl.textContent.split('\n');
@@ -61,15 +81,11 @@
         btn.classList.add('active');
         var filtered = allLines;
         if (level !== 'all') {
-            filtered = allLines.filter(l => l.includes(' - ' + level + ' - '));
+            filtered = allLines.filter(function(l) {
+                return l.toUpperCase().includes(' ' + level + ' ');
+            });
         }
-        var text = filtered.join('\n');
-        logEl.textContent = text;
-        // Re-colorize
-        var h = logEl.innerHTML;
-        h = h.replace(/(.*ERROR.*)/g, '<span class="log-error">$1</span>');
-        h = h.replace(/(.*WARNING.*)/g, '<span class="log-warning">$1</span>');
-        logEl.innerHTML = h;
+        logEl.innerHTML = colorize(filtered.join('\n'));
         logEl.scrollTop = logEl.scrollHeight;
     }
 </script>

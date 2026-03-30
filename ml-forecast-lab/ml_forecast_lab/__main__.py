@@ -16,26 +16,27 @@ from pathlib import Path
 LOG_DIR = Path("/data/ml_forecast_lab/logs")
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "mlfl.log"
-LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+LOG_FORMAT = "%(asctime)s %(levelname)-5s %(message)s"
+LOG_FORMAT_FILE = "%(asctime)s %(levelname)-5s [%(name)s] %(message)s"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # Root logger setup
 root_logger = logging.getLogger()
 root_logger.setLevel(LOG_LEVEL)
 
-# Console handler
+# Console handler — short format for HA addon logs
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+console_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt="%H:%M:%S"))
 root_logger.addHandler(console_handler)
 
-# Rotating file handler: 5 MB per file, keep 5 backups
+# Rotating file handler — detailed format with module name for debugging
 file_handler = logging.handlers.RotatingFileHandler(
     str(LOG_FILE),
     maxBytes=5 * 1024 * 1024,
     backupCount=5,
     encoding="utf-8",
 )
-file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+file_handler.setFormatter(logging.Formatter(LOG_FORMAT_FILE, datefmt="%Y-%m-%d %H:%M:%S"))
 root_logger.addHandler(file_handler)
 
 logger = logging.getLogger(__name__)
