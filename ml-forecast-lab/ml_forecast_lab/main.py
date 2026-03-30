@@ -156,7 +156,15 @@ class MLForecastLabApp:
             self.model_registry.register("xgboost", XGBoostModel)
             self.model_registry.register("lstm", LSTMModel)
             self.model_registry.register("cnn", CNNModel)
-            logger.info("ModelRegistry initialised with 4 backends")
+
+            # Register NeuralProphet if available
+            try:
+                from ml_forecast_lab.models.neuralprophet_backend import NeuralProphetModel
+                self.model_registry.register("neuralprophet", NeuralProphetModel)
+            except Exception as e:
+                logger.debug(f"NeuralProphet not available: {e}")
+
+            logger.info(f"ModelRegistry initialised with {len(self.model_registry.list_available())} backends")
 
         except Exception as e:
             logger.error(f"Failed to initialise components: {e}", exc_info=True)
@@ -632,6 +640,7 @@ class MLForecastLabApp:
             "xgboost": "#3498db",
             "lstm": "#f39c12",
             "cnn": "#e74c3c",
+            "neuralprophet": "#9b59b6",
         }
 
         def _generate_holdout_predictions():

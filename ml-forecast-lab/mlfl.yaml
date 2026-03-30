@@ -73,6 +73,7 @@ experiments:
       - "xgboost"
       - "lstm"
       - "cnn"
+      - "neuralprophet"
 
     # -- Cross-validation settings --------------------------------------------
     cv_strategy: "walk_forward"    # or "sliding_window"

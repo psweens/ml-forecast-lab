@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.0.0
+
+### Major Features — PyTorch Migration
+- **LSTM rewritten with PyTorch** — torch.nn.LSTM replaces 500 lines of
+  pure-NumPy implementation. Proper autograd, 10-50x faster matrix ops,
+  correct gradient flow through all gate weights.
+- **CNN rewritten with PyTorch** — WaveNet-style dilated causal convolutions
+  using torch.nn.Conv1d with residual connections. Replaces manual conv
+  backward pass.
+- **NeuralProphet added** — Facebook's neural forecasting library combining
+  trend decomposition, automatic seasonality detection, and neural AR
+  components. Purpose-built for time series with covariates.
+- **5 model backends** now available: LightGBM, XGBoost, LSTM, CNN, NeuralProphet
+
+### Dependencies
+- Added PyTorch (torch>=2.0.0) — first install will take ~15-20 min on Pi,
+  subsequent updates use Docker cache (~30s)
+- Added neuralprophet>=0.9.0
+
+### Other
+- All version strings now imported from __init__.py (no more hardcoded)
+- NeuralProphet shown on System Status page with purple colour in charts
+- _numpy_optim.py kept for reference but no longer used by neural backends
+
 ## 0.6.1
 
 ### Improvements
