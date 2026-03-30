@@ -207,6 +207,12 @@ class AppConfig:
     hailo_enabled: bool = False
     """Whether to use Hailo accelerator (if available)."""
 
+    cpu_cores: int = 0
+    """Number of CPU cores for model training. 0 = all available."""
+
+    nice_priority: int = 10
+    """Process priority for training (0=normal, 19=lowest). Default 10."""
+
     def __post_init__(self) -> None:
         """Validate application configuration."""
         if self.update_every_minutes < 1:

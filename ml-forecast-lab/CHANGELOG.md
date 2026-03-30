@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0
+
+### New Features
+- Settings page accessible from the nav bar:
+  - System information: CPU cores, processor, memory usage, disk usage
+  - Resource limits: configurable training CPU cores and process priority
+  - Update interval, timezone, and Hailo toggle — editable from the UI
+  - Per-experiment configuration overview with covariate details
+  - Config file path and version info
+  - Save button writes settings back to mlfl.yaml
+- cpu_cores and nice_priority config options in mlfl.yaml
+
+### Improvements
+- Cleaner log format: short timestamps, no module name in console output
+- Richer log viewer colours: cyan headers, green results, purple model progress
+- Removed version number from footer (shown in Settings instead)
+
 ## 0.3.7
 
 ### Improvements

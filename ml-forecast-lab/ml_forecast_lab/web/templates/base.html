@@ -136,6 +136,7 @@
                 <li><a href="{{ base_path | default('') }}/" class="nav-link {% if active_page == 'dashboard' %}active{% endif %}">Dashboard</a></li>
                 <li><a href="{{ base_path | default('') }}/log" class="nav-link {% if active_page == 'logs' %}active{% endif %}">Logs</a></li>
                 <li><a href="{{ base_path | default('') }}/status" class="nav-link {% if active_page == 'status' %}active{% endif %}">System Status</a></li>
+                <li><a href="{{ base_path | default('') }}/settings" class="nav-link {% if active_page == 'settings' %}active{% endif %}">⚙ Settings</a></li>
             </ul>
         </div>
     </nav>
@@ -145,7 +146,7 @@
     </main>
 
     <footer class="footer">
-        <p>ML Forecast Lab v{{ version | default('0.3') }} · Created by <a href="https://github.com/psweens" target="_blank" style="color: var(--accent-secondary); text-decoration: none;">Dr Paul W. Sweeney</a></p>
+        <p>ML Forecast Lab · Created by <a href="https://github.com/psweens" target="_blank" style="color: var(--accent-secondary); text-decoration: none;">Dr Paul W. Sweeney</a></p>
     </footer>
 
     <script>

@@ -7,6 +7,9 @@ experiments, model benchmarking, and production deployment.
 
 import json
 import logging
+import os
+import platform
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -488,6 +491,153 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "models": models_list,
             },
         )
+
+    @app.get("/settings", response_class=Response)
+    async def settings_page(request: Request):
+        """
+        Settings page with system info, resource limits, and experiment config.
+        """
+        # Gather system information
+        import psutil
+        cpu_count = os.cpu_count() or 4
+        try:
+            cpu_model = platform.processor() or platform.machine()
+        except Exception:
+            cpu_model = platform.machine()
+
+        try:
+            mem = psutil.virtual_memory()
+            memory_total_gb = round(mem.total / (1024**3), 1)
+            memory_used_gb = round(mem.used / (1024**3), 1)
+            memory_percent = mem.percent
+        except Exception:
+            memory_total_gb = memory_used_gb = memory_percent = 0
+
+        try:
+            disk = shutil.disk_usage("/data")
+            disk_total_gb = round(disk.total / (1024**3), 1)
+            disk_used_gb = round(disk.used / (1024**3), 1)
+            disk_percent = round(disk.used / disk.total * 100, 1)
+        except Exception:
+            disk_total_gb = disk_used_gb = disk_percent = 0
+
+        system_info = {
+            "cpu_cores": cpu_count,
+            "cpu_model": cpu_model,
+            "memory_total_gb": memory_total_gb,
+            "memory_used_gb": memory_used_gb,
+            "memory_percent": memory_percent,
+            "disk_total_gb": disk_total_gb,
+            "disk_used_gb": disk_used_gb,
+            "disk_percent": disk_percent,
+        }
+
+        # Get current config from app state
+        config_data = {
+            "update_every_minutes": 360,
+            "timezone": "UTC",
+            "hailo_enabled": False,
+            "cpu_cores": 0,
+            "nice_priority": 10,
+        }
+
+        # Try to read from the main app's config
+        config_path = "unknown"
+        for p in [
+            Path("/addon_configs/ml_forecast_lab/mlfl.yaml"),
+            Path("/config/mlfl.yaml"),
+        ]:
+            if p.exists():
+                config_path = str(p)
+                break
+        # Also check hashed paths
+        import glob
+        for match in glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
+            config_path = match
+            break
+
+        try:
+            from ml_forecast_lab.config import load_config as _load_config
+            cfg = _load_config(config_path)
+            config_data = {
+                "update_every_minutes": cfg.update_every_minutes,
+                "timezone": cfg.timezone,
+                "hailo_enabled": cfg.hailo_enabled,
+                "cpu_cores": cfg.cpu_cores,
+                "nice_priority": cfg.nice_priority,
+            }
+            experiments = cfg.experiments
+        except Exception:
+            experiments = []
+
+        return templates.TemplateResponse(
+            request=request,
+            name="settings.html",
+            context={
+                "request": request,
+                "base_path": _get_base_path(request),
+                "active_page": "settings",
+                "version": "0.3.7",
+                "system": system_info,
+                "config": config_data,
+                "config_path": config_path,
+                "experiments": experiments,
+            },
+        )
+
+    @app.post("/api/settings")
+    async def save_settings(request: Request):
+        """
+        Save settings back to mlfl.yaml.
+        """
+        import yaml
+
+        try:
+            data = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        # Find config file
+        config_path = None
+        for p in [Path("/addon_configs/ml_forecast_lab/mlfl.yaml"), Path("/config/mlfl.yaml")]:
+            if p.exists():
+                config_path = p
+                break
+        import glob as _glob
+        for match in _glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
+            config_path = Path(match)
+            break
+
+        if not config_path or not config_path.exists():
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+
+        try:
+            # Read existing YAML
+            with open(config_path, "r", encoding="utf-8") as f:
+                yaml_data = yaml.safe_load(f)
+
+            # Update fields
+            if "update_every_minutes" in data:
+                yaml_data["update_every_minutes"] = int(data["update_every_minutes"])
+            if "timezone" in data:
+                yaml_data["timezone"] = str(data["timezone"])
+            if "hailo_enabled" in data:
+                yaml_data["hailo_enabled"] = bool(data["hailo_enabled"])
+            if "cpu_cores" in data:
+                yaml_data["cpu_cores"] = int(data["cpu_cores"])
+            if "nice_priority" in data:
+                yaml_data["nice_priority"] = int(data["nice_priority"])
+
+            # Write back
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+
+            logger.info(f"Settings saved to {config_path}")
+            return JSONResponse(content={"success": True})
+
+        except Exception as e:
+            logger.error(f"Failed to save settings: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.get("/api/log")
     async def api_log(
