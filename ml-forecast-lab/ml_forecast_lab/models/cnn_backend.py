@@ -61,14 +61,14 @@ class CNNModel(ForecastModel):
 
     def __init__(
         self,
-        n_filters: int = 32,
+        n_filters: int = 16,
         kernel_size: int = 3,
-        n_layers: int = 4,
+        n_layers: int = 3,
         dilation_base: int = 2,
         learning_rate: float = 0.001,
-        epochs: int = 100,
-        batch_size: int = 32,
-        patience: int = 10,
+        epochs: int = 50,
+        batch_size: int = 64,
+        patience: int = 8,
         dropout: float = 0.1,
     ) -> None:
         """Initialise CNN model."""

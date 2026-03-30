@@ -61,13 +61,13 @@ class LSTMModel(ForecastModel):
 
     def __init__(
         self,
-        hidden_size: int = 64,
-        num_layers: int = 2,
+        hidden_size: int = 32,
+        num_layers: int = 1,
         dropout: float = 0.1,
         learning_rate: float = 0.001,
-        epochs: int = 100,
-        batch_size: int = 32,
-        patience: int = 10,
+        epochs: int = 50,
+        batch_size: int = 64,
+        patience: int = 8,
         sequence_length: Optional[int] = None,
     ) -> None:
         """Initialise LSTM model."""
