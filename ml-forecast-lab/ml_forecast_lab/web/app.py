@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ml_forecast_lab import __version__ as APP_VERSION
+
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -179,7 +181,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     app = FastAPI(
         title="ML Forecast Lab",
         description="Multi-model ML forecasting and benchmarking system",
-        version="0.2.0",
+        version=APP_VERSION,
     )
 
     # Initialize state
@@ -230,7 +232,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "request": request,
                 "base_path": _get_base_path(request),
                 "active_page": "dashboard",
-                "version": "0.3.2",
+                "version": APP_VERSION,
                 "experiments": experiments,
                 "total_experiments": len(experiments),
                 "lab_experiments": sum(
@@ -281,7 +283,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "request": request,
                 "base_path": _get_base_path(request),
                 "active_page": "dashboard",
-                "version": "0.6.0",
+                "version": APP_VERSION,
                 "experiment": exp_status,
                 "benchmark_result": benchmark_result,
                 "forecast_data": forecast_data,
@@ -424,7 +426,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         return HealthStatus(
             status="healthy",
             service="ml-forecast-lab",
-            version="0.2.0",
+            version=APP_VERSION,
             timestamp=datetime.utcnow().isoformat(),
             experiments_total=len(list(experiments)),
             experiments_lab=lab_count,
@@ -459,7 +461,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "request": request,
                 "base_path": _get_base_path(request),
                 "active_page": "logs",
-                "version": "0.3.2",
+                "version": APP_VERSION,
                 "log_content": "\n".join(tail),
             },
         )
@@ -475,7 +477,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         health = {
             "status": "healthy",
-            "version": "0.3.2",
+            "version": APP_VERSION,
             "experiments_total": len(experiments),
             "experiments_lab": lab_count,
             "experiments_production": prod_count,
@@ -503,7 +505,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "request": request,
                 "base_path": _get_base_path(request),
                 "active_page": "status",
-                "version": "0.3.2",
+                "version": APP_VERSION,
                 "health": health,
                 "experiments": experiments,
                 "models": models_list,
@@ -605,7 +607,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "request": request,
                 "base_path": _get_base_path(request),
                 "active_page": "settings",
-                "version": "0.3.7",
+                "version": APP_VERSION,
                 "system": system_info,
                 "config": config_data,
                 "config_path": config_path,
