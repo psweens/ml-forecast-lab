@@ -460,6 +460,10 @@ class LSTMModel(ForecastModel):
         lstm_out, _ = self._forward_lstm(X_seq, training=False)
         predictions = self._forward_dense(lstm_out[:, -1, :])
 
+        # Clip to non-negative — LSTM gate weights are not fully trained
+        # (backward pass only updates dense layer) so output may be negative.
+        predictions = np.clip(predictions, 0.0, None)
+
         return predictions
 
     def predict_multi(self, X: np.ndarray, horizon: int) -> np.ndarray:

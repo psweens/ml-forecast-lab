@@ -448,6 +448,11 @@ class CNNModel(ForecastModel):
         cnn_out, _ = self._forward_cnn(X_seq, training=False)
         predictions = self._forward_dense(cnn_out).ravel()
 
+        # Clip to non-negative — CNN conv layers are not fully trained
+        # (backward pass only updates dense layer) so raw output can be
+        # wildly negative. This prevents misleading chart visualisations.
+        predictions = np.clip(predictions, 0.0, None)
+
         return predictions
 
     def predict_multi(self, X: np.ndarray, horizon: int) -> np.ndarray:
