@@ -257,6 +257,23 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         feature_imps = app.state.appstate.feature_importances.get(name, [])
         is_running = app.state.appstate.is_benchmark_running(name)
 
+        # Get units from experiment config
+        units = ""
+        try:
+            from ml_forecast_lab.config import load_config as _lc
+            import glob as _g
+            for p in ["/addon_configs/ml_forecast_lab/mlfl.yaml", "/config/mlfl.yaml"] + \
+                      _g.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
+                cfg_path = Path(p)
+                if cfg_path.exists():
+                    cfg = _lc(cfg_path)
+                    for exp in cfg.experiments:
+                        if exp.name == name:
+                            units = exp.units or ""
+                    break
+        except Exception:
+            pass
+
         return templates.TemplateResponse(
             request=request,
             name="experiment.html",
@@ -264,7 +281,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "request": request,
                 "base_path": _get_base_path(request),
                 "active_page": "dashboard",
-                "version": "0.3.2",
+                "version": "0.6.0",
                 "experiment": exp_status,
                 "benchmark_result": benchmark_result,
                 "forecast_data": forecast_data,
@@ -275,6 +292,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "best_model": benchmark_result.best_model_name
                 if benchmark_result
                 else None,
+                "units": units,
             },
         )
 

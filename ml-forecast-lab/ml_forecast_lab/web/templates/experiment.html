@@ -39,8 +39,8 @@
             <thead>
                 <tr>
                     <th>Model</th>
-                    <th>MAE <span class="info-tip">?<span class="tip-text">Mean Absolute Error — average magnitude of prediction errors. Lower is better. The ± value shows variation across CV folds.</span></span></th>
-                    <th>RMSE <span class="info-tip">?<span class="tip-text">Root Mean Square Error — penalises large errors more heavily than MAE. Lower is better.</span></span></th>
+                    <th>MAE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Mean Absolute Error — average magnitude of prediction errors. Lower is better. The ± value shows variation across CV folds.</span></span></th>
+                    <th>RMSE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Root Mean Square Error — penalises large errors more heavily than MAE. Lower is better.</span></span></th>
                     <th>MAPE <span class="info-tip">?<span class="tip-text">Mean Absolute Percentage Error — error as a percentage of actual values. Lower is better. Can be misleading when actual values are near zero.</span></span></th>
                     <th>Train Time <span class="info-tip">?<span class="tip-text">Average wall-clock training time per CV fold in seconds.</span></span></th>
                     <th>Rank</th>
@@ -189,7 +189,7 @@
                     title: (cumulative ? 'Daily Cumulative ' : '') + 'Model Comparison on Holdout (' +
                            labData.holdout_start.split('T')[0] + ' to ' + labData.holdout_end.split('T')[0] + ')',
                     xaxis: { title: 'Time', gridcolor: '#2d3561' },
-                    yaxis: { title: cumulative ? 'Daily Cumulative' : 'Value', gridcolor: '#2d3561' },
+                    yaxis: { title: cumulative ? 'Daily Cumulative{{ " (" + units + ")" if units else "" }}' : 'Value{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
                     hovermode: 'x unified',
                     plot_bgcolor: '#16213e',
                     paper_bgcolor: '#1a1a2e',
@@ -264,7 +264,7 @@
             const layout = {
                 title: 'Residuals (Actual - Predicted)',
                 xaxis: { title: 'Time', gridcolor: '#2d3561' },
-                yaxis: { title: 'Residual', gridcolor: '#2d3561', zeroline: true, zerolinecolor: '#ffffff' },
+                yaxis: { title: 'Residual{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561', zeroline: true, zerolinecolor: '#ffffff' },
                 hovermode: 'x unified',
                 plot_bgcolor: '#16213e',
                 paper_bgcolor: '#1a1a2e',

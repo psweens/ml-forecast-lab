@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1
+
+### Improvements
+- Units displayed on all charts — Y-axis shows "Value (%)" or
+  "Daily Cumulative (%)" based on experiment config
+- Units shown on MAE and RMSE column headers in model comparison table
+- Residual chart Y-axis shows units
+- Daily cumulative chart resets at midnight (not running total)
+
 ## 0.6.0
 
 ### Major Features
