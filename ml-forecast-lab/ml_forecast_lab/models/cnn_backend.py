@@ -148,21 +148,31 @@ class CNNModel(ForecastModel):
         y_train = self._validate_y(y_train)
         start_time = time.time()
 
-        # Reshape
-        X_seq = self._reshape_to_sequences(X_train)
+        # Use pre-windowed sequence data if provided, otherwise reshape flat features
+        sequence_data = kwargs.get("sequence_data")
+        if sequence_data is not None:
+            X_seq = sequence_data
+            logger.debug(f"Using pre-windowed sequence data: {X_seq.shape}")
+        else:
+            X_seq = self._reshape_to_sequences(X_train)
         _, seq_len, input_size = X_seq.shape
         self._input_size = input_size
         self._sequence_length = seq_len
+
+        # Extract sample weights
+        sample_weight = kwargs.get("sample_weight")
 
         # Train/val split
         val_split = kwargs.get("validation_split", 0.2)
         n_train = int(len(X_seq) * (1 - val_split))
         X_tr, X_val = X_seq[:n_train], X_seq[n_train:]
         y_tr, y_val = y_train[:n_train], y_train[n_train:]
+        w_tr = sample_weight[:n_train] if sample_weight is not None else None
 
         # Convert to tensors
         X_tr_t = torch.FloatTensor(X_tr)
         y_tr_t = torch.FloatTensor(y_tr)
+        w_tr_t = torch.FloatTensor(w_tr) if w_tr is not None else None
         X_val_t = torch.FloatTensor(X_val)
         y_val_t = torch.FloatTensor(y_val)
 
@@ -172,7 +182,7 @@ class CNNModel(ForecastModel):
             self.n_layers, self.dilation_base, self.dropout,
         )
         optimiser = torch.optim.Adam(self._model.parameters(), lr=self.learning_rate)
-        criterion = nn.HuberLoss(delta=1.0)
+        criterion = nn.HuberLoss(reduction='none')
 
         # Training loop
         best_val_loss = float("inf")
@@ -192,7 +202,12 @@ class CNNModel(ForecastModel):
 
                 optimiser.zero_grad()
                 y_pred = self._model(X_batch)
-                loss = criterion(y_pred, y_batch)
+                loss_per_sample = criterion(y_pred, y_batch)
+                if w_tr_t is not None:
+                    w_batch = w_tr_t[batch_idx]
+                    loss = (loss_per_sample * w_batch).mean()
+                else:
+                    loss = loss_per_sample.mean()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self._model.parameters(), max_norm=5.0)
                 optimiser.step()
@@ -200,11 +215,11 @@ class CNNModel(ForecastModel):
                 epoch_loss += loss.item()
                 n_batches += 1
 
-            # Validation
+            # Validation (unweighted)
             self._model.eval()
             with torch.no_grad():
                 val_pred = self._model(X_val_t)
-                val_loss = criterion(val_pred, y_val_t).item()
+                val_loss = criterion(val_pred, y_val_t).mean().item()
 
             avg_loss = epoch_loss / max(n_batches, 1)
             self._training_history["train_loss"].append(avg_loss)

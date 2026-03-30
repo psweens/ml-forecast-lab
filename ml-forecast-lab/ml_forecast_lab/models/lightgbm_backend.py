@@ -155,20 +155,26 @@ class LightGBMModel(ForecastModel):
         else:
             self.feature_names_ = list(feature_names)
 
+        # Extract sample weights if provided
+        sample_weight = kwargs.get("sample_weight")
+
         # Create validation set if not provided
         eval_set = kwargs.get("eval_set")
         if eval_set is None:
             split_idx = int(len(X_train) * 0.8)
             X_train_split, X_val = X_train[:split_idx], X_train[split_idx:]
             y_train_split, y_val = y_train[:split_idx], y_train[split_idx:]
+            w_train = sample_weight[:split_idx] if sample_weight is not None else None
         else:
             X_train_split, y_train_split = X_train, y_train
             X_val, y_val = eval_set
+            w_train = sample_weight
 
         # Prepare training and validation data for LightGBM
         train_data = lgb.Dataset(
             X_train_split,
             label=y_train_split,
+            weight=w_train,
             free_raw_data=False,
         )
         train_data.feature_name = self.feature_names_

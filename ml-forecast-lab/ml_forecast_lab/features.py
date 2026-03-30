@@ -385,6 +385,64 @@ def reshape_for_sequence(
     return X_seq
 
 
+def create_sliding_windows(
+    df: pd.DataFrame,
+    target_col: str,
+    window_size: int = 48,
+    covariate_cols: Optional[List[str]] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Create sliding window sequences from raw time series for LSTM/CNN.
+
+    Instead of pre-computed features, this creates (n_samples, window_size, n_channels)
+    arrays where each sample is a window of raw values.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with DatetimeIndex containing target and optional covariates.
+    target_col : str
+        Name of target column.
+    window_size : int
+        Number of timesteps per window (default 48 = 24h at 30-min intervals).
+    covariate_cols : list of str, optional
+        Additional columns to include as channels.
+
+    Returns
+    -------
+    X : np.ndarray
+        Shape (n_samples, window_size, n_channels) where n_channels = 1 + len(covariate_cols).
+    y : np.ndarray
+        Shape (n_samples,) — the target value at the step after each window.
+    """
+    cols = [target_col]
+    if covariate_cols:
+        cols += [c for c in covariate_cols if c in df.columns]
+
+    data = df[cols].values.astype(np.float32)
+    n_total = len(data)
+    n_channels = len(cols)
+
+    if n_total <= window_size:
+        raise ValueError(f"Need more than {window_size} samples, got {n_total}")
+
+    n_samples = n_total - window_size
+    X = np.zeros((n_samples, window_size, n_channels), dtype=np.float32)
+    y = np.zeros(n_samples, dtype=np.float32)
+
+    target_idx = 0  # target_col is always first
+    for i in range(n_samples):
+        X[i] = data[i:i + window_size]
+        y[i] = data[i + window_size, target_idx]
+
+    logger.debug(
+        f"Created {n_samples} sliding windows: "
+        f"({window_size} steps × {n_channels} channels)"
+    )
+
+    return X, y
+
+
 def create_forecast_features(
     last_timestamp: pd.Timestamp,
     interval_minutes: int,

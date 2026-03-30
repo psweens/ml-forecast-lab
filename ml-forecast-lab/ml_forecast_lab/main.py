@@ -306,27 +306,65 @@ class MLForecastLabApp:
         freq = f"{exp_cfg.interval_minutes}min"
         table_name = self.history_db.safe_table_name(exp_cfg.target_entity) if self.history_db else None
 
-        # --- Fetch from HA API ---
+        df = pd.DataFrame(columns=["ds", "value"])
+
+        # --- Try SQLite cache first ---
+        if exp_cfg.database and self.history_db and table_name:
+            cached_df = self.history_db.get_history(table_name)
+            if not cached_df.empty:
+                # Rename 'y' back to 'value' for consistency
+                cached_df = cached_df.rename(columns={"y": "value"})
+                # Filter to requested time window
+                cached_df = cached_df[cached_df["ds"] >= start]
+                if len(cached_df) > 0:
+                    df = cached_df
+                    logger.info(
+                        f"  Loaded {len(df)} cached records for {exp_cfg.target_entity}"
+                    )
+
+        # --- Fetch delta from HA API ---
+        if len(df) > 0:
+            # Only fetch records newer than our latest cached record
+            last_cached = df["ds"].max()
+            fetch_start = last_cached
+        else:
+            fetch_start = start
+
         raw_records = await self.ha_interface.get_history(
-            exp_cfg.target_entity, start, now
+            exp_cfg.target_entity, fetch_start, now
         )
-        df = normalise_history(raw_records)
+        new_df = normalise_history(raw_records)
+
+        if not new_df.empty:
+            if len(df) > 0:
+                # Merge: append new records, deduplicate by timestamp
+                df = pd.concat([df, new_df], ignore_index=True)
+                df = df.drop_duplicates(subset=["ds"], keep="last").sort_values("ds").reset_index(drop=True)
+                logger.info(
+                    f"  Fetched {len(new_df)} new records from HA API "
+                    f"(total: {len(df)})"
+                )
+            else:
+                df = new_df
+                logger.info(
+                    f"  Fetched {len(df)} records for {exp_cfg.target_entity} "
+                    f"({exp_cfg.days_history} days, {start.strftime('%d %b')} to {now.strftime('%d %b %H:%M')})"
+                )
 
         if df.empty:
             raise ValueError(
-                f"No history data returned for {exp_cfg.target_entity}"
+                f"No history data for {exp_cfg.target_entity}"
             )
-
-        logger.info(
-            f"  Fetched {len(df)} records for {exp_cfg.target_entity} "
-            f"({exp_cfg.days_history} days, {start.strftime('%d %b')} to {now.strftime('%d %b %H:%M')})"
-        )
 
         # --- Store in SQLite cache ---
         if exp_cfg.database and self.history_db and table_name:
             inserted = self.history_db.store_history(table_name, df)
             if inserted > 0:
                 logger.info(f"  Cached {inserted} new records in SQLite")
+
+            # Cleanup old records beyond max_age
+            oldest = now - timedelta(days=exp_cfg.max_age)
+            self.history_db.cleanup(table_name, oldest)
 
         # --- Set DatetimeIndex ---
         df = df.set_index("ds").sort_index()

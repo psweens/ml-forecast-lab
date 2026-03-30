@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.2.0
+
+### New Features
+- **Time-weighted sampling**: recent data weighted higher than old data
+  using exponential decay (half-life = 30% of training window). Applied
+  to all models: LightGBM/XGBoost via sample_weight, PyTorch via
+  weighted Huber loss.
+- **SQLite cache as primary source**: checks local cache first, only
+  fetches delta from HA API for new records since last cache. Reduces
+  HA API load from ~11K records to just new ones. Auto-cleans records
+  older than max_age.
+- **Raw sequence input for LSTM/CNN**: creates sliding window sequences
+  (48 steps × n_channels) from raw target + covariate time series
+  instead of reshaping pre-computed features. Gives neural models
+  proper temporal structure to learn from.
+
+### Technical Details
+- BenchmarkRunner generates time-decay weights and passes to all models
+- LightGBM uses lgb.Dataset(weight=), XGBoost uses fit(sample_weight=)
+- PyTorch models use per-sample weighted HuberLoss (reduction='none')
+- create_sliding_windows() utility in features.py
+- Delta fetch: loads SQLite cache → fetches only records after last
+  cached timestamp → merges and deduplicates
+
 ## 1.1.0
 
 ### Major Features

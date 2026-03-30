@@ -321,10 +321,41 @@ class BenchmarkRunner:
             # Get feature names from dataframe columns
             feat_names = [c for c in df_train.columns if c != 'target']
 
+            # Generate time-decay sample weights (exponential, half-life = 30% of data)
+            n_train_samples = len(y_train)
+            half_life = max(1, int(n_train_samples * 0.3))
+            decay_rate = np.log(2) / half_life
+            sample_weights = np.exp(decay_rate * np.arange(n_train_samples))
+            sample_weights = sample_weights / sample_weights.sum() * n_train_samples
+
+            # Generate sliding window sequence data for LSTM/CNN
+            sequence_kwargs = {}
+            if model.name in ('lstm', 'cnn'):
+                try:
+                    from ml_forecast_lab.features import create_sliding_windows
+                    # Use target + covariate columns from the dataframe
+                    target_col = 'target'
+                    cov_cols = [c for c in df_train.columns if c not in (target_col, *feat_names[:31])]
+                    if target_col in df_train.columns:
+                        window_size = min(48, len(df_train) // 3)
+                        if window_size >= 12:
+                            seq_X, seq_y = create_sliding_windows(
+                                df_train, target_col, window_size=window_size,
+                                covariate_cols=cov_cols if cov_cols else None,
+                            )
+                            sequence_kwargs['sequence_data'] = seq_X
+                            # Use windowed targets for training
+                            y_train = seq_y
+                            X_train = X_train[-len(seq_y):]  # Align flat features
+                            sample_weights = sample_weights[-len(seq_y):]
+                except Exception as e:
+                    logger.debug(f'Sliding window creation failed: {e}')
+
             # Train model
             train_start = time.time()
             try:
-                model.fit(X_train, y_train, feature_names=feat_names)
+                model.fit(X_train, y_train, feature_names=feat_names,
+                          sample_weight=sample_weights, **sequence_kwargs)
             except Exception as e:
                 logger.error(f'Model training failed for fold {fold_idx}: {e}')
                 model_result.fold_metrics.append({})
