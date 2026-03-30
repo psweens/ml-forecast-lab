@@ -199,7 +199,7 @@ class MLForecastLabApp:
                 app=self.web_app,
                 host=host,
                 port=port,
-                log_level="info",
+                log_level="warning",
             )
             self.server = uvicorn.Server(config)
 
