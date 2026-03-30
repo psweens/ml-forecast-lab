@@ -117,51 +117,102 @@
 
 <!-- Multi-Model Predictions (Lab Mode) -->
 <section class="section">
-    <h2>Model Predictions on Holdout Data <span class="info-tip">?<span class="tip-text">Shows how each model's predictions (coloured lines) compare to actual values (white dotted line) on the last 20% of data held out from training. Models that track the white line closely are performing well.</span></span></h2>
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <h2 style="margin-bottom: 0;">Model Predictions on Holdout Data <span class="info-tip">?<span class="tip-text">Shows how each model's predictions (coloured lines) compare to actual values (white dotted line) on the last 20% of data held out from training. Toggle to cumulative view to see total demand over time — useful for assessing overall accuracy.</span></span></h2>
+        {% if lab_forecast and lab_forecast.model_predictions %}
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+            <span style="color: var(--text-secondary); font-size: 0.85rem;">Interval</span>
+            <label style="position: relative; display: inline-block; width: 44px; height: 24px; cursor: pointer;">
+                <input type="checkbox" id="cumulative-toggle" onchange="toggleCumulative(this.checked)"
+                       style="opacity: 0; width: 0; height: 0;">
+                <span style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: var(--bg-tertiary);
+                    border-radius: 12px; border: 1px solid var(--border); transition: all 0.3s;"></span>
+                <span id="toggle-knob" style="position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+                    background: var(--text-secondary); border-radius: 50%; transition: all 0.3s;"></span>
+            </label>
+            <span style="color: var(--text-secondary); font-size: 0.85rem;">Cumulative</span>
+        </div>
+        {% endif %}
+    </div>
     {% if lab_forecast and lab_forecast.model_predictions %}
     <div id="lab-forecast-chart" style="min-height: 500px;"></div>
     <script>
         document.addEventListener('DOMContentLoaded', function() {
             const labData = {{ lab_forecast.model_dump() | tojson }};
-            const traces = [];
 
-            // Actual values (from first model — they're all the same)
-            if (labData.model_predictions.length > 0) {
-                const first = labData.model_predictions[0];
+            // Store raw data for toggling
+            window._holdoutData = labData;
+
+            // Helper: compute cumulative sum
+            function cumsum(arr) {
+                var result = [];
+                var sum = 0;
+                for (var i = 0; i < arr.length; i++) {
+                    sum += (arr[i] !== null && arr[i] !== undefined) ? arr[i] : 0;
+                    result.push(sum);
+                }
+                return result;
+            }
+
+            window.renderHoldoutChart = function(cumulative) {
+                var traces = [];
+                var first = labData.model_predictions[0];
+
+                // Actual values
                 traces.push({
                     x: first.timestamps,
-                    y: first.actuals,
+                    y: cumulative ? cumsum(first.actuals) : first.actuals,
                     name: 'Actual',
                     mode: 'lines',
                     line: { color: '#ffffff', width: 2.5, dash: 'dot' }
                 });
-            }
 
-            // Each model's predictions
-            labData.model_predictions.forEach(function(mp) {
-                traces.push({
-                    x: mp.timestamps,
-                    y: mp.predictions,
-                    name: mp.model_name,
-                    mode: 'lines',
-                    line: { color: mp.color, width: 2 }
+                // Each model
+                labData.model_predictions.forEach(function(mp) {
+                    traces.push({
+                        x: mp.timestamps,
+                        y: cumulative ? cumsum(mp.predictions) : mp.predictions,
+                        name: mp.model_name,
+                        mode: 'lines',
+                        line: { color: mp.color, width: 2 }
+                    });
                 });
-            });
 
-            const layout = {
-                title: 'Model Comparison on Holdout (' + labData.holdout_start.split('T')[0] + ' to ' + labData.holdout_end.split('T')[0] + ')',
-                xaxis: { title: 'Time', gridcolor: '#2d3561' },
-                yaxis: { title: 'Value', gridcolor: '#2d3561' },
-                hovermode: 'x unified',
-                plot_bgcolor: '#16213e',
-                paper_bgcolor: '#1a1a2e',
-                font: { color: '#e0e0e0' },
-                legend: { orientation: 'h', y: -0.15 },
-                margin: { l: 60, r: 20, t: 50, b: 80 }
+                var layout = {
+                    title: (cumulative ? 'Cumulative ' : '') + 'Model Comparison on Holdout (' +
+                           labData.holdout_start.split('T')[0] + ' to ' + labData.holdout_end.split('T')[0] + ')',
+                    xaxis: { title: 'Time', gridcolor: '#2d3561' },
+                    yaxis: { title: cumulative ? 'Cumulative Value' : 'Value', gridcolor: '#2d3561' },
+                    hovermode: 'x unified',
+                    plot_bgcolor: '#16213e',
+                    paper_bgcolor: '#1a1a2e',
+                    font: { color: '#e0e0e0' },
+                    legend: { orientation: 'h', y: -0.15 },
+                    margin: { l: 60, r: 20, t: 50, b: 80 }
+                };
+
+                Plotly.newPlot('lab-forecast-chart', traces, layout, { responsive: true });
             };
 
-            Plotly.newPlot('lab-forecast-chart', traces, layout, { responsive: true });
+            // Initial render (interval view)
+            window.renderHoldoutChart(false);
         });
+
+        function toggleCumulative(checked) {
+            // Update toggle visual
+            var knob = document.getElementById('toggle-knob');
+            if (checked) {
+                knob.style.left = '22px';
+                knob.style.background = 'var(--accent-secondary)';
+            } else {
+                knob.style.left = '2px';
+                knob.style.background = 'var(--text-secondary)';
+            }
+            // Re-render chart
+            if (window.renderHoldoutChart) {
+                window.renderHoldoutChart(checked);
+            }
+        }
     </script>
     {% else %}
     <div class="empty-state">
