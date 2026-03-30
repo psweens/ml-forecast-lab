@@ -314,8 +314,9 @@ class MLForecastLabApp:
             if not cached_df.empty:
                 # Rename 'y' back to 'value' for consistency
                 cached_df = cached_df.rename(columns={"y": "value"})
-                # Filter to requested time window
-                cached_df = cached_df[cached_df["ds"] >= start]
+                # Ensure tz-naive for comparison (SQLite stores naive, start is tz-aware)
+                start_naive = start.replace(tzinfo=None)
+                cached_df = cached_df[cached_df["ds"] >= start_naive]
                 if len(cached_df) > 0:
                     df = cached_df
                     logger.info(
@@ -326,6 +327,9 @@ class MLForecastLabApp:
         if len(df) > 0:
             # Only fetch records newer than our latest cached record
             last_cached = df["ds"].max()
+            # Ensure tz-aware for HA API
+            if hasattr(last_cached, 'tzinfo') and last_cached.tzinfo is None:
+                last_cached = last_cached.tz_localize("UTC")
             fetch_start = last_cached
         else:
             fetch_start = start
