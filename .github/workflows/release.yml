@@ -32,36 +32,18 @@ jobs:
           fi
           echo "Version verified: $TAG_VERSION"
 
-      - name: Generate changelog from commits
-        id: changelog
+      - name: Extract release notes from tag annotation
         run: |
-          # Get commits since last tag
-          PREV_TAG=$(git tag --sort=-version:refname | head -2 | tail -1)
-          if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "v${{ steps.version.outputs.version }}" ]; then
-            COMMITS=$(git log --oneline --no-merges HEAD~20..HEAD)
-          else
-            COMMITS=$(git log --oneline --no-merges ${PREV_TAG}..HEAD)
-          fi
-
-          # Write to file for the release body
-          {
-            echo "## What's Changed"
-            echo ""
-            echo "$COMMITS" | while read line; do
-              echo "- $line"
-            done
-            echo ""
-            echo "---"
-            echo "*Full changelog: ${PREV_TAG:-initial}...v${{ steps.version.outputs.version }}*"
-          } > CHANGELOG.md
-
-          cat CHANGELOG.md
+          # Use the tag annotation message as release notes
+          # (written by us with proper formatting at tag time)
+          git tag -l --format='%(contents)' "v${{ steps.version.outputs.version }}" > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: "v${{ steps.version.outputs.version }}"
-          body_path: CHANGELOG.md
+          body_path: RELEASE_NOTES.md
           draft: false
           prerelease: ${{ contains(steps.version.outputs.version, 'rc') || contains(steps.version.outputs.version, 'beta') }}
         env:
