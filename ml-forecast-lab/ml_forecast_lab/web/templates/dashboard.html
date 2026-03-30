@@ -51,8 +51,8 @@
 
                 {% if exp.best_model %}
                 <div class="card-field">
-                    <span class="field-label">Best Model</span>
-                    <span class="field-value">{{ exp.best_model }}</span>
+                    <span class="field-label">{% if exp.mode == 'production' %}Production Model{% else %}Best Model{% endif %}</span>
+                    <span class="field-value" style="color: var(--accent-secondary); font-weight: 600;">{{ exp.best_model }}</span>
                 </div>
                 {% endif %}
 
@@ -68,22 +68,32 @@
                 {% if exp.last_benchmark_timestamp %}
                 <div class="card-field">
                     <span class="field-label">Last Run</span>
-                    <span class="field-value timestamp">{{ exp.last_benchmark_timestamp }}</span>
+                    <span class="field-value timestamp" data-ts="{{ exp.last_benchmark_timestamp }}">{{ exp.last_benchmark_timestamp[:19] }}</span>
                 </div>
                 {% endif %}
 
-                {% if exp.next_update_in_seconds %}
+                {% if exp.next_update_in_seconds is not none %}
                 <div class="card-field">
                     <span class="field-label">Next Update</span>
-                    <span class="field-value">{{ exp.next_update_in_seconds }}s</span>
+                    <span class="field-value next-update" data-seconds="{{ exp.next_update_in_seconds }}">
+                        {% set s = exp.next_update_in_seconds %}
+                        {% if s >= 3600 %}{{ (s // 3600) }}h {{ ((s % 3600) // 60) }}m
+                        {% elif s >= 60 %}{{ (s // 60) }}m {{ (s % 60) }}s
+                        {% else %}{{ s }}s{% endif %}
+                    </span>
                 </div>
                 {% endif %}
             </div>
 
-            <div class="card-footer">
+            <div class="card-footer" style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
                 <a href="{{ base_path | default('') }}/experiment/{{ exp.name }}" class="btn btn-secondary">
                     → View Details
                 </a>
+                <button class="btn {% if exp.mode == 'lab' %}btn-success{% else %}btn-primary{% endif %}"
+                        style="font-size: 0.85rem; padding: 0.4rem 1rem;"
+                        onclick="toggleMode('{{ exp.name }}', this)">
+                    {% if exp.mode == 'lab' %}⚡ Switch to Production{% else %}🔬 Switch to Lab{% endif %}
+                </button>
             </div>
         </div>
         {% endfor %}
@@ -98,9 +108,39 @@
 
 {% block scripts %}
 <script>
-    // Auto-refresh dashboard every 30 seconds
+    // Toggle mode via API
+    function toggleMode(name, btn) {
+        btn.disabled = true;
+        btn.textContent = '⏳ Switching...';
+        fetch(BASE_PATH + '/experiment/' + name + '/toggle-mode', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                location.reload();
+            })
+            .catch(err => {
+                alert('Failed to toggle mode: ' + err);
+                btn.disabled = false;
+            });
+    }
+
+    // Live countdown timer
+    document.querySelectorAll('.next-update').forEach(function(el) {
+        var seconds = parseInt(el.dataset.seconds);
+        if (isNaN(seconds)) return;
+        setInterval(function() {
+            seconds = Math.max(0, seconds - 1);
+            var h = Math.floor(seconds / 3600);
+            var m = Math.floor((seconds % 3600) / 60);
+            var s = seconds % 60;
+            if (h > 0) el.textContent = h + 'h ' + m + 'm';
+            else if (m > 0) el.textContent = m + 'm ' + s + 's';
+            else el.textContent = s + 's';
+        }, 1000);
+    });
+
+    // Auto-refresh dashboard every 60 seconds
     setInterval(function() {
         location.reload();
-    }, 30000);
+    }, 60000);
 </script>
 {% endblock %}

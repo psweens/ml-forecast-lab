@@ -325,7 +325,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         exp_status.best_model = model_name
         exp_status.mode = "production"
 
-        # Mark all models as not production, then mark selected one as production
+        # Mark all models as not production, then mark selected
         if benchmark_result:
             for model in benchmark_result.models:
                 model.is_production = model.name == model_name
@@ -335,6 +335,27 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "message": f"Model {model_name} promoted to production",
                 "experiment": name,
                 "model": model_name,
+            }
+        )
+
+    @app.post("/experiment/{name}/toggle-mode")
+    async def toggle_mode(name: str):
+        """
+        Toggle experiment between lab and production mode.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        exp_status = app.state.appstate.experiment_statuses[name]
+        old_mode = exp_status.mode
+        new_mode = "production" if old_mode == "lab" else "lab"
+        exp_status.mode = new_mode
+
+        return JSONResponse(
+            content={
+                "message": f"Switched {name} to {new_mode} mode",
+                "experiment": name,
+                "mode": new_mode,
             }
         )
 
