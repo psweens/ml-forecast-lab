@@ -112,10 +112,11 @@
     .info-tip { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
         border-radius: 50%; background: rgba(0,212,255,0.15); color: var(--accent-secondary); font-size: 0.7rem;
         font-weight: 700; cursor: help; margin-left: 0.4rem; position: relative; vertical-align: middle; }
-    .info-tip:hover::after { content: attr(data-tip); position: absolute; bottom: 130%; left: 50%; transform: translateX(-50%);
-        background: var(--bg-tertiary); color: var(--text-primary); padding: 0.5rem 0.75rem; border-radius: 0.4rem;
-        font-size: 0.78rem; font-weight: 400; white-space: normal; width: max-content; max-width: 300px;
-        border: 1px solid var(--border); box-shadow: 0 4px 12px rgba(0,0,0,0.4); z-index: 200; line-height: 1.4; }
+    .info-tip .tip-text { display: none; position: fixed; background: var(--bg-tertiary); color: var(--text-primary);
+        padding: 0.75rem 1rem; border-radius: 0.5rem; font-size: 0.82rem; font-weight: 400; white-space: normal;
+        width: max-content; max-width: 320px; border: 1px solid var(--accent-secondary);
+        box-shadow: 0 8px 24px rgba(0,0,0,0.5); z-index: 9999; line-height: 1.5; pointer-events: none; }
+    .info-tip:hover .tip-text { display: block; }
     :focus-visible { outline: 2px solid var(--accent-secondary); outline-offset: 2px; }
     </style>
     <!-- HTMX for interactive updates -->
@@ -276,6 +277,23 @@
                 Plotly.newPlot(elementId, [trace], layout, config);
             }
         };
+    </script>
+
+    <script>
+    // Position tooltips near the ? icon using fixed positioning
+    document.querySelectorAll('.info-tip').forEach(function(tip) {
+        tip.addEventListener('mouseenter', function(e) {
+            var text = tip.querySelector('.tip-text');
+            if (!text) return;
+            var rect = tip.getBoundingClientRect();
+            text.style.left = Math.min(rect.left, window.innerWidth - 340) + 'px';
+            text.style.top = (rect.top - text.offsetHeight - 8) + 'px';
+            // If it would go above viewport, show below instead
+            if (rect.top - text.offsetHeight - 8 < 0) {
+                text.style.top = (rect.bottom + 8) + 'px';
+            }
+        });
+    });
     </script>
 
     {% block scripts %}{% endblock %}

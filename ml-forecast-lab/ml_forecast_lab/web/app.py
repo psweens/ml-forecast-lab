@@ -461,10 +461,18 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         }
 
         models_list = [
-            {"name": "lightgbm", "display_name": "LightGBM", "description": "Gradient boosting for fast, accurate tabular predictions"},
-            {"name": "xgboost", "display_name": "XGBoost", "description": "Extreme gradient boosting with regularisation"},
-            {"name": "lstm", "display_name": "LSTM", "description": "Long short-term memory recurrent neural network"},
-            {"name": "cnn", "display_name": "CNN", "description": "1D convolutional neural network for sequence patterns"},
+            {"name": "lightgbm", "display_name": "LightGBM", "model_type": "Tree",
+             "description": "Gradient boosting framework optimised for speed and memory efficiency. Builds trees leaf-wise for faster convergence.",
+             "speed": "⚡ Very Fast (~0.5s/fold)", "hardware_accel": "No (CPU only)", "best_for": "Default choice — fast and accurate"},
+            {"name": "xgboost", "display_name": "XGBoost", "model_type": "Tree",
+             "description": "Extreme gradient boosting with L1/L2 regularisation. Builds trees level-wise with robust handling of missing values.",
+             "speed": "⚡ Fast (~1s/fold)", "hardware_accel": "No (CPU only)", "best_for": "When LightGBM overfits"},
+            {"name": "lstm", "display_name": "LSTM", "model_type": "Neural",
+             "description": "Long short-term memory network with gated cells for learning temporal dependencies. Pure NumPy implementation.",
+             "speed": "🐢 Slow (~30s/fold)", "hardware_accel": "Yes (Hailo NPU)", "best_for": "Complex temporal patterns"},
+            {"name": "cnn", "display_name": "CNN", "model_type": "Neural",
+             "description": "1D convolutional network that detects local patterns in sequences using sliding filters. Pure NumPy implementation.",
+             "speed": "🐢 Moderate (~6s/fold)", "hardware_accel": "Yes (Hailo NPU)", "best_for": "Periodic/seasonal signals"},
         ]
 
         return templates.TemplateResponse(

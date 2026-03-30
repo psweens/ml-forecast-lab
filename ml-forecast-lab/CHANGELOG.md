@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.6
+
+### Bug Fixes
+- Tooltips now use fixed positioning with JavaScript so they don't get
+  clipped by table headers or overflow containers
+
+### Improvements
+- Model Comparison tooltip includes guidance on Per-Fold Metrics
+- System Status model cards now show type (Tree/Neural), speed,
+  hardware acceleration support, and best-use-case for each backend
+- Footer: "Created by Dr Paul W. Sweeney"
+
 ## 0.3.5
 
 ### New Features
