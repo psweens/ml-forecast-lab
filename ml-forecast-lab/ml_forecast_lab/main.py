@@ -571,10 +571,10 @@ class MLForecastLabApp:
 
     async def _run_production_inference(self, exp_cfg):
         """
-        Run production mode: train best model on full data and publish forecasts.
+        Run production mode: train best model on full data, generate a full
+        forecast curve, and publish results as HA sensor entities.
         """
         from ml_forecast_lab.features import build_features, create_forecast_features
-        from ml_forecast_lab.publishing import publish_forecasts
 
         logger.info(f"Running production inference for {exp_cfg.name}...")
 
@@ -601,7 +601,6 @@ class MLForecastLabApp:
         # 3. Determine production model
         prod_model_name = exp_cfg.production_model
         if not prod_model_name:
-            # Try to get best model from last benchmark
             if self.web_app:
                 bench = self.web_app.state.appstate.benchmark_results.get(
                     exp_cfg.name
@@ -615,7 +614,7 @@ class MLForecastLabApp:
                 f"No production model set, defaulting to {prod_model_name}"
             )
 
-        # 4. Create and train model on full data (in thread pool)
+        # 4. Train model on full data (in thread pool)
         model = self.model_registry.create(prod_model_name)
         logger.info(f"Training {prod_model_name} on {len(X)} samples...")
         train_start = time.time()
@@ -625,21 +624,28 @@ class MLForecastLabApp:
         train_time = time.time() - train_start
         logger.info(f"Training completed in {train_time:.1f}s")
 
-        # 5. Create forecast features for future horizons
-        n_lags = 12  # Must match build_features default
+        # 5. Generate full forecast curve at regular intervals
+        n_lags = 12
         last_ts = combined.index[-1]
         lag_values = y[-n_lags:]
+        future_periods = getattr(exp_cfg, 'future_periods', 48)
+
+        # Build future timestamps at regular intervals
+        future_minutes = [
+            exp_cfg.interval_minutes * (i + 1)
+            for i in range(future_periods)
+        ]
 
         forecast_features = create_forecast_features(
             last_timestamp=last_ts,
             interval_minutes=exp_cfg.interval_minutes,
-            horizons_minutes=exp_cfg.horizons_minutes,
+            horizons_minutes=future_minutes,
             n_lags=n_lags,
             lag_values=lag_values,
             country=exp_cfg.country,
         )
 
-        # Align forecast feature columns to training columns
+        # Align columns to training features
         for col in feature_cols:
             if col not in forecast_features.columns:
                 forecast_features[col] = 0.0
@@ -648,37 +654,112 @@ class MLForecastLabApp:
         X_forecast = forecast_features.values.astype(np.float32)
         X_forecast = np.nan_to_num(X_forecast, nan=0.0)
 
-        # 6. Predict
-        y_pred = model.predict(X_forecast)
+        # 6. Predict full curve (in thread pool)
+        def _predict():
+            return model.predict(X_forecast)
+
+        y_pred = await asyncio.get_event_loop().run_in_executor(
+            None, _predict
+        )
+        if y_pred.ndim > 1:
+            y_pred = y_pred.ravel()
+
         logger.info(
-            f"Forecast generated: {len(y_pred)} points, "
-            f"range [{y_pred.min():.2f}, {y_pred.max():.2f}]"
+            f"Forecast curve: {len(y_pred)} points over "
+            f"{future_periods * exp_cfg.interval_minutes / 60:.0f}h, "
+            f"range [{y_pred.min():.3f}, {y_pred.max():.3f}]"
         )
 
-        # 7. Build forecast DataFrame for publishing
         ds_future = forecast_features.index
-        yhat_interval = pd.DataFrame({
-            "ds": ds_future,
-            "yhat": y_pred,
-        })
+        publish_name = exp_cfg.publish_name or exp_cfg.name
+        prefix = exp_cfg.publish_prefix
+        units = exp_cfg.units or ""
 
-        # 8. Publish to Home Assistant
-        exp_cfg_dict = dataclasses.asdict(exp_cfg)
-        success = await publish_forecasts(
-            experiment_cfg=exp_cfg_dict,
-            iface=self.ha_interface,
-            app_config={},
-            ds_future=ds_future,
-            yhat_interval=yhat_interval,
-            yhat_level=0.95,
+        # 7. Publish main forecast sensor with full curve in attributes
+        forecast_list = [
+            {"datetime": ts.isoformat(), "value": round(float(val), 4)}
+            for ts, val in zip(ds_future, y_pred)
+        ]
+
+        # Recent actuals for context (last 24h)
+        recent_n = min(int(24 * 60 / exp_cfg.interval_minutes), len(combined))
+        recent_actuals = [
+            {"datetime": ts.isoformat(), "value": round(float(val), 4)}
+            for ts, val in zip(
+                combined.index[-recent_n:],
+                combined["target"].values[-recent_n:],
+            )
+        ]
+
+        base_entity = f"sensor.{prefix}{publish_name}"
+        next_val = round(float(y_pred[0]), 4)
+
+        await self.ha_interface.set_state(
+            f"{base_entity}_forecast",
+            str(next_val),
+            attributes={
+                "friendly_name": f"{publish_name} Forecast",
+                "unit_of_measurement": units,
+                "icon": "mdi:chart-timeline-variant-shimmer",
+                "device_class": "power_factor" if units == "%" else None,
+                "state_class": "measurement",
+                "model": prod_model_name,
+                "train_time_seconds": round(train_time, 1),
+                "forecast_periods": future_periods,
+                "interval_minutes": exp_cfg.interval_minutes,
+                "last_trained": datetime.utcnow().isoformat(),
+                "forecast": forecast_list,
+                "recent_actuals": recent_actuals,
+            },
+        )
+        logger.info(f"Published forecast curve to {base_entity}_forecast")
+
+        # 8. Publish per-horizon scalar sensors
+        for horizon_mins in exp_cfg.horizons_minutes:
+            # Find the forecast point closest to this horizon
+            target_ts = last_ts + pd.Timedelta(minutes=horizon_mins)
+            idx = (ds_future - target_ts).abs().argmin()
+            horizon_val = round(float(y_pred[idx]), 4)
+
+            # Format horizon label
+            if horizon_mins >= 1440:
+                h_label = f"{horizon_mins // 1440}d"
+            elif horizon_mins >= 60:
+                h_label = f"{horizon_mins // 60}h"
+            else:
+                h_label = f"{horizon_mins}m"
+
+            await self.ha_interface.set_state(
+                f"{base_entity}_{h_label}",
+                str(horizon_val),
+                attributes={
+                    "friendly_name": f"{publish_name} +{h_label}",
+                    "unit_of_measurement": units,
+                    "icon": "mdi:clock-fast",
+                    "horizon_minutes": horizon_mins,
+                    "forecast_timestamp": ds_future[idx].isoformat(),
+                    "model": prod_model_name,
+                },
+            )
+
+        logger.info(
+            f"Published {len(exp_cfg.horizons_minutes)} horizon sensors "
+            f"for {exp_cfg.name}"
         )
 
-        if success:
-            logger.info(f"Production forecasts published for {exp_cfg.name}")
-        else:
-            logger.warning(
-                f"Some forecast publishes failed for {exp_cfg.name}"
+        # 9. Update web app status
+        if self.web_app:
+            status = self.web_app.state.appstate.experiment_statuses.get(
+                exp_cfg.name
             )
+            if status:
+                status.best_model = prod_model_name
+                status.mode = "production"
+
+        logger.info(
+            f"Production inference complete for {exp_cfg.name}: "
+            f"model={prod_model_name}, {len(y_pred)} forecast points"
+        )
 
     async def _run_update_cycle(self, next_update: datetime):
         """
