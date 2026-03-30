@@ -66,9 +66,9 @@ class CNNModel(ForecastModel):
         n_layers: int = 3,
         dilation_base: int = 2,
         learning_rate: float = 0.001,
-        epochs: int = 50,
+        epochs: int = 100,
         batch_size: int = 64,
-        patience: int = 8,
+        patience: int = 15,
         dropout: float = 0.1,
     ) -> None:
         """Initialise CNN model."""

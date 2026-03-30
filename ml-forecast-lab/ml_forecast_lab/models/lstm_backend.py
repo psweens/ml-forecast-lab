@@ -65,9 +65,9 @@ class LSTMModel(ForecastModel):
         num_layers: int = 1,
         dropout: float = 0.1,
         learning_rate: float = 0.001,
-        epochs: int = 50,
+        epochs: int = 100,
         batch_size: int = 64,
-        patience: int = 8,
+        patience: int = 15,
         sequence_length: Optional[int] = None,
     ) -> None:
         """Initialise LSTM model."""
