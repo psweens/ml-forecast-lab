@@ -682,9 +682,62 @@ class MLForecastLabApp:
                     status="running",
                 )
 
-        # Final ranking
-        best_model_name = sorted_models[0][0] if sorted_models else None
-        best_metric_value = sorted_models[0][1] if sorted_models else np.nan
+        # Final ranking by mean rank across folds (Demšar 2006)
+        higher_is_better = runner.production_metric in {'r_squared', 'coverage'}
+        model_names = list(completed_models.keys())
+        n_folds_actual = max(
+            len(mr.fold_metrics) for mr in completed_models.values()
+        ) if completed_models else 0
+
+        fold_ranks = {name: [] for name in model_names}
+        for fold_idx in range(n_folds_actual):
+            fold_values = {}
+            for name in model_names:
+                mr = completed_models[name]
+                if fold_idx < len(mr.fold_metrics) and mr.fold_metrics[fold_idx]:
+                    fold_values[name] = mr.fold_metrics[fold_idx].get(
+                        runner.production_metric,
+                        np.inf if not higher_is_better else -np.inf,
+                    )
+                else:
+                    fold_values[name] = np.inf if not higher_is_better else -np.inf
+            sorted_fold = sorted(fold_values.items(), key=lambda x: x[1], reverse=higher_is_better)
+            for rank, (name, _) in enumerate(sorted_fold):
+                fold_ranks[name].append(rank + 1)
+
+        mean_ranks = {
+            name: float(np.mean(ranks)) if ranks else float('inf')
+            for name, ranks in fold_ranks.items()
+        }
+        for name, mean_rank in mean_ranks.items():
+            completed_models[name].metrics['mean_rank'] = mean_rank
+
+        sorted_by_mean_rank = sorted(mean_ranks.items(), key=lambda x: x[1])
+        rankings = {name: rank + 1 for rank, (name, _) in enumerate(sorted_by_mean_rank)}
+        best_model_name = sorted_by_mean_rank[0][0] if sorted_by_mean_rank else None
+        best_metric_value = completed_models[best_model_name].metrics.get(
+            runner.production_metric, np.nan
+        ) if best_model_name else np.nan
+
+        # Log final rankings with fold detail
+        logger.info("")
+        logger.info("  Final rankings (by mean rank across folds):")
+        for name, _ in sorted_by_mean_rank:
+            mr = completed_models[name]
+            logger.info(
+                f"    #{rankings[name]} {name}: "
+                f"{runner.production_metric}={mr.metrics.get(runner.production_metric, np.nan):.4f}, "
+                f"mean_rank={mean_ranks[name]:.2f}, "
+                f"fold_ranks={fold_ranks[name]}"
+            )
+
+        # Update web UI with final mean-rank-based rankings
+        if self.web_app:
+            self._update_web_benchmark(
+                exp_cfg, completed_models, rankings,
+                best_model_name,
+                status="completed",
+            )
 
         # Build a BenchmarkResult-compatible object for downstream use
         from ml_forecast_lab.benchmark.runner import BenchmarkResult as RunnerBenchmarkResult
