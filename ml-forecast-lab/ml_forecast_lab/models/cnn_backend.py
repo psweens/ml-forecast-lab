@@ -209,12 +209,13 @@ class CNNModel(ForecastModel):
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimiser, mode='min', factor=0.5, patience=self.lr_patience,
         )
-        criterion = nn.HuberLoss(reduction='none')
+        criterion = nn.HuberLoss(reduction='none', delta=0.1)
 
         # Training loop with best-model checkpointing
         best_val_loss = float("inf")
         best_state = None
         patience_counter = 0
+        prev_lr = self.learning_rate
         self._training_history = {"train_loss": [], "val_loss": []}
 
         for epoch in range(self.epochs):
@@ -253,8 +254,13 @@ class CNNModel(ForecastModel):
             self._training_history["train_loss"].append(avg_loss)
             self._training_history["val_loss"].append(val_loss)
 
-            # LR scheduler step
+            # LR scheduler step — reset early stopping if LR drops
             scheduler.step(val_loss)
+            current_lr = optimiser.param_groups[0]['lr']
+            if current_lr < prev_lr:
+                logger.info(f"LR reduced {prev_lr:.2e} → {current_lr:.2e}, resetting early stopping")
+                patience_counter = 0
+                prev_lr = current_lr
 
             # Best-model checkpoint
             if val_loss < best_val_loss:
