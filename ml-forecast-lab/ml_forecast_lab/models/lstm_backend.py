@@ -183,6 +183,7 @@ class LSTMModel(ForecastModel):
         best_state = None
         patience_counter = 0
         prev_lr = self.learning_rate
+        best_val_at_last_lr_drop = float("inf")  # Track if LR drops are helping
         self._training_history = {"train_loss": [], "val_loss": []}
 
         for epoch in range(self.epochs):
@@ -221,12 +222,26 @@ class LSTMModel(ForecastModel):
             self._training_history["train_loss"].append(avg_loss)
             self._training_history["val_loss"].append(val_loss)
 
-            # LR scheduler step — reset early stopping if LR drops
+            # LR scheduler step — only reset early stopping if previous drop helped
             scheduler.step(val_loss)
             current_lr = optimiser.param_groups[0]['lr']
             if current_lr < prev_lr:
-                logger.info(f"LR reduced {prev_lr:.2e} → {current_lr:.2e}, resetting early stopping")
-                patience_counter = 0
+                # Did loss meaningfully improve (>1% relative) since the last LR drop?
+                improved = best_val_loss < best_val_at_last_lr_drop * 0.99
+                if improved:
+                    logger.info(
+                        f"LR reduced {prev_lr:.2e} → {current_lr:.2e}, "
+                        f"loss improved {best_val_at_last_lr_drop:.6f} → {best_val_loss:.6f}, "
+                        f"resetting early stopping"
+                    )
+                    patience_counter = 0
+                else:
+                    logger.info(
+                        f"LR reduced {prev_lr:.2e} → {current_lr:.2e}, "
+                        f"loss stalled ({best_val_loss:.6f} vs {best_val_at_last_lr_drop:.6f}), "
+                        f"not resetting early stopping"
+                    )
+                best_val_at_last_lr_drop = best_val_loss
                 prev_lr = current_lr
 
             # Best-model checkpoint
