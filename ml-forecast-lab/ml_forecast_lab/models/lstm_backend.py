@@ -1,9 +1,9 @@
 """
 PyTorch LSTM forecasting model backend for ML Forecast Lab.
 
-Implements a multi-layer LSTM using PyTorch with proper autograd,
-Adam optimisation, and early stopping. Replaces the pure-NumPy
-implementation for correct gradient flow and faster training.
+Implements a multi-layer LSTM with temporal attention using PyTorch,
+Adam optimisation, ReduceLROnPlateau scheduling, best-model
+checkpointing, and early stopping.
 """
 
 import logging
@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 try:
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
@@ -31,11 +32,29 @@ except ImportError:
     )
 
 
+class _TemporalAttention(nn.Module):
+    """Learnable attention over LSTM timesteps."""
+
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.attn_proj = nn.Linear(hidden_size, hidden_size)
+        self.attn_vector = nn.Parameter(torch.randn(hidden_size))
+
+    def forward(self, lstm_out):
+        # lstm_out: (batch, seq_len, hidden_size)
+        scores = torch.tanh(self.attn_proj(lstm_out))  # (batch, seq_len, hidden)
+        scores = (scores * self.attn_vector).sum(dim=-1)  # (batch, seq_len)
+        weights = F.softmax(scores, dim=-1)  # (batch, seq_len)
+        context = (lstm_out * weights.unsqueeze(-1)).sum(dim=1)  # (batch, hidden)
+        return context
+
+
 class _LSTMNet(nn.Module):
-    """PyTorch LSTM network with dense output."""
+    """PyTorch LSTM with LayerNorm, temporal attention, and MLP head."""
 
     def __init__(self, input_size: int, hidden_size: int, num_layers: int, dropout: float):
         super().__init__()
+        self.layer_norm = nn.LayerNorm(input_size)
         self.lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
@@ -43,33 +62,41 @@ class _LSTMNet(nn.Module):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0.0,
         )
-        self.fc = nn.Linear(hidden_size, 1)
+        self.attention = _TemporalAttention(hidden_size)
+        self.head = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size // 2, 1),
+        )
 
     def forward(self, x):
         # x: (batch, seq_len, input_size)
-        lstm_out, _ = self.lstm(x)
-        # Use last timestep hidden state
-        h_last = lstm_out[:, -1, :]
-        return self.fc(h_last).squeeze(-1)
+        x = self.layer_norm(x)
+        lstm_out, _ = self.lstm(x)  # (batch, seq_len, hidden_size)
+        context = self.attention(lstm_out)  # (batch, hidden_size)
+        return self.head(context).squeeze(-1)
 
 
 class LSTMModel(ForecastModel):
     """
-    PyTorch LSTM time-series forecasting model.
+    PyTorch LSTM time-series forecasting model with temporal attention.
 
-    Uses torch.nn.LSTM with autograd for proper gradient computation,
-    Adam optimiser, and early stopping on validation loss.
+    Uses torch.nn.LSTM with autograd, temporal attention over all timesteps,
+    Adam optimiser with ReduceLROnPlateau, best-model checkpointing,
+    and early stopping on validation loss.
     """
 
     def __init__(
         self,
-        hidden_size: int = 32,
-        num_layers: int = 1,
-        dropout: float = 0.1,
+        hidden_size: int = 64,
+        num_layers: int = 2,
+        dropout: float = 0.2,
         learning_rate: float = 0.001,
         epochs: int = 100,
         batch_size: int = 64,
         patience: int = 15,
+        lr_patience: int = 7,
         sequence_length: Optional[int] = None,
     ) -> None:
         """Initialise LSTM model."""
@@ -84,6 +111,7 @@ class LSTMModel(ForecastModel):
         self.epochs = epochs
         self.batch_size = batch_size
         self.patience = patience
+        self.lr_patience = lr_patience
         self.sequence_length = sequence_length
 
         self._model: Optional[_LSTMNet] = None
@@ -104,7 +132,7 @@ class LSTMModel(ForecastModel):
         return X[:, :seq_len * n_features_per_step].reshape(n_samples, seq_len, n_features_per_step)
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray, **kwargs: Any) -> Dict[str, Any]:
-        """Train LSTM with PyTorch autograd and Adam."""
+        """Train LSTM with PyTorch autograd, attention, and best-model checkpointing."""
         self._validate_X(X_train)
         y_train = self._validate_y(y_train)
         start_time = time.time()
@@ -118,15 +146,22 @@ class LSTMModel(ForecastModel):
             X_seq = self._reshape_to_sequences(X_train)
         _, seq_len, input_size = X_seq.shape
 
-        # Extract sample weights and build time-decay weights for PyTorch
+        # Extract sample weights
         sample_weight = kwargs.get("sample_weight")
 
-        # Train/val split
+        # Middle-out validation split — val from centre so model trains on recent data
+        n_total = len(X_seq)
         val_split = kwargs.get("validation_split", 0.2)
-        n_train = int(len(X_seq) * (1 - val_split))
-        X_tr, X_val = X_seq[:n_train], X_seq[n_train:]
-        y_tr, y_val = y_train[:n_train], y_train[n_train:]
-        w_tr = sample_weight[:n_train] if sample_weight is not None else None
+        n_val = int(n_total * val_split)
+        val_start = (n_total - n_val) // 2
+
+        val_mask = np.zeros(n_total, dtype=bool)
+        val_mask[val_start:val_start + n_val] = True
+        train_mask = ~val_mask
+
+        X_tr, X_val = X_seq[train_mask], X_seq[val_mask]
+        y_tr, y_val = y_train[train_mask], y_train[val_mask]
+        w_tr = sample_weight[train_mask] if sample_weight is not None else None
 
         # Convert to tensors
         X_tr_t = torch.FloatTensor(X_tr)
@@ -138,10 +173,14 @@ class LSTMModel(ForecastModel):
         # Create model
         self._model = _LSTMNet(input_size, self.hidden_size, self.num_layers, self.dropout)
         optimiser = torch.optim.Adam(self._model.parameters(), lr=self.learning_rate)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimiser, mode='min', factor=0.5, patience=self.lr_patience,
+        )
         criterion = nn.HuberLoss(reduction='none')
 
-        # Training loop
+        # Training loop with best-model checkpointing
         best_val_loss = float("inf")
+        best_state = None
         patience_counter = 0
         self._training_history = {"train_loss": [], "val_loss": []}
 
@@ -181,18 +220,31 @@ class LSTMModel(ForecastModel):
             self._training_history["train_loss"].append(avg_loss)
             self._training_history["val_loss"].append(val_loss)
 
+            # LR scheduler step
+            scheduler.step(val_loss)
+
+            # Best-model checkpoint
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
+                best_state = deepcopy(self._model.state_dict())
                 patience_counter = 0
             else:
                 patience_counter += 1
 
             if (epoch + 1) % max(1, self.epochs // 10) == 0:
-                logger.info(f"Epoch {epoch + 1}/{self.epochs}: train_loss={avg_loss:.6f}, val_loss={val_loss:.6f}")
+                current_lr = optimiser.param_groups[0]['lr']
+                logger.info(
+                    f"Epoch {epoch + 1}/{self.epochs}: "
+                    f"train_loss={avg_loss:.6f}, val_loss={val_loss:.6f}, lr={current_lr:.2e}"
+                )
 
             if patience_counter >= self.patience:
                 logger.info(f"Early stopping at epoch {epoch + 1}")
                 break
+
+        # Restore best model
+        if best_state is not None:
+            self._model.load_state_dict(best_state)
 
         elapsed = time.time() - start_time
         self._is_fitted = True
@@ -223,7 +275,7 @@ class LSTMModel(ForecastModel):
         if not self.is_fitted or self._model is None:
             return False
         try:
-            dummy = torch.randn(1, self.sequence_length or 31, 1)
+            dummy = torch.randn(1, self.sequence_length or 48, 1)
             torch.onnx.export(self._model, dummy, path, input_names=["input"], output_names=["output"])
             logger.info(f"Exported LSTM to ONNX: {path}")
             return True
@@ -239,12 +291,13 @@ class LSTMModel(ForecastModel):
             "hidden_size": self.hidden_size, "num_layers": self.num_layers,
             "dropout": self.dropout, "learning_rate": self.learning_rate,
             "epochs": self.epochs, "batch_size": self.batch_size,
-            "patience": self.patience, "sequence_length": self.sequence_length,
+            "patience": self.patience, "lr_patience": self.lr_patience,
+            "sequence_length": self.sequence_length,
         })
 
     def set_params(self, **kwargs: Any) -> None:
         valid = {"hidden_size", "num_layers", "dropout", "learning_rate",
-                 "epochs", "batch_size", "patience", "sequence_length"}
+                 "epochs", "batch_size", "patience", "lr_patience", "sequence_length"}
         for k, v in kwargs.items():
             if k not in valid:
                 raise ValueError(f"Unknown parameter: {k}")
@@ -261,7 +314,5 @@ class LSTMModel(ForecastModel):
         """Load model state dict."""
         data = torch.load(path, map_location="cpu")
         self.set_params(**data["params"])
-        # Recreate model architecture — need to know input_size
-        # For now, defer to fit() or manual setup
         self._is_fitted = True
         logger.info(f"Loaded LSTM model from {path}")

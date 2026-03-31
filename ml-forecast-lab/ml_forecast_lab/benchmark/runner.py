@@ -337,7 +337,7 @@ class BenchmarkRunner:
                     target_col = 'target'
                     cov_cols = [c for c in df_train.columns if c not in (target_col, *feat_names[:31])]
                     if target_col in df_train.columns:
-                        window_size = min(24, len(df_train) // 3)  # 12h at 30-min
+                        window_size = min(48, len(df_train) // 3)  # 24h at 30-min
                         if window_size >= 12:
                             seq_X, seq_y = create_sliding_windows(
                                 df_train, target_col, window_size=window_size,

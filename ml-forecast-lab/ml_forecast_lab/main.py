@@ -602,7 +602,31 @@ class MLForecastLabApp:
             X = np.nan_to_num(X, nan=0.0)
             return X
 
-        # 5. Instantiate models
+        # 5. Refresh models_enabled from config (picks up UI toggle changes)
+        try:
+            import yaml as _yaml
+            import glob as _glob
+            _cfg_path = None
+            for _p in [Path("/addon_configs/ml_forecast_lab/mlfl.yaml"), Path("/config/mlfl.yaml"),
+                        Path(__file__).parent.parent / "mlfl.yaml"]:
+                if _p.exists():
+                    _cfg_path = _p
+                    break
+            for _m in _glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
+                _cfg_path = Path(_m)
+                break
+            if _cfg_path and _cfg_path.exists():
+                with open(_cfg_path, "r", encoding="utf-8") as _f:
+                    _yaml_data = _yaml.safe_load(_f)
+                for _exp in _yaml_data.get("experiments", []):
+                    if _exp.get("name") == exp_cfg.name:
+                        exp_cfg.models_enabled = _exp.get("models_enabled", exp_cfg.models_enabled)
+                        logger.debug(f"Refreshed models_enabled for {exp_cfg.name}: {exp_cfg.models_enabled}")
+                        break
+        except Exception as _e:
+            logger.debug(f"Config refresh skipped: {_e}")
+
+        # Instantiate models
         models = {}
         for model_name in exp_cfg.models_enabled:
             try:

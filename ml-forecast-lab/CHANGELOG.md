@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.3.0
+
+### New Features
+- **LSTM architecture upgrade**: 2-layer LSTM with temporal attention
+  (learnable weights across all timesteps), LayerNorm input normalisation,
+  and MLP output head (64→32→1). Replaces naive "take last hidden state"
+  approach — model now learns which timesteps matter most.
+- **CNN architecture upgrade**: 4-layer WaveNet with 32 filters,
+  dilations 1/2/4/8 (receptive field = 31 steps), learnable positional
+  pooling (replaces global average pool), LayerNorm, and MLP head.
+- **Best-model checkpointing**: both LSTM and CNN now save the best
+  model state during training and restore it after early stopping.
+  Previously used whatever state the model was in when patience ran out.
+- **ReduceLROnPlateau**: learning rate halves when validation loss
+  plateaus (patience=7), separate from early stopping (patience=15).
+- **Middle-out validation split**: validation data taken from the centre
+  of the training window instead of the tail, so the model trains on
+  both early and recent (most valuable) data.
+- **Window size 48**: restored full 24-hour daily cycle for LSTM/CNN
+  sliding windows (was reduced to 12h in v1.2.3).
+- **Model toggle UI**: toggle models on/off from the System Status page.
+  Changes save to mlfl.yaml and take effect on the next benchmark run.
+
 ## 1.2.5
 
 ### Bug Fixes

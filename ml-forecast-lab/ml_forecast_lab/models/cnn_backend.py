@@ -2,8 +2,9 @@
 PyTorch 1D CNN forecasting model backend for ML Forecast Lab.
 
 Implements a stack of 1D causal dilated convolutions (WaveNet-style)
-using PyTorch with proper autograd, residual connections, and Adam
-optimisation. Replaces the pure-NumPy implementation.
+with learnable positional pooling, using PyTorch with proper autograd,
+residual connections, ReduceLROnPlateau scheduling, best-model
+checkpointing, and early stopping.
 """
 
 import logging
@@ -65,26 +66,40 @@ class _WaveNetBlock(nn.Module):
 
 
 class _CNNNet(nn.Module):
-    """PyTorch WaveNet-style CNN with global average pooling and dense output."""
+    """PyTorch WaveNet-style CNN with LayerNorm, learnable pooling, and MLP head."""
 
-    def __init__(self, input_size: int, n_filters: int, kernel_size: int,
+    def __init__(self, input_size: int, seq_len: int, n_filters: int, kernel_size: int,
                  n_layers: int, dilation_base: int, dropout: float):
         super().__init__()
+        self.layer_norm = nn.LayerNorm(input_size)
         layers = []
         for i in range(n_layers):
             in_ch = input_size if i == 0 else n_filters
             dilation = dilation_base ** i
             layers.append(_WaveNetBlock(in_ch, n_filters, kernel_size, dilation, dropout))
         self.blocks = nn.Sequential(*layers)
-        self.fc = nn.Linear(n_filters, 1)
+
+        # Learnable positional pooling weights
+        self.pool_weights = nn.Parameter(torch.zeros(seq_len))
+
+        self.head = nn.Sequential(
+            nn.Linear(n_filters, n_filters // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(n_filters // 2, 1),
+        )
 
     def forward(self, x):
-        # x: (batch, seq_len, input_size) → need (batch, channels, seq_len)
-        x = x.permute(0, 2, 1)
-        out = self.blocks(x)
-        # Global average pooling over sequence dimension
-        pooled = out.mean(dim=2)  # (batch, n_filters)
-        return self.fc(pooled).squeeze(-1)
+        # x: (batch, seq_len, input_size)
+        x = self.layer_norm(x)
+        x = x.permute(0, 2, 1)  # → (batch, channels, seq_len)
+        out = self.blocks(x)  # (batch, n_filters, seq_len)
+
+        # Learnable weighted average pooling
+        weights = F.softmax(self.pool_weights, dim=0)  # (seq_len,)
+        pooled = (out * weights.unsqueeze(0).unsqueeze(0)).sum(dim=2)  # (batch, n_filters)
+
+        return self.head(pooled).squeeze(-1)
 
 
 class CNNModel(ForecastModel):
@@ -92,21 +107,22 @@ class CNNModel(ForecastModel):
     PyTorch 1D Dilated Causal CNN for time-series forecasting.
 
     WaveNet-style architecture with residual connections, ReLU activation,
-    dropout, and global average pooling. Uses PyTorch autograd for proper
-    gradient computation.
+    learnable positional pooling, dropout, ReduceLROnPlateau scheduling,
+    best-model checkpointing, and early stopping.
     """
 
     def __init__(
         self,
-        n_filters: int = 16,
+        n_filters: int = 32,
         kernel_size: int = 3,
-        n_layers: int = 3,
+        n_layers: int = 4,
         dilation_base: int = 2,
         learning_rate: float = 0.001,
         epochs: int = 100,
         batch_size: int = 64,
         patience: int = 15,
-        dropout: float = 0.1,
+        lr_patience: int = 7,
+        dropout: float = 0.2,
     ) -> None:
         """Initialise CNN model."""
         super().__init__()
@@ -121,6 +137,7 @@ class CNNModel(ForecastModel):
         self.epochs = epochs
         self.batch_size = batch_size
         self.patience = patience
+        self.lr_patience = lr_patience
         self.dropout = dropout
 
         self._model: Optional[_CNNNet] = None
@@ -143,7 +160,7 @@ class CNNModel(ForecastModel):
         return X[:, :seq_len * n_features_per_step].reshape(n_samples, seq_len, n_features_per_step)
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray, **kwargs: Any) -> Dict[str, Any]:
-        """Train CNN with PyTorch autograd and Adam."""
+        """Train CNN with PyTorch autograd, learnable pooling, and best-model checkpointing."""
         self._validate_X(X_train)
         y_train = self._validate_y(y_train)
         start_time = time.time()
@@ -162,12 +179,19 @@ class CNNModel(ForecastModel):
         # Extract sample weights
         sample_weight = kwargs.get("sample_weight")
 
-        # Train/val split
+        # Middle-out validation split — val from centre so model trains on recent data
+        n_total = len(X_seq)
         val_split = kwargs.get("validation_split", 0.2)
-        n_train = int(len(X_seq) * (1 - val_split))
-        X_tr, X_val = X_seq[:n_train], X_seq[n_train:]
-        y_tr, y_val = y_train[:n_train], y_train[n_train:]
-        w_tr = sample_weight[:n_train] if sample_weight is not None else None
+        n_val = int(n_total * val_split)
+        val_start = (n_total - n_val) // 2
+
+        val_mask = np.zeros(n_total, dtype=bool)
+        val_mask[val_start:val_start + n_val] = True
+        train_mask = ~val_mask
+
+        X_tr, X_val = X_seq[train_mask], X_seq[val_mask]
+        y_tr, y_val = y_train[train_mask], y_train[val_mask]
+        w_tr = sample_weight[train_mask] if sample_weight is not None else None
 
         # Convert to tensors
         X_tr_t = torch.FloatTensor(X_tr)
@@ -178,14 +202,18 @@ class CNNModel(ForecastModel):
 
         # Create model
         self._model = _CNNNet(
-            input_size, self.n_filters, self.kernel_size,
+            input_size, seq_len, self.n_filters, self.kernel_size,
             self.n_layers, self.dilation_base, self.dropout,
         )
         optimiser = torch.optim.Adam(self._model.parameters(), lr=self.learning_rate)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimiser, mode='min', factor=0.5, patience=self.lr_patience,
+        )
         criterion = nn.HuberLoss(reduction='none')
 
-        # Training loop
+        # Training loop with best-model checkpointing
         best_val_loss = float("inf")
+        best_state = None
         patience_counter = 0
         self._training_history = {"train_loss": [], "val_loss": []}
 
@@ -225,18 +253,31 @@ class CNNModel(ForecastModel):
             self._training_history["train_loss"].append(avg_loss)
             self._training_history["val_loss"].append(val_loss)
 
+            # LR scheduler step
+            scheduler.step(val_loss)
+
+            # Best-model checkpoint
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
+                best_state = deepcopy(self._model.state_dict())
                 patience_counter = 0
             else:
                 patience_counter += 1
 
             if (epoch + 1) % max(1, self.epochs // 10) == 0:
-                logger.info(f"Epoch {epoch + 1}/{self.epochs}: train_loss={avg_loss:.6f}, val_loss={val_loss:.6f}")
+                current_lr = optimiser.param_groups[0]['lr']
+                logger.info(
+                    f"Epoch {epoch + 1}/{self.epochs}: "
+                    f"train_loss={avg_loss:.6f}, val_loss={val_loss:.6f}, lr={current_lr:.2e}"
+                )
 
             if patience_counter >= self.patience:
                 logger.info(f"Early stopping at epoch {epoch + 1}")
                 break
+
+        # Restore best model
+        if best_state is not None:
+            self._model.load_state_dict(best_state)
 
         elapsed = time.time() - start_time
         self._is_fitted = True
@@ -266,7 +307,7 @@ class CNNModel(ForecastModel):
         if not self.is_fitted or self._model is None:
             return False
         try:
-            seq_len = self._sequence_length or 31
+            seq_len = self._sequence_length or 48
             input_size = self._input_size or 1
             dummy = torch.randn(1, seq_len, input_size)
             torch.onnx.export(self._model, dummy, path, input_names=["input"], output_names=["output"])
@@ -285,12 +326,13 @@ class CNNModel(ForecastModel):
             "n_layers": self.n_layers, "dilation_base": self.dilation_base,
             "learning_rate": self.learning_rate, "epochs": self.epochs,
             "batch_size": self.batch_size, "patience": self.patience,
-            "dropout": self.dropout,
+            "lr_patience": self.lr_patience, "dropout": self.dropout,
         })
 
     def set_params(self, **kwargs: Any) -> None:
         valid = {"n_filters", "kernel_size", "n_layers", "dilation_base",
-                 "learning_rate", "epochs", "batch_size", "patience", "dropout"}
+                 "learning_rate", "epochs", "batch_size", "patience",
+                 "lr_patience", "dropout"}
         for k, v in kwargs.items():
             if k not in valid:
                 raise ValueError(f"Unknown parameter: {k}")

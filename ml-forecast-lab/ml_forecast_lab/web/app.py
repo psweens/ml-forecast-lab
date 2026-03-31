@@ -557,15 +557,38 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
              "description": "Extreme gradient boosting with L1/L2 regularisation. Builds trees level-wise with robust handling of missing values.",
              "speed": "⚡ Fast (~1s/fold)", "hardware_accel": "No (CPU only)", "best_for": "When LightGBM overfits"},
             {"name": "lstm", "display_name": "LSTM", "model_type": "PyTorch",
-             "description": "Long Short-Term Memory network with gated cells for learning temporal dependencies. PyTorch implementation with autograd.",
-             "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Complex temporal patterns"},
+             "description": "2-layer LSTM with temporal attention, LayerNorm, and MLP output head. Learns which timesteps matter most for prediction.",
+             "speed": "🔶 Moderate (~10s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Complex temporal patterns"},
             {"name": "cnn", "display_name": "CNN", "model_type": "PyTorch",
-             "description": "WaveNet-style dilated causal convolutions with residual connections. PyTorch implementation with autograd.",
-             "speed": "🔶 Moderate (~6s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Periodic/seasonal signals"},
+             "description": "WaveNet-style dilated causal convolutions with learnable positional pooling and residual connections.",
+             "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Periodic/seasonal signals"},
             {"name": "neuralprophet", "display_name": "NeuralProphet", "model_type": "PyTorch",
              "description": "Facebook's neural forecasting library combining trend decomposition, automatic seasonality, and neural AR components.",
              "speed": "🔶 Moderate (~15s/fold)", "hardware_accel": "No", "best_for": "Strong seasonality + covariates"},
         ]
+
+        # Load models_enabled from config
+        models_enabled = ["lightgbm", "xgboost", "lstm", "cnn", "neuralprophet"]
+        try:
+            import glob as _glob
+            import yaml
+            config_path = None
+            for p in [Path("/addon_configs/ml_forecast_lab/mlfl.yaml"), Path("/config/mlfl.yaml")]:
+                if p.exists():
+                    config_path = p
+                    break
+            for match in _glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
+                config_path = Path(match)
+                break
+            if config_path and config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    yaml_data = yaml.safe_load(f)
+                # Extract models_enabled from the first experiment
+                exps = yaml_data.get("experiments", [])
+                if exps and isinstance(exps, list) and len(exps) > 0:
+                    models_enabled = exps[0].get("models_enabled", models_enabled)
+        except Exception:
+            pass
 
         return templates.TemplateResponse(
             request=request,
@@ -578,8 +601,65 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "health": health,
                 "experiments": experiments,
                 "models": models_list,
+                "models_enabled": models_enabled,
             },
         )
+
+    @app.post("/api/models/toggle")
+    async def toggle_model(request: Request):
+        """
+        Toggle a model on/off in the config. Updates models_enabled in mlfl.yaml.
+        Body: {"model_name": "lstm", "enabled": true}
+        """
+        import yaml
+        import glob as _glob
+
+        try:
+            data = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        model_name = data.get("model_name")
+        enabled = data.get("enabled", True)
+
+        if not model_name:
+            return JSONResponse(content={"success": False, "error": "model_name required"})
+
+        # Find config file
+        config_path = None
+        for p in [Path("/addon_configs/ml_forecast_lab/mlfl.yaml"), Path("/config/mlfl.yaml")]:
+            if p.exists():
+                config_path = p
+                break
+        for match in _glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
+            config_path = Path(match)
+            break
+
+        if not config_path or not config_path.exists():
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                yaml_data = yaml.safe_load(f)
+
+            # Update models_enabled in all experiments
+            for exp in yaml_data.get("experiments", []):
+                models = exp.get("models_enabled", [])
+                if enabled and model_name not in models:
+                    models.append(model_name)
+                elif not enabled and model_name in models:
+                    models.remove(model_name)
+                exp["models_enabled"] = models
+
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+
+            logger.info(f"Model {model_name} {'enabled' if enabled else 'disabled'}")
+            return JSONResponse(content={"success": True})
+
+        except Exception as e:
+            logger.error(f"Failed to toggle model: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.get("/settings", response_class=Response)
     async def settings_page(request: Request):
