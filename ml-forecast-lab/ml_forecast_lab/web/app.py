@@ -44,6 +44,7 @@ class ModelResult(BaseModel):
     mape: MetricValue
     train_time_seconds: float
     rank: int
+    mean_rank: float = 0.0
     is_production: bool = False
     fold_results: Optional[List[Dict[str, float]]] = None
 

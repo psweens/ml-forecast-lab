@@ -516,6 +516,7 @@ class MLForecastLabApp:
                 ),
                 train_time_seconds=runner_model_result.mean_train_time,
                 rank=rank,
+                mean_rank=runner_model_result.metrics.get("mean_rank", 0.0),
                 is_production=(model_name == best_model_name),
                 fold_results=[fm for fm in fold_metrics_list if fm],
             ))

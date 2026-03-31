@@ -138,6 +138,7 @@ class BenchmarkResult:
             rows.append({
                 'model': model_name,
                 'rank': rank,
+                'mean_rank': result.metrics.get('mean_rank', np.nan),
                 'metric_name': self.metric_used,
                 'metric_mean': metric_mean,
                 'metric_std': metric_std,
@@ -477,35 +478,69 @@ class BenchmarkRunner:
                 logger.error(f'Benchmark failed for model {model_name}: {e}')
                 result.model_results[model_name] = ModelResult(model_name=model_name)
 
-        # Rank models
-        metric_values = {
-            name: mr.metrics.get(self.production_metric, np.inf)
-            for name, mr in result.model_results.items()
+        # Rank models by mean rank across folds (Demšar 2006)
+        # Within each fold, rank models by production metric, then average ranks
+        higher_is_better = self.production_metric in {'r_squared', 'coverage'}
+        model_names = list(result.model_results.keys())
+        n_folds = max(
+            len(mr.fold_metrics) for mr in result.model_results.values()
+        ) if result.model_results else 0
+
+        # Compute per-fold ranks
+        fold_ranks = {name: [] for name in model_names}
+        for fold_idx in range(n_folds):
+            fold_values = {}
+            for name in model_names:
+                mr = result.model_results[name]
+                if fold_idx < len(mr.fold_metrics) and mr.fold_metrics[fold_idx]:
+                    fold_values[name] = mr.fold_metrics[fold_idx].get(
+                        self.production_metric, np.inf if not higher_is_better else -np.inf
+                    )
+                else:
+                    fold_values[name] = np.inf if not higher_is_better else -np.inf
+
+            sorted_fold = sorted(
+                fold_values.items(),
+                key=lambda x: x[1],
+                reverse=higher_is_better,
+            )
+            for rank, (name, _) in enumerate(sorted_fold):
+                fold_ranks[name].append(rank + 1)
+
+        # Mean rank per model
+        mean_ranks = {
+            name: float(np.mean(ranks)) if ranks else float('inf')
+            for name, ranks in fold_ranks.items()
         }
 
-        # For metrics where lower is better (MAE, RMSE, MAPE, MASE)
-        # For metrics where higher is better (R², coverage)
-        higher_is_better = self.production_metric in {'r_squared', 'coverage'}
+        # Store mean_rank in ModelResult.metrics for UI access
+        for name, mean_rank in mean_ranks.items():
+            result.model_results[name].metrics['mean_rank'] = mean_rank
 
-        if higher_is_better:
-            sorted_models = sorted(
-                metric_values.items(), key=lambda x: x[1], reverse=True
-            )
-        else:
-            sorted_models = sorted(
-                metric_values.items(), key=lambda x: x[1]
-            )
-
+        # Final ranking: sort by mean rank (lower = better)
+        sorted_models = sorted(mean_ranks.items(), key=lambda x: x[1])
         result.rankings = {name: rank + 1 for rank, (name, _) in enumerate(sorted_models)}
 
         if sorted_models:
             result.best_model = sorted_models[0][0]
-            result.best_metric_value = sorted_models[0][1]
+            result.best_metric_value = result.model_results[sorted_models[0][0]].metrics.get(
+                self.production_metric, np.nan
+            )
 
         logger.info(
             f'Benchmark complete. Best model: {result.best_model} '
-            f'({self.production_metric}={result.best_metric_value:.4f})'
+            f'({self.production_metric}={result.best_metric_value:.4f}, '
+            f'mean_rank={mean_ranks.get(result.best_model, 0):.1f})'
         )
+        for name in sorted_models:
+            model_name = name[0]
+            mr = result.model_results[model_name]
+            logger.info(
+                f'  #{result.rankings[model_name]} {model_name}: '
+                f'{self.production_metric}={mr.metrics.get(self.production_metric, np.nan):.4f}, '
+                f'mean_rank={mean_ranks[model_name]:.2f}, '
+                f'fold_ranks={fold_ranks[model_name]}'
+            )
 
         return result
 

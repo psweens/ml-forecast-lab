@@ -39,7 +39,7 @@
 {% if benchmark_result %}
 <!-- Model Comparison Table -->
 <section class="section">
-    <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Each model is trained and evaluated using walk-forward cross-validation across multiple time folds. Lower MAE and RMSE indicate better accuracy. The rank is determined by the production metric (MAE by default). The best model is highlighted in green. Expand 'Per-Fold Metrics' below to see how each model performed on individual CV folds — consistent performance across folds indicates a robust model.</span></span></h2>
+    <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Models are ranked by mean rank across CV folds (Demšar 2006). Within each fold, models are ranked by MAE; the average of these per-fold ranks determines the final ranking. This rewards consistency — a model that reliably places 1st or 2nd beats one that's sometimes 1st but sometimes last.</span></span></h2>
     <div class="table-container">
         <table class="metrics-table">
             <thead>
@@ -49,6 +49,7 @@
                     <th>RMSE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Root Mean Square Error — penalises large errors more heavily than MAE. Lower is better.</span></span></th>
                     <th>MAPE <span class="info-tip">?<span class="tip-text">Mean Absolute Percentage Error — error as a percentage of actual values. Lower is better. Can be misleading when actual values are near zero.</span></span></th>
                     <th>Train Time <span class="info-tip">?<span class="tip-text">Average wall-clock training time per CV fold in seconds.</span></span></th>
+                    <th>Mean Rank <span class="info-tip">?<span class="tip-text">Average rank across CV folds (1.0 = ranked 1st in every fold). Lower is better. A model with mean rank 1.4 was typically 1st or 2nd across folds, indicating strong generalisability.</span></span></th>
                     <th>Rank</th>
                     <th>Production</th>
                 </tr>
@@ -69,7 +70,10 @@
                         <span class="metric-value">{{ "%.2f" | format(model.mape.mean) }}</span>
                         <span class="metric-std">± {{ "%.2f" | format(model.mape.std) }}</span>
                     </td>
-                    <td>{{ "%.2f" | format(model.train_time_seconds) }}</td>
+                    <td>{{ "%.1f" | format(model.train_time_seconds) }}s</td>
+                    <td>
+                        <span class="metric-value">{{ "%.1f" | format(model.mean_rank) }}</span>
+                    </td>
                     <td>
                         <span class="rank-badge rank-{{ model.rank }}">{{ model.rank }}</span>
                     </td>
