@@ -269,7 +269,7 @@ class MLForecastLabApp:
                     experiment_name
                 )
                 if status:
-                    status.last_benchmark_timestamp = datetime.utcnow().isoformat()
+                    status.last_benchmark_timestamp = datetime.now(timezone.utc).isoformat()
                     status.last_benchmark_status = "completed"
                     self.web_app.state.appstate.end_benchmark(experiment_name)
 
@@ -524,7 +524,7 @@ class MLForecastLabApp:
 
         web_result = WebBenchmarkResult(
             experiment_name=exp_cfg.name,
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             status=status,
             models=web_models,
             best_model_name=best_model_name,
@@ -596,10 +596,19 @@ class MLForecastLabApp:
 
         # 4. Create feature_builder callback for BenchmarkRunner
         # BenchmarkRunner splits by index and passes df subsets here.
-        # Features are already pre-built so we just extract numpy arrays.
+        # Re-compute rolling stats per fold to prevent feature leakage.
+        rolling_windows = [6, 24, 72]
+
         def feature_builder(df_sub, config, purpose="train"):
-            cols = [c for c in df_sub.columns if c != "target"]
-            X = df_sub[cols].values.astype(np.float32)
+            df_out = df_sub.copy()
+            # Re-compute rolling stats from fold-local target to avoid leakage
+            target = df_out["target"]
+            for window in rolling_windows:
+                df_out[f"y_rolling_mean_{window}"] = target.rolling(window=window).mean()
+                df_out[f"y_rolling_std_{window}"] = target.rolling(window=window).std()
+                df_out[f"y_rolling_max_{window}"] = target.rolling(window=window).max()
+            cols = [c for c in df_out.columns if c != "target"]
+            X = df_out[cols].values.astype(np.float32)
             # Replace any remaining NaN with 0 for model safety
             X = np.nan_to_num(X, nan=0.0)
             return X
@@ -654,7 +663,7 @@ class MLForecastLabApp:
             logger.info(f"")
             logger.info(f"  [{model_idx}/{len(models)}] Benchmarking: {model_name}")
 
-            model_result = await asyncio.get_event_loop().run_in_executor(
+            model_result = await asyncio.get_running_loop().run_in_executor(
                 None, runner.run_single_model, combined, model, fold_indices
             )
             completed_models[model_name] = model_result
@@ -828,7 +837,7 @@ class MLForecastLabApp:
 
             return _model_predictions, _feature_importance_list
 
-        model_predictions, feature_importance_list = await asyncio.get_event_loop().run_in_executor(
+        model_predictions, feature_importance_list = await asyncio.get_running_loop().run_in_executor(
             None, _generate_holdout_predictions
         )
 
@@ -934,13 +943,50 @@ class MLForecastLabApp:
                 f"No production model set, defaulting to {prod_model_name}"
             )
 
-        # 4. Train model on full data (in thread pool)
+        # 4. Train model on full data
         model = self.model_registry.create(prod_model_name)
+        is_neural = prod_model_name in ('lstm', 'cnn')
         logger.info(f"Training {prod_model_name} on {len(X)} samples...")
         train_start = time.time()
-        await asyncio.get_event_loop().run_in_executor(
-            None, model.fit, X, y
-        )
+
+        # Neural models need sliding window training
+        seq_kwargs = {}
+        if is_neural:
+            from ml_forecast_lab.features import create_sliding_windows
+            # Find covariate columns (same logic as runner)
+            engineered = {
+                'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
+                'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
+            }
+            engineered.update(c for c in combined.columns if c.startswith(('y_lag_', 'y_rolling_')))
+            raw_cov_cols = [c for c in combined.columns if c not in engineered and c != 'target']
+            window_size = min(48, len(combined) // 3)
+            if window_size >= 12:
+                seq_X, seq_y, channel_names = create_sliding_windows(
+                    combined.rename(columns={'target': 'target'}),
+                    'target', window_size=window_size,
+                    covariate_cols=raw_cov_cols if raw_cov_cols else None,
+                    add_temporal=True,
+                )
+                seq_kwargs['sequence_data'] = seq_X
+                seq_kwargs['channel_names'] = channel_names
+                # Use windowed data
+                y_train_seq = seq_y
+                X_train_seq = X[-len(seq_y):]
+                logger.info(
+                    f"  Sliding windows: {seq_X.shape[1]} steps × {seq_X.shape[2]} channels"
+                )
+
+                def _train_neural():
+                    model.fit(X_train_seq, y_train_seq, **seq_kwargs)
+                await asyncio.get_running_loop().run_in_executor(None, _train_neural)
+            else:
+                # Not enough data for sliding windows; fall back to flat
+                is_neural = False
+                await asyncio.get_running_loop().run_in_executor(None, model.fit, X, y)
+        else:
+            await asyncio.get_running_loop().run_in_executor(None, model.fit, X, y)
+
         train_time = time.time() - train_start
         logger.info(f"Training completed in {train_time:.1f}s")
 
@@ -950,42 +996,144 @@ class MLForecastLabApp:
         lag_values = y[-n_lags:]
         future_periods = getattr(exp_cfg, 'future_periods', 48)
 
-        # Build future timestamps at regular intervals
-        future_minutes = [
-            exp_cfg.interval_minutes * (i + 1)
-            for i in range(future_periods)
-        ]
+        if is_neural and 'sequence_data' in seq_kwargs:
+            # ----- Autoregressive sliding window prediction for LSTM/CNN -----
+            import torch
+            window_size = seq_kwargs['sequence_data'].shape[1]
+            n_channels = seq_kwargs['sequence_data'].shape[2]
 
-        forecast_features = create_forecast_features(
-            last_timestamp=last_ts,
-            interval_minutes=exp_cfg.interval_minutes,
-            horizons_minutes=future_minutes,
-            n_lags=n_lags,
-            lag_values=lag_values,
-            country=exp_cfg.country,
-        )
+            # Build initial window from last window_size rows of historical data
+            # Reconstruct with same channels as training
+            last_window_df = combined.iloc[-window_size:].copy()
+            last_window_df_raw = last_window_df[['target']].rename(columns={'target': 'target'})
+            raw_cov_cols_prod = [c for c in combined.columns if c not in engineered and c != 'target']
+            for c in raw_cov_cols_prod:
+                if c in last_window_df.columns:
+                    last_window_df_raw[c] = last_window_df[c]
 
-        # Align columns to training features
-        # For covariates, use last known value (forward-fill from training data)
-        for col in feature_cols:
-            if col not in forecast_features.columns:
-                if col in covariate_cols and col in combined.columns:
-                    # Use last known covariate value
-                    forecast_features[col] = float(combined[col].iloc[-1])
-                else:
-                    forecast_features[col] = 0.0
-        forecast_features = forecast_features[feature_cols]
+            # Add temporal features
+            idx = last_window_df.index
+            hour_rad = 2 * np.pi * idx.hour / 24
+            dow_rad = 2 * np.pi * idx.dayofweek / 7
+            last_window_df_raw['hour_sin'] = np.sin(hour_rad)
+            last_window_df_raw['hour_cos'] = np.cos(hour_rad)
+            last_window_df_raw['dow_sin'] = np.sin(dow_rad)
+            last_window_df_raw['dow_cos'] = np.cos(dow_rad)
+            last_window_df_raw['is_weekend'] = (idx.dayofweek >= 5).astype(np.float32)
 
-        X_forecast = forecast_features.values.astype(np.float32)
-        X_forecast = np.nan_to_num(X_forecast, nan=0.0)
+            window = last_window_df_raw.values.astype(np.float32)
 
-        # 6. Predict full curve (in thread pool)
-        def _predict():
-            return model.predict(X_forecast)
+            # Apply z-score standardisation
+            if model._channel_mean is not None and model._channel_std is not None:
+                window = (window - model._channel_mean) / model._channel_std
 
-        y_pred = await asyncio.get_event_loop().run_in_executor(
-            None, _predict
-        )
+            # Last known covariate values for filling future steps
+            last_covs = {}
+            for c in raw_cov_cols_prod:
+                last_covs[c] = float(combined[c].iloc[-1]) if c in combined.columns else 0.0
+
+            y_pred_list = []
+            model._model.eval()
+            with torch.no_grad():
+                for step in range(future_periods):
+                    # Predict next value from current window
+                    X_t = torch.FloatTensor(window).unsqueeze(0)  # (1, window_size, n_channels)
+                    pred_val = float(model._model(X_t).numpy().item())
+                    pred_val = max(0.0, pred_val)
+                    y_pred_list.append(pred_val)
+
+                    # Build next row for the window
+                    future_ts = last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes * (step + 1))
+                    new_row = np.zeros(n_channels, dtype=np.float32)
+                    # Channel 0: predicted target (in standardised space if applicable)
+                    if model._channel_mean is not None:
+                        new_row[0] = (pred_val - model._channel_mean[0]) / model._channel_std[0]
+                    else:
+                        new_row[0] = pred_val
+                    # Covariates (channels 1..n_cov): last known, standardised
+                    ch_idx = 1
+                    for c in raw_cov_cols_prod:
+                        val = last_covs.get(c, 0.0)
+                        if model._channel_mean is not None and ch_idx < len(model._channel_mean):
+                            new_row[ch_idx] = (val - model._channel_mean[ch_idx]) / model._channel_std[ch_idx]
+                        else:
+                            new_row[ch_idx] = val
+                        ch_idx += 1
+                    # Temporal features (standardised)
+                    hour_r = 2 * np.pi * future_ts.hour / 24
+                    dow_r = 2 * np.pi * future_ts.dayofweek / 7
+                    temporal = [np.sin(hour_r), np.cos(hour_r), np.sin(dow_r), np.cos(dow_r),
+                                float(future_ts.dayofweek >= 5)]
+                    for t_val in temporal:
+                        if model._channel_mean is not None and ch_idx < len(model._channel_mean):
+                            new_row[ch_idx] = (t_val - model._channel_mean[ch_idx]) / model._channel_std[ch_idx]
+                        else:
+                            new_row[ch_idx] = t_val
+                        ch_idx += 1
+
+                    # Shift window: drop first row, append new row
+                    window = np.vstack([window[1:], new_row.reshape(1, -1)])
+
+            y_pred = np.array(y_pred_list, dtype=np.float32)
+        else:
+            # ----- Flat feature prediction for tree models -----
+            # Build future timestamps at regular intervals
+            future_minutes = [
+                exp_cfg.interval_minutes * (i + 1)
+                for i in range(future_periods)
+            ]
+
+            forecast_features = create_forecast_features(
+                last_timestamp=last_ts,
+                interval_minutes=exp_cfg.interval_minutes,
+                horizons_minutes=future_minutes,
+                n_lags=n_lags,
+                lag_values=lag_values,
+                country=exp_cfg.country,
+            )
+
+            # Align columns to training features
+            # For covariates with role='future', attempt to fetch actual future values
+            future_cov_values = {}
+            if exp_cfg.covariates and self.covariate_resolver:
+                for cov_cfg in exp_cfg.covariates:
+                    cov_name = cov_cfg.entity.split(".")[-1]
+                    if cov_name in covariate_cols and cov_cfg.role in ('future', 'both'):
+                        try:
+                            cov_dict = {"entity_id": cov_cfg.entity, "name": cov_name}
+                            future_series = await self.covariate_resolver.fetch_future(
+                                cov_dict, forecast_features.index,
+                            )
+                            if future_series is not None and not future_series.empty:
+                                if cov_cfg.scale is not None:
+                                    future_series = future_series * cov_cfg.scale
+                                future_cov_values[cov_name] = future_series
+                                logger.debug(f"Fetched future values for {cov_name}")
+                        except Exception as e:
+                            logger.debug(f"Future fetch failed for {cov_name}: {e}")
+
+            for col in feature_cols:
+                if col not in forecast_features.columns:
+                    if col in future_cov_values:
+                        forecast_features[col] = future_cov_values[col].reindex(
+                            forecast_features.index
+                        ).ffill().bfill()
+                    elif col in covariate_cols and col in combined.columns:
+                        forecast_features[col] = float(combined[col].iloc[-1])
+                    else:
+                        forecast_features[col] = 0.0
+            forecast_features = forecast_features[feature_cols]
+
+            X_forecast = forecast_features.values.astype(np.float32)
+            X_forecast = np.nan_to_num(X_forecast, nan=0.0)
+
+            def _predict():
+                return model.predict(X_forecast)
+
+            y_pred = await asyncio.get_running_loop().run_in_executor(
+                None, _predict
+            )
+
         if y_pred.ndim > 1:
             y_pred = y_pred.ravel()
 
@@ -1032,7 +1180,7 @@ class MLForecastLabApp:
                 "train_time_seconds": round(train_time, 1),
                 "forecast_periods": future_periods,
                 "interval_minutes": exp_cfg.interval_minutes,
-                "last_trained": datetime.utcnow().isoformat(),
+                "last_trained": datetime.now(timezone.utc).isoformat(),
                 "forecast": forecast_list,
                 "recent_actuals": recent_actuals,
             },
@@ -1124,7 +1272,7 @@ class MLForecastLabApp:
 
             # Update web app state with next update time
             if self.web_app:
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc)
                 for exp_cfg in self.config.experiments:
                     status = self.web_app.state.appstate.experiment_statuses.get(
                         exp_cfg.name
@@ -1185,7 +1333,7 @@ class MLForecastLabApp:
 
             self.web_app.state.appstate.deep_analysis_results[exp_cfg.name] = DeepAnalysisResult(
                 experiment_name=exp_cfg.name,
-                timestamp=datetime.utcnow().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 status="running",
                 baseline_label="All covariates",
                 covariate_labels=covariate_labels,
@@ -1263,7 +1411,7 @@ class MLForecastLabApp:
                         rmse_val = float(np.sqrt(np.mean((y_te - y_pred_flat) ** 2)))
                         return mae_val, rmse_val
 
-                    mae_val, rmse_val = await asyncio.get_event_loop().run_in_executor(
+                    mae_val, rmse_val = await asyncio.get_running_loop().run_in_executor(
                         None, _train_and_eval
                     )
 
@@ -1381,7 +1529,7 @@ class MLForecastLabApp:
             if not self.ha_interface:
                 return
 
-            timestamp = datetime.utcnow().isoformat()
+            timestamp = datetime.now(timezone.utc).isoformat()
             logger.debug(f"Publishing heartbeat: {timestamp}")
 
             await self.ha_interface.set_state(
@@ -1416,21 +1564,21 @@ class MLForecastLabApp:
 
         # Calculate update interval — run first cycle immediately
         update_interval = self.config.update_every_minutes * 60  # Convert to seconds
-        next_update = datetime.utcnow()
+        next_update = datetime.now(timezone.utc)
 
         while self.running:
             try:
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc)
 
                 # Check if it's time for update
                 if now >= next_update and not self._update_running:
                     # Run update cycle in background so web server stays responsive
-                    next_update = datetime.utcnow() + timedelta(seconds=update_interval)
+                    next_update = datetime.now(timezone.utc) + timedelta(seconds=update_interval)
                     asyncio.create_task(self._run_update_cycle(next_update))
 
                 # Update next_update_in_seconds counters
                 if self.web_app:
-                    now = datetime.utcnow()
+                    now = datetime.now(timezone.utc)
                     for exp_cfg in self.config.experiments:
                         status = self.web_app.state.appstate.experiment_statuses.get(
                             exp_cfg.name

@@ -10,7 +10,7 @@ import logging
 import os
 import platform
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -504,7 +504,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             status="healthy",
             service="ml-forecast-lab",
             version=APP_VERSION,
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             experiments_total=len(list(experiments)),
             experiments_lab=lab_count,
             experiments_production=prod_count,

@@ -322,9 +322,10 @@ class BenchmarkRunner:
             # Get feature names from dataframe columns
             feat_names = [c for c in df_train.columns if c != 'target']
 
-            # Generate time-decay sample weights (exponential, half-life = 30% of data)
+            # Generate time-decay sample weights (exponential, half-life = 7 days)
             n_train_samples = len(y_train)
-            half_life = max(1, int(n_train_samples * 0.3))
+            interval_min = self.experiment_cfg.get('interval_minutes', 30)
+            half_life = max(1, 7 * (24 * 60 // interval_min))  # 7 days in samples
             decay_rate = np.log(2) / half_life
             sample_weights = np.exp(decay_rate * np.arange(n_train_samples))
             sample_weights = sample_weights / sample_weights.sum() * n_train_samples
@@ -397,6 +398,10 @@ class BenchmarkRunner:
                                 covariate_cols=cov_cols if cov_cols else None,
                                 add_temporal=True,
                             )
+                            # Apply same z-score standardisation as training
+                            if model._channel_mean is not None and model._channel_std is not None:
+                                seq_X_test = (seq_X_test - model._channel_mean) / model._channel_std
+
                             import torch
                             model._model.eval()
                             with torch.no_grad():

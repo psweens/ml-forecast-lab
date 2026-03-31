@@ -48,6 +48,8 @@ class HistoryDB:
         safe = re.sub(r"[^a-zA-Z0-9_]", "_", entity_id)
         # Ensure starts with letter or underscore
         safe = re.sub(r"^[0-9]", "_", safe)
+        if not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_]{0,127}', safe):
+            raise ValueError(f"Invalid table name after sanitisation: {safe!r}")
         return safe
 
     def ensure_table(self, table_name: str) -> None:

@@ -1,16 +1,17 @@
 ARG BUILD_FROM
 ARG BUILD_VERSION
-FROM ${BUILD_FROM}
 
-# Set shell
+# ===== Stage 1: Builder =====
+FROM ${BUILD_FROM} AS builder
+
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# Install Python and system dependencies for ML library compilation
+# Install build dependencies
 RUN apt-get update \
-    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
+        python3-venv \
         build-essential \
         gcc \
         g++ \
@@ -22,9 +23,29 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python dependencies
+# Install Python dependencies into a virtual environment
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
+
+# ===== Stage 2: Runtime =====
+FROM ${BUILD_FROM}
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Install only runtime dependencies (no compilers)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-venv \
+        libgomp1 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy pre-built virtualenv from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy the ML Forecast Lab package and default config
 COPY ml_forecast_lab /app/ml_forecast_lab

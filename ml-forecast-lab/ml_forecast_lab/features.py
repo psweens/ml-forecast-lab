@@ -13,29 +13,17 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Simple holiday definitions (no heavy dependencies)
-HOLIDAYS = {
-    'GB': {  # United Kingdom bank holidays (approximate)
-        (1, 1): 'New Year',
-        (4, 9): 'Easter Monday',
-        (5, 5): 'Early May Bank Holiday',
-        (5, 26): 'Spring Bank Holiday',
-        (8, 25): 'Summer Bank Holiday',
-        (12, 25): 'Christmas Day',
-        (12, 26): 'Boxing Day',
-    },
-    'US': {  # United States federal holidays
-        (1, 1): 'New Year',
-        (7, 4): 'Independence Day',
-        (11, 24): 'Thanksgiving',
-        (12, 25): 'Christmas',
-    },
-    'DE': {  # Germany
-        (1, 1): 'New Year',
-        (12, 25): 'Christmas Day',
-        (12, 26): 'Boxing Day',
-    },
-}
+# Holiday detection using the holidays library (accurate movable dates)
+try:
+    import holidays as _holidays_lib
+    _HOLIDAYS_AVAILABLE = True
+except ImportError:
+    _holidays_lib = None
+    _HOLIDAYS_AVAILABLE = False
+    logger.debug("holidays library not installed; holiday features disabled")
+
+# Cache for holiday year lookups
+_holiday_cache: dict = {}
 
 
 def is_holiday(date: pd.Timestamp, country: Optional[str]) -> bool:
@@ -56,15 +44,22 @@ def is_holiday(date: pd.Timestamp, country: Optional[str]) -> bool:
 
     Notes
     -----
-    Uses simple (month, day) matching. Does not account for movable holidays
-    like Easter (fixed to approximate date). For production use, consider
-    a dedicated library like `holidays`.
+    Uses the `holidays` library for accurate movable holiday dates.
+    Falls back gracefully if the library is not installed.
     """
-    if country is None or country not in HOLIDAYS:
+    if country is None or not _HOLIDAYS_AVAILABLE:
         return False
 
-    month_day = (date.month, date.day)
-    return month_day in HOLIDAYS[country]
+    cache_key = (country, date.year)
+    if cache_key not in _holiday_cache:
+        try:
+            _holiday_cache[cache_key] = _holidays_lib.country_holidays(
+                country, years=date.year
+            )
+        except Exception:
+            return False
+
+    return date.date() in _holiday_cache[cache_key]
 
 
 def build_features(
@@ -536,12 +531,13 @@ def create_forecast_features(
     for i, lag_val in enumerate(lag_values, start=1):
         forecast_df[f'y_lag_{i}'] = lag_val
 
-    # Rolling statistics (set to NaN; model should impute)
+    # Rolling statistics computed from available lag values
     rolling_windows = [6, 24, 72]
     for window in rolling_windows:
-        forecast_df[f'y_rolling_mean_{window}'] = np.nan
-        forecast_df[f'y_rolling_std_{window}'] = np.nan
-        forecast_df[f'y_rolling_max_{window}'] = np.nan
+        available = lag_values[-min(window, len(lag_values)):]
+        forecast_df[f'y_rolling_mean_{window}'] = float(np.mean(available))
+        forecast_df[f'y_rolling_std_{window}'] = float(np.std(available))
+        forecast_df[f'y_rolling_max_{window}'] = float(np.max(available))
 
     # Holiday indicator
     if country is not None:

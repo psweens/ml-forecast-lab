@@ -143,6 +143,8 @@ class CNNModel(ForecastModel):
         self._model: Optional[_CNNNet] = None
         self._input_size: Optional[int] = None
         self._sequence_length: Optional[int] = None
+        self._channel_mean: Optional[np.ndarray] = None
+        self._channel_std: Optional[np.ndarray] = None
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -175,6 +177,12 @@ class CNNModel(ForecastModel):
         _, seq_len, input_size = X_seq.shape
         self._input_size = input_size
         self._sequence_length = seq_len
+
+        # Per-channel z-score standardisation (fitted on training data)
+        self._channel_mean = X_seq.mean(axis=(0, 1))  # shape (n_channels,)
+        self._channel_std = X_seq.std(axis=(0, 1))     # shape (n_channels,)
+        self._channel_std[self._channel_std < 1e-8] = 1.0  # Avoid division by zero
+        X_seq = (X_seq - self._channel_mean) / self._channel_std
 
         # Extract sample weights
         sample_weight = kwargs.get("sample_weight")
@@ -368,6 +376,8 @@ class CNNModel(ForecastModel):
             "params": self.get_params(),
             "input_size": self._input_size,
             "sequence_length": self._sequence_length,
+            "channel_mean": self._channel_mean,
+            "channel_std": self._channel_std,
         }, path)
         logger.info(f"Saved CNN model to {path}")
 
@@ -377,5 +387,7 @@ class CNNModel(ForecastModel):
         self.set_params(**data["params"])
         self._input_size = data.get("input_size")
         self._sequence_length = data.get("sequence_length")
+        self._channel_mean = data.get("channel_mean")
+        self._channel_std = data.get("channel_std")
         self._is_fitted = True
         logger.info(f"Loaded CNN model from {path}")

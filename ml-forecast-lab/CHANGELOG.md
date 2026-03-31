@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.5.0
+
+### Correctness Fixes
+- **LSTM/CNN production inference**: autoregressive sliding window prediction
+  instead of flat features. Neural models now produce proper demand curves in
+  production mode.
+- **Rolling stats at inference**: computed from available lag values instead
+  of being set to NaN (which became 0 after nan_to_num).
+- **Feature leakage**: rolling statistics now recomputed per CV fold instead
+  of once on the full dataset before splitting.
+
+### Security & Robustness
+- **SQL injection**: added regex assertion after safe_table_name() sanitisation
+- **eval() replaced with asteval**: safer expression evaluation for custom metrics
+- **datetime.utcnow()**: replaced with datetime.now(timezone.utc) (5 instances)
+- **asyncio.get_event_loop()**: replaced with get_running_loop() (4 instances)
+
+### ML Methodology
+- **Per-channel z-score standardisation**: LSTM/CNN inputs now standardised
+  per channel (fitted on training data, applied to test). Persisted in save/load.
+- **Outlier clipping**: default quantile raised from 0.95 to 0.995
+- **Sample weight half-life**: fixed at 7 days instead of 30% of fold size
+- **Future covariates**: production inference uses fetch_future() for role='future'
+  covariates instead of always using last-known-value
+- **holidays library**: replaces hardcoded GB/US/DE holiday dates
+- **Box-Cox renamed to shifted_log**: honest naming (kept box_cox as alias)
+- **Deep Analysis model selection**: dropdown to select which model to analyse
+
+### Code Quality
+- **Test suite**: 7 test modules (preprocessing, features, db, config, models,
+  benchmark, metrics) with pytest fixtures
+- **Multi-stage Docker build**: separates build deps from runtime, smaller image
+- **.gitignore**: added with standard Python ignores
+- **__pycache__ cleanup**: removed from git tracking
+- **Dead code removed**: core.py, server.py, _numpy_optim.py (v1.4.1)
+- **NeuralProphet made optional**: removed from requirements.txt
+
 ## 1.3.0
 
 ### New Features

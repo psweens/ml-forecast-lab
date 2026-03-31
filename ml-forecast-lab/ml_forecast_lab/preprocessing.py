@@ -187,7 +187,7 @@ def resample_to_grid(
 
 def clip_outliers(
     series: pd.Series,
-    quantile: float = 0.95,
+    quantile: float = 0.995,
     positive_only: bool = False,
 ) -> pd.Series:
     """
@@ -435,17 +435,18 @@ def apply_transform(
         series = np.sqrt(series)
         series.attrs['transform'] = 'sqrt'
 
-    elif transform == 'box_cox':
-        # Simplified Box-Cox: shift to positive and use log
+    elif transform in ('shifted_log', 'box_cox'):
+        # Shifted log: shift to positive and use log
+        # ('box_cox' kept as alias for backward compatibility)
         min_val = series.min()
         shift = 1.0 if min_val >= 0 else abs(min_val) + 1.0
         series = np.log(series + shift)
-        series.attrs['transform'] = 'box_cox'
+        series.attrs['transform'] = 'shifted_log'
         series.attrs['transform_shift'] = shift
 
     else:
         raise ValueError(
-            f"transform must be 'log', 'sqrt', 'box_cox', or None, got {transform!r}"
+            f"transform must be 'log', 'sqrt', 'shifted_log', or None, got {transform!r}"
         )
 
     return series
@@ -485,13 +486,13 @@ def invert_transform(
     elif transform == 'sqrt':
         series = series ** 2
 
-    elif transform == 'box_cox':
+    elif transform in ('shifted_log', 'box_cox'):
         shift = series.attrs.get('transform_shift', 1.0)
         series = np.exp(series) - shift
 
     else:
         raise ValueError(
-            f"transform must be 'log', 'sqrt', 'box_cox', or None, got {transform!r}"
+            f"transform must be 'log', 'sqrt', 'shifted_log', or None, got {transform!r}"
         )
 
     return series

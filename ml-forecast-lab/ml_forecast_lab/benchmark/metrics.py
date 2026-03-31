@@ -500,13 +500,15 @@ class MetricRegistry:
         def custom_metric(y_true: np.ndarray, y_pred: np.ndarray) -> float:
             """Dynamically created custom metric function."""
             try:
-                result = eval(
-                    expression_str,
-                    {'__builtins__': {}},
-                    {'y_true': y_true, 'y_pred': y_pred, 'np': np,
-                     'float': float, 'int': int, 'abs': abs, 'sum': sum,
-                     'min': min, 'max': max, 'len': len}
-                )
+                from asteval import Interpreter
+                aeval = Interpreter(usersyms={
+                    'y_true': y_true, 'y_pred': y_pred, 'np': np,
+                    'float': float, 'int': int, 'abs': abs, 'sum': sum,
+                    'min': min, 'max': max, 'len': len,
+                })
+                result = aeval(expression_str)
+                if aeval.error:
+                    raise RuntimeError('; '.join(str(e) for e in aeval.error))
                 return float(result)
             except Exception as e:
                 logger.error(
