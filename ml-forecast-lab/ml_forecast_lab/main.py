@@ -388,8 +388,6 @@ class MLForecastLabApp:
             )
 
         # --- Resample to regular grid ---
-        # Use sum for interval data (cumulative→interval) so 30-min bins capture
-        # total demand, not the average of sub-interval increments
         resample_method = "sum" if exp_cfg.source_is_cumulative else "mean"
         series = resample_to_grid(series, freq=freq, method=resample_method)
 
