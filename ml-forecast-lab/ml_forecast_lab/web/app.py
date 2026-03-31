@@ -414,9 +414,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         )
 
     @app.post("/experiment/{name}/run-deep-analysis")
-    async def run_deep_analysis(name: str):
+    async def run_deep_analysis(name: str, request: Request):
         """
         Trigger a deep covariate analysis (async, returns 202 Accepted).
+        Body (optional): {"model": "lightgbm"} or {"model": "all"}
         """
         if name not in app.state.appstate.experiment_statuses:
             raise HTTPException(status_code=404, detail="Experiment not found")
@@ -428,16 +429,25 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 content={"error": "Deep analysis already running"},
             )
 
+        # Parse optional model selection
+        selected_model = "all"
+        try:
+            body = await request.json()
+            selected_model = body.get("model", "all")
+        except Exception:
+            pass
+
         # Trigger via callback if available
         import asyncio
         if app.state.appstate.deep_analysis_callback:
-            asyncio.create_task(app.state.appstate.deep_analysis_callback(name))
+            asyncio.create_task(app.state.appstate.deep_analysis_callback(name, selected_model))
 
         return JSONResponse(
             status_code=202,
             content={
                 "message": "Deep analysis started",
                 "experiment": name,
+                "model": selected_model,
                 "status": "running",
             },
         )

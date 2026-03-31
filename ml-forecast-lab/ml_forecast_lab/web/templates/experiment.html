@@ -26,12 +26,25 @@
             ⭐ Promote to Production
         </button>
         {% endif %}
-        <button class="btn" style="background: #9b59b6; color: white;"
-                id="deep-analysis-btn"
-                onclick="runDeepAnalysis('{{ experiment.name }}', this)"
-                {% if deep_analysis and deep_analysis.status == 'running' %}disabled{% endif %}>
-            {% if deep_analysis and deep_analysis.status == 'running' %}⏳ Analysing...{% else %}🔬 Deep Analysis{% endif %}
-        </button>
+        <div style="display: inline-flex; align-items: center; gap: 0.5rem;">
+            <select id="deep-analysis-model" class="setting-input" style="padding: 0.4rem 0.6rem; font-size: 0.9rem;">
+                {% if best_model %}
+                <option value="{{ best_model }}">{{ best_model }} (best)</option>
+                {% endif %}
+                {% for model in models %}
+                {% if model.name != best_model %}
+                <option value="{{ model.name }}">{{ model.name }}</option>
+                {% endif %}
+                {% endfor %}
+                <option value="all">All models</option>
+            </select>
+            <button class="btn" style="background: #9b59b6; color: white;"
+                    id="deep-analysis-btn"
+                    onclick="runDeepAnalysis('{{ experiment.name }}', this)"
+                    {% if deep_analysis and deep_analysis.status == 'running' %}disabled{% endif %}>
+                {% if deep_analysis and deep_analysis.status == 'running' %}⏳ Analysing...{% else %}🔬 Deep Analysis{% endif %}
+            </button>
+        </div>
     </div>
     <div id="promote-message"></div>
 </div>
@@ -451,7 +464,13 @@
     function runDeepAnalysis(name, btn) {
         btn.disabled = true;
         btn.textContent = '⏳ Analysing...';
-        fetch(BASE_PATH + '/experiment/' + name + '/run-deep-analysis', { method: 'POST' })
+        var modelSelect = document.getElementById('deep-analysis-model');
+        var selectedModel = modelSelect ? modelSelect.value : 'all';
+        fetch(BASE_PATH + '/experiment/' + name + '/run-deep-analysis', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: selectedModel })
+        })
             .then(r => r.json())
             .then(data => {
                 // Poll for completion

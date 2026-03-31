@@ -212,7 +212,7 @@ class MLForecastLabApp:
             self.server = uvicorn.Server(config)
 
             # Register deep analysis callback
-            async def _deep_analysis_trigger(experiment_name: str):
+            async def _deep_analysis_trigger(experiment_name: str, selected_model: str = "all"):
                 exp_cfg = None
                 for cfg in self.config.experiments:
                     if cfg.name == experiment_name:
@@ -220,7 +220,7 @@ class MLForecastLabApp:
                         break
                 if exp_cfg:
                     try:
-                        await self._run_deep_analysis(exp_cfg)
+                        await self._run_deep_analysis(exp_cfg, selected_model=selected_model)
                     except Exception as e:
                         logger.error(f"Deep analysis failed: {e}", exc_info=True)
 
@@ -1139,9 +1139,9 @@ class MLForecastLabApp:
         finally:
             self._update_running = False
 
-    async def _run_deep_analysis(self, exp_cfg):
+    async def _run_deep_analysis(self, exp_cfg, selected_model: str = "all"):
         """
-        Run deep covariate analysis: all models × all covariate combinations.
+        Run deep covariate analysis: selected model(s) × all covariate combinations.
 
         Tests each model with:
         1. All covariates (baseline)
@@ -1149,6 +1149,11 @@ class MLForecastLabApp:
         3. Each covariate dropped one at a time
 
         Generates recommendations based on MAE impact.
+
+        Parameters
+        ----------
+        selected_model : str
+            Model name to analyse, or 'all' for all enabled models.
         """
         from ml_forecast_lab.features import build_features
         from ml_forecast_lab.benchmark.metrics import get_metric_registry
@@ -1157,10 +1162,16 @@ class MLForecastLabApp:
             DeepAnalysisCellResult,
         )
 
+        # Determine which models to run
+        if selected_model == "all":
+            models_to_run = exp_cfg.models_enabled
+        else:
+            models_to_run = [selected_model] if selected_model in exp_cfg.models_enabled else exp_cfg.models_enabled
+
         logger.info("")
         logger.info(f"{'=' * 60}")
         logger.info(f"  DEEP ANALYSIS: {exp_cfg.name}")
-        logger.info(f"  Models: {', '.join(exp_cfg.models_enabled)}")
+        logger.info(f"  Models: {', '.join(models_to_run)}")
         logger.info(f"  Covariates: {len(exp_cfg.covariates)}")
         logger.info(f"{'=' * 60}")
 
@@ -1170,7 +1181,7 @@ class MLForecastLabApp:
             covariate_labels = ["All covariates", "No covariates"] + [
                 f"Without {name}" for name in cov_names
             ]
-            total_runs = len(exp_cfg.models_enabled) * len(covariate_labels)
+            total_runs = len(models_to_run) * len(covariate_labels)
 
             self.web_app.state.appstate.deep_analysis_results[exp_cfg.name] = DeepAnalysisResult(
                 experiment_name=exp_cfg.name,
@@ -1178,7 +1189,7 @@ class MLForecastLabApp:
                 status="running",
                 baseline_label="All covariates",
                 covariate_labels=covariate_labels,
-                model_names=exp_cfg.models_enabled,
+                model_names=models_to_run,
                 results={},
                 recommendations=[],
                 total_runs=total_runs,
@@ -1216,7 +1227,7 @@ class MLForecastLabApp:
         for config_label, cov_cols_to_use in configs:
             results[config_label] = {}
 
-            for model_name in exp_cfg.models_enabled:
+            for model_name in models_to_run:
                 try:
                     # Build combined feature matrix
                     combined = features_base.copy()
@@ -1292,7 +1303,7 @@ class MLForecastLabApp:
         no_cov = results.get("No covariates", {})
 
         # Overall covariate value
-        for model_name in exp_cfg.models_enabled:
+        for model_name in models_to_run:
             base_mae = baseline.get(model_name, DeepAnalysisCellResult(mae=np.nan, rmse=np.nan)).mae
             no_cov_mae = no_cov.get(model_name, DeepAnalysisCellResult(mae=np.nan, rmse=np.nan)).mae
             if not np.isnan(base_mae) and not np.isnan(no_cov_mae):
@@ -1316,8 +1327,8 @@ class MLForecastLabApp:
                         "color": "#b0b0b0",
                     })
 
-        # Per-covariate recommendations (using best tree model)
-        best_tree = "lightgbm" if "lightgbm" in exp_cfg.models_enabled else exp_cfg.models_enabled[0]
+        # Per-covariate recommendations (using best tree model or first selected)
+        best_tree = "lightgbm" if "lightgbm" in models_to_run else models_to_run[0]
         for cov_col in covariate_cols:
             label = f"Without {cov_col}"
             dropped = results.get(label, {})

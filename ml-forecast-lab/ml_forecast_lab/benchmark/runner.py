@@ -330,25 +330,37 @@ class BenchmarkRunner:
             sample_weights = sample_weights / sample_weights.sum() * n_train_samples
 
             # Generate sliding window sequence data for LSTM/CNN
+            # Includes target + covariates + temporal features (hour_sin/cos, dow_sin/cos, is_weekend)
             sequence_kwargs = {}
             if model.name in ('lstm', 'cnn'):
                 try:
                     from ml_forecast_lab.features import create_sliding_windows
-                    # Use target + covariate columns from the dataframe
                     target_col = 'target'
-                    cov_cols = [c for c in df_train.columns if c not in (target_col, *feat_names[:31])]
+                    # Find covariate columns: anything that's not target or an engineered feature
+                    engineered = {
+                        'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
+                        'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
+                    }
+                    engineered.update(c for c in df_train.columns if c.startswith(('y_lag_', 'y_rolling_')))
+                    cov_cols = [c for c in df_train.columns if c not in engineered and c != target_col]
                     if target_col in df_train.columns:
                         window_size = min(48, len(df_train) // 3)  # 24h at 30-min
                         if window_size >= 12:
-                            seq_X, seq_y = create_sliding_windows(
+                            seq_X, seq_y, channel_names = create_sliding_windows(
                                 df_train, target_col, window_size=window_size,
                                 covariate_cols=cov_cols if cov_cols else None,
+                                add_temporal=True,
                             )
                             sequence_kwargs['sequence_data'] = seq_X
+                            sequence_kwargs['channel_names'] = channel_names
                             # Use windowed targets for training
                             y_train = seq_y
                             X_train = X_train[-len(seq_y):]  # Align flat features
                             sample_weights = sample_weights[-len(seq_y):]
+                            logger.debug(
+                                f'Sliding windows for {model.name}: '
+                                f'{seq_X.shape[1]} steps × {seq_X.shape[2]} channels: {channel_names}'
+                            )
                 except Exception as e:
                     logger.debug(f'Sliding window creation failed: {e}')
 
@@ -373,11 +385,17 @@ class BenchmarkRunner:
                     # Create windowed test data matching training format
                     try:
                         target_col = 'target'
-                        cov_cols = [c for c in df_test.columns if c not in (target_col, *feat_names[:31])]
+                        engineered = {
+                            'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
+                            'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
+                        }
+                        engineered.update(c for c in df_test.columns if c.startswith(('y_lag_', 'y_rolling_')))
+                        cov_cols = [c for c in df_test.columns if c not in engineered and c != target_col]
                         if target_col in df_test.columns:
-                            seq_X_test, seq_y_test = create_sliding_windows(
+                            seq_X_test, seq_y_test, _ = create_sliding_windows(
                                 df_test, target_col, window_size=sequence_kwargs['sequence_data'].shape[1],
                                 covariate_cols=cov_cols if cov_cols else None,
+                                add_temporal=True,
                             )
                             import torch
                             model._model.eval()

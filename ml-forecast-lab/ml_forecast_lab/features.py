@@ -390,12 +390,13 @@ def create_sliding_windows(
     target_col: str,
     window_size: int = 48,
     covariate_cols: Optional[List[str]] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+    add_temporal: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """
     Create sliding window sequences from raw time series for LSTM/CNN.
 
-    Instead of pre-computed features, this creates (n_samples, window_size, n_channels)
-    arrays where each sample is a window of raw values.
+    Creates (n_samples, window_size, n_channels) arrays where each sample
+    is a window of raw values plus optional temporal features.
 
     Parameters
     ----------
@@ -407,21 +408,42 @@ def create_sliding_windows(
         Number of timesteps per window (default 48 = 24h at 30-min intervals).
     covariate_cols : list of str, optional
         Additional columns to include as channels.
+    add_temporal : bool, default True
+        Add temporal features (hour_sin, hour_cos, dow_sin, dow_cos, is_weekend)
+        as extra channels.
 
     Returns
     -------
     X : np.ndarray
-        Shape (n_samples, window_size, n_channels) where n_channels = 1 + len(covariate_cols).
+        Shape (n_samples, window_size, n_channels).
     y : np.ndarray
         Shape (n_samples,) — the target value at the step after each window.
+    channel_names : list of str
+        Names of the channels in X.
     """
-    cols = [target_col]
-    if covariate_cols:
-        cols += [c for c in covariate_cols if c in df.columns]
+    # Build channel list
+    channel_names = [target_col]
+    work_df = df[[target_col]].copy()
 
-    data = df[cols].values.astype(np.float32)
+    if covariate_cols:
+        for c in covariate_cols:
+            if c in df.columns:
+                channel_names.append(c)
+                work_df[c] = df[c]
+
+    if add_temporal and isinstance(df.index, pd.DatetimeIndex):
+        hour_rad = 2 * np.pi * df.index.hour / 24
+        dow_rad = 2 * np.pi * df.index.dayofweek / 7
+        work_df['hour_sin'] = np.sin(hour_rad)
+        work_df['hour_cos'] = np.cos(hour_rad)
+        work_df['dow_sin'] = np.sin(dow_rad)
+        work_df['dow_cos'] = np.cos(dow_rad)
+        work_df['is_weekend'] = (df.index.dayofweek >= 5).astype(np.float32)
+        channel_names.extend(['hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_weekend'])
+
+    data = work_df.values.astype(np.float32)
     n_total = len(data)
-    n_channels = len(cols)
+    n_channels = len(channel_names)
 
     if n_total <= window_size:
         raise ValueError(f"Need more than {window_size} samples, got {n_total}")
@@ -437,10 +459,10 @@ def create_sliding_windows(
 
     logger.debug(
         f"Created {n_samples} sliding windows: "
-        f"({window_size} steps × {n_channels} channels)"
+        f"({window_size} steps × {n_channels} channels: {channel_names})"
     )
 
-    return X, y
+    return X, y, channel_names
 
 
 def create_forecast_features(
