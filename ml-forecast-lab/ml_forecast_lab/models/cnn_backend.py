@@ -230,7 +230,7 @@ class CNNModel(ForecastModel):
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimiser, mode='min', factor=0.5, patience=self.lr_patience,
         )
-        criterion = nn.L1Loss(reduction='none')
+        criterion = nn.MSELoss(reduction='none')
 
         # Training loop with best-model checkpointing
         best_val_loss = float("inf")

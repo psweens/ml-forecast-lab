@@ -87,7 +87,7 @@ experiments:
       - "mape"
       - "smape"
       - "mase"
-    production_metric: "mae"       # metric used to rank models / auto-select
+    production_metric: "rmse"      # metric used to rank models / auto-select
 
     # -- Custom metrics (Python expressions) ----------------------------------
     # Variables available: y_true, y_pred, np

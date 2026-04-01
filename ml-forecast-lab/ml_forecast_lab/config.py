@@ -116,7 +116,7 @@ class ExperimentCfg:
     production_model: Optional[str] = None
     """Which model to use in production; if None, auto-select best by production_metric."""
 
-    production_metric: str = 'mae'
+    production_metric: str = 'rmse'
     """Metric to use for automatic model selection."""
 
     publish_prefix: str = 'mlfl_'
