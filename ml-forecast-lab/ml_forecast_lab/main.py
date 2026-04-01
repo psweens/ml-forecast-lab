@@ -845,7 +845,16 @@ class MLForecastLabApp:
                                     ts.isoformat() for ts in holdout_part.index[window_size:]
                                 ]
                         except Exception as e:
-                            logger.debug(f'Holdout sliding windows failed for {m_name}: {e}')
+                            logger.warning(f'Holdout sliding windows failed for {m_name}: {e}', exc_info=True)
+
+                    if m.is_neural and 'sequence_data' in hold_seq_kwargs:
+                        logger.info(
+                            f"  Holdout {m_name}: sliding windows "
+                            f"{hold_seq_kwargs['sequence_data'].shape[1]} steps × "
+                            f"{hold_seq_kwargs['sequence_data'].shape[2]} channels"
+                        )
+                    elif m.is_neural:
+                        logger.warning(f"  Holdout {m_name}: falling back to flat features (no sliding windows)")
 
                     m.fit(_X_train_h, _y_train_h, feature_names=feature_cols, **hold_seq_kwargs)
 

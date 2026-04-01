@@ -272,7 +272,11 @@ class HAInterface:
         end_iso = end.isoformat()
 
         endpoint = f"/api/history/period/{start_iso}"
-        params = {"end_time": end_iso, "filter_entity_id": entity_id}
+        params = {
+            "end_time": end_iso,
+            "filter_entity_id": entity_id,
+            "minimal_response": "",
+        }
 
         result = await self.api_call("GET", endpoint, params=params)
 
