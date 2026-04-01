@@ -323,6 +323,11 @@ class CNNModel(ForecastModel):
         self._validate_X(X)
 
         X_seq = self._reshape_to_sequences(X)
+
+        # Apply same per-channel z-score standardisation as training
+        if self._channel_mean is not None and self._channel_std is not None:
+            X_seq = (X_seq - self._channel_mean) / self._channel_std
+
         X_t = torch.FloatTensor(X_seq)
 
         self._model.eval()
