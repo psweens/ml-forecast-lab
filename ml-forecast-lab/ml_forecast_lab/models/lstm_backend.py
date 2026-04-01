@@ -118,6 +118,8 @@ class LSTMModel(ForecastModel):
         self._input_size: Optional[int] = None
         self._channel_mean: Optional[np.ndarray] = None
         self._channel_std: Optional[np.ndarray] = None
+        self._y_mean: float = 0.0
+        self._y_std: float = 1.0
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -159,6 +161,13 @@ class LSTMModel(ForecastModel):
         self._channel_std = X_seq.std(axis=(0, 1))     # shape (n_channels,)
         self._channel_std[self._channel_std < 1e-8] = 1.0  # Avoid division by zero
         X_seq = (X_seq - self._channel_mean) / self._channel_std
+
+        # Target z-score normalisation — critical for neural networks to learn the right output scale
+        self._y_mean = float(y_train.mean())
+        self._y_std = float(y_train.std())
+        if self._y_std < 1e-8:
+            self._y_std = 1.0
+        y_train = (y_train - self._y_mean) / self._y_std
 
         # Extract sample weights
         sample_weight = kwargs.get("sample_weight")
@@ -307,6 +316,9 @@ class LSTMModel(ForecastModel):
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
 
+        # Denormalize back to original target scale
+        predictions = predictions * self._y_std + self._y_mean
+
         # Clip to non-negative
         return np.clip(predictions, 0.0, None).astype(np.float32)
 
@@ -353,6 +365,8 @@ class LSTMModel(ForecastModel):
             "input_size": self._input_size,
             "channel_mean": self._channel_mean,
             "channel_std": self._channel_std,
+            "y_mean": self._y_mean,
+            "y_std": self._y_std,
         }, path)
         logger.info(f"Saved LSTM model to {path}")
 
@@ -362,6 +376,8 @@ class LSTMModel(ForecastModel):
         self.set_params(**data["params"])
         self._channel_mean = data.get("channel_mean")
         self._channel_std = data.get("channel_std")
+        self._y_mean = float(data.get("y_mean", 0.0))
+        self._y_std = float(data.get("y_std", 1.0))
 
         # Reconstruct the nn.Module and load weights
         self._input_size = data.get("input_size")

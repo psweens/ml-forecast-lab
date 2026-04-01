@@ -407,7 +407,11 @@ class BenchmarkRunner:
                             with torch.no_grad():
                                 X_t = torch.FloatTensor(seq_X_test)
                                 y_pred = model._model(X_t).numpy()
-                                y_pred = np.clip(y_pred, 0.0, None).astype(np.float32)
+                            # Denormalize back to original target scale
+                            y_mean = getattr(model, '_y_mean', 0.0)
+                            y_std = getattr(model, '_y_std', 1.0)
+                            y_pred = y_pred * y_std + y_mean
+                            y_pred = np.clip(y_pred, 0.0, None).astype(np.float32)
                             y_test = seq_y_test
                         else:
                             y_pred = model.predict(X_test)

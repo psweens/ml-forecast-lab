@@ -868,7 +868,11 @@ class MLForecastLabApp:
                         with torch.no_grad():
                             X_t = torch.FloatTensor(seq_X_ho_norm)
                             y_p = m._model(X_t).numpy()
-                            y_p = np.clip(y_p, 0.0, None).astype(np.float32)
+                        # Denormalize back to original target scale
+                        y_mean = getattr(m, '_y_mean', 0.0)
+                        y_std = getattr(m, '_y_std', 1.0)
+                        y_p = y_p * y_std + y_mean
+                        y_p = np.clip(y_p, 0.0, None).astype(np.float32)
                     else:
                         y_p = m.predict(X_holdout)
 
