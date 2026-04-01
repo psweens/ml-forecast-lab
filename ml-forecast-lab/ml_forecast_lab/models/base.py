@@ -109,6 +109,11 @@ class ForecastModel(ABC):
         """
         return self._is_fitted
 
+    @property
+    def is_neural(self) -> bool:
+        """Whether this model requires sequence (sliding-window) input."""
+        return False
+
     @abstractmethod
     def fit(
         self,

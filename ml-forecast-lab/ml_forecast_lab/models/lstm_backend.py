@@ -115,6 +115,7 @@ class LSTMModel(ForecastModel):
         self.sequence_length = sequence_length
 
         self._model: Optional[_LSTMNet] = None
+        self._input_size: Optional[int] = None
         self._channel_mean: Optional[np.ndarray] = None
         self._channel_std: Optional[np.ndarray] = None
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
@@ -122,6 +123,10 @@ class LSTMModel(ForecastModel):
     @property
     def name(self) -> str:
         return "lstm"
+
+    @property
+    def is_neural(self) -> bool:
+        return True
 
     def _reshape_to_sequences(self, X: np.ndarray) -> np.ndarray:
         """Reshape (n_samples, n_features) → (n_samples, seq_len, features_per_step)."""
@@ -147,6 +152,7 @@ class LSTMModel(ForecastModel):
         else:
             X_seq = self._reshape_to_sequences(X_train)
         _, seq_len, input_size = X_seq.shape
+        self._input_size = input_size
 
         # Per-channel z-score standardisation (fitted on training data)
         self._channel_mean = X_seq.mean(axis=(0, 1))  # shape (n_channels,)
@@ -344,6 +350,7 @@ class LSTMModel(ForecastModel):
         torch.save({
             "state_dict": self._model.state_dict(),
             "params": self.get_params(),
+            "input_size": self._input_size,
             "channel_mean": self._channel_mean,
             "channel_std": self._channel_std,
         }, path)
@@ -355,5 +362,16 @@ class LSTMModel(ForecastModel):
         self.set_params(**data["params"])
         self._channel_mean = data.get("channel_mean")
         self._channel_std = data.get("channel_std")
+
+        # Reconstruct the nn.Module and load weights
+        self._input_size = data.get("input_size")
+        state_dict = data.get("state_dict")
+        if state_dict is not None and self._input_size is not None:
+            self._model = _LSTMNet(
+                self._input_size, self.hidden_size, self.num_layers, self.dropout,
+            )
+            self._model.load_state_dict(state_dict)
+            self._model.eval()
+
         self._is_fitted = True
         logger.info(f"Loaded LSTM model from {path}")

@@ -333,7 +333,7 @@ class BenchmarkRunner:
             # Generate sliding window sequence data for LSTM/CNN
             # Includes target + covariates + temporal features (hour_sin/cos, dow_sin/cos, is_weekend)
             sequence_kwargs = {}
-            if model.name in ('lstm', 'cnn'):
+            if model.is_neural:
                 try:
                     from ml_forecast_lab.features import create_sliding_windows
                     target_col = 'target'
@@ -382,7 +382,7 @@ class BenchmarkRunner:
             # Predict — use sequence data for LSTM/CNN if available
             inference_start = time.time()
             try:
-                if 'sequence_data' in sequence_kwargs and model.name in ('lstm', 'cnn'):
+                if 'sequence_data' in sequence_kwargs and model.is_neural:
                     # Create windowed test data matching training format
                     try:
                         target_col = 'target'

@@ -802,16 +802,74 @@ class MLForecastLabApp:
             for m_name in exp_cfg.models_enabled:
                 try:
                     m = self.model_registry.create(m_name)
-                    m.fit(X_train_hold, y_train_hold, feature_names=feature_cols)
 
-                    y_p = m.predict(X_holdout)
+                    # Neural models need sliding window data
+                    hold_seq_kwargs = {}
+                    _y_train_h = y_train_hold
+                    _X_train_h = X_train_hold
+                    _y_holdout = y_holdout
+                    _holdout_ts = holdout_timestamps
+
+                    seq_X_ho = None
+                    if m.is_neural:
+                        try:
+                            from ml_forecast_lab.features import create_sliding_windows
+                            target_col = 'target'
+                            engineered = {
+                                'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
+                                'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
+                            }
+                            engineered.update(c for c in train_part.columns if c.startswith(('y_lag_', 'y_rolling_')))
+                            cov_cols = [c for c in train_part.columns if c not in engineered and c != target_col]
+
+                            window_size = min(48, len(train_part) // 3)
+                            if window_size >= 12:
+                                seq_X, seq_y, channel_names = create_sliding_windows(
+                                    train_part, target_col, window_size=window_size,
+                                    covariate_cols=cov_cols if cov_cols else None,
+                                    add_temporal=True,
+                                )
+                                hold_seq_kwargs['sequence_data'] = seq_X
+                                hold_seq_kwargs['channel_names'] = channel_names
+                                _y_train_h = seq_y
+                                _X_train_h = X_train_hold[-len(seq_y):]
+
+                                # Also create windowed holdout for inference
+                                seq_X_ho, seq_y_ho, _ = create_sliding_windows(
+                                    holdout_part, target_col, window_size=window_size,
+                                    covariate_cols=cov_cols if cov_cols else None,
+                                    add_temporal=True,
+                                )
+                                _y_holdout = seq_y_ho
+                                _holdout_ts = [
+                                    ts.isoformat() for ts in holdout_part.index[window_size:]
+                                ]
+                        except Exception as e:
+                            logger.debug(f'Holdout sliding windows failed for {m_name}: {e}')
+
+                    m.fit(_X_train_h, _y_train_h, feature_names=feature_cols, **hold_seq_kwargs)
+
+                    if m.is_neural and 'sequence_data' in hold_seq_kwargs and seq_X_ho is not None:
+                        # Use windowed holdout with proper normalization
+                        import torch
+                        seq_X_ho_norm = seq_X_ho.copy()
+                        if m._channel_mean is not None and m._channel_std is not None:
+                            seq_X_ho_norm = (seq_X_ho_norm - m._channel_mean) / m._channel_std
+                        m._model.eval()
+                        with torch.no_grad():
+                            X_t = torch.FloatTensor(seq_X_ho_norm)
+                            y_p = m._model(X_t).numpy()
+                            y_p = np.clip(y_p, 0.0, None).astype(np.float32)
+                    else:
+                        y_p = m.predict(X_holdout)
+
                     if y_p.ndim > 1:
                         y_p = y_p.ravel()
 
                     _model_predictions.append(ModelPrediction(
                         model_name=m_name,
-                        timestamps=holdout_timestamps,
-                        actuals=[float(v) if not np.isnan(v) else None for v in y_holdout],
+                        timestamps=_holdout_ts,
+                        actuals=[float(v) if not np.isnan(v) else None for v in _y_holdout],
                         predictions=[float(v) for v in y_p],
                         color=MODEL_COLORS.get(m_name, "#00d4ff"),
                     ))
@@ -945,7 +1003,7 @@ class MLForecastLabApp:
 
         # 4. Train model on full data
         model = self.model_registry.create(prod_model_name)
-        is_neural = prod_model_name in ('lstm', 'cnn')
+        is_neural = model.is_neural
         logger.info(f"Training {prod_model_name} on {len(X)} samples...")
         train_start = time.time()
 

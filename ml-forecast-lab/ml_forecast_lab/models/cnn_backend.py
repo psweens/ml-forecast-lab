@@ -151,6 +151,10 @@ class CNNModel(ForecastModel):
     def name(self) -> str:
         return "cnn"
 
+    @property
+    def is_neural(self) -> bool:
+        return True
+
     def _reshape_to_sequences(self, X: np.ndarray) -> np.ndarray:
         """Reshape (n_samples, n_features) → (n_samples, seq_len, features_per_step)."""
         n_samples, n_features = X.shape
@@ -394,5 +398,15 @@ class CNNModel(ForecastModel):
         self._sequence_length = data.get("sequence_length")
         self._channel_mean = data.get("channel_mean")
         self._channel_std = data.get("channel_std")
+
+        # Reconstruct the nn.Module and load weights
+        if self._input_size is not None and self._sequence_length is not None:
+            self._model = _CNNNet(
+                self._input_size, self._sequence_length, self.n_filters,
+                self.kernel_size, self.n_layers, self.dilation_base, self.dropout,
+            )
+            self._model.load_state_dict(data["state_dict"])
+            self._model.eval()
+
         self._is_fitted = True
         logger.info(f"Loaded CNN model from {path}")
