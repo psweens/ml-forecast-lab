@@ -179,6 +179,30 @@ class ForecastModel(ABC):
         if not self.is_fitted:
             raise RuntimeError(f'{self.name} model must be fitted before prediction')
 
+    def predict_sequence(self, X: np.ndarray) -> np.ndarray:
+        """
+        Generate multi-horizon forecasts from sliding-window input.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Sliding-window input of shape (n_samples, window_size, n_channels).
+
+        Returns
+        -------
+        np.ndarray
+            Predictions of shape (n_samples, n_horizons).
+
+        Raises
+        ------
+        NotImplementedError
+            If the model does not support direct multi-horizon prediction.
+        """
+        raise NotImplementedError(
+            f"{self.name} does not support predict_sequence(). "
+            f"Use predict() for single-step forecasting."
+        )
+
     def predict_multi(
         self,
         X: np.ndarray,
@@ -439,8 +463,10 @@ class ForecastModel(ABC):
             return y
         elif y.ndim == 2 and y.shape[1] == 1:
             return y.ravel()
+        elif y.ndim == 2 and y.shape[1] > 1:
+            return y  # Multi-horizon targets, keep 2D
         else:
-            raise ValueError(f'y must be 1D or (n, 1), got shape {y.shape}')
+            raise ValueError(f'y must be 1D or 2D, got shape {y.shape}')
 
     def __repr__(self) -> str:
         """Return string representation of model."""

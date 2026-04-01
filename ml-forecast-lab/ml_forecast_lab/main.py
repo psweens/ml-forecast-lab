@@ -799,6 +799,9 @@ class MLForecastLabApp:
             _model_predictions = []
             _feature_importance_list = []
 
+            # Compute horizon steps from config for neural multi-output
+            horizon_steps = [h // exp_cfg.interval_minutes for h in exp_cfg.horizons_minutes]
+
             for m_name in exp_cfg.models_enabled:
                 try:
                     m = self.model_registry.create(m_name)
@@ -810,7 +813,7 @@ class MLForecastLabApp:
                     _y_holdout = y_holdout
                     _holdout_ts = holdout_timestamps
 
-                    seq_X_ho = None
+                    neural_ok = False
                     if m.is_neural:
                         try:
                             from ml_forecast_lab.features import create_sliding_windows
@@ -828,62 +831,67 @@ class MLForecastLabApp:
                                     train_part, target_col, window_size=window_size,
                                     covariate_cols=cov_cols if cov_cols else None,
                                     add_temporal=True,
+                                    horizon_steps=horizon_steps,
                                 )
                                 hold_seq_kwargs['sequence_data'] = seq_X
                                 hold_seq_kwargs['channel_names'] = channel_names
                                 _y_train_h = seq_y
                                 _X_train_h = X_train_hold[-len(seq_y):]
-
-                                # Also create windowed holdout for inference
-                                seq_X_ho, seq_y_ho, _ = create_sliding_windows(
-                                    holdout_part, target_col, window_size=window_size,
-                                    covariate_cols=cov_cols if cov_cols else None,
-                                    add_temporal=True,
-                                )
-                                _y_holdout = seq_y_ho
-                                _holdout_ts = [
-                                    ts.isoformat() for ts in holdout_part.index[window_size:]
-                                ]
+                                neural_ok = True
                         except Exception as e:
                             logger.warning(f'Holdout sliding windows failed for {m_name}: {e}', exc_info=True)
 
-                    if m.is_neural and 'sequence_data' in hold_seq_kwargs:
+                    if m.is_neural and neural_ok:
                         logger.info(
                             f"  Holdout {m_name}: sliding windows "
                             f"{hold_seq_kwargs['sequence_data'].shape[1]} steps × "
-                            f"{hold_seq_kwargs['sequence_data'].shape[2]} channels"
+                            f"{hold_seq_kwargs['sequence_data'].shape[2]} channels, "
+                            f"horizons={horizon_steps}"
                         )
                     elif m.is_neural:
                         logger.warning(f"  Holdout {m_name}: falling back to flat features (no sliding windows)")
 
                     m.fit(_X_train_h, _y_train_h, feature_names=feature_cols, **hold_seq_kwargs)
 
-                    if m.is_neural and 'sequence_data' in hold_seq_kwargs and seq_X_ho is not None:
-                        # Use windowed holdout with proper normalization
-                        import torch
-                        seq_X_ho_norm = seq_X_ho.copy()
-                        if m._channel_mean is not None and m._channel_std is not None:
-                            seq_X_ho_norm = (seq_X_ho_norm - m._channel_mean) / m._channel_std
-                        m._model.eval()
-                        with torch.no_grad():
-                            X_t = torch.FloatTensor(seq_X_ho_norm)
-                            y_p = m._model(X_t).numpy()
-                        # Denormalize back to original target scale
-                        y_mean = getattr(m, '_y_mean', 0.0)
-                        y_std = getattr(m, '_y_std', 1.0)
-                        y_p = y_p * y_std + y_mean
-                        y_p = np.clip(y_p, 0.0, None).astype(np.float32)
+                    if m.is_neural and neural_ok:
+                        # Bridge fold boundary: prepend train tail for holdout context
+                        from ml_forecast_lab.features import create_sliding_windows
+                        combined_holdout = pd.concat([
+                            train_part.iloc[-window_size:],
+                            holdout_part,
+                        ])
+                        seq_X_ho, seq_y_ho, _ = create_sliding_windows(
+                            combined_holdout, target_col, window_size=window_size,
+                            covariate_cols=cov_cols if cov_cols else None,
+                            add_temporal=True,
+                            horizon_steps=horizon_steps,
+                        )
+                        y_p = m.predict_sequence(seq_X_ho)
+                        _y_holdout = seq_y_ho
+                        # Timestamps: predictions start at first holdout timestamp
+                        max_h = max(horizon_steps)
+                        _holdout_ts = [
+                            ts.isoformat() for ts in holdout_part.index[:len(seq_y_ho)]
+                        ]
                     else:
                         y_p = m.predict(X_holdout)
 
-                    if y_p.ndim > 1:
-                        y_p = y_p.ravel()
+                    # For chart display: use first horizon (shortest-term)
+                    if y_p.ndim == 2:
+                        y_p_display = y_p[:, 0]
+                        _y_holdout_display = _y_holdout[:, 0] if _y_holdout.ndim == 2 else _y_holdout
+                    else:
+                        y_p_display = y_p
+                        _y_holdout_display = _y_holdout
+
+                    if y_p_display.ndim > 1:
+                        y_p_display = y_p_display.ravel()
 
                     _model_predictions.append(ModelPrediction(
                         model_name=m_name,
                         timestamps=_holdout_ts,
-                        actuals=[float(v) if not np.isnan(v) else None for v in _y_holdout],
-                        predictions=[float(v) for v in y_p],
+                        actuals=[float(v) if not np.isnan(v) else None for v in _y_holdout_display],
+                        predictions=[float(v) for v in y_p_display],
                         color=MODEL_COLORS.get(m_name, "#00d4ff"),
                     ))
 
@@ -959,6 +967,24 @@ class MLForecastLabApp:
         logger.info(f"{'=' * 60}")
         logger.info(f"")
 
+    @staticmethod
+    def _build_window_channels(df_slice, cov_cols, target_col='target'):
+        """Build (window_size, n_channels) array matching create_sliding_windows channel layout."""
+        work = df_slice[[target_col]].copy()
+        for c in cov_cols:
+            if c in df_slice.columns:
+                work[c] = df_slice[c]
+        idx = df_slice.index
+        if isinstance(idx, pd.DatetimeIndex):
+            hour_rad = 2 * np.pi * idx.hour / 24
+            dow_rad = 2 * np.pi * idx.dayofweek / 7
+            work['hour_sin'] = np.sin(hour_rad)
+            work['hour_cos'] = np.cos(hour_rad)
+            work['dow_sin'] = np.sin(dow_rad)
+            work['dow_cos'] = np.cos(dow_rad)
+            work['is_weekend'] = (idx.dayofweek >= 5).astype(np.float32)
+        return work.values.astype(np.float32)
+
     async def _run_production_inference(self, exp_cfg):
         """
         Run production mode: train best model on full data, generate a full
@@ -1020,39 +1046,40 @@ class MLForecastLabApp:
         logger.info(f"Training {prod_model_name} on {len(X)} samples...")
         train_start = time.time()
 
-        # Neural models need sliding window training
+        # Neural models need sliding window training with multi-horizon targets
         seq_kwargs = {}
+        raw_cov_cols_prod = []
+        window_size_prod = None
+        horizon_steps_prod = [h // exp_cfg.interval_minutes for h in exp_cfg.horizons_minutes]
         if is_neural:
             from ml_forecast_lab.features import create_sliding_windows
-            # Find covariate columns (same logic as runner)
             engineered = {
                 'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
                 'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
             }
             engineered.update(c for c in combined.columns if c.startswith(('y_lag_', 'y_rolling_')))
-            raw_cov_cols = [c for c in combined.columns if c not in engineered and c != 'target']
-            window_size = min(48, len(combined) // 3)
-            if window_size >= 12:
+            raw_cov_cols_prod = [c for c in combined.columns if c not in engineered and c != 'target']
+            window_size_prod = min(48, len(combined) // 3)
+            if window_size_prod >= 12:
                 seq_X, seq_y, channel_names = create_sliding_windows(
-                    combined.rename(columns={'target': 'target'}),
-                    'target', window_size=window_size,
-                    covariate_cols=raw_cov_cols if raw_cov_cols else None,
+                    combined, 'target', window_size=window_size_prod,
+                    covariate_cols=raw_cov_cols_prod if raw_cov_cols_prod else None,
                     add_temporal=True,
+                    horizon_steps=horizon_steps_prod,
                 )
                 seq_kwargs['sequence_data'] = seq_X
                 seq_kwargs['channel_names'] = channel_names
-                # Use windowed data
                 y_train_seq = seq_y
                 X_train_seq = X[-len(seq_y):]
                 logger.info(
-                    f"  Sliding windows: {seq_X.shape[1]} steps × {seq_X.shape[2]} channels"
+                    f"  Sliding windows: {seq_X.shape[1]} steps × {seq_X.shape[2]} channels, "
+                    f"horizons={horizon_steps_prod}"
                 )
 
                 def _train_neural():
                     model.fit(X_train_seq, y_train_seq, **seq_kwargs)
                 await asyncio.get_running_loop().run_in_executor(None, _train_neural)
             else:
-                # Not enough data for sliding windows; fall back to flat
                 is_neural = False
                 await asyncio.get_running_loop().run_in_executor(None, model.fit, X, y)
         else:
@@ -1259,13 +1286,29 @@ class MLForecastLabApp:
         logger.info(f"Published forecast curve to {base_entity}_forecast")
 
         # 8. Publish per-horizon scalar sensors
-        for horizon_mins in exp_cfg.horizons_minutes:
-            # Find the forecast point closest to this horizon
-            target_ts = last_ts + pd.Timedelta(minutes=horizon_mins)
-            idx = (ds_future - target_ts).abs().argmin()
-            horizon_val = round(float(y_pred[idx]), 4)
+        # Neural models: use predict_sequence for direct multi-horizon output
+        neural_horizon_preds = None
+        if is_neural and 'sequence_data' in seq_kwargs and window_size_prod:
+            try:
+                tail_df = combined.iloc[-window_size_prod:]
+                X_horizon = self._build_window_channels(
+                    tail_df, raw_cov_cols_prod, target_col='target',
+                )
+                X_horizon_input = X_horizon[np.newaxis, :, :]  # (1, window_size, n_channels)
+                neural_horizon_preds = model.predict_sequence(X_horizon_input).squeeze(0)
+            except Exception as e:
+                logger.warning(f"predict_sequence failed, using dense curve: {e}")
 
-            # Format horizon label
+        for h_idx, horizon_mins in enumerate(exp_cfg.horizons_minutes):
+            if neural_horizon_preds is not None and h_idx < len(neural_horizon_preds):
+                horizon_val = round(float(neural_horizon_preds[h_idx]), 4)
+                forecast_ts = (last_ts + pd.Timedelta(minutes=horizon_mins)).isoformat()
+            else:
+                target_ts = last_ts + pd.Timedelta(minutes=horizon_mins)
+                idx = (ds_future - target_ts).abs().argmin()
+                horizon_val = round(float(y_pred[idx]), 4)
+                forecast_ts = ds_future[idx].isoformat()
+
             if horizon_mins >= 1440:
                 h_label = f"{horizon_mins // 1440}d"
             elif horizon_mins >= 60:
@@ -1281,7 +1324,7 @@ class MLForecastLabApp:
                     "unit_of_measurement": units,
                     "icon": "mdi:clock-fast",
                     "horizon_minutes": horizon_mins,
-                    "forecast_timestamp": ds_future[idx].isoformat(),
+                    "forecast_timestamp": forecast_ts,
                     "model": prod_model_name,
                 },
             )

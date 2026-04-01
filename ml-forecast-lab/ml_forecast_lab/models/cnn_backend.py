@@ -4,7 +4,8 @@ PyTorch 1D CNN forecasting model backend for ML Forecast Lab.
 Implements a stack of 1D causal dilated convolutions (WaveNet-style)
 with learnable positional pooling, using PyTorch with proper autograd,
 residual connections, ReduceLROnPlateau scheduling, best-model
-checkpointing, and early stopping.
+checkpointing, and early stopping. Supports multi-horizon output
+via a shared encoder and multi-output head.
 """
 
 import logging
@@ -69,8 +70,9 @@ class _CNNNet(nn.Module):
     """PyTorch WaveNet-style CNN with LayerNorm, learnable pooling, and MLP head."""
 
     def __init__(self, input_size: int, seq_len: int, n_filters: int, kernel_size: int,
-                 n_layers: int, dilation_base: int, dropout: float):
+                 n_layers: int, dilation_base: int, dropout: float, n_horizons: int = 1):
         super().__init__()
+        self.n_horizons = n_horizons
         self.layer_norm = nn.LayerNorm(input_size)
         layers = []
         for i in range(n_layers):
@@ -86,7 +88,7 @@ class _CNNNet(nn.Module):
             nn.Linear(n_filters, n_filters // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(n_filters // 2, 1),
+            nn.Linear(n_filters // 2, n_horizons),
         )
 
     def forward(self, x):
@@ -99,7 +101,10 @@ class _CNNNet(nn.Module):
         weights = F.softmax(self.pool_weights, dim=0)  # (seq_len,)
         pooled = (out * weights.unsqueeze(0).unsqueeze(0)).sum(dim=2)  # (batch, n_filters)
 
-        return self.head(pooled).squeeze(-1)
+        out = self.head(pooled)  # (batch, n_horizons)
+        if self.n_horizons == 1:
+            return out.squeeze(-1)  # (batch,) backward compat
+        return out
 
 
 class CNNModel(ForecastModel):
@@ -108,7 +113,7 @@ class CNNModel(ForecastModel):
 
     WaveNet-style architecture with residual connections, ReLU activation,
     learnable positional pooling, dropout, ReduceLROnPlateau scheduling,
-    best-model checkpointing, and early stopping.
+    best-model checkpointing, and early stopping. Supports multi-horizon output.
     """
 
     def __init__(
@@ -143,10 +148,11 @@ class CNNModel(ForecastModel):
         self._model: Optional[_CNNNet] = None
         self._input_size: Optional[int] = None
         self._sequence_length: Optional[int] = None
+        self._n_horizons: int = 1
         self._channel_mean: Optional[np.ndarray] = None
         self._channel_std: Optional[np.ndarray] = None
-        self._y_mean: float = 0.0
-        self._y_std: float = 1.0
+        self._y_mean = 0.0   # float or ndarray(n_horizons,)
+        self._y_std = 1.0    # float or ndarray(n_horizons,)
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -173,6 +179,12 @@ class CNNModel(ForecastModel):
         y_train = self._validate_y(y_train)
         start_time = time.time()
 
+        # Detect multi-horizon from y shape
+        if y_train.ndim == 2 and y_train.shape[1] > 1:
+            self._n_horizons = y_train.shape[1]
+        else:
+            self._n_horizons = 1
+
         # Use pre-windowed sequence data if provided, otherwise reshape flat features
         sequence_data = kwargs.get("sequence_data")
         if sequence_data is not None:
@@ -190,11 +202,16 @@ class CNNModel(ForecastModel):
         self._channel_std[self._channel_std < 1e-8] = 1.0  # Avoid division by zero
         X_seq = (X_seq - self._channel_mean) / self._channel_std
 
-        # Target z-score normalisation — critical for neural networks to learn the right output scale
-        self._y_mean = float(y_train.mean())
-        self._y_std = float(y_train.std())
-        if self._y_std < 1e-8:
-            self._y_std = 1.0
+        # Target z-score normalisation — per-horizon when multi-output
+        if self._n_horizons > 1:
+            self._y_mean = y_train.mean(axis=0)   # (n_horizons,)
+            self._y_std = y_train.std(axis=0)     # (n_horizons,)
+            self._y_std[self._y_std < 1e-8] = 1.0
+        else:
+            self._y_mean = float(y_train.mean())
+            self._y_std = float(y_train.std())
+            if self._y_std < 1e-8:
+                self._y_std = 1.0
         y_train = (y_train - self._y_mean) / self._y_std
 
         # Extract sample weights
@@ -225,6 +242,7 @@ class CNNModel(ForecastModel):
         self._model = _CNNNet(
             input_size, seq_len, self.n_filters, self.kernel_size,
             self.n_layers, self.dilation_base, self.dropout,
+            n_horizons=self._n_horizons,
         )
         optimiser = torch.optim.Adam(self._model.parameters(), lr=self.learning_rate)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -256,7 +274,10 @@ class CNNModel(ForecastModel):
                 loss_per_sample = criterion(y_pred, y_batch)
                 if w_tr_t is not None:
                     w_batch = w_tr_t[batch_idx]
-                    loss = (loss_per_sample * w_batch).mean()
+                    if loss_per_sample.ndim > 1:
+                        loss = (loss_per_sample * w_batch.unsqueeze(-1)).mean()
+                    else:
+                        loss = (loss_per_sample * w_batch).mean()
                 else:
                     loss = loss_per_sample.mean()
                 loss.backward()
@@ -330,8 +351,36 @@ class CNNModel(ForecastModel):
             "best_val_loss": float(best_val_loss),
         }
 
+    def predict_sequence(self, X: np.ndarray) -> np.ndarray:
+        """Multi-horizon prediction from sliding-window input.
+
+        Parameters
+        ----------
+        X : np.ndarray, shape (n_samples, window_size, n_channels)
+
+        Returns
+        -------
+        np.ndarray, shape (n_samples, n_horizons) or (n_samples,) if single-horizon
+        """
+        self._validate_fitted()
+        if self._model is None:
+            raise RuntimeError("No model loaded")
+
+        X_seq = X.copy()
+        if self._channel_mean is not None and self._channel_std is not None:
+            X_seq = (X_seq - self._channel_mean) / self._channel_std
+
+        X_t = torch.FloatTensor(X_seq)
+        self._model.eval()
+        with torch.no_grad():
+            predictions = self._model(X_t).numpy()
+
+        # Denormalize — broadcasting handles both scalar and array _y_mean/_y_std
+        predictions = predictions * self._y_std + self._y_mean
+        return np.clip(predictions, 0.0, None).astype(np.float32)
+
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """Generate predictions."""
+        """Generate predictions (returns horizon-0 for multi-horizon models)."""
         self._validate_fitted()
         self._validate_X(X)
 
@@ -349,6 +398,10 @@ class CNNModel(ForecastModel):
 
         # Denormalize back to original target scale
         predictions = predictions * self._y_std + self._y_mean
+
+        # Multi-horizon: return only first horizon for backward compat
+        if predictions.ndim == 2:
+            predictions = predictions[:, 0]
 
         return np.clip(predictions, 0.0, None).astype(np.float32)
 
@@ -397,6 +450,7 @@ class CNNModel(ForecastModel):
             "params": self.get_params(),
             "input_size": self._input_size,
             "sequence_length": self._sequence_length,
+            "n_horizons": self._n_horizons,
             "channel_mean": self._channel_mean,
             "channel_std": self._channel_std,
             "y_mean": self._y_mean,
@@ -412,14 +466,24 @@ class CNNModel(ForecastModel):
         self._sequence_length = data.get("sequence_length")
         self._channel_mean = data.get("channel_mean")
         self._channel_std = data.get("channel_std")
-        self._y_mean = float(data.get("y_mean", 0.0))
-        self._y_std = float(data.get("y_std", 1.0))
+
+        # Backward compat: old checkpoints store scalar y_mean/y_std, no n_horizons
+        self._n_horizons = data.get("n_horizons", 1)
+        raw_y_mean = data.get("y_mean", 0.0)
+        raw_y_std = data.get("y_std", 1.0)
+        if isinstance(raw_y_mean, np.ndarray):
+            self._y_mean = raw_y_mean
+            self._y_std = raw_y_std
+        else:
+            self._y_mean = float(raw_y_mean)
+            self._y_std = float(raw_y_std)
 
         # Reconstruct the nn.Module and load weights
         if self._input_size is not None and self._sequence_length is not None:
             self._model = _CNNNet(
                 self._input_size, self._sequence_length, self.n_filters,
                 self.kernel_size, self.n_layers, self.dilation_base, self.dropout,
+                n_horizons=self._n_horizons,
             )
             self._model.load_state_dict(data["state_dict"])
             self._model.eval()

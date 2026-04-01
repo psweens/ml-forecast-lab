@@ -330,37 +330,46 @@ class BenchmarkRunner:
             sample_weights = np.exp(decay_rate * np.arange(n_train_samples))
             sample_weights = sample_weights / sample_weights.sum() * n_train_samples
 
-            # Generate sliding window sequence data for LSTM/CNN
-            # Includes target + covariates + temporal features (hour_sin/cos, dow_sin/cos, is_weekend)
+            # Generate sliding window sequence data for neural models
             sequence_kwargs = {}
+            horizon_steps = None
+            window_size = None
+            neural_cov_cols = None
             if model.is_neural:
                 try:
                     from ml_forecast_lab.features import create_sliding_windows
                     target_col = 'target'
-                    # Find covariate columns: anything that's not target or an engineered feature
                     engineered = {
                         'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
                         'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
                     }
                     engineered.update(c for c in df_train.columns if c.startswith(('y_lag_', 'y_rolling_')))
-                    cov_cols = [c for c in df_train.columns if c not in engineered and c != target_col]
+                    neural_cov_cols = [c for c in df_train.columns if c not in engineered and c != target_col]
+
+                    # Compute horizon steps from config
+                    horizons_min = self.experiment_cfg.get('horizons_minutes', [interval_min])
+                    horizon_steps = [h // interval_min for h in horizons_min]
+
                     if target_col in df_train.columns:
-                        window_size = min(48, len(df_train) // 3)  # 24h at 30-min
+                        # Use original df slice (with DatetimeIndex) for temporal features
+                        df_train_raw = df.iloc[train_idx]
+                        window_size = min(48, len(df_train_raw) // 3)
                         if window_size >= 12:
                             seq_X, seq_y, channel_names = create_sliding_windows(
-                                df_train, target_col, window_size=window_size,
-                                covariate_cols=cov_cols if cov_cols else None,
+                                df_train_raw, target_col, window_size=window_size,
+                                covariate_cols=neural_cov_cols if neural_cov_cols else None,
                                 add_temporal=True,
+                                horizon_steps=horizon_steps,
                             )
                             sequence_kwargs['sequence_data'] = seq_X
                             sequence_kwargs['channel_names'] = channel_names
-                            # Use windowed targets for training
                             y_train = seq_y
-                            X_train = X_train[-len(seq_y):]  # Align flat features
+                            X_train = X_train[-len(seq_y):]
                             sample_weights = sample_weights[-len(seq_y):]
                             logger.debug(
                                 f'Sliding windows for {model.name}: '
-                                f'{seq_X.shape[1]} steps × {seq_X.shape[2]} channels: {channel_names}'
+                                f'{seq_X.shape[1]} steps × {seq_X.shape[2]} channels, '
+                                f'horizons={horizon_steps}: {channel_names}'
                             )
                 except Exception as e:
                     logger.debug(f'Sliding window creation failed: {e}')
@@ -379,42 +388,25 @@ class BenchmarkRunner:
 
             train_time = time.time() - train_start
 
-            # Predict — use sequence data for LSTM/CNN if available
+            # Predict — use predict_sequence for neural models
             inference_start = time.time()
             try:
-                if 'sequence_data' in sequence_kwargs and model.is_neural:
-                    # Create windowed test data matching training format
+                if 'sequence_data' in sequence_kwargs and model.is_neural and window_size:
                     try:
-                        target_col = 'target'
-                        engineered = {
-                            'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
-                            'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
-                        }
-                        engineered.update(c for c in df_test.columns if c.startswith(('y_lag_', 'y_rolling_')))
-                        cov_cols = [c for c in df_test.columns if c not in engineered and c != target_col]
-                        if target_col in df_test.columns:
-                            seq_X_test, seq_y_test, _ = create_sliding_windows(
-                                df_test, target_col, window_size=sequence_kwargs['sequence_data'].shape[1],
-                                covariate_cols=cov_cols if cov_cols else None,
-                                add_temporal=True,
-                            )
-                            # Apply same z-score standardisation as training
-                            if model._channel_mean is not None and model._channel_std is not None:
-                                seq_X_test = (seq_X_test - model._channel_mean) / model._channel_std
+                        from ml_forecast_lab.features import create_sliding_windows
+                        # Bridge fold boundary: prepend trailing train rows for context
+                        n_bridge = min(window_size, len(train_idx))
+                        bridge_idx = np.concatenate([train_idx[-n_bridge:], test_idx])
+                        df_combined_test = df.iloc[bridge_idx]
 
-                            import torch
-                            model._model.eval()
-                            with torch.no_grad():
-                                X_t = torch.FloatTensor(seq_X_test)
-                                y_pred = model._model(X_t).numpy()
-                            # Denormalize back to original target scale
-                            y_mean = getattr(model, '_y_mean', 0.0)
-                            y_std = getattr(model, '_y_std', 1.0)
-                            y_pred = y_pred * y_std + y_mean
-                            y_pred = np.clip(y_pred, 0.0, None).astype(np.float32)
-                            y_test = seq_y_test
-                        else:
-                            y_pred = model.predict(X_test)
+                        seq_X_test, seq_y_test, _ = create_sliding_windows(
+                            df_combined_test, 'target', window_size=window_size,
+                            covariate_cols=neural_cov_cols if neural_cov_cols else None,
+                            add_temporal=True,
+                            horizon_steps=horizon_steps,
+                        )
+                        y_pred = model.predict_sequence(seq_X_test)
+                        y_test = seq_y_test
                     except Exception:
                         y_pred = model.predict(X_test)
                 else:
@@ -428,14 +420,32 @@ class BenchmarkRunner:
 
             inference_time = time.time() - inference_start
 
-            # Compute all configured metrics
+            # Compute metrics — per-horizon for multi-output, then averaged for ranking
             metrics_to_compute = list(set(self.metrics + [self.production_metric]))
-            fold_metrics = self.metric_registry.compute_all(
-                metrics_to_compute,
-                y_test,
-                y_pred,
-                y_train=y_train,
-            )
+            fold_metrics = {}
+            if y_pred.ndim == 2 and y_test.ndim == 2:
+                # Per-horizon metrics (e.g. rmse_h4, rmse_h16)
+                for h_idx, h_step in enumerate(horizon_steps or []):
+                    h_metrics = self.metric_registry.compute_all(
+                        metrics_to_compute,
+                        y_test[:, h_idx],
+                        y_pred[:, h_idx],
+                        y_train=y_train[:, h_idx] if y_train.ndim == 2 else y_train,
+                    )
+                    for metric_name, value in h_metrics.items():
+                        fold_metrics[f"{metric_name}_h{h_step}"] = value
+
+                # Horizon-averaged metrics (un-suffixed) for Demšar ranking
+                for metric_name in metrics_to_compute:
+                    h_values = [
+                        fold_metrics.get(f"{metric_name}_h{h}", np.nan)
+                        for h in (horizon_steps or [])
+                    ]
+                    fold_metrics[metric_name] = float(np.nanmean(h_values))
+            else:
+                fold_metrics = self.metric_registry.compute_all(
+                    metrics_to_compute, y_test, y_pred, y_train=y_train,
+                )
 
             model_result.fold_metrics.append(fold_metrics)
             model_result.train_times.append(train_time)

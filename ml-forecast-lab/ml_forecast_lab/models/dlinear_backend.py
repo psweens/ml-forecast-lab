@@ -1,18 +1,20 @@
 """
-PyTorch LSTM forecasting model backend for ML Forecast Lab.
+DLinear forecasting model backend for ML Forecast Lab.
 
-Implements a multi-layer LSTM with temporal attention using PyTorch,
-Adam optimisation, ReduceLROnPlateau scheduling, best-model
-checkpointing, and early stopping. Supports multi-horizon output
-via a shared encoder and multi-output head.
+Implements the Decomposition-Linear (DLinear) model from:
+  "Are Transformers Effective for Time Series Forecasting?" (Zeng et al., 2023)
+
+Decomposes the input into trend (moving average) and seasonal (residual)
+components, then applies a separate linear layer to each, summing the outputs.
+Simple, fast, and surprisingly competitive on many benchmarks.
+Supports multi-horizon output via multi-output linear heads.
 """
 
 import logging
 import time
 import warnings
 from copy import deepcopy
-from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import numpy as np
 
@@ -28,76 +30,52 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
     warnings.warn(
-        "PyTorch is not installed. LSTMModel will not be functional.",
+        "PyTorch is not installed. DLinearModel will not be functional.",
         ImportWarning,
     )
 
 
-class _TemporalAttention(nn.Module):
-    """Learnable attention over LSTM timesteps."""
+class _DLinearNet(nn.Module):
+    """DLinear: decompose into trend + seasonal, one Linear each."""
 
-    def __init__(self, hidden_size: int):
+    def __init__(self, seq_len: int, n_channels: int, kernel_size: int,
+                 n_horizons: int = 1):
         super().__init__()
-        self.attn_proj = nn.Linear(hidden_size, hidden_size)
-        self.attn_vector = nn.Parameter(torch.randn(hidden_size))
-
-    def forward(self, lstm_out):
-        # lstm_out: (batch, seq_len, hidden_size)
-        scores = torch.tanh(self.attn_proj(lstm_out))  # (batch, seq_len, hidden)
-        scores = (scores * self.attn_vector).sum(dim=-1)  # (batch, seq_len)
-        weights = F.softmax(scores, dim=-1)  # (batch, seq_len)
-        context = (lstm_out * weights.unsqueeze(-1)).sum(dim=1)  # (batch, hidden)
-        return context
-
-
-class _LSTMNet(nn.Module):
-    """PyTorch LSTM with LayerNorm, temporal attention, and MLP head."""
-
-    def __init__(self, input_size: int, hidden_size: int, num_layers: int,
-                 dropout: float, n_horizons: int = 1):
-        super().__init__()
+        self.seq_len = seq_len
+        self.kernel_size = kernel_size
         self.n_horizons = n_horizons
-        self.layer_norm = nn.LayerNorm(input_size)
-        self.lstm = nn.LSTM(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0.0,
-        )
-        self.attention = _TemporalAttention(hidden_size)
-        self.head = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size // 2, n_horizons),
-        )
+        pad = kernel_size // 2
+        # AvgPool1d along time for trend extraction
+        self.avg_pool = nn.AvgPool1d(kernel_size, stride=1, padding=pad, count_include_pad=False)
+        flat = seq_len * n_channels
+        self.trend_linear = nn.Linear(flat, n_horizons)
+        self.seasonal_linear = nn.Linear(flat, n_horizons)
 
-    def forward(self, x):
-        # x: (batch, seq_len, input_size)
-        x = self.layer_norm(x)
-        lstm_out, _ = self.lstm(x)  # (batch, seq_len, hidden_size)
-        context = self.attention(lstm_out)  # (batch, hidden_size)
-        out = self.head(context)  # (batch, n_horizons)
+    def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+        # x: (batch, seq_len, n_channels)
+        x_t = x.permute(0, 2, 1)  # (batch, n_channels, seq_len)
+        trend = self.avg_pool(x_t)[:, :, :self.seq_len]  # ensure same length
+        seasonal = x_t - trend
+        trend_flat = trend.reshape(trend.shape[0], -1)
+        seasonal_flat = seasonal.reshape(seasonal.shape[0], -1)
+        out = self.trend_linear(trend_flat) + self.seasonal_linear(seasonal_flat)
         if self.n_horizons == 1:
             return out.squeeze(-1)  # (batch,) backward compat
         return out
 
 
-class LSTMModel(ForecastModel):
+class DLinearModel(ForecastModel):
     """
-    PyTorch LSTM time-series forecasting model with temporal attention.
+    DLinear time-series forecasting model.
 
-    Uses torch.nn.LSTM with autograd, temporal attention over all timesteps,
-    Adam optimiser with ReduceLROnPlateau, best-model checkpointing,
-    and early stopping on validation loss. Supports multi-horizon output.
+    Decomposes the input into trend and seasonal components via a moving
+    average kernel, then projects each component to the forecast with a
+    separate linear layer. Supports multi-horizon output.
     """
 
     def __init__(
         self,
-        hidden_size: int = 64,
-        num_layers: int = 2,
-        dropout: float = 0.2,
+        kernel_size: int = 25,
         learning_rate: float = 0.001,
         epochs: int = 100,
         batch_size: int = 64,
@@ -108,10 +86,7 @@ class LSTMModel(ForecastModel):
         super().__init__()
         if not TORCH_AVAILABLE:
             raise RuntimeError("PyTorch is not installed")
-
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.dropout = dropout
+        self.kernel_size = kernel_size
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.batch_size = batch_size
@@ -119,35 +94,36 @@ class LSTMModel(ForecastModel):
         self.lr_patience = lr_patience
         self.sequence_length = sequence_length
 
-        self._model: Optional[_LSTMNet] = None
-        self._input_size: Optional[int] = None
+        self._model: Optional[_DLinearNet] = None
+        self._seq_len: Optional[int] = None
+        self._n_channels: Optional[int] = None
         self._n_horizons: int = 1
         self._channel_mean: Optional[np.ndarray] = None
         self._channel_std: Optional[np.ndarray] = None
         self._y_mean = 0.0   # float or ndarray(n_horizons,)
         self._y_std = 1.0    # float or ndarray(n_horizons,)
-        self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
     def name(self) -> str:
-        return "lstm"
+        return "dlinear"
 
     @property
     def is_neural(self) -> bool:
         return True
 
     def _reshape_to_sequences(self, X: np.ndarray) -> np.ndarray:
-        """Reshape (n_samples, n_features) → (n_samples, seq_len, features_per_step)."""
         n_samples, n_features = X.shape
         seq_len = self.sequence_length or n_features
-        if n_features % seq_len != 0 and seq_len == n_features:
-            n_features_per_step = 1
-        else:
-            n_features_per_step = n_features // seq_len
+        n_features_per_step = n_features // seq_len if n_features % seq_len == 0 else 1
         return X[:, :seq_len * n_features_per_step].reshape(n_samples, seq_len, n_features_per_step)
 
+    def _build_model(self, seq_len: int, n_channels: int,
+                     n_horizons: int = 1) -> "_DLinearNet":
+        return _DLinearNet(seq_len, n_channels, self.kernel_size,
+                           n_horizons=n_horizons)
+
     def fit(self, X_train: np.ndarray, y_train: np.ndarray, **kwargs: Any) -> Dict[str, Any]:
-        """Train LSTM with PyTorch autograd, attention, and best-model checkpointing."""
+        """Train DLinear model."""
         self._validate_X(X_train)
         y_train = self._validate_y(y_train)
         start_time = time.time()
@@ -158,23 +134,23 @@ class LSTMModel(ForecastModel):
         else:
             self._n_horizons = 1
 
-        # Use pre-windowed sequence data if provided, otherwise reshape flat features
         sequence_data = kwargs.get("sequence_data")
         if sequence_data is not None:
-            X_seq = sequence_data  # Already (n_samples, window_size, n_channels)
+            X_seq = sequence_data
             logger.debug(f"Using pre-windowed sequence data: {X_seq.shape}")
         else:
             X_seq = self._reshape_to_sequences(X_train)
-        _, seq_len, input_size = X_seq.shape
-        self._input_size = input_size
 
-        # Per-channel z-score standardisation (fitted on training data)
-        self._channel_mean = X_seq.mean(axis=(0, 1))  # shape (n_channels,)
-        self._channel_std = X_seq.std(axis=(0, 1))     # shape (n_channels,)
-        self._channel_std[self._channel_std < 1e-8] = 1.0  # Avoid division by zero
+        _, seq_len, n_channels = X_seq.shape
+        self._seq_len = seq_len
+        self._n_channels = n_channels
+
+        self._channel_mean = X_seq.mean(axis=(0, 1))
+        self._channel_std = X_seq.std(axis=(0, 1))
+        self._channel_std[self._channel_std < 1e-8] = 1.0
         X_seq = (X_seq - self._channel_mean) / self._channel_std
 
-        # Target z-score normalisation — per-horizon when multi-output
+        # Target z-score normalisation -- per-horizon when multi-output
         if self._n_horizons > 1:
             self._y_mean = y_train.mean(axis=0)   # (n_horizons,)
             self._y_std = y_train.std(axis=0)     # (n_horizons,)
@@ -189,12 +165,10 @@ class LSTMModel(ForecastModel):
         # Extract sample weights
         sample_weight = kwargs.get("sample_weight")
 
-        # Middle-out validation split — val from centre so model trains on recent data
         n_total = len(X_seq)
         val_split = kwargs.get("validation_split", 0.2)
         n_val = int(n_total * val_split)
         val_start = (n_total - n_val) // 2
-
         val_mask = np.zeros(n_total, dtype=bool)
         val_mask[val_start:val_start + n_val] = True
         train_mask = ~val_mask
@@ -203,31 +177,25 @@ class LSTMModel(ForecastModel):
         y_tr, y_val = y_train[train_mask], y_train[val_mask]
         w_tr = sample_weight[train_mask] if sample_weight is not None else None
 
-        # Convert to tensors
         X_tr_t = torch.FloatTensor(X_tr)
         y_tr_t = torch.FloatTensor(y_tr)
         w_tr_t = torch.FloatTensor(w_tr) if w_tr is not None else None
         X_val_t = torch.FloatTensor(X_val)
         y_val_t = torch.FloatTensor(y_val)
 
-        # Create model
-        self._model = _LSTMNet(
-            input_size, self.hidden_size, self.num_layers, self.dropout,
-            n_horizons=self._n_horizons,
-        )
+        self._model = self._build_model(seq_len, n_channels,
+                                        n_horizons=self._n_horizons)
         optimiser = torch.optim.Adam(self._model.parameters(), lr=self.learning_rate)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimiser, mode='min', factor=0.5, patience=self.lr_patience,
+            optimiser, mode="min", factor=0.5, patience=self.lr_patience,
         )
-        criterion = nn.MSELoss(reduction='none')
+        criterion = nn.L1Loss(reduction="none")
 
-        # Training loop with best-model checkpointing
         best_val_loss = float("inf")
         best_state = None
         patience_counter = 0
         prev_lr = self.learning_rate
         best_val_at_last_lr_drop = float("inf")
-        self._training_history = {"train_loss": [], "val_loss": []}
 
         for epoch in range(self.epochs):
             self._model.train()
@@ -254,42 +222,28 @@ class LSTMModel(ForecastModel):
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self._model.parameters(), max_norm=5.0)
                 optimiser.step()
-
                 epoch_loss += loss.item()
                 n_batches += 1
 
-            # Validation
             self._model.eval()
             with torch.no_grad():
                 val_pred = self._model(X_val_t)
                 val_loss = criterion(val_pred, y_val_t).mean().item()
 
             avg_loss = epoch_loss / max(n_batches, 1)
-            self._training_history["train_loss"].append(avg_loss)
-            self._training_history["val_loss"].append(val_loss)
-
-            # LR scheduler step — only reset early stopping if previous drop helped
             scheduler.step(val_loss)
-            current_lr = optimiser.param_groups[0]['lr']
+            current_lr = optimiser.param_groups[0]["lr"]
+
             if current_lr < prev_lr:
                 improved = best_val_loss < best_val_at_last_lr_drop * 0.99
                 if improved:
-                    logger.info(
-                        f"LR reduced {prev_lr:.2e} → {current_lr:.2e}, "
-                        f"loss improved {best_val_at_last_lr_drop:.6f} → {best_val_loss:.6f}, "
-                        f"resetting early stopping"
-                    )
+                    logger.info(f"LR {prev_lr:.2e}\u2192{current_lr:.2e}, loss improved, resetting patience")
                     patience_counter = 0
                 else:
-                    logger.info(
-                        f"LR reduced {prev_lr:.2e} → {current_lr:.2e}, "
-                        f"loss stalled ({best_val_loss:.6f} vs {best_val_at_last_lr_drop:.6f}), "
-                        f"not resetting early stopping"
-                    )
+                    logger.info(f"LR {prev_lr:.2e}\u2192{current_lr:.2e}, loss stalled, keeping patience")
                 best_val_at_last_lr_drop = best_val_loss
                 prev_lr = current_lr
 
-            # Best-model checkpoint
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_state = deepcopy(self._model.state_dict())
@@ -298,28 +252,20 @@ class LSTMModel(ForecastModel):
                 patience_counter += 1
 
             if (epoch + 1) % max(1, self.epochs // 10) == 0:
-                current_lr = optimiser.param_groups[0]['lr']
                 logger.info(
-                    f"Epoch {epoch + 1}/{self.epochs}: "
-                    f"train_loss={avg_loss:.6f}, val_loss={val_loss:.6f}, lr={current_lr:.2e}"
+                    f"Epoch {epoch+1}/{self.epochs}: train={avg_loss:.6f}, val={val_loss:.6f}, lr={current_lr:.2e}"
                 )
 
             if patience_counter >= self.patience:
                 logger.info(f"Early stopping at epoch {epoch + 1}")
                 break
 
-        # Restore best model
         if best_state is not None:
             self._model.load_state_dict(best_state)
 
         elapsed = time.time() - start_time
         self._is_fitted = True
-
-        return {
-            "time_seconds": elapsed,
-            "epochs": epoch + 1,
-            "best_val_loss": float(best_val_loss),
-        }
+        return {"time_seconds": elapsed, "epochs": epoch + 1, "best_val_loss": float(best_val_loss)}
 
     def predict_sequence(self, X: np.ndarray) -> np.ndarray:
         """Multi-horizon prediction from sliding-window input.
@@ -345,7 +291,7 @@ class LSTMModel(ForecastModel):
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
 
-        # Denormalize — broadcasting handles both scalar and array _y_mean/_y_std
+        # Denormalize -- broadcasting handles both scalar and array _y_mean/_y_std
         predictions = predictions * self._y_std + self._y_mean
         return np.clip(predictions, 0.0, None).astype(np.float32)
 
@@ -353,15 +299,10 @@ class LSTMModel(ForecastModel):
         """Generate predictions (returns horizon-0 for multi-horizon models)."""
         self._validate_fitted()
         self._validate_X(X)
-
         X_seq = self._reshape_to_sequences(X)
-
-        # Apply same per-channel z-score standardisation as training
         if self._channel_mean is not None and self._channel_std is not None:
             X_seq = (X_seq - self._channel_mean) / self._channel_std
-
         X_t = torch.FloatTensor(X_seq)
-
         self._model.eval()
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
@@ -376,13 +317,12 @@ class LSTMModel(ForecastModel):
         return np.clip(predictions, 0.0, None).astype(np.float32)
 
     def export_onnx(self, path: str) -> bool:
-        """Export model to ONNX format."""
         if not self.is_fitted or self._model is None:
             return False
         try:
-            dummy = torch.randn(1, self.sequence_length or 48, self._input_size or 1)
+            dummy = torch.randn(1, self._seq_len or 48, self._n_channels or 1)
             torch.onnx.export(self._model, dummy, path, input_names=["input"], output_names=["output"])
-            logger.info(f"Exported LSTM to ONNX: {path}")
+            logger.info(f"Exported DLinear to ONNX: {path}")
             return True
         except Exception as e:
             logger.warning(f"ONNX export failed: {e}")
@@ -393,41 +333,41 @@ class LSTMModel(ForecastModel):
 
     def get_params(self) -> Dict[str, Any]:
         return deepcopy({
-            "hidden_size": self.hidden_size, "num_layers": self.num_layers,
-            "dropout": self.dropout, "learning_rate": self.learning_rate,
+            "kernel_size": self.kernel_size, "learning_rate": self.learning_rate,
             "epochs": self.epochs, "batch_size": self.batch_size,
             "patience": self.patience, "lr_patience": self.lr_patience,
             "sequence_length": self.sequence_length,
         })
 
     def set_params(self, **kwargs: Any) -> None:
-        valid = {"hidden_size", "num_layers", "dropout", "learning_rate",
-                 "epochs", "batch_size", "patience", "lr_patience", "sequence_length"}
+        valid = {"kernel_size", "learning_rate", "epochs", "batch_size",
+                 "patience", "lr_patience", "sequence_length"}
         for k, v in kwargs.items():
             if k not in valid:
                 raise ValueError(f"Unknown parameter: {k}")
             setattr(self, k, v)
 
     def save(self, path: str) -> None:
-        """Save model state dict."""
         if not self.is_fitted or self._model is None:
             raise RuntimeError("Cannot save unfitted model")
         torch.save({
             "state_dict": self._model.state_dict(),
             "params": self.get_params(),
-            "input_size": self._input_size,
+            "seq_len": self._seq_len,
+            "n_channels": self._n_channels,
             "n_horizons": self._n_horizons,
             "channel_mean": self._channel_mean,
             "channel_std": self._channel_std,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
         }, path)
-        logger.info(f"Saved LSTM model to {path}")
+        logger.info(f"Saved DLinear model to {path}")
 
     def load(self, path: str) -> None:
-        """Load model state dict."""
         data = torch.load(path, map_location="cpu")
         self.set_params(**data["params"])
+        self._seq_len = data.get("seq_len")
+        self._n_channels = data.get("n_channels")
         self._channel_mean = data.get("channel_mean")
         self._channel_std = data.get("channel_std")
 
@@ -442,16 +382,10 @@ class LSTMModel(ForecastModel):
             self._y_mean = float(raw_y_mean)
             self._y_std = float(raw_y_std)
 
-        # Reconstruct the nn.Module and load weights
-        self._input_size = data.get("input_size")
-        state_dict = data.get("state_dict")
-        if state_dict is not None and self._input_size is not None:
-            self._model = _LSTMNet(
-                self._input_size, self.hidden_size, self.num_layers, self.dropout,
-                n_horizons=self._n_horizons,
-            )
-            self._model.load_state_dict(state_dict)
+        if self._seq_len is not None and self._n_channels is not None:
+            self._model = self._build_model(self._seq_len, self._n_channels,
+                                            n_horizons=self._n_horizons)
+            self._model.load_state_dict(data["state_dict"])
             self._model.eval()
-
         self._is_fitted = True
-        logger.info(f"Loaded LSTM model from {path}")
+        logger.info(f"Loaded DLinear model from {path}")

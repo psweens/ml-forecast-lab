@@ -386,6 +386,7 @@ def create_sliding_windows(
     window_size: int = 48,
     covariate_cols: Optional[List[str]] = None,
     add_temporal: bool = True,
+    horizon_steps: Optional[List[int]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """
     Create sliding window sequences from raw time series for LSTM/CNN.
@@ -406,13 +407,19 @@ def create_sliding_windows(
     add_temporal : bool, default True
         Add temporal features (hour_sin, hour_cos, dow_sin, dow_cos, is_weekend)
         as extra channels.
+    horizon_steps : list of int, optional
+        Steps-ahead for each forecast horizon. E.g. [4, 16, 24, 48] for
+        2h/8h/12h/24h at 30-min intervals. When provided, y becomes 2D
+        with shape (n_samples, len(horizon_steps)). horizon_steps=[1] is
+        equivalent to the default single-step-ahead behaviour.
 
     Returns
     -------
     X : np.ndarray
         Shape (n_samples, window_size, n_channels).
     y : np.ndarray
-        Shape (n_samples,) — the target value at the step after each window.
+        Shape (n_samples,) when horizon_steps is None, or
+        (n_samples, n_horizons) when horizon_steps is provided.
     channel_names : list of str
         Names of the channels in X.
     """
@@ -443,18 +450,39 @@ def create_sliding_windows(
     if n_total <= window_size:
         raise ValueError(f"Need more than {window_size} samples, got {n_total}")
 
-    n_samples = n_total - window_size
+    if horizon_steps is not None:
+        max_horizon = max(horizon_steps)
+        n_samples = n_total - window_size - max_horizon + 1
+        if n_samples <= 0:
+            raise ValueError(
+                f"Not enough data for window_size={window_size} and "
+                f"max_horizon={max_horizon}: need > {window_size + max_horizon - 1} "
+                f"samples, got {n_total}"
+            )
+        n_horizons = len(horizon_steps)
+    else:
+        n_samples = n_total - window_size
+        n_horizons = 0
+
     X = np.zeros((n_samples, window_size, n_channels), dtype=np.float32)
-    y = np.zeros(n_samples, dtype=np.float32)
+    if n_horizons > 0:
+        y = np.zeros((n_samples, n_horizons), dtype=np.float32)
+    else:
+        y = np.zeros(n_samples, dtype=np.float32)
 
     target_idx = 0  # target_col is always first
     for i in range(n_samples):
         X[i] = data[i:i + window_size]
-        y[i] = data[i + window_size, target_idx]
+        if n_horizons > 0:
+            for h_idx, h in enumerate(horizon_steps):
+                y[i, h_idx] = data[i + window_size + h - 1, target_idx]
+        else:
+            y[i] = data[i + window_size, target_idx]
 
+    horizon_info = f", horizons={horizon_steps}" if horizon_steps else ""
     logger.debug(
         f"Created {n_samples} sliding windows: "
-        f"({window_size} steps × {n_channels} channels: {channel_names})"
+        f"({window_size} steps × {n_channels} channels: {channel_names}{horizon_info})"
     )
 
     return X, y, channel_names
