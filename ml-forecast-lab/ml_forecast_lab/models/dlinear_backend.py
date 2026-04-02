@@ -76,7 +76,7 @@ class DLinearModel(ForecastModel):
     def __init__(
         self,
         kernel_size: int = 25,
-        learning_rate: float = 0.001,
+        learning_rate: float = 2e-4,
         epochs: int = 100,
         batch_size: int = 64,
         patience: int = 15,
@@ -187,7 +187,7 @@ class DLinearModel(ForecastModel):
 
         self._model = self._build_model(seq_len, n_channels,
                                         n_horizons=self._n_horizons)
-        optimiser = torch.optim.Adam(self._model.parameters(), lr=self.learning_rate)
+        optimiser = torch.optim.AdamW(self._model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimiser, mode="min", factor=0.5, patience=self.lr_patience,
         )
