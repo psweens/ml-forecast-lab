@@ -157,12 +157,17 @@ class MLForecastLabApp:
             self.model_registry.register("lstm", LSTMModel)
             self.model_registry.register("cnn", CNNModel)
 
-            # Register NeuralProphet if available
-            try:
-                from ml_forecast_lab.models.neuralprophet_backend import NeuralProphetModel
-                self.model_registry.register("neuralprophet", NeuralProphetModel)
-            except Exception as e:
-                logger.debug(f"NeuralProphet not available: {e}")
+            # Register optional backends
+            _optional_backends = [
+                ("neuralprophet", "neuralprophet_backend", "NeuralProphetModel"),
+                ("dlinear", "dlinear_backend", "DLinearModel"),
+            ]
+            for _name, _module, _cls_name in _optional_backends:
+                try:
+                    _mod = __import__(f"ml_forecast_lab.models.{_module}", fromlist=[_cls_name])
+                    self.model_registry.register(_name, getattr(_mod, _cls_name))
+                except Exception as e:
+                    logger.debug(f"{_name} not available: {e}")
 
             logger.info(f"ModelRegistry initialised with {len(self.model_registry.list_available())} backends")
 
