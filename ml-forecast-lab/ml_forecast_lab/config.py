@@ -161,6 +161,9 @@ class ExperimentCfg:
     database: bool = False
     """Whether to cache history in SQLite."""
 
+    loss_fn: str = 'mse'
+    """Training loss for neural models: 'mse', 'mae', or 'huber'."""
+
     def __post_init__(self) -> None:
         """Validate configuration."""
         valid_modes = {'lab', 'production'}

@@ -74,6 +74,10 @@ experiments:
       - "lstm"
       - "cnn"
       - "neuralprophet"
+      # - "dlinear"                 # DLinear: simple decomposition-linear (off by default)
+
+    # -- Neural model settings ------------------------------------------------
+    loss_fn: "mse"                   # Training loss for neural models: "mse", "mae", "huber"
 
     # -- Cross-validation settings --------------------------------------------
     cv_strategy: "walk_forward"    # or "sliding_window"

@@ -637,11 +637,14 @@ class MLForecastLabApp:
         except Exception as _e:
             logger.debug(f"Config refresh skipped: {_e}")
 
-        # Instantiate models
+        # Instantiate models — pass loss_fn to neural models
         models = {}
         for model_name in exp_cfg.models_enabled:
             try:
-                models[model_name] = self.model_registry.create(model_name)
+                m = self.model_registry.create(model_name)
+                if m.is_neural and hasattr(m, 'loss_fn'):
+                    m.set_params(loss_fn=exp_cfg.loss_fn)
+                models[model_name] = m
             except Exception as e:
                 logger.warning(
                     f"Skipping model {model_name}: {e}"
@@ -805,6 +808,8 @@ class MLForecastLabApp:
             for m_name in exp_cfg.models_enabled:
                 try:
                     m = self.model_registry.create(m_name)
+                    if m.is_neural and hasattr(m, 'loss_fn'):
+                        m.set_params(loss_fn=exp_cfg.loss_fn)
 
                     # Neural models need sliding window data
                     hold_seq_kwargs = {}
@@ -1042,6 +1047,8 @@ class MLForecastLabApp:
 
         # 4. Train model on full data
         model = self.model_registry.create(prod_model_name)
+        if model.is_neural and hasattr(model, 'loss_fn'):
+            model.set_params(loss_fn=exp_cfg.loss_fn)
         is_neural = model.is_neural
         logger.info(f"Training {prod_model_name} on {len(X)} samples...")
         train_start = time.time()
