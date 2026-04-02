@@ -104,6 +104,7 @@ class LSTMModel(ForecastModel):
         patience: int = 15,
         lr_patience: int = 7,
         sequence_length: Optional[int] = None,
+        loss_fn: str = 'mse',
     ) -> None:
         super().__init__()
         if not TORCH_AVAILABLE:
@@ -118,6 +119,7 @@ class LSTMModel(ForecastModel):
         self.patience = patience
         self.lr_patience = lr_patience
         self.sequence_length = sequence_length
+        self.loss_fn = loss_fn
 
         self._model: Optional[_LSTMNet] = None
         self._input_size: Optional[int] = None
@@ -219,7 +221,8 @@ class LSTMModel(ForecastModel):
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimiser, mode='min', factor=0.5, patience=self.lr_patience,
         )
-        criterion = nn.MSELoss(reduction='none')
+        _loss_map = {'mse': nn.MSELoss, 'mae': nn.L1Loss, 'l1': nn.L1Loss, 'huber': nn.SmoothL1Loss}
+        criterion = _loss_map.get(self.loss_fn, nn.MSELoss)(reduction='none')
 
         # Training loop with best-model checkpointing
         best_val_loss = float("inf")
@@ -397,12 +400,13 @@ class LSTMModel(ForecastModel):
             "dropout": self.dropout, "learning_rate": self.learning_rate,
             "epochs": self.epochs, "batch_size": self.batch_size,
             "patience": self.patience, "lr_patience": self.lr_patience,
-            "sequence_length": self.sequence_length,
+            "sequence_length": self.sequence_length, "loss_fn": self.loss_fn,
         })
 
     def set_params(self, **kwargs: Any) -> None:
         valid = {"hidden_size", "num_layers", "dropout", "learning_rate",
-                 "epochs", "batch_size", "patience", "lr_patience", "sequence_length"}
+                 "epochs", "batch_size", "patience", "lr_patience",
+                 "sequence_length", "loss_fn"}
         for k, v in kwargs.items():
             if k not in valid:
                 raise ValueError(f"Unknown parameter: {k}")

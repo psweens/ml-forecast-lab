@@ -82,6 +82,7 @@ class DLinearModel(ForecastModel):
         patience: int = 15,
         lr_patience: int = 7,
         sequence_length: Optional[int] = None,
+        loss_fn: str = 'mse',
     ) -> None:
         super().__init__()
         if not TORCH_AVAILABLE:
@@ -93,6 +94,7 @@ class DLinearModel(ForecastModel):
         self.patience = patience
         self.lr_patience = lr_patience
         self.sequence_length = sequence_length
+        self.loss_fn = loss_fn
 
         self._model: Optional[_DLinearNet] = None
         self._seq_len: Optional[int] = None
@@ -189,7 +191,8 @@ class DLinearModel(ForecastModel):
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimiser, mode="min", factor=0.5, patience=self.lr_patience,
         )
-        criterion = nn.L1Loss(reduction="none")
+        _loss_map = {'mse': nn.MSELoss, 'mae': nn.L1Loss, 'l1': nn.L1Loss, 'huber': nn.SmoothL1Loss}
+        criterion = _loss_map.get(self.loss_fn, nn.MSELoss)(reduction='none')
 
         best_val_loss = float("inf")
         best_state = None
@@ -336,12 +339,12 @@ class DLinearModel(ForecastModel):
             "kernel_size": self.kernel_size, "learning_rate": self.learning_rate,
             "epochs": self.epochs, "batch_size": self.batch_size,
             "patience": self.patience, "lr_patience": self.lr_patience,
-            "sequence_length": self.sequence_length,
+            "sequence_length": self.sequence_length, "loss_fn": self.loss_fn,
         })
 
     def set_params(self, **kwargs: Any) -> None:
         valid = {"kernel_size", "learning_rate", "epochs", "batch_size",
-                 "patience", "lr_patience", "sequence_length"}
+                 "patience", "lr_patience", "sequence_length", "loss_fn"}
         for k, v in kwargs.items():
             if k not in valid:
                 raise ValueError(f"Unknown parameter: {k}")
