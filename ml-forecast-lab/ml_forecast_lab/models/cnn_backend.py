@@ -123,10 +123,8 @@ class CNNModel(ForecastModel):
         n_layers: int = 4,
         dilation_base: int = 2,
         learning_rate: float = 2e-4,
-        epochs: int = 100,
+        epochs: int = 150,
         batch_size: int = 64,
-        patience: int = 15,
-        lr_patience: int = 7,
         dropout: float = 0.2,
         loss_fn: str = 'mse',
     ) -> None:
@@ -142,8 +140,6 @@ class CNNModel(ForecastModel):
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.batch_size = batch_size
-        self.patience = patience
-        self.lr_patience = lr_patience
         self.dropout = dropout
         self.loss_fn = loss_fn
 
@@ -247,18 +243,13 @@ class CNNModel(ForecastModel):
             n_horizons=self._n_horizons,
         )
         optimiser = torch.optim.AdamW(self._model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimiser, mode='min', factor=0.5, patience=self.lr_patience,
-        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=self.epochs, eta_min=1e-6)
         _loss_map = {'mse': nn.MSELoss, 'mae': nn.L1Loss, 'l1': nn.L1Loss, 'huber': nn.SmoothL1Loss}
         criterion = _loss_map.get(self.loss_fn, nn.MSELoss)(reduction='none')
 
-        # Training loop with best-model checkpointing
+        # Training loop — fixed budget with cosine annealing + best-model checkpoint
         best_val_loss = float("inf")
         best_state = None
-        patience_counter = 0
-        prev_lr = self.learning_rate
-        best_val_at_last_lr_drop = float("inf")  # Track if LR drops are helping
         self._training_history = {"train_loss": [], "val_loss": []}
 
         for epoch in range(self.epochs):
@@ -290,7 +281,9 @@ class CNNModel(ForecastModel):
                 epoch_loss += loss.item()
                 n_batches += 1
 
-            # Validation (unweighted)
+            scheduler.step()
+
+            # Validation
             self._model.eval()
             with torch.no_grad():
                 val_pred = self._model(X_val_t)
@@ -300,35 +293,10 @@ class CNNModel(ForecastModel):
             self._training_history["train_loss"].append(avg_loss)
             self._training_history["val_loss"].append(val_loss)
 
-            # LR scheduler step — only reset early stopping if previous drop helped
-            scheduler.step(val_loss)
-            current_lr = optimiser.param_groups[0]['lr']
-            if current_lr < prev_lr:
-                # Did loss meaningfully improve (>1% relative) since the last LR drop?
-                improved = best_val_loss < best_val_at_last_lr_drop * 0.99
-                if improved:
-                    logger.info(
-                        f"LR reduced {prev_lr:.2e} → {current_lr:.2e}, "
-                        f"loss improved {best_val_at_last_lr_drop:.6f} → {best_val_loss:.6f}, "
-                        f"resetting early stopping"
-                    )
-                    patience_counter = 0
-                else:
-                    logger.info(
-                        f"LR reduced {prev_lr:.2e} → {current_lr:.2e}, "
-                        f"loss stalled ({best_val_loss:.6f} vs {best_val_at_last_lr_drop:.6f}), "
-                        f"not resetting early stopping"
-                    )
-                best_val_at_last_lr_drop = best_val_loss
-                prev_lr = current_lr
-
             # Best-model checkpoint
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_state = deepcopy(self._model.state_dict())
-                patience_counter = 0
-            else:
-                patience_counter += 1
 
             if (epoch + 1) % max(1, self.epochs // 10) == 0:
                 current_lr = optimiser.param_groups[0]['lr']
@@ -336,10 +304,6 @@ class CNNModel(ForecastModel):
                     f"Epoch {epoch + 1}/{self.epochs}: "
                     f"train_loss={avg_loss:.6f}, val_loss={val_loss:.6f}, lr={current_lr:.2e}"
                 )
-
-            if patience_counter >= self.patience:
-                logger.info(f"Early stopping at epoch {epoch + 1}")
-                break
 
         # Restore best model
         if best_state is not None:
@@ -431,15 +395,14 @@ class CNNModel(ForecastModel):
             "n_filters": self.n_filters, "kernel_size": self.kernel_size,
             "n_layers": self.n_layers, "dilation_base": self.dilation_base,
             "learning_rate": self.learning_rate, "epochs": self.epochs,
-            "batch_size": self.batch_size, "patience": self.patience,
-            "lr_patience": self.lr_patience, "dropout": self.dropout,
+            "batch_size": self.batch_size, "dropout": self.dropout,
             "loss_fn": self.loss_fn,
         })
 
     def set_params(self, **kwargs: Any) -> None:
         valid = {"n_filters", "kernel_size", "n_layers", "dilation_base",
-                 "learning_rate", "epochs", "batch_size", "patience",
-                 "lr_patience", "dropout", "loss_fn"}
+                 "learning_rate", "epochs", "batch_size",
+                 "dropout", "loss_fn"}
         for k, v in kwargs.items():
             if k not in valid:
                 raise ValueError(f"Unknown parameter: {k}")

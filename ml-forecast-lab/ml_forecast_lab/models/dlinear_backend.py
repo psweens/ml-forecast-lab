@@ -77,10 +77,8 @@ class DLinearModel(ForecastModel):
         self,
         kernel_size: int = 25,
         learning_rate: float = 2e-4,
-        epochs: int = 100,
+        epochs: int = 150,
         batch_size: int = 64,
-        patience: int = 15,
-        lr_patience: int = 7,
         sequence_length: Optional[int] = None,
         loss_fn: str = 'mse',
     ) -> None:
@@ -91,8 +89,6 @@ class DLinearModel(ForecastModel):
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.batch_size = batch_size
-        self.patience = patience
-        self.lr_patience = lr_patience
         self.sequence_length = sequence_length
         self.loss_fn = loss_fn
 
@@ -188,17 +184,12 @@ class DLinearModel(ForecastModel):
         self._model = self._build_model(seq_len, n_channels,
                                         n_horizons=self._n_horizons)
         optimiser = torch.optim.AdamW(self._model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimiser, mode="min", factor=0.5, patience=self.lr_patience,
-        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=self.epochs, eta_min=1e-6)
         _loss_map = {'mse': nn.MSELoss, 'mae': nn.L1Loss, 'l1': nn.L1Loss, 'huber': nn.SmoothL1Loss}
         criterion = _loss_map.get(self.loss_fn, nn.MSELoss)(reduction='none')
 
         best_val_loss = float("inf")
         best_state = None
-        patience_counter = 0
-        prev_lr = self.learning_rate
-        best_val_at_last_lr_drop = float("inf")
 
         for epoch in range(self.epochs):
             self._model.train()
@@ -228,40 +219,24 @@ class DLinearModel(ForecastModel):
                 epoch_loss += loss.item()
                 n_batches += 1
 
+            scheduler.step()
+
             self._model.eval()
             with torch.no_grad():
                 val_pred = self._model(X_val_t)
                 val_loss = criterion(val_pred, y_val_t).mean().item()
 
             avg_loss = epoch_loss / max(n_batches, 1)
-            scheduler.step(val_loss)
-            current_lr = optimiser.param_groups[0]["lr"]
-
-            if current_lr < prev_lr:
-                improved = best_val_loss < best_val_at_last_lr_drop * 0.99
-                if improved:
-                    logger.info(f"LR {prev_lr:.2e}\u2192{current_lr:.2e}, loss improved, resetting patience")
-                    patience_counter = 0
-                else:
-                    logger.info(f"LR {prev_lr:.2e}\u2192{current_lr:.2e}, loss stalled, keeping patience")
-                best_val_at_last_lr_drop = best_val_loss
-                prev_lr = current_lr
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_state = deepcopy(self._model.state_dict())
-                patience_counter = 0
-            else:
-                patience_counter += 1
 
             if (epoch + 1) % max(1, self.epochs // 10) == 0:
+                current_lr = optimiser.param_groups[0]["lr"]
                 logger.info(
                     f"Epoch {epoch+1}/{self.epochs}: train={avg_loss:.6f}, val={val_loss:.6f}, lr={current_lr:.2e}"
                 )
-
-            if patience_counter >= self.patience:
-                logger.info(f"Early stopping at epoch {epoch + 1}")
-                break
 
         if best_state is not None:
             self._model.load_state_dict(best_state)
@@ -338,13 +313,12 @@ class DLinearModel(ForecastModel):
         return deepcopy({
             "kernel_size": self.kernel_size, "learning_rate": self.learning_rate,
             "epochs": self.epochs, "batch_size": self.batch_size,
-            "patience": self.patience, "lr_patience": self.lr_patience,
             "sequence_length": self.sequence_length, "loss_fn": self.loss_fn,
         })
 
     def set_params(self, **kwargs: Any) -> None:
         valid = {"kernel_size", "learning_rate", "epochs", "batch_size",
-                 "patience", "lr_patience", "sequence_length", "loss_fn"}
+                 "sequence_length", "loss_fn"}
         for k, v in kwargs.items():
             if k not in valid:
                 raise ValueError(f"Unknown parameter: {k}")
