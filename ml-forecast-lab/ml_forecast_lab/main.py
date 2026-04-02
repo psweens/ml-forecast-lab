@@ -161,6 +161,15 @@ class MLForecastLabApp:
             _optional_backends = [
                 ("neuralprophet", "neuralprophet_backend", "NeuralProphetModel"),
                 ("dlinear", "dlinear_backend", "DLinearModel"),
+                ("nbeats", "nbeats_backend", "NBeatsModel"),
+                ("nhits", "nhits_backend", "NHiTSModel"),
+                ("tide", "tide_backend", "TiDEModel"),
+                ("tsmixer", "tsmixer_backend", "TSMixerModel"),
+                ("sparsetsf", "sparsetsf_backend", "SparseTSFModel"),
+                ("patchtst", "patchtst_backend", "PatchTSTModel"),
+                ("itransformer", "itransformer_backend", "iTransformerModel"),
+                ("crossformer", "crossformer_backend", "CrossformerModel"),
+                ("timesnet", "timesnet_backend", "TimesNetModel"),
             ]
             for _name, _module, _cls_name in _optional_backends:
                 try:
@@ -800,6 +809,16 @@ class MLForecastLabApp:
             "lstm": "#f39c12",
             "cnn": "#e74c3c",
             "neuralprophet": "#9b59b6",
+            "dlinear": "#1abc9c",
+            "nbeats": "#e67e22",
+            "nhits": "#d35400",
+            "tide": "#2980b9",
+            "tsmixer": "#8e44ad",
+            "sparsetsf": "#16a085",
+            "patchtst": "#c0392b",
+            "itransformer": "#f1c40f",
+            "crossformer": "#e84393",
+            "timesnet": "#00cec9",
         }
 
         def _generate_holdout_predictions():

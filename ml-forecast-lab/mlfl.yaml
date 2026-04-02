@@ -74,7 +74,16 @@ experiments:
       - "lstm"
       - "cnn"
       - "neuralprophet"
-      # - "dlinear"                 # DLinear: simple decomposition-linear (off by default)
+      # - "dlinear"                 # Decomposition-Linear (Zeng et al., 2023)
+      # - "nbeats"                  # Neural Basis Expansion (Oreshkin et al., 2020)
+      # - "nhits"                   # Neural Hierarchical Interpolation (Challu et al., 2023)
+      # - "tide"                    # Time-series Dense Encoder (Das et al., 2023)
+      # - "tsmixer"                 # Time-Series Mixer (Chen et al., 2023)
+      # - "sparsetsf"              # Sparse Time-Series Forecasting (Lin et al., 2024)
+      # - "patchtst"               # Patch Time-Series Transformer (Nie et al., 2023)
+      # - "itransformer"           # Inverted Transformer (Liu et al., 2024)
+      # - "crossformer"            # Cross-variable Transformer (Zhang & Yan, 2023)
+      # - "timesnet"               # TimesNet 2D vision backbone (Wu et al., 2023)
 
     # -- Neural model settings ------------------------------------------------
     loss_fn: "mse"                   # Training loss for neural models: "mse", "mae", "huber"
