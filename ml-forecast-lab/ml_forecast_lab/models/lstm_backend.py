@@ -99,7 +99,7 @@ class LSTMModel(ForecastModel):
         num_layers: int = 2,
         dropout: float = 0.2,
         learning_rate: float = 2e-4,
-        epochs: int = 150,
+        epochs: int = 100,
         batch_size: int = 64,
         sequence_length: Optional[int] = None,
         loss_fn: str = 'mse',

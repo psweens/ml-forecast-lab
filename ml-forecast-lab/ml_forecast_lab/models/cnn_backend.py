@@ -123,7 +123,7 @@ class CNNModel(ForecastModel):
         n_layers: int = 4,
         dilation_base: int = 2,
         learning_rate: float = 2e-4,
-        epochs: int = 150,
+        epochs: int = 100,
         batch_size: int = 64,
         dropout: float = 0.2,
         loss_fn: str = 'mse',

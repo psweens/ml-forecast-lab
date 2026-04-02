@@ -832,7 +832,7 @@ class MLForecastLabApp:
                                 'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
                                 'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
                             }
-                            engineered.update(c for c in train_part.columns if c.startswith(('y_lag_', 'y_rolling_')))
+                            engineered.update(c for c in train_part.columns if c.startswith('y_lag_'))
                             cov_cols = [c for c in train_part.columns if c not in engineered and c != target_col]
 
                             window_size = min(48, len(train_part) // 3)
@@ -1069,7 +1069,7 @@ class MLForecastLabApp:
                 'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
                 'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
             }
-            engineered.update(c for c in combined.columns if c.startswith(('y_lag_', 'y_rolling_')))
+            engineered.update(c for c in combined.columns if c.startswith('y_lag_'))
             raw_cov_cols_prod = [c for c in combined.columns if c not in engineered and c != 'target']
             window_size_prod = min(48, len(combined) // 3)
             if window_size_prod >= 12:

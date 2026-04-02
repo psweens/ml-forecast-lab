@@ -343,7 +343,7 @@ class BenchmarkRunner:
                         'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
                         'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
                     }
-                    engineered.update(c for c in df_train.columns if c.startswith(('y_lag_', 'y_rolling_')))
+                    engineered.update(c for c in df_train.columns if c.startswith('y_lag_'))
                     neural_cov_cols = [c for c in df_train.columns if c not in engineered and c != target_col]
 
                     # Compute horizon steps from config

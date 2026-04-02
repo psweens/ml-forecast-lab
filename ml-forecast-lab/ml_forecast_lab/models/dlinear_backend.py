@@ -77,7 +77,7 @@ class DLinearModel(ForecastModel):
         self,
         kernel_size: int = 25,
         learning_rate: float = 2e-4,
-        epochs: int = 150,
+        epochs: int = 100,
         batch_size: int = 64,
         sequence_length: Optional[int] = None,
         loss_fn: str = 'mse',
