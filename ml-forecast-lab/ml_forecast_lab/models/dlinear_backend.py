@@ -81,6 +81,7 @@ class DLinearModel(ForecastModel):
         batch_size: int = 64,
         sequence_length: Optional[int] = None,
         loss_fn: str = 'mse',
+        patience: int = 20,
     ) -> None:
         super().__init__()
         if not TORCH_AVAILABLE:
@@ -91,6 +92,7 @@ class DLinearModel(ForecastModel):
         self.batch_size = batch_size
         self.sequence_length = sequence_length
         self.loss_fn = loss_fn
+        self.patience = patience
 
         self._model: Optional[_DLinearNet] = None
         self._seq_len: Optional[int] = None
@@ -190,6 +192,7 @@ class DLinearModel(ForecastModel):
 
         best_val_loss = float("inf")
         best_state = None
+        patience_counter = 0
 
         for epoch in range(self.epochs):
             self._model.train()
@@ -231,12 +234,19 @@ class DLinearModel(ForecastModel):
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_state = deepcopy(self._model.state_dict())
+                patience_counter = 0
+            else:
+                patience_counter += 1
 
             if (epoch + 1) % max(1, self.epochs // 10) == 0:
                 current_lr = optimiser.param_groups[0]["lr"]
                 logger.info(
                     f"Epoch {epoch+1}/{self.epochs}: train={avg_loss:.6f}, val={val_loss:.6f}, lr={current_lr:.2e}"
                 )
+
+            if patience_counter >= self.patience:
+                logger.info(f"Early stopping at epoch {epoch + 1} (no improvement for {self.patience} epochs)")
+                break
 
         if best_state is not None:
             self._model.load_state_dict(best_state)

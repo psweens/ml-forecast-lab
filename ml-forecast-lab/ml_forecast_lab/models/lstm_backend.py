@@ -103,6 +103,7 @@ class LSTMModel(ForecastModel):
         batch_size: int = 64,
         sequence_length: Optional[int] = None,
         loss_fn: str = 'mse',
+        patience: int = 20,
     ) -> None:
         super().__init__()
         if not TORCH_AVAILABLE:
@@ -116,6 +117,7 @@ class LSTMModel(ForecastModel):
         self.batch_size = batch_size
         self.sequence_length = sequence_length
         self.loss_fn = loss_fn
+        self.patience = patience
 
         self._model: Optional[_LSTMNet] = None
         self._input_size: Optional[int] = None
@@ -218,9 +220,10 @@ class LSTMModel(ForecastModel):
         _loss_map = {'mse': nn.MSELoss, 'mae': nn.L1Loss, 'l1': nn.L1Loss, 'huber': nn.SmoothL1Loss}
         criterion = _loss_map.get(self.loss_fn, nn.MSELoss)(reduction='none')
 
-        # Training loop — fixed budget with cosine annealing + best-model checkpoint
+        # Training loop — cosine annealing + best-model checkpoint + early stopping
         best_val_loss = float("inf")
         best_state = None
+        patience_counter = 0
         self._training_history = {"train_loss": [], "val_loss": []}
 
         for epoch in range(self.epochs):
@@ -264,10 +267,13 @@ class LSTMModel(ForecastModel):
             self._training_history["train_loss"].append(avg_loss)
             self._training_history["val_loss"].append(val_loss)
 
-            # Best-model checkpoint
+            # Best-model checkpoint + early stopping
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_state = deepcopy(self._model.state_dict())
+                patience_counter = 0
+            else:
+                patience_counter += 1
 
             if (epoch + 1) % max(1, self.epochs // 10) == 0:
                 current_lr = optimiser.param_groups[0]['lr']
@@ -275,6 +281,10 @@ class LSTMModel(ForecastModel):
                     f"Epoch {epoch + 1}/{self.epochs}: "
                     f"train_loss={avg_loss:.6f}, val_loss={val_loss:.6f}, lr={current_lr:.2e}"
                 )
+
+            if patience_counter >= self.patience:
+                logger.info(f"Early stopping at epoch {epoch + 1} (no improvement for {self.patience} epochs)")
+                break
 
         # Restore best model
         if best_state is not None:
