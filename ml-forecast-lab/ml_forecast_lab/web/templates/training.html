@@ -91,7 +91,14 @@
         </div>
     </div>
 
-    <!-- Live loss chart -->
+    <!-- Model selector + Live loss chart -->
+    <div style="display:flex;align-items:center;gap:1rem;margin-bottom:0.75rem;">
+        <label style="color:var(--text-secondary);font-weight:600;font-size:0.9rem;">Model</label>
+        <select id="model-select" onchange="switchChartModel(this.value)"
+                style="padding:0.4rem 0.8rem;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:0.5rem;font-size:0.9rem;min-width:180px;">
+            <option value="">— select model —</option>
+        </select>
+    </div>
     <div id="loss-chart" style="width:100%;height:400px;"></div>
 </div>
 
@@ -109,12 +116,15 @@
 (function() {
     const BASE = typeof BASE_PATH !== 'undefined' ? BASE_PATH : '';
     let evtSource = null;
-    let lossData = {};    // { "model:fold": { epochs: [], train: [], val: [] } }
+    let allLossData = {};   // { modelName: { "F1": { epochs:[], train:[], val:[] }, ... } }
+    let earlyStops = {};    // { modelName: { "F1": { epoch:N, bestLoss:X } } }
     let totalModels = 0;
     let completedModels = 0;
     let currentModel = '';
+    let displayModel = '';  // Model currently shown on chart (may differ during dropdown browsing)
     let pipelineRunning = false;
-    let isReplaying = false;  // True during history replay to batch chart updates
+    let isReplaying = false;
+    let knownModels = [];   // Ordered list of models seen so far
 
     window.startPipeline = function() {
         const sel = document.getElementById('exp-select');
@@ -136,10 +146,14 @@
         pipelineRunning = true;
 
         // Reset state
-        lossData = {};
+        allLossData = {};
+        earlyStops = {};
         totalModels = 0;
         completedModels = 0;
         currentModel = '';
+        displayModel = '';
+        knownModels = [];
+        document.getElementById('model-select').innerHTML = '<option value="">— select model —</option>';
         document.getElementById('progress-section').style.display = 'block';
         document.getElementById('event-log').innerHTML = '';
         document.getElementById('progress-bar').style.width = '0%';
@@ -205,28 +219,47 @@
 
             case 'model_start':
                 currentModel = ev.model_name;
+                addModelToDropdown(ev.model_name);
+                // Auto-switch chart to the new model during live training
+                displayModel = ev.model_name;
+                document.getElementById('model-select').value = ev.model_name;
                 document.getElementById('stat-model').textContent = ev.model_name;
                 logEvent('info', `Started: ${ev.model_name} (${ev.message})`);
                 resetStats();
+                // Rebuild chart for new model (unless replaying)
+                if (!isReplaying) renderChartForModel(displayModel);
                 break;
 
             case 'epoch':
                 updateEpochStats(ev);
-                updateLossChart(ev);
+                accumulateEpochData(ev);
+                if (!isReplaying) {
+                    // During live, only render if this model is displayed
+                    if (ev.model_name === displayModel) {
+                        liveUpdateChart(ev);
+                    }
+                }
                 break;
 
             case 'early_stop':
+                recordEarlyStop(ev.model_name, ev);
                 logEvent('warn', `${ev.model_name}: Early stop at epoch ${ev.epoch}`);
                 break;
 
             case 'model_end':
                 completedModels++;
+                // Detect early stop from epoch data if no explicit early_stop event
+                detectEarlyStopFromData(ev.model_name);
                 const pct = totalModels > 0 ? Math.round(completedModels / totalModels * 100) : 0;
                 document.getElementById('progress-bar').style.width = pct + '%';
                 document.getElementById('progress-pct').textContent = pct + '%';
                 document.getElementById('progress-label').textContent =
                     `${completedModels}/${totalModels} models complete`;
                 logEvent('success', `Completed: ${ev.model_name}`);
+                // Re-render chart to show early stop markers
+                if (!isReplaying && ev.model_name === displayModel) {
+                    renderChartForModel(displayModel);
+                }
                 break;
 
             case 'ensemble_start':
@@ -267,8 +300,6 @@
             ev.patience_limit > 0 ? `${ev.patience_counter}/${ev.patience_limit}` : '—';
     }
 
-    // Track which model the chart is currently showing and trace index per fold
-    let chartModel = '';
     let foldTraceMap = {};  // "F1" -> { trainIdx: 0, valIdx: 1 }
 
     const CHART_LAYOUT = {
@@ -288,101 +319,147 @@
         '#1abc9c', '#e67e22', '#3498db', '#e74c3c', '#2c3e50'
     ];
 
-    function updateLossChart(ev) {
-        // During replay, just accumulate data — we'll render once at the end
-        if (isReplaying) {
-            const dataKey = `${ev.model_name} F${ev.fold}`;
-            if (!lossData[dataKey]) {
-                lossData[dataKey] = { epochs: [], train: [], val: [], model: ev.model_name, fold: `F${ev.fold}` };
+    // Add a model to the dropdown if not already present
+    function addModelToDropdown(modelName) {
+        if (knownModels.includes(modelName)) return;
+        knownModels.push(modelName);
+        const sel = document.getElementById('model-select');
+        const opt = document.createElement('option');
+        opt.value = modelName;
+        opt.textContent = modelName;
+        sel.appendChild(opt);
+    }
+
+    // Accumulate epoch data into allLossData (works for both live and replay)
+    function accumulateEpochData(ev) {
+        if (!allLossData[ev.model_name]) allLossData[ev.model_name] = {};
+        const foldKey = `F${ev.fold}`;
+        if (!allLossData[ev.model_name][foldKey]) {
+            allLossData[ev.model_name][foldKey] = { epochs: [], train: [], val: [] };
+        }
+        const fd = allLossData[ev.model_name][foldKey];
+        fd.epochs.push(ev.epoch);
+        fd.train.push(ev.train_loss);
+        fd.val.push(ev.val_loss);
+    }
+
+    // Record an explicit early_stop event
+    function recordEarlyStop(modelName, ev) {
+        if (!earlyStops[modelName]) earlyStops[modelName] = {};
+        const foldKey = `F${ev.fold}`;
+        // Best epoch = stop epoch - patience_counter (the epoch that had the best loss)
+        const bestEpoch = ev.epoch - (ev.patience_counter || 0);
+        earlyStops[modelName][foldKey] = {
+            stopEpoch: ev.epoch,
+            bestEpoch: bestEpoch,
+            bestLoss: ev.best_val_loss || ev.val_loss,
+        };
+    }
+
+    // Detect early stop from accumulated data when model_end fires
+    function detectEarlyStopFromData(modelName) {
+        const modelData = allLossData[modelName];
+        if (!modelData) return;
+        for (const [foldKey, fd] of Object.entries(modelData)) {
+            // Already recorded via explicit event?
+            if (earlyStops[modelName] && earlyStops[modelName][foldKey]) continue;
+            if (fd.epochs.length === 0) continue;
+            const lastEpoch = fd.epochs[fd.epochs.length - 1];
+            // Find best val loss epoch
+            let bestIdx = 0;
+            for (let i = 1; i < fd.val.length; i++) {
+                if (fd.val[i] < fd.val[bestIdx]) bestIdx = i;
             }
-            lossData[dataKey].epochs.push(ev.epoch);
-            lossData[dataKey].train.push(ev.train_loss);
-            lossData[dataKey].val.push(ev.val_loss);
-            chartModel = ev.model_name;
+            // If training ended before the last epoch's total_epochs, it was early stopped
+            // We can also check if the best epoch is not the last epoch (patience ran out)
+            if (bestIdx < fd.val.length - 1) {
+                if (!earlyStops[modelName]) earlyStops[modelName] = {};
+                earlyStops[modelName][foldKey] = {
+                    stopEpoch: lastEpoch,
+                    bestEpoch: fd.epochs[bestIdx],
+                    bestLoss: fd.val[bestIdx],
+                };
+            }
+        }
+    }
+
+    // Switch chart to a different model (called from dropdown)
+    window.switchChartModel = function(modelName) {
+        if (!modelName) return;
+        displayModel = modelName;
+        renderChartForModel(modelName);
+    };
+
+    // Full chart render for a given model (used for replay, model switch, and early stop markers)
+    function renderChartForModel(modelName) {
+        const modelData = allLossData[modelName];
+        if (!modelData) {
+            CHART_LAYOUT.title = `${modelName} — Training & Validation Loss`;
+            Plotly.newPlot('loss-chart', [], CHART_LAYOUT, { responsive: true, displayModeBar: false });
+            foldTraceMap = {};
             return;
         }
 
-        const foldKey = `F${ev.fold}`;
+        const traces = [];
+        let colorIdx = 0;
+        foldTraceMap = {};
+        const foldKeys = Object.keys(modelData).sort();
 
-        // If the model changed, rebuild the chart from scratch
-        if (ev.model_name !== chartModel) {
-            chartModel = ev.model_name;
-            foldTraceMap = {};
-            lossData = {};
-            CHART_LAYOUT.title = `${ev.model_name} — Training & Validation Loss`;
-            Plotly.newPlot('loss-chart', [], CHART_LAYOUT, { responsive: true, displayModeBar: false });
-        }
-
-        // Track data for history replay
-        const dataKey = `${ev.model_name} ${foldKey}`;
-        if (!lossData[dataKey]) {
-            lossData[dataKey] = { epochs: [], train: [], val: [] };
-        }
-        lossData[dataKey].epochs.push(ev.epoch);
-        lossData[dataKey].train.push(ev.train_loss);
-        lossData[dataKey].val.push(ev.val_loss);
-
-        // If this is a new fold, add two new traces (train + val)
-        if (!(foldKey in foldTraceMap)) {
-            const colorIdx = Object.keys(foldTraceMap).length;
+        for (const foldKey of foldKeys) {
+            const fd = modelData[foldKey];
             const color = FOLD_COLORS[colorIdx % FOLD_COLORS.length];
 
-            const trainTrace = {
-                x: [ev.epoch], y: [ev.train_loss],
+            const trainIdx = traces.length;
+            traces.push({
+                x: fd.epochs.slice(), y: fd.train.slice(),
                 name: `Train ${foldKey}`, mode: 'lines',
                 line: { color: color, width: 1.5, dash: 'dot' },
-            };
-            const valTrace = {
-                x: [ev.epoch], y: [ev.val_loss],
+            });
+            const valIdx = traces.length;
+            traces.push({
+                x: fd.epochs.slice(), y: fd.val.slice(),
                 name: `Val ${foldKey}`, mode: 'lines',
                 line: { color: color, width: 2 },
-            };
+            });
+            foldTraceMap[foldKey] = { trainIdx, valIdx };
+            colorIdx++;
 
-            Plotly.addTraces('loss-chart', [trainTrace, valTrace]);
+            // Add early stop marker if present
+            const es = earlyStops[modelName] && earlyStops[modelName][foldKey];
+            if (es) {
+                traces.push({
+                    x: [es.bestEpoch], y: [es.bestLoss],
+                    name: `Early Stop ${foldKey}`,
+                    mode: 'markers+text',
+                    marker: { color: '#ff6b6b', size: 12, symbol: 'circle', line: { color: '#fff', width: 2 } },
+                    text: ['Early Stop'],
+                    textposition: 'top center',
+                    textfont: { color: '#ff6b6b', size: 10 },
+                    showlegend: colorIdx === 1,  // Only show legend entry once
+                    legendgroup: 'earlystop',
+                    hovertemplate: `Best Val Loss: %{y:.5f}<br>Epoch: %{x}<extra>Early Stop ${foldKey}</extra>`,
+                });
+            }
+        }
 
-            const chartDiv = document.getElementById('loss-chart');
-            const nTraces = chartDiv.data.length;
-            foldTraceMap[foldKey] = { trainIdx: nTraces - 2, valIdx: nTraces - 1 };
+        CHART_LAYOUT.title = `${modelName} — Training & Validation Loss`;
+        Plotly.newPlot('loss-chart', traces, CHART_LAYOUT, { responsive: true, displayModeBar: false });
+    }
+
+    // Incremental live update for the currently displayed model
+    function liveUpdateChart(ev) {
+        const foldKey = `F${ev.fold}`;
+
+        if (!(foldKey in foldTraceMap)) {
+            // New fold appeared — full re-render is simplest to keep indices correct
+            renderChartForModel(displayModel);
         } else {
-            // Extend existing traces with the new epoch point
             const { trainIdx, valIdx } = foldTraceMap[foldKey];
             Plotly.extendTraces('loss-chart', {
                 x: [[ev.epoch], [ev.epoch]],
                 y: [[ev.train_loss], [ev.val_loss]],
             }, [trainIdx, valIdx]);
         }
-    }
-
-    // After replaying history, render the full chart in one go
-    function renderReplayedChart() {
-        if (!chartModel) return;
-        const traces = [];
-        let colorIdx = 0;
-        foldTraceMap = {};
-
-        for (const [dataKey, d] of Object.entries(lossData)) {
-            if (!dataKey.startsWith(chartModel)) continue;
-            const foldKey = d.fold || dataKey.replace(chartModel + ' ', '');
-            const color = FOLD_COLORS[colorIdx % FOLD_COLORS.length];
-
-            const trainIdx = traces.length;
-            traces.push({
-                x: d.epochs.slice(), y: d.train.slice(),
-                name: `Train ${foldKey}`, mode: 'lines',
-                line: { color: color, width: 1.5, dash: 'dot' },
-            });
-            const valIdx = traces.length;
-            traces.push({
-                x: d.epochs.slice(), y: d.val.slice(),
-                name: `Val ${foldKey}`, mode: 'lines',
-                line: { color: color, width: 2 },
-            });
-            foldTraceMap[foldKey] = { trainIdx, valIdx };
-            colorIdx++;
-        }
-
-        CHART_LAYOUT.title = `${chartModel} — Training & Validation Loss`;
-        Plotly.newPlot('loss-chart', traces, CHART_LAYOUT, { responsive: true, displayModeBar: false });
     }
 
     function resetStats() {
@@ -424,12 +501,15 @@
 
                 if (hasStart) {
                     // Reset all state before replaying
-                    lossData = {};
-                    chartModel = '';
+                    allLossData = {};
+                    earlyStops = {};
                     foldTraceMap = {};
                     totalModels = 0;
                     completedModels = 0;
                     currentModel = '';
+                    displayModel = '';
+                    knownModels = [];
+                    document.getElementById('model-select').innerHTML = '<option value="">— select model —</option>';
 
                     // Show the progress section and replay events
                     document.getElementById('progress-section').style.display = 'block';
@@ -442,7 +522,12 @@
                         handleEvent(ev);
                     }
                     isReplaying = false;
-                    renderReplayedChart();
+
+                    // Select the last model in the dropdown and render its chart
+                    if (displayModel) {
+                        document.getElementById('model-select').value = displayModel;
+                        renderChartForModel(displayModel);
+                    }
 
                     // If pipeline is still running, connect SSE for live updates
                     if (!hasEnd) {
