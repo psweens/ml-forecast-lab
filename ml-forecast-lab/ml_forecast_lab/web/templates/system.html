@@ -1,0 +1,327 @@
+{% extends "base.html" %}
+
+{% block title %}System - ML Forecast Lab{% endblock %}
+
+{% block content %}
+<section class="dashboard-header">
+    <h1>System</h1>
+    <p class="subtitle">Health, hardware, configuration, and model management</p>
+</section>
+
+<!-- Health & System Info -->
+<section class="section">
+    <h2>System Info</h2>
+    <div class="header-stats" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
+        <div class="stat-box">
+            <span class="stat-value" style="color: var(--success); font-size: 1.5rem;">{{ health.status | upper }}</span>
+            <span class="stat-label">Service Status</span>
+        </div>
+        <div class="stat-box">
+            <span class="stat-value" style="color: var(--accent-secondary); font-size: 1.5rem;">v{{ health.version }}</span>
+            <span class="stat-label">Version</span>
+        </div>
+        <div class="stat-box">
+            <span class="stat-value" style="color: var(--accent-primary); font-size: 1.5rem;">{{ health.experiments_total }}</span>
+            <span class="stat-label">Experiments</span>
+        </div>
+        <div class="stat-box">
+            <span class="stat-value" style="font-size: 1.5rem; color: var(--accent-secondary);">{{ system.cpu_cores }}</span>
+            <span class="stat-label">CPU Cores</span>
+        </div>
+        <div class="stat-box">
+            <span class="stat-value" style="font-size: 1.2rem; color: var(--accent-secondary);">{{ system.cpu_model }}</span>
+            <span class="stat-label">Processor</span>
+        </div>
+        <div class="stat-box">
+            <span class="stat-value" style="font-size: 1.3rem; color: {% if system.memory_percent > 80 %}var(--error){% elif system.memory_percent > 60 %}var(--warning){% else %}var(--success){% endif %};">{{ system.memory_used_gb }}GB / {{ system.memory_total_gb }}GB</span>
+            <span class="stat-label">Memory ({{ system.memory_percent }}%)</span>
+        </div>
+        <div class="stat-box">
+            <span class="stat-value" style="font-size: 1.3rem; color: {% if system.disk_percent > 80 %}var(--error){% elif system.disk_percent > 60 %}var(--warning){% else %}var(--success){% endif %};">{{ system.disk_used_gb }}GB / {{ system.disk_total_gb }}GB</span>
+            <span class="stat-label">Disk ({{ system.disk_percent }}%)</span>
+        </div>
+    </div>
+    <!-- Paths -->
+    <div style="margin-top: 1.5rem; display: grid; grid-template-columns: auto 1fr; gap: 0.5rem 1.5rem; font-size: 0.9rem;">
+        <span class="field-label">Config</span>
+        <span class="monospace" style="color: var(--text-secondary);">{{ config_path }}</span>
+        <span class="field-label">Logs</span>
+        <span class="monospace" style="color: var(--text-secondary);">/data/ml_forecast_lab/logs/mlfl.log</span>
+        <span class="field-label">Database</span>
+        <span class="monospace" style="color: var(--text-secondary);">/data/ml_forecast_lab/history.db</span>
+    </div>
+</section>
+
+<!-- Settings -->
+<section class="section">
+    <h2>Settings <span class="info-tip">?<span class="tip-text">Control how much CPU the add-on uses during model training. Lower values keep HA responsive but training takes longer. Recommended: half your available cores.</span></span></h2>
+    <form id="resource-form" onsubmit="saveSettings(event)">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; max-width: 600px;">
+            <div>
+                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Training CPU Cores</label>
+                <select name="cpu_cores" class="setting-input">
+                    <option value="0" {% if config.cpu_cores == 0 %}selected{% endif %}>All available ({{ system.cpu_cores }})</option>
+                    {% for i in range(1, system.cpu_cores + 1) %}
+                    <option value="{{ i }}" {% if config.cpu_cores == i %}selected{% endif %}>{{ i }} core{{ 's' if i > 1 else '' }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Process Priority</label>
+                <select name="nice_priority" class="setting-input">
+                    <option value="0" {% if config.nice_priority == 0 %}selected{% endif %}>High (normal)</option>
+                    <option value="5" {% if config.nice_priority == 5 %}selected{% endif %}>Medium</option>
+                    <option value="10" {% if config.nice_priority == 10 %}selected{% endif %}>Low (recommended)</option>
+                    <option value="15" {% if config.nice_priority == 15 %}selected{% endif %}>Very Low</option>
+                    <option value="19" {% if config.nice_priority == 19 %}selected{% endif %}>Minimal (HA always first)</option>
+                </select>
+            </div>
+        </div>
+
+        <div style="margin-top: 1.5rem; display: flex; gap: 2rem; flex-wrap: wrap; align-items: flex-end;">
+            <div>
+                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Update Interval (minutes)</label>
+                <input type="number" name="update_every_minutes" value="{{ config.update_every_minutes }}"
+                       min="1" max="1440" class="setting-input" style="width: 120px;">
+                <span style="color: var(--text-secondary); margin-left: 0.5rem; font-size: 0.9rem;">
+                    {% set mins = config.update_every_minutes %}
+                    {% if mins >= 60 %}({{ mins // 60 }}h {{ mins % 60 }}m){% endif %}
+                </span>
+            </div>
+            <div>
+                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Timezone</label>
+                <input type="text" name="timezone" value="{{ config.timezone }}"
+                       class="setting-input" style="width: 200px;" placeholder="e.g. Europe/London">
+            </div>
+        </div>
+
+        <div style="margin-top: 1.5rem;">
+            <label class="field-label" style="display: block; margin-bottom: 0.5rem;">
+                <input type="checkbox" name="hailo_enabled" {% if config.hailo_enabled %}checked{% endif %}
+                       style="margin-right: 0.5rem; accent-color: var(--accent-secondary);">
+                Enable Hailo AI Accelerator
+            </label>
+            <span style="color: var(--text-secondary); font-size: 0.85rem;">Requires Hailo AI HAT hardware</span>
+        </div>
+
+        <div style="margin-top: 2rem;">
+            <button type="submit" class="btn btn-primary">Save Settings</button>
+            <span id="save-status" style="margin-left: 1rem; color: var(--success);"></span>
+        </div>
+    </form>
+</section>
+
+<!-- Experiments -->
+<section class="section">
+    <h2>Experiments <span class="info-tip">?<span class="tip-text">Each experiment targets one HA sensor for forecasting. Edit mlfl.yaml directly for advanced configuration like adding covariates or custom metrics.</span></span></h2>
+
+    <!-- Quick summary table -->
+    {% if experiment_statuses %}
+    <div class="table-container" style="margin-bottom: 1.5rem;">
+        <table class="metrics-table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Target Entity</th>
+                    <th>Mode</th>
+                    <th>Status</th>
+                    <th>Best Model</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for exp in experiment_statuses %}
+                <tr>
+                    <td class="model-name">{{ exp.name }}</td>
+                    <td class="monospace">{{ exp.target_entity }}</td>
+                    <td><span class="status-badge status-{{ exp.mode | lower }}">{{ exp.mode | upper }}</span></td>
+                    <td><span class="status-badge status-{{ exp.last_benchmark_status | lower }}">{{ exp.last_benchmark_status | title }}</span></td>
+                    <td>{{ exp.best_model or '---' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <!-- Detailed config cards -->
+    {% for exp in experiment_configs %}
+    <details class="fold-metrics" style="margin-bottom: 1rem;">
+        <summary>{{ exp.name }} &mdash; {{ exp.target_entity }}</summary>
+        <div class="fold-content">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+                <div class="card-field">
+                    <span class="field-label">Target Entity</span>
+                    <span class="field-value monospace">{{ exp.target_entity }}</span>
+                </div>
+                <div class="card-field">
+                    <span class="field-label">History</span>
+                    <span class="field-value">{{ exp.days_history }} days</span>
+                </div>
+                <div class="card-field">
+                    <span class="field-label">Interval</span>
+                    <span class="field-value">{{ exp.interval_minutes }} min</span>
+                </div>
+                <div class="card-field">
+                    <span class="field-label">Models</span>
+                    <span class="field-value">{{ exp.models_enabled | join(', ') }}</span>
+                </div>
+                <div class="card-field">
+                    <span class="field-label">CV Strategy</span>
+                    <span class="field-value">{{ exp.cv_strategy }} ({{ exp.cv_folds }} folds)</span>
+                </div>
+                <div class="card-field">
+                    <span class="field-label">Horizons</span>
+                    <span class="field-value">{{ exp.horizons_minutes | join(', ') }} min</span>
+                </div>
+                <div class="card-field">
+                    <span class="field-label">Cumulative Source</span>
+                    <span class="field-value">{{ 'Yes' if exp.source_is_cumulative else 'No' }}{% if exp.reset_daily %} (daily reset){% endif %}</span>
+                </div>
+                <div class="card-field">
+                    <span class="field-label">Covariates</span>
+                    <span class="field-value">{{ exp.covariates | length }} configured</span>
+                </div>
+                {% if exp.covariates %}
+                <div class="card-field" style="grid-column: 1 / -1;">
+                    <span class="field-label">Covariate Details</span>
+                    <span class="field-value">
+                        {% for cov in exp.covariates %}
+                        <span class="status-badge" style="background: rgba(0,212,255,0.1); color: var(--accent-secondary); margin: 0.15rem;">
+                            {{ cov.entity }} ({{ cov.role }})
+                        </span>
+                        {% endfor %}
+                    </span>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </details>
+    {% endfor %}
+
+    <div style="margin-top: 1rem; padding: 1rem; background: var(--bg-tertiary); border-radius: 0.5rem;">
+        <p style="color: var(--text-secondary); font-size: 0.9rem;">
+            To add experiments or covariates, edit <code style="color: var(--accent-secondary);">mlfl.yaml</code> in your addon config directory and restart the add-on.
+        </p>
+    </div>
+</section>
+
+<!-- Model Backends -->
+<section class="section">
+    <h2>Model Backends <span class="info-tip">?<span class="tip-text">Toggle models on/off to include or exclude them from the next benchmark run. Changes are saved to your config file immediately. For hyperparameter tuning, use the Models tab.</span></span></h2>
+    <div class="experiments-grid" style="grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));">
+        {% for model in models %}
+        <div class="experiment-card" id="card-{{ model.name }}" style="cursor: default; {% if model.name not in models_enabled %}opacity: 0.5;{% endif %}">
+            <div class="card-header">
+                <h3 class="card-title">{{ model.display_name }}</h3>
+                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                    <span class="status-badge" style="background: rgba(0,212,255,0.15); color: #00d4ff;">{{ model.model_type }}</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" data-model="{{ model.name }}"
+                               {% if model.name in models_enabled %}checked{% endif %}
+                               onchange="toggleModel(this, '{{ model.name }}')">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+            <div class="card-body">
+                <p style="color: var(--text-secondary); margin-bottom: 1rem;">{{ model.description }}</p>
+                <div class="card-field">
+                    <span class="field-label">Speed</span>
+                    <span class="field-value">{{ model.speed }}</span>
+                </div>
+                <div class="card-field">
+                    <span class="field-label">Hardware Accel</span>
+                    <span class="field-value">{{ model.hardware_accel }}</span>
+                </div>
+                <div class="card-field">
+                    <span class="field-label">Best For</span>
+                    <span class="field-value" style="color: var(--accent-secondary);">{{ model.best_for }}</span>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</section>
+
+<style>
+    .setting-input {
+        background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border);
+        border-radius: 0.4rem; padding: 0.5rem 0.75rem; font-size: 0.95rem; font-family: inherit;
+    }
+    .setting-input:focus { border-color: var(--accent-secondary); outline: none;
+        box-shadow: 0 0 0 2px rgba(0,212,255,0.2); }
+    select.setting-input { cursor: pointer; }
+    .toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider { position: absolute; cursor: pointer; inset: 0; background: var(--bg-primary);
+        border: 1px solid var(--border); border-radius: 24px; transition: 0.3s; }
+    .toggle-slider::before { content: ""; position: absolute; height: 18px; width: 18px; left: 2px; bottom: 2px;
+        background: var(--text-secondary); border-radius: 50%; transition: 0.3s; }
+    .toggle-switch input:checked + .toggle-slider { background: var(--success); border-color: var(--success); }
+    .toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); background: var(--bg-primary); }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function saveSettings(e) {
+        e.preventDefault();
+        var form = document.getElementById('resource-form');
+        var data = {
+            cpu_cores: parseInt(form.cpu_cores.value),
+            nice_priority: parseInt(form.nice_priority.value),
+            update_every_minutes: parseInt(form.update_every_minutes.value),
+            timezone: form.timezone.value,
+            hailo_enabled: form.hailo_enabled.checked,
+        };
+
+        fetch(BASE_PATH + '/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        })
+        .then(r => r.json())
+        .then(result => {
+            var status = document.getElementById('save-status');
+            if (result.success) {
+                status.textContent = 'Settings saved';
+                status.style.color = 'var(--success)';
+            } else {
+                status.textContent = 'Error: ' + (result.error || 'Failed to save');
+                status.style.color = 'var(--error)';
+            }
+            setTimeout(function() { status.textContent = ''; }, 3000);
+        })
+        .catch(err => {
+            var status = document.getElementById('save-status');
+            status.textContent = 'Error: ' + err;
+            status.style.color = 'var(--error)';
+        });
+    }
+
+    function toggleModel(checkbox, modelName) {
+        var enabled = checkbox.checked;
+        var card = document.getElementById('card-' + modelName);
+        card.style.opacity = enabled ? '1' : '0.5';
+
+        fetch(BASE_PATH + '/api/models/toggle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model_name: modelName, enabled: enabled })
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.success) {
+                checkbox.checked = !enabled;
+                card.style.opacity = enabled ? '0.5' : '1';
+                alert('Failed to toggle model: ' + (data.error || 'Unknown error'));
+            }
+        })
+        .catch(function(err) {
+            checkbox.checked = !enabled;
+            card.style.opacity = enabled ? '0.5' : '1';
+            console.error('Toggle error:', err);
+        });
+    }
+</script>
+{% endblock %}

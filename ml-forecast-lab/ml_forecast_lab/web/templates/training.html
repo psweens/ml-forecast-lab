@@ -330,9 +330,48 @@
         log.scrollTop = log.scrollHeight;
     }
 
-    // If we land on the page and a benchmark is running, auto-connect
-    {% for exp in experiments %}
-    {% endfor %}
+    // On page load: check for running experiments and auto-reconnect SSE
+    // The SSE endpoint replays history, so we recover the full state
+    function autoReconnect() {
+        const sel = document.getElementById('exp-select');
+        if (!sel || !sel.value) return;
+
+        // Fetch training history to see if there's an active or recent session
+        fetch(`${BASE}/api/training/history/${sel.value}`)
+            .then(r => r.json())
+            .then(events => {
+                if (!events || events.length === 0) return;
+
+                // Check if there's a pipeline_start without a pipeline_end
+                let hasStart = false;
+                let hasEnd = false;
+                for (const ev of events) {
+                    if (ev.event_type === 'pipeline_start') hasStart = true;
+                    if (ev.event_type === 'pipeline_end') hasEnd = true;
+                }
+
+                if (hasStart) {
+                    // Show the progress section and replay events
+                    document.getElementById('progress-section').style.display = 'block';
+                    document.getElementById('event-log').innerHTML = '';
+
+                    for (const ev of events) {
+                        handleEvent(ev);
+                    }
+
+                    // If pipeline is still running, connect SSE for live updates
+                    if (!hasEnd) {
+                        pipelineRunning = true;
+                        const btn = document.getElementById('btn-run');
+                        btn.disabled = true;
+                        document.getElementById('btn-run-text').textContent = 'Running...';
+                        connectSSE(sel.value);
+                    }
+                }
+            })
+            .catch(() => {});
+    }
+    autoReconnect();
 })();
 </script>
 {% endblock %}

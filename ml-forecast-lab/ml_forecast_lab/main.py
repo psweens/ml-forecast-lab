@@ -227,6 +227,24 @@ class MLForecastLabApp:
             )
             self.server = uvicorn.Server(config)
 
+            # Register benchmark callback (triggered from Training tab)
+            async def _benchmark_trigger(experiment_name: str):
+                exp_cfg = None
+                for cfg in self.config.experiments:
+                    if cfg.name == experiment_name:
+                        exp_cfg = cfg
+                        break
+                if exp_cfg:
+                    try:
+                        self.web_app.state.appstate.start_benchmark(experiment_name)
+                        await self._run_benchmark(exp_cfg)
+                    except Exception as e:
+                        logger.error(f"Benchmark failed: {e}", exc_info=True)
+                    finally:
+                        self.web_app.state.appstate.end_benchmark(experiment_name)
+
+            self.web_app.state.appstate.benchmark_callback = _benchmark_trigger
+
             # Register deep analysis callback
             async def _deep_analysis_trigger(experiment_name: str, selected_model: str = "all"):
                 exp_cfg = None

@@ -18,7 +18,7 @@ from ml_forecast_lab import __version__ as APP_VERSION
 
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -199,6 +199,7 @@ class AppState:
         self.deep_analysis_callback = None  # Set by main app for triggering
         self.ensemble_results: Dict[str, EnsembleResultData] = {}
         self.ensemble_callback = None  # Set by main app for triggering
+        self.benchmark_callback = None  # Set by main app for triggering
         self.running_benchmarks: set = set()
         self.last_update: Optional[datetime] = None
         self.next_update_seconds: Optional[int] = None
@@ -949,108 +950,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             },
         )
 
-    @app.get("/status", response_class=Response)
+    @app.get("/status")
     async def status_page(request: Request):
-        """
-        System status page with styled template.
-        """
-        experiments = list(app.state.appstate.experiment_statuses.values())
-        lab_count = sum(1 for e in experiments if e.mode == "lab")
-        prod_count = sum(1 for e in experiments if e.mode == "production")
-
-        health = {
-            "status": "healthy",
-            "version": APP_VERSION,
-            "experiments_total": len(experiments),
-            "experiments_lab": lab_count,
-            "experiments_production": prod_count,
-        }
-
-        models_list = [
-            {"name": "cnn", "display_name": "CNN", "model_type": "PyTorch",
-             "description": "WaveNet-style dilated causal convolutions with learnable positional pooling and residual connections.",
-             "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Periodic/seasonal signals"},
-            {"name": "crossformer", "display_name": "Crossformer", "model_type": "PyTorch",
-             "description": "Segment embedding with temporal self-attention and cross-variable attention per layer.",
-             "speed": "🔶 Moderate (~12s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Joint temporal + cross-variate modelling"},
-            {"name": "dlinear", "display_name": "DLinear", "model_type": "PyTorch",
-             "description": "Decomposition-Linear: decomposes input into trend (moving average) and seasonal, applies separate linear layers.",
-             "speed": "⚡ Fast (~2s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Simple baseline — surprisingly competitive"},
-            {"name": "itransformer", "display_name": "iTransformer", "model_type": "PyTorch",
-             "description": "Inverted Transformer: treats each variable as a token and applies attention across variables.",
-             "speed": "🔶 Moderate (~10s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Cross-variate correlations"},
-            {"name": "lightgbm", "display_name": "LightGBM", "model_type": "Tree",
-             "description": "Gradient boosting framework optimised for speed and memory efficiency. Builds trees leaf-wise for faster convergence.",
-             "speed": "⚡ Very Fast (~0.5s/fold)", "hardware_accel": "No (CPU only)", "best_for": "Default choice — fast and accurate"},
-            {"name": "lstm", "display_name": "LSTM", "model_type": "PyTorch",
-             "description": "2-layer LSTM with temporal attention, LayerNorm, and multi-horizon output head.",
-             "speed": "🔶 Moderate (~10s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Complex temporal patterns"},
-            {"name": "nbeats", "display_name": "N-BEATS", "model_type": "PyTorch",
-             "description": "Neural Basis Expansion Analysis with doubly-residual stacking of fully-connected blocks.",
-             "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Pure time-series without covariates"},
-            {"name": "neuralprophet", "display_name": "NeuralProphet", "model_type": "PyTorch",
-             "description": "Facebook's neural forecasting library combining trend decomposition, automatic seasonality, and neural AR components.",
-             "speed": "🔶 Moderate (~15s/fold)", "hardware_accel": "No", "best_for": "Strong seasonality + covariates"},
-            {"name": "nhits", "display_name": "N-HiTS", "model_type": "PyTorch",
-             "description": "Neural Hierarchical Interpolation: N-BEATS with multi-rate temporal downsampling per stack.",
-             "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Multi-scale temporal patterns"},
-            {"name": "patchtst", "display_name": "PatchTST", "model_type": "PyTorch",
-             "description": "Channel-independent Patch Transformer: patches the time series, embeds, and applies Transformer encoder.",
-             "speed": "🔶 Moderate (~12s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Long-range dependencies"},
-            {"name": "sparsetsf", "display_name": "SparseTSF", "model_type": "PyTorch",
-             "description": "Period-based sparse cross-period linear model exploiting periodic structure in time series.",
-             "speed": "⚡ Fast (~2s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Strong daily/weekly periodicity"},
-            {"name": "tide", "display_name": "TiDE", "model_type": "PyTorch",
-             "description": "Time-series Dense Encoder: residual MLP encoder-decoder with skip connections and LayerNorm.",
-             "speed": "🔶 Moderate (~6s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Efficient long-horizon forecasting"},
-            {"name": "timesnet", "display_name": "TimesNet", "model_type": "PyTorch",
-             "description": "FFT period detection, reshapes 1D to 2D, applies multi-scale inception convolutions.",
-             "speed": "🔶 Moderate (~10s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Multi-periodic signals"},
-            {"name": "tsmixer", "display_name": "TSMixer", "model_type": "PyTorch",
-             "description": "Alternating time-mixing and feature-mixing MLP layers with residual connections.",
-             "speed": "🔶 Moderate (~6s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Multivariate cross-channel patterns"},
-            {"name": "xgboost", "display_name": "XGBoost", "model_type": "Tree",
-             "description": "Extreme gradient boosting with L1/L2 regularisation. Builds trees level-wise with robust handling of missing values.",
-             "speed": "⚡ Fast (~1s/fold)", "hardware_accel": "No (CPU only)", "best_for": "When LightGBM overfits"},
-        ]
-
-        # Load models_enabled from config
-        models_enabled = ["lightgbm", "xgboost", "lstm", "cnn", "neuralprophet"]
-        try:
-            import glob as _glob
-            import yaml
-            config_path = None
-            for p in [Path("/addon_configs/ml_forecast_lab/mlfl.yaml"), Path("/config/mlfl.yaml")]:
-                if p.exists():
-                    config_path = p
-                    break
-            for match in _glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
-                config_path = Path(match)
-                break
-            if config_path and config_path.exists():
-                with open(config_path, "r", encoding="utf-8") as f:
-                    yaml_data = yaml.safe_load(f)
-                # Extract models_enabled from the first experiment
-                exps = yaml_data.get("experiments", [])
-                if exps and isinstance(exps, list) and len(exps) > 0:
-                    models_enabled = exps[0].get("models_enabled", models_enabled)
-        except Exception:
-            pass
-
-        return templates.TemplateResponse(
-            request=request,
-            name="status.html",
-            context={
-                "request": request,
-                "base_path": _get_base_path(request),
-                "active_page": "status",
-                "version": APP_VERSION,
-                "health": health,
-                "experiments": experiments,
-                "models": models_list,
-                "models_enabled": models_enabled,
-            },
-        )
+        """Redirect old status page to /system."""
+        return RedirectResponse(url=f"{_get_base_path(request)}/system", status_code=301)
 
     @app.post("/api/models/toggle")
     async def toggle_model(request: Request):
@@ -1108,12 +1011,32 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             logger.error(f"Failed to toggle model: {e}")
             return JSONResponse(content={"success": False, "error": str(e)})
 
-    @app.get("/settings", response_class=Response)
+    @app.get("/settings")
     async def settings_page(request: Request):
+        """Redirect old settings page to /system."""
+        return RedirectResponse(url=f"{_get_base_path(request)}/system", status_code=301)
+
+    @app.get("/system", response_class=Response)
+    async def system_page(request: Request):
         """
-        Settings page with system info, resource limits, and experiment config.
+        Unified system page: health, hardware, settings, experiments, model backends.
+        Replaces the former separate /status and /settings pages.
         """
-        # Gather system information
+        import yaml
+
+        experiment_statuses = list(app.state.appstate.experiment_statuses.values())
+        lab_count = sum(1 for e in experiment_statuses if e.mode == "lab")
+        prod_count = sum(1 for e in experiment_statuses if e.mode == "production")
+
+        health = {
+            "status": "healthy",
+            "version": APP_VERSION,
+            "experiments_total": len(experiment_statuses),
+            "experiments_lab": lab_count,
+            "experiments_production": prod_count,
+        }
+
+        # Hardware info
         cpu_count = os.cpu_count() or 4
         try:
             cpu_model = platform.processor() or platform.machine()
@@ -1127,7 +1050,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             memory_used_gb = round(mem.used / (1024**3), 1)
             memory_percent = mem.percent
         except ImportError:
-            # psutil not available — read from /proc/meminfo instead
             try:
                 with open("/proc/meminfo") as f:
                     meminfo = {line.split(":")[0]: int(line.split()[1]) for line in f if len(line.split()) >= 2}
@@ -1158,7 +1080,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "disk_percent": disk_percent,
         }
 
-        # Get current config from app state
+        # Config data
         config_data = {
             "update_every_minutes": 360,
             "timezone": "UTC",
@@ -1166,25 +1088,14 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "cpu_cores": 0,
             "nice_priority": 10,
         }
-
-        # Try to read from the main app's config
-        config_path = "unknown"
-        for p in [
-            Path("/addon_configs/ml_forecast_lab/mlfl.yaml"),
-            Path("/config/mlfl.yaml"),
-        ]:
-            if p.exists():
-                config_path = str(p)
-                break
-        # Also check hashed paths
-        import glob
-        for match in glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
-            config_path = match
-            break
-
+        config_path_str = "unknown"
+        experiment_configs = []
+        cp = _find_config_path()
+        if cp:
+            config_path_str = str(cp)
         try:
             from ml_forecast_lab.config import load_config as _load_config
-            cfg = _load_config(config_path)
+            cfg = _load_config(config_path_str)
             config_data = {
                 "update_every_minutes": cfg.update_every_minutes,
                 "timezone": cfg.timezone,
@@ -1192,22 +1103,87 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "cpu_cores": cfg.cpu_cores,
                 "nice_priority": cfg.nice_priority,
             }
-            experiments = cfg.experiments
+            experiment_configs = cfg.experiments
         except Exception:
-            experiments = []
+            pass
+
+        # Models enabled
+        models_enabled = ["lightgbm", "xgboost", "lstm", "cnn", "neuralprophet"]
+        if cp:
+            try:
+                with open(cp, "r", encoding="utf-8") as f:
+                    yaml_data = yaml.safe_load(f)
+                exps = yaml_data.get("experiments", [])
+                if exps and isinstance(exps, list) and len(exps) > 0:
+                    models_enabled = exps[0].get("models_enabled", models_enabled)
+            except Exception:
+                pass
+
+        # Models catalog (alphabetical)
+        models_list = [
+            {"name": "cnn", "display_name": "CNN", "model_type": "PyTorch",
+             "description": "WaveNet-style dilated causal convolutions with residual connections.",
+             "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Periodic/seasonal signals"},
+            {"name": "crossformer", "display_name": "Crossformer", "model_type": "PyTorch",
+             "description": "Segment embedding with temporal + cross-variable attention.",
+             "speed": "🔶 Moderate (~12s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Joint temporal + cross-variate modelling"},
+            {"name": "dlinear", "display_name": "DLinear", "model_type": "PyTorch",
+             "description": "Decomposition-Linear: separate linear layers for trend and seasonal.",
+             "speed": "⚡ Fast (~2s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Simple baseline — surprisingly competitive"},
+            {"name": "itransformer", "display_name": "iTransformer", "model_type": "PyTorch",
+             "description": "Inverted Transformer: attention across variables.",
+             "speed": "🔶 Moderate (~10s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Cross-variate correlations"},
+            {"name": "lightgbm", "display_name": "LightGBM", "model_type": "Tree",
+             "description": "Gradient boosting framework optimised for speed and memory efficiency.",
+             "speed": "⚡ Very Fast (~0.5s/fold)", "hardware_accel": "No (CPU only)", "best_for": "Default choice — fast and accurate"},
+            {"name": "lstm", "display_name": "LSTM", "model_type": "PyTorch",
+             "description": "2-layer LSTM with temporal attention and multi-horizon output head.",
+             "speed": "🔶 Moderate (~10s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Complex temporal patterns"},
+            {"name": "nbeats", "display_name": "N-BEATS", "model_type": "PyTorch",
+             "description": "Neural Basis Expansion with doubly-residual stacking.",
+             "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Pure time-series without covariates"},
+            {"name": "neuralprophet", "display_name": "NeuralProphet", "model_type": "PyTorch",
+             "description": "Neural forecasting with trend decomposition and automatic seasonality.",
+             "speed": "🔶 Moderate (~15s/fold)", "hardware_accel": "No", "best_for": "Strong seasonality + covariates"},
+            {"name": "nhits", "display_name": "N-HiTS", "model_type": "PyTorch",
+             "description": "Hierarchical interpolation with multi-rate temporal downsampling.",
+             "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Multi-scale temporal patterns"},
+            {"name": "patchtst", "display_name": "PatchTST", "model_type": "PyTorch",
+             "description": "Channel-independent Patch Transformer with encoder.",
+             "speed": "🔶 Moderate (~12s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Long-range dependencies"},
+            {"name": "sparsetsf", "display_name": "SparseTSF", "model_type": "PyTorch",
+             "description": "Period-based sparse cross-period linear model.",
+             "speed": "⚡ Fast (~2s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Strong daily/weekly periodicity"},
+            {"name": "tide", "display_name": "TiDE", "model_type": "PyTorch",
+             "description": "Time-series Dense Encoder with residual MLP encoder-decoder.",
+             "speed": "🔶 Moderate (~6s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Efficient long-horizon forecasting"},
+            {"name": "timesnet", "display_name": "TimesNet", "model_type": "PyTorch",
+             "description": "FFT period detection with 2D inception convolutions.",
+             "speed": "🔶 Moderate (~10s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Multi-periodic signals"},
+            {"name": "tsmixer", "display_name": "TSMixer", "model_type": "PyTorch",
+             "description": "Alternating time-mixing and feature-mixing MLP layers.",
+             "speed": "🔶 Moderate (~6s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Multivariate cross-channel patterns"},
+            {"name": "xgboost", "display_name": "XGBoost", "model_type": "Tree",
+             "description": "Extreme gradient boosting with L1/L2 regularisation.",
+             "speed": "⚡ Fast (~1s/fold)", "hardware_accel": "No (CPU only)", "best_for": "When LightGBM overfits"},
+        ]
 
         return templates.TemplateResponse(
             request=request,
-            name="settings.html",
+            name="system.html",
             context={
                 "request": request,
                 "base_path": _get_base_path(request),
-                "active_page": "settings",
+                "active_page": "system",
                 "version": APP_VERSION,
+                "health": health,
                 "system": system_info,
                 "config": config_data,
-                "config_path": config_path,
-                "experiments": experiments,
+                "config_path": config_path_str,
+                "experiment_statuses": experiment_statuses,
+                "experiment_configs": experiment_configs,
+                "models": models_list,
+                "models_enabled": models_enabled,
             },
         )
 
@@ -1492,28 +1468,27 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception:
             pass
 
-        # Mark as running
-        app.state.appstate.start_benchmark(name)
-
-        # Trigger via the existing benchmark mechanism
-        # The main app loop picks up the running flag and kicks off _run_benchmark
         import asyncio as _aio
 
-        # Chain post-benchmark steps: ensemble, then deep_analysis
-        needs_chain = "ensemble" in steps or "deep_analysis" in steps
-        if needs_chain:
-            async def _chain():
-                # Wait for benchmark to finish
-                while app.state.appstate.is_benchmark_running(name):
-                    await _aio.sleep(2)
-                # Run ensemble if requested
-                if "ensemble" in steps and app.state.appstate.ensemble_callback:
+        if not getattr(app.state.appstate, 'benchmark_callback', None):
+            raise HTTPException(status_code=501, detail="Benchmark callback not registered")
+
+        # Run the full pipeline as a background task
+        async def _pipeline():
+            try:
+                # Benchmark step
+                if "benchmark" in steps:
+                    await app.state.appstate.benchmark_callback(name)
+                # Ensemble step
+                if "ensemble" in steps and getattr(app.state.appstate, 'ensemble_callback', None):
                     await app.state.appstate.ensemble_callback(name)
-                # Run deep analysis if requested
+                # Deep analysis step
                 if "deep_analysis" in steps and app.state.appstate.deep_analysis_callback:
                     await app.state.appstate.deep_analysis_callback(name, "all")
+            except Exception as e:
+                logger.error(f"Pipeline failed for {name}: {e}", exc_info=True)
 
-            _aio.create_task(_chain())
+        _aio.create_task(_pipeline())
 
         return JSONResponse(
             status_code=202,
