@@ -1178,6 +1178,103 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             logger.error(f"Failed to save settings: {e}")
             return JSONResponse(content={"success": False, "error": str(e)})
 
+    @app.post("/api/experiment-settings")
+    async def save_experiment_settings(request: Request):
+        """
+        Save per-experiment training settings (CV strategy, folds, recency weighting).
+
+        Persists changes to mlfl.yaml without requiring add-on restart.
+        Changes take effect on next training run.
+        """
+        import yaml
+
+        try:
+            data = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        exp_name = data.get("experiment")
+        if not exp_name:
+            return JSONResponse(content={"success": False, "error": "Missing experiment name"})
+
+        # Allowed editable fields and their types/validators
+        editable = {
+            "cv_strategy": lambda v: v if v in ("walk_forward", "sliding_window") else None,
+            "cv_folds": lambda v: int(v) if int(v) >= 2 else None,
+            "recency_half_life_days": lambda v: float(v) if float(v) >= 0 else None,
+        }
+
+        updates = {}
+        for field, validator in editable.items():
+            if field in data:
+                try:
+                    val = validator(data[field])
+                    if val is None:
+                        return JSONResponse(content={
+                            "success": False, "error": f"Invalid value for {field}"
+                        })
+                    updates[field] = val
+                except (ValueError, TypeError) as e:
+                    return JSONResponse(content={
+                        "success": False, "error": f"Invalid {field}: {e}"
+                    })
+
+        if not updates:
+            return JSONResponse(content={"success": False, "error": "No valid fields to update"})
+
+        # Find config file
+        config_path = None
+        for p in [Path("/addon_configs/ml_forecast_lab/mlfl.yaml"), Path("/config/mlfl.yaml")]:
+            if p.exists():
+                config_path = p
+                break
+        import glob as _glob
+        for match in _glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
+            config_path = Path(match)
+            break
+
+        if not config_path or not config_path.exists():
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                yaml_data = yaml.safe_load(f)
+
+            # Find the experiment in the YAML
+            experiments = yaml_data.get("experiments", [])
+            found = False
+            for exp in experiments:
+                if exp.get("name") == exp_name:
+                    exp.update(updates)
+                    found = True
+                    break
+
+            if not found:
+                return JSONResponse(content={
+                    "success": False, "error": f"Experiment '{exp_name}' not found in config"
+                })
+
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+
+            # Also update the in-memory config if possible
+            try:
+                cfg = _load_config()
+                for exp_cfg in cfg.experiments:
+                    if exp_cfg.name == exp_name:
+                        for k, v in updates.items():
+                            setattr(exp_cfg, k, v)
+                        break
+            except Exception:
+                pass  # Config will reload on next training run
+
+            logger.info(f"Experiment '{exp_name}' settings updated: {updates}")
+            return JSONResponse(content={"success": True})
+
+        except Exception as e:
+            logger.error(f"Failed to save experiment settings: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
+
     @app.get("/api/log")
     async def api_log(
         lines: int = 200,

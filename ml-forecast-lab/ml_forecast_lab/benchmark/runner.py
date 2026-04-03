@@ -325,13 +325,17 @@ class BenchmarkRunner:
             # Get feature names from dataframe columns
             feat_names = [c for c in df_train.columns if c != 'target']
 
-            # Generate time-decay sample weights (exponential, half-life = 7 days)
+            # Generate time-decay sample weights (exponential recency weighting)
             n_train_samples = len(y_train)
-            interval_min = self.experiment_cfg.get('interval_minutes', 30)
-            half_life = max(1, 7 * (24 * 60 // interval_min))  # 7 days in samples
-            decay_rate = np.log(2) / half_life
-            sample_weights = np.exp(decay_rate * np.arange(n_train_samples))
-            sample_weights = sample_weights / sample_weights.sum() * n_train_samples
+            half_life_days = self.experiment_cfg.get('recency_half_life_days', 7.0)
+            if half_life_days > 0:
+                interval_min = self.experiment_cfg.get('interval_minutes', 30)
+                half_life = max(1, half_life_days * (24 * 60 / interval_min))
+                decay_rate = np.log(2) / half_life
+                sample_weights = np.exp(decay_rate * np.arange(n_train_samples))
+                sample_weights = sample_weights / sample_weights.sum() * n_train_samples
+            else:
+                sample_weights = None  # Equal weighting when disabled
 
             # Generate sliding window sequence data for neural models
             sequence_kwargs = {}
@@ -368,7 +372,8 @@ class BenchmarkRunner:
                             sequence_kwargs['channel_names'] = channel_names
                             y_train = seq_y
                             X_train = X_train[-len(seq_y):]
-                            sample_weights = sample_weights[-len(seq_y):]
+                            if sample_weights is not None:
+                                sample_weights = sample_weights[-len(seq_y):]
                             logger.debug(
                                 f'Sliding windows for {model.name}: '
                                 f'{seq_X.shape[1]} steps × {seq_X.shape[2]} channels, '

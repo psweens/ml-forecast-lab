@@ -164,6 +164,11 @@ class ExperimentCfg:
     loss_fn: str = 'mse'
     """Training loss for neural models: 'mse', 'mae', or 'huber'."""
 
+    recency_half_life_days: float = 7.0
+    """Half-life for exponential recency weighting in days. Recent samples receive
+    higher weight during training so models prioritise current patterns.
+    Set to 0 to disable recency weighting (all samples weighted equally)."""
+
     def __post_init__(self) -> None:
         """Validate configuration."""
         valid_modes = {'lab', 'production'}
@@ -191,6 +196,10 @@ class ExperimentCfg:
         if self.interval_minutes < 1:
             raise ValueError(
                 f'interval_minutes must be >= 1, got {self.interval_minutes}'
+            )
+        if self.recency_half_life_days < 0:
+            raise ValueError(
+                f'recency_half_life_days must be >= 0, got {self.recency_half_life_days}'
             )
 
 

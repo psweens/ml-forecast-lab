@@ -117,8 +117,29 @@
                     <span class="field-value">{{ exp.models_enabled | join(', ') }}</span>
                 </div>
                 <div class="card-field">
-                    <span class="field-label">CV Strategy</span>
-                    <span class="field-value">{{ exp.cv_strategy }} ({{ exp.cv_folds }} folds)</span>
+                    <span class="field-label">CV Strategy <span class="info-tip">?<span class="tip-text">Walk-forward (expanding window): training set grows each fold, mimics real retraining. Sliding window: fixed-size train/test windows slide forward.</span></span></span>
+                    <select class="form-input" data-exp="{{ exp.name }}" data-field="cv_strategy" onchange="saveExperimentField(this)">
+                        <option value="walk_forward" {{ 'selected' if exp.cv_strategy == 'walk_forward' }}>Walk-forward (expanding)</option>
+                        <option value="sliding_window" {{ 'selected' if exp.cv_strategy == 'sliding_window' }}>Sliding window (fixed)</option>
+                    </select>
+                </div>
+                <div class="card-field">
+                    <span class="field-label">CV Folds</span>
+                    <input type="number" class="form-input" min="2" max="20" step="1"
+                           value="{{ exp.cv_folds }}"
+                           data-exp="{{ exp.name }}" data-field="cv_folds"
+                           onchange="saveExperimentField(this)">
+                </div>
+                <div class="card-field">
+                    <span class="field-label">Recency Half-Life <span class="info-tip">?<span class="tip-text">Exponential decay half-life in days. Recent training samples get higher weight so the model prioritises current patterns. Set to 0 to weight all data equally.</span></span></span>
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                        <input type="number" class="form-input" min="0" max="365" step="0.5"
+                               value="{{ exp.recency_half_life_days if exp.recency_half_life_days is defined else 7 }}"
+                               data-exp="{{ exp.name }}" data-field="recency_half_life_days"
+                               onchange="saveExperimentField(this)"
+                               style="flex: 1;">
+                        <span class="field-value" style="white-space: nowrap;">days</span>
+                    </div>
                 </div>
                 <div class="card-field">
                     <span class="field-label">Horizons</span>
@@ -151,7 +172,7 @@
 
     <div style="margin-top: 1rem; padding: 1rem; background: var(--bg-tertiary); border-radius: 0.5rem;">
         <p style="color: var(--text-secondary); font-size: 0.9rem;">
-            📝 To add experiments or covariates, edit <code style="color: var(--accent-secondary);">mlfl.yaml</code> in your addon config directory and restart the add-on.
+            📝 CV strategy, folds, and recency weighting can be changed above — settings are saved immediately and take effect on the next training run. To add experiments or covariates, edit <code style="color: var(--accent-secondary);">mlfl.yaml</code> directly.
         </p>
     </div>
 </section>
@@ -178,18 +199,53 @@
 </section>
 
 <style>
-    .setting-input {
+    .setting-input, .form-input {
         background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border);
         border-radius: 0.4rem; padding: 0.5rem 0.75rem; font-size: 0.95rem; font-family: inherit;
+        width: 100%; box-sizing: border-box;
     }
-    .setting-input:focus { border-color: var(--accent-secondary); outline: none;
+    .setting-input:focus, .form-input:focus { border-color: var(--accent-secondary); outline: none;
         box-shadow: 0 0 0 2px rgba(0,212,255,0.2); }
-    select.setting-input { cursor: pointer; }
+    select.setting-input, select.form-input { cursor: pointer; }
+    .form-input[type="number"] { width: 100%; }
 </style>
 {% endblock %}
 
 {% block scripts %}
 <script>
+    function saveExperimentField(el) {
+        var expName = el.getAttribute('data-exp');
+        var field = el.getAttribute('data-field');
+        var value = el.value;
+        // Parse numeric fields
+        if (field === 'cv_folds') value = parseInt(value);
+        else if (field === 'recency_half_life_days') value = parseFloat(value);
+
+        var data = { experiment: expName };
+        data[field] = value;
+
+        el.style.borderColor = 'var(--warning)';
+        fetch(BASE_PATH + '/api/experiment-settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.success) {
+                el.style.borderColor = 'var(--success)';
+                setTimeout(function() { el.style.borderColor = ''; }, 2000);
+            } else {
+                el.style.borderColor = 'var(--error)';
+                alert('Failed to save: ' + (result.error || 'Unknown error'));
+            }
+        })
+        .catch(function(err) {
+            el.style.borderColor = 'var(--error)';
+            alert('Error saving: ' + err);
+        });
+    }
+
     function saveSettings(e) {
         e.preventDefault();
         var form = document.getElementById('resource-form');
