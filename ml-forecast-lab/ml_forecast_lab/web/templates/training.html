@@ -336,13 +336,22 @@
         if (!allLossData[ev.model_name]) allLossData[ev.model_name] = {};
         const foldKey = `F${ev.fold}`;
         if (!allLossData[ev.model_name][foldKey]) {
-            allLossData[ev.model_name][foldKey] = { epochs: [], train: [], val: [], totalEpochs: 0 };
+            allLossData[ev.model_name][foldKey] = {
+                epochs: [], train: [], val: [],
+                totalEpochs: 0, lastPatienceCounter: 0, lastPatienceLimit: 0,
+                bestValLoss: Infinity,
+            };
         }
         const fd = allLossData[ev.model_name][foldKey];
         fd.epochs.push(ev.epoch);
         fd.train.push(ev.train_loss);
         fd.val.push(ev.val_loss);
         if (ev.total_epochs > 0) fd.totalEpochs = ev.total_epochs;
+        if (ev.patience_limit > 0) {
+            fd.lastPatienceCounter = ev.patience_counter;
+            fd.lastPatienceLimit = ev.patience_limit;
+        }
+        if (ev.best_val_loss > 0) fd.bestValLoss = ev.best_val_loss;
     }
 
     // Record an explicit early_stop event
@@ -359,7 +368,7 @@
     }
 
     // Detect early stop from accumulated data when model_end fires.
-    // Only flags early stop if training actually ended before total_epochs.
+    // Uses two signals: (1) patience exhausted, (2) training ended before total_epochs.
     function detectEarlyStopFromData(modelName) {
         const modelData = allLossData[modelName];
         if (!modelData) return;
@@ -368,8 +377,16 @@
             if (earlyStops[modelName] && earlyStops[modelName][foldKey]) continue;
             if (fd.epochs.length === 0) continue;
             const lastEpoch = fd.epochs[fd.epochs.length - 1];
-            // Only mark as early stopped if training ended before total epochs
-            if (fd.totalEpochs <= 0 || lastEpoch >= fd.totalEpochs) continue;
+
+            // Check if early stopping actually occurred:
+            // Signal 1: patience counter reached the limit on the last epoch
+            const patienceExhausted = fd.lastPatienceLimit > 0 &&
+                fd.lastPatienceCounter >= fd.lastPatienceLimit;
+            // Signal 2: training ended before the configured total epochs
+            const endedEarly = fd.totalEpochs > 0 && lastEpoch < fd.totalEpochs;
+
+            if (!patienceExhausted && !endedEarly) continue;
+
             // Find best val loss epoch
             let bestIdx = 0;
             for (let i = 1; i < fd.val.length; i++) {
