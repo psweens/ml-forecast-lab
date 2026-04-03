@@ -296,34 +296,38 @@ class EnsembleEngine:
             logger.warning("After filtering, <2 models remain. Skipping ensemble.")
             return {}
 
-        # Validate prediction shapes match across models per fold.
-        # Models may output different shapes (e.g. 1D vs multi-step 2D).
-        # Group by shape signature and keep the largest compatible group.
-        def _shape_sig(m: str) -> tuple:
-            return tuple(fold_predictions[m][f].shape for f in range(n_folds))
-
-        shape_groups: Dict[tuple, List[str]] = {}
-        for m in member_models:
-            sig = _shape_sig(m)
-            shape_groups.setdefault(sig, []).append(m)
-
-        if len(shape_groups) > 1:
-            # Pick the largest group
-            largest_group = max(shape_groups.values(), key=len)
-            excluded = [m for m in member_models if m not in largest_group]
-            logger.warning(
-                f"Prediction shape mismatch — excluding {excluded} from ensemble "
-                f"(keeping {len(largest_group)} models with matching shapes)"
+        # Normalise prediction shapes so all models are compatible.
+        # Multi-horizon models produce (n_samples, n_horizons) while single-step
+        # models produce (n_samples,). We flatten to 1D (first horizon for multi-step)
+        # and trim all predictions to the shortest length per fold.
+        for f in range(n_folds):
+            min_len = min(
+                fold_predictions[m][f].ravel().shape[0] if fold_predictions[m][f].ndim == 1
+                else fold_predictions[m][f].shape[0]
+                for m in member_models
             )
-            fold_predictions = {m: fold_predictions[m] for m in largest_group}
-            member_models = largest_group
+            # Also respect actuals length
+            min_len = min(min_len, len(fold_actuals[f].ravel()))
 
-        if len(member_models) < 2:
-            logger.warning("After shape filtering, <2 models remain. Skipping ensemble.")
-            return {}
+            for m in member_models:
+                arr = fold_predictions[m][f]
+                if arr.ndim > 1:
+                    # Multi-horizon: take the first horizon column
+                    arr = arr[:, 0]
+                    logger.debug(f"Ensemble: flattened {m} fold {f} from 2D to 1D (first horizon)")
+                fold_predictions[m][f] = arr[:min_len]
+
+            # Also trim actuals to match
+            fold_actuals[f] = fold_actuals[f].ravel()[:min_len]
 
         results: Dict[EnsembleStrategy, EnsembleResult] = {}
-        metrics_to_compute = list(set(self.metrics + [self.production_metric]))
+        # Exclude metrics that require y_train (e.g. mase) — we don't have
+        # training data available in the ensemble context
+        _skip = {"mase"}
+        metrics_to_compute = [
+            m for m in set(self.metrics + [self.production_metric])
+            if m not in _skip
+        ]
 
         for strategy in strategies:
             t0 = time.time()
