@@ -203,9 +203,38 @@ class LightGBMModel(ForecastModel):
         }
 
         # Train with early stopping
+        epoch_callback = kwargs.get("epoch_callback")
+        best_val_loss = float('inf')
+        patience_counter = 0
+        patience_limit = 50
+
+        def _epoch_cb(env):
+            """Custom LightGBM callback to emit per-round metrics."""
+            nonlocal best_val_loss, patience_counter
+            if not env.evaluation_result_list:
+                return
+            # evaluation_result_list is [(ds_name, metric_name, value, higher_is_better)]
+            val_loss = env.evaluation_result_list[0][2]
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            self._emit_epoch(epoch_callback,
+                model_name=self.name,
+                epoch=env.iteration + 1,
+                total_epochs=self.n_estimators,
+                train_loss=val_loss,  # LightGBM doesn't expose train loss easily
+                val_loss=val_loss,
+                lr=self.learning_rate,
+                patience_counter=patience_counter,
+                patience_limit=patience_limit,
+                best_val_loss=best_val_loss)
+
         callbacks = [
-            lgb.early_stopping(stopping_rounds=50),
+            lgb.early_stopping(stopping_rounds=patience_limit),
             lgb.log_evaluation(period=0),
+            _epoch_cb,
         ]
 
         self.model = lgb.train(

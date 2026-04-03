@@ -181,6 +181,46 @@ class XGBoostModel(ForecastModel):
             early_stopping_rounds=50,
         )
 
+        # Build per-round callback for live training progress
+        epoch_callback = kwargs.get("epoch_callback")
+        best_val_loss = float('inf')
+        patience_counter = 0
+        patience_limit = 50
+
+        xgb_callbacks = []
+        _outer = self  # capture for inner class
+
+        if epoch_callback is not None:
+            class _EpochCB(xgb.callback.TrainingCallback):
+                """Emit per-round metrics to the training event bus."""
+                def after_iteration(self_cb, model, epoch, evals_log):
+                    nonlocal best_val_loss, patience_counter
+                    # evals_log: {"validation_0": {"rmse": [v1, v2, ...]}}
+                    val_loss = None
+                    for ds_name, metrics_dict in evals_log.items():
+                        for metric_name, vals in metrics_dict.items():
+                            val_loss = vals[-1] if vals else None
+                            break
+                        break
+                    if val_loss is not None:
+                        if val_loss < best_val_loss:
+                            best_val_loss = val_loss
+                            patience_counter = 0
+                        else:
+                            patience_counter += 1
+                        _outer._emit_epoch(epoch_callback,
+                            model_name=_outer.name,
+                            epoch=epoch + 1,
+                            total_epochs=_outer.n_estimators,
+                            train_loss=val_loss,
+                            val_loss=val_loss,
+                            lr=_outer.learning_rate,
+                            patience_counter=patience_counter,
+                            patience_limit=patience_limit,
+                            best_val_loss=best_val_loss)
+                    return False  # Don't stop training
+            xgb_callbacks.append(_EpochCB())
+
         # Train with early stopping
         self.model.fit(
             X_train_split,
@@ -188,6 +228,7 @@ class XGBoostModel(ForecastModel):
             sample_weight=w_train,
             eval_set=[(X_val, y_val)],
             verbose=False,
+            callbacks=xgb_callbacks if xgb_callbacks else None,
         )
 
         # Extract training metadata
