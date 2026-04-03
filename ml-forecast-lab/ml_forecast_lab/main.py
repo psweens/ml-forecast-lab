@@ -229,6 +229,8 @@ class MLForecastLabApp:
 
             # Register benchmark callback (triggered from Training tab)
             async def _benchmark_trigger(experiment_name: str):
+                # Reload config so UI-edited overrides are picked up
+                await self.load_config()
                 exp_cfg = None
                 for cfg in self.config.experiments:
                     if cfg.name == experiment_name:
@@ -703,11 +705,13 @@ class MLForecastLabApp:
                 m = self.model_registry.create(model_name)
                 # Apply user hyperparameter overrides
                 overrides = self.config.model_overrides.get(model_name, {})
+                # Apply experiment-level loss_fn first, then per-model overrides
+                # so per-model overrides take precedence
+                if m.is_neural and hasattr(m, 'loss_fn') and 'loss_fn' not in overrides:
+                    m.set_params(loss_fn=exp_cfg.loss_fn)
                 if overrides:
                     m.set_params(**overrides)
                     logger.info(f"Applied {len(overrides)} override(s) for {model_name}")
-                if m.is_neural and hasattr(m, 'loss_fn'):
-                    m.set_params(loss_fn=exp_cfg.loss_fn)
                 models[model_name] = m
             except Exception as e:
                 logger.warning(
@@ -942,10 +946,10 @@ class MLForecastLabApp:
                 try:
                     m = self.model_registry.create(m_name)
                     overrides = self.config.model_overrides.get(m_name, {})
+                    if m.is_neural and hasattr(m, 'loss_fn') and 'loss_fn' not in overrides:
+                        m.set_params(loss_fn=exp_cfg.loss_fn)
                     if overrides:
                         m.set_params(**overrides)
-                    if m.is_neural and hasattr(m, 'loss_fn'):
-                        m.set_params(loss_fn=exp_cfg.loss_fn)
 
                     # Neural models need sliding window data
                     hold_seq_kwargs = {}
@@ -1442,11 +1446,11 @@ class MLForecastLabApp:
         # 4. Train model on full data
         model = self.model_registry.create(prod_model_name)
         overrides = self.config.model_overrides.get(prod_model_name, {})
+        if model.is_neural and hasattr(model, 'loss_fn') and 'loss_fn' not in overrides:
+            model.set_params(loss_fn=exp_cfg.loss_fn)
         if overrides:
             model.set_params(**overrides)
             logger.info(f"Applied {len(overrides)} override(s) for {prod_model_name}")
-        if model.is_neural and hasattr(model, 'loss_fn'):
-            model.set_params(loss_fn=exp_cfg.loss_fn)
         is_neural = model.is_neural
         logger.info(f"Training {prod_model_name} on {len(X)} samples...")
         train_start = time.time()
