@@ -45,6 +45,8 @@ class ModelResult:
     fold_metrics: List[Dict[str, float]] = field(default_factory=list)
     train_times: List[float] = field(default_factory=list)
     inference_times: List[float] = field(default_factory=list)
+    fold_predictions: List[np.ndarray] = field(default_factory=list)
+    fold_actuals: List[np.ndarray] = field(default_factory=list)
 
     @property
     def mean_train_time(self) -> float:
@@ -460,6 +462,8 @@ class BenchmarkRunner:
             model_result.fold_metrics.append(fold_metrics)
             model_result.train_times.append(train_time)
             model_result.inference_times.append(inference_time)
+            model_result.fold_predictions.append(y_pred.copy())
+            model_result.fold_actuals.append(y_test.copy())
 
         # Aggregate across folds — compute mean for all metrics
         if model_result.fold_metrics:

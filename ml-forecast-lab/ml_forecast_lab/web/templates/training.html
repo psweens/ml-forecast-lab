@@ -22,7 +22,11 @@
                 {% endif %}
             </select>
         </div>
-        <div style="display:flex;gap:0.5rem;align-items:center;">
+        <div style="display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap;">
+            <label style="display:flex;align-items:center;gap:0.5rem;color:var(--text-secondary);cursor:pointer;">
+                <input type="checkbox" id="chk-ensemble" checked style="accent-color:var(--accent-secondary);width:18px;height:18px;">
+                <span>Include Ensemble</span>
+            </label>
             <label style="display:flex;align-items:center;gap:0.5rem;color:var(--text-secondary);cursor:pointer;">
                 <input type="checkbox" id="chk-deep" style="accent-color:var(--accent-secondary);width:18px;height:18px;">
                 <span>Include Deep Analysis</span>
@@ -108,6 +112,9 @@
         if (!expName) return;
 
         const steps = ['benchmark'];
+        if (document.getElementById('chk-ensemble').checked) {
+            steps.push('ensemble');
+        }
         if (document.getElementById('chk-deep').checked) {
             steps.push('deep_analysis');
         }
@@ -210,6 +217,14 @@
                 document.getElementById('progress-label').textContent =
                     `${completedModels}/${totalModels} models complete`;
                 logEvent('success', `Completed: ${ev.model_name}`);
+                break;
+
+            case 'ensemble_start':
+                logEvent('info', ev.message || 'Ensemble started');
+                break;
+
+            case 'ensemble_end':
+                logEvent('success', ev.message || 'Ensemble complete');
                 break;
 
             case 'pipeline_end':

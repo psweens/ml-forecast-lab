@@ -242,6 +242,15 @@ class MLForecastLabApp:
 
             self.web_app.state.appstate.deep_analysis_callback = _deep_analysis_trigger
 
+            # Register ensemble callback
+            async def _ensemble_trigger(experiment_name: str, strategies: list = None):
+                try:
+                    await self._run_ensemble(experiment_name, strategies)
+                except Exception as e:
+                    logger.error(f"Ensemble failed: {e}", exc_info=True)
+
+            self.web_app.state.appstate.ensemble_callback = _ensemble_trigger
+
             # Run in a background task
             asyncio.create_task(self.server.serve())
             logger.info(f"Web server started successfully on {host}:{port}")
@@ -821,6 +830,17 @@ class MLForecastLabApp:
                 status="completed",
             )
 
+        # Store completed models for ensemble engine
+        if self.web_app:
+            self.web_app.state.appstate._benchmark_models = getattr(
+                self.web_app.state.appstate, '_benchmark_models', {}
+            )
+            self.web_app.state.appstate._benchmark_models[exp_cfg.name] = completed_models
+            self.web_app.state.appstate._benchmark_runners = getattr(
+                self.web_app.state.appstate, '_benchmark_runners', {}
+            )
+            self.web_app.state.appstate._benchmark_runners[exp_cfg.name] = runner
+
         # Build a BenchmarkResult-compatible object for downstream use
         from ml_forecast_lab.benchmark.runner import BenchmarkResult as RunnerBenchmarkResult
         bench_result = RunnerBenchmarkResult(
@@ -1058,6 +1078,229 @@ class MLForecastLabApp:
             event_type="pipeline_end",
             experiment_name=exp_cfg.name,
             message=f"Benchmark complete — best model: {best_model_name}",
+        ))
+
+    async def _run_ensemble(
+        self, experiment_name: str, strategies: Optional[list] = None,
+    ) -> None:
+        """
+        Run ensemble strategies on completed benchmark results.
+
+        Combines per-fold predictions from the most recent benchmark run
+        using simple averaging, inverse-metric weighting, and/or stacking.
+
+        Parameters
+        ----------
+        experiment_name : str
+            Name of the experiment whose benchmark results to ensemble.
+        strategies : list, optional
+            Strategy names to run. Defaults to all three.
+        """
+        from ml_forecast_lab.ensemble.engine import EnsembleEngine, EnsembleStrategy
+        from ml_forecast_lab.training_events import TrainingEvent, TrainingEventBus
+
+        event_bus = TrainingEventBus.get_instance()
+
+        # Resolve strategy enums
+        strategy_map = {
+            "simple_average": EnsembleStrategy.SIMPLE_AVERAGE,
+            "weighted_average": EnsembleStrategy.WEIGHTED_AVERAGE,
+            "stacking": EnsembleStrategy.STACKING,
+        }
+        if strategies is None:
+            strategies = list(strategy_map.keys())
+        strategy_enums = [strategy_map[s] for s in strategies if s in strategy_map]
+
+        if not strategy_enums:
+            logger.warning("No valid ensemble strategies requested")
+            return
+
+        # Retrieve stored benchmark data
+        if not self.web_app:
+            logger.error("Web app not available for ensemble")
+            return
+
+        appstate = self.web_app.state.appstate
+        completed_models = getattr(appstate, '_benchmark_models', {}).get(experiment_name)
+        runner = getattr(appstate, '_benchmark_runners', {}).get(experiment_name)
+
+        if not completed_models or not runner:
+            logger.error(f"No benchmark results for {experiment_name}, run benchmark first")
+            return
+
+        event_bus.publish(TrainingEvent(
+            event_type="ensemble_start",
+            experiment_name=experiment_name,
+            message=f"Running {len(strategy_enums)} ensemble strategy(ies)",
+        ))
+
+        # Gather per-fold predictions and actuals from completed models
+        # Only include models that have fold_predictions populated
+        fold_predictions = {}
+        fold_actuals = None
+        for m_name, mr in completed_models.items():
+            if mr.fold_predictions and mr.fold_actuals:
+                fold_predictions[m_name] = mr.fold_predictions
+                if fold_actuals is None:
+                    fold_actuals = mr.fold_actuals
+
+        if not fold_actuals or len(fold_predictions) < 2:
+            logger.warning(
+                f"Ensemble needs >= 2 models with fold predictions, "
+                f"got {len(fold_predictions)}. Skipping."
+            )
+            event_bus.publish(TrainingEvent(
+                event_type="ensemble_end",
+                experiment_name=experiment_name,
+                message="Skipped — need >= 2 models with fold predictions",
+            ))
+            return
+
+        # Model metrics for weighted averaging
+        model_metrics = {
+            m_name: mr.metrics.get(runner.production_metric, np.inf)
+            for m_name, mr in completed_models.items()
+            if m_name in fold_predictions
+        }
+
+        # Run ensemble in executor
+        engine = EnsembleEngine(
+            metric_registry=runner.metric_registry,
+            production_metric=runner.production_metric,
+            metrics=runner.metrics,
+        )
+
+        loop = asyncio.get_running_loop()
+        ensemble_results = await loop.run_in_executor(
+            None,
+            lambda: engine.run_all(
+                strategy_enums,
+                fold_predictions,
+                fold_actuals,
+                model_metrics,
+            ),
+        )
+
+        if not ensemble_results:
+            logger.warning("All ensemble strategies failed")
+            event_bus.publish(TrainingEvent(
+                event_type="ensemble_end",
+                experiment_name=experiment_name,
+                message="All ensemble strategies failed",
+            ))
+            return
+
+        # Store ensemble results in web app state
+        from ml_forecast_lab.web.app import EnsembleMethodResult, EnsembleResultData
+
+        strategy_display = {
+            EnsembleStrategy.SIMPLE_AVERAGE: "Simple Average",
+            EnsembleStrategy.WEIGHTED_AVERAGE: "Weighted Average",
+            EnsembleStrategy.STACKING: "Stacking (Ridge)",
+        }
+
+        # Best individual model metric for comparison
+        best_individual = min(model_metrics.values()) if model_metrics else np.inf
+        best_individual_name = min(model_metrics, key=model_metrics.get) if model_metrics else ""
+
+        method_results = []
+        best_ensemble_metric = np.inf
+        best_strategy = None
+
+        for strat, eres in ensemble_results.items():
+            pm = eres.metrics.get(runner.production_metric, np.inf)
+            # Compute std across fold metrics
+            fold_vals = [
+                fm.get(runner.production_metric, np.nan)
+                for fm in eres.fold_metrics if fm
+            ]
+            std_pm = float(np.nanstd(fold_vals)) if len(fold_vals) > 1 else 0.0
+
+            method_results.append(EnsembleMethodResult(
+                strategy=strat.value,
+                display_name=strategy_display.get(strat, strat.value),
+                member_models=eres.member_models,
+                mae=pm if runner.production_metric == "mae" else eres.metrics.get("mae", np.nan),
+                rmse=eres.metrics.get("rmse", np.nan),
+                mape=eres.metrics.get("mape", np.nan),
+                weights=eres.weights,
+            ))
+
+            if pm < best_ensemble_metric:
+                best_ensemble_metric = pm
+                best_strategy = strat.value
+
+        # Improvement vs best individual
+        improvement_pct = None
+        if np.isfinite(best_individual) and best_individual > 0 and np.isfinite(best_ensemble_metric):
+            improvement_pct = (best_individual - best_ensemble_metric) / best_individual * 100
+
+        ensemble_data = EnsembleResultData(
+            experiment_name=experiment_name,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            status="completed",
+            methods=method_results,
+            best_strategy=best_strategy,
+            improvement_pct=improvement_pct,
+            best_individual_model=best_individual_name,
+            best_individual_metric=best_individual,
+        )
+        appstate.ensemble_results[experiment_name] = ensemble_data
+
+        # Add ensemble predictions to the holdout chart if lab forecast data exists
+        lab_forecast = appstate.lab_forecast_data.get(experiment_name)
+        if lab_forecast:
+            from ml_forecast_lab.web.app import ModelPrediction
+
+            ENSEMBLE_COLORS = {
+                "simple_average": "#FFD700",
+                "weighted_average": "#FF6B6B",
+                "stacking": "#7B68EE",
+            }
+
+            # Use last fold's predictions for display (closest to holdout behaviour)
+            for strat, eres in ensemble_results.items():
+                if eres.predictions is not None and len(eres.predictions) > 0:
+                    display_preds = eres.predictions.ravel()
+                    # Use the actuals from the last fold for timestamps alignment
+                    last_actuals = fold_actuals[-1].ravel()
+                    n_pts = min(len(display_preds), len(last_actuals))
+                    # Use holdout timestamps if available and matching length
+                    timestamps = lab_forecast.model_predictions[0].timestamps if lab_forecast.model_predictions else []
+                    if len(timestamps) != n_pts:
+                        timestamps = [str(i) for i in range(n_pts)]
+
+                    display_name = strategy_display.get(strat, strat.value)
+                    lab_forecast.model_predictions.append(ModelPrediction(
+                        model_name=f"Ensemble: {display_name}",
+                        timestamps=timestamps[:n_pts],
+                        actuals=[None] * n_pts,  # Don't duplicate actuals
+                        predictions=[float(v) for v in display_preds[:n_pts]],
+                        color=ENSEMBLE_COLORS.get(strat.value, "#FFD700"),
+                    ))
+
+        # Log summary
+        logger.info("")
+        logger.info(f"  {'─' * 60}")
+        logger.info(f"  Ensemble Results:")
+        for mr in method_results:
+            logger.info(
+                f"    {mr.display_name:<20} "
+                f"MAE={mr.mae:>8.4f}  RMSE={mr.rmse:>8.4f}  MAPE={mr.mape:>8.2f}"
+            )
+        if improvement_pct is not None:
+            direction = "better" if improvement_pct > 0 else "worse"
+            logger.info(
+                f"  Best ensemble vs best individual ({best_individual_name}): "
+                f"{abs(improvement_pct):.1f}% {direction}"
+            )
+        logger.info(f"  {'─' * 60}")
+
+        event_bus.publish(TrainingEvent(
+            event_type="ensemble_end",
+            experiment_name=experiment_name,
+            message=f"Ensemble complete — best: {best_strategy}"
+            + (f" ({improvement_pct:+.1f}% vs {best_individual_name})" if improvement_pct is not None else ""),
         ))
 
     @staticmethod
@@ -1778,9 +2021,10 @@ class MLForecastLabApp:
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-        # Calculate update interval — run first cycle immediately
+        # Calculate update interval — defer first cycle to the configured interval
+        # Training is now triggered on-demand from the Training tab
         update_interval = self.config.update_every_minutes * 60  # Convert to seconds
-        next_update = datetime.now(timezone.utc)
+        next_update = datetime.now(timezone.utc) + timedelta(seconds=update_interval)
 
         while self.running:
             try:

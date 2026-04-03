@@ -139,6 +139,31 @@ class FeatureImportanceData(BaseModel):
     features: List[Dict[str, Any]]  # [{"name": "hour_of_day", "importance": 0.25}, ...]
 
 
+class EnsembleMethodResult(BaseModel):
+    """Result for one ensemble strategy."""
+
+    strategy: str  # "simple_average", "weighted_average", "stacking"
+    display_name: str
+    member_models: List[str]
+    mae: float
+    rmse: float
+    mape: float
+    weights: Optional[Dict[str, float]] = None
+
+
+class EnsembleResultData(BaseModel):
+    """Complete ensemble results for an experiment."""
+
+    experiment_name: str
+    timestamp: str
+    status: str  # "running", "completed", "failed"
+    methods: List[EnsembleMethodResult]
+    best_strategy: Optional[str] = None
+    improvement_pct: Optional[float] = None
+    best_individual_model: Optional[str] = None
+    best_individual_metric: Optional[float] = None
+
+
 class ModelInfo(BaseModel):
     """Information about an available model backend."""
 
@@ -172,6 +197,8 @@ class AppState:
         self.feature_importances: Dict[str, List[FeatureImportanceData]] = {}
         self.deep_analysis_results: Dict[str, DeepAnalysisResult] = {}
         self.deep_analysis_callback = None  # Set by main app for triggering
+        self.ensemble_results: Dict[str, EnsembleResultData] = {}
+        self.ensemble_callback = None  # Set by main app for triggering
         self.running_benchmarks: set = set()
         self.last_update: Optional[datetime] = None
         self.next_update_seconds: Optional[int] = None
@@ -453,53 +480,53 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         """Models configuration page with per-model hyperparameter editing."""
         import yaml
 
-        # Same models_list used by status page
+        # Models listed alphabetically by display name
         models_list = [
-            {"name": "lightgbm", "display_name": "LightGBM", "model_type": "Tree",
-             "description": "Gradient boosting framework optimised for speed and memory efficiency.",
-             "speed": "⚡ Very Fast", "best_for": "Default choice — fast and accurate"},
-            {"name": "xgboost", "display_name": "XGBoost", "model_type": "Tree",
-             "description": "Extreme gradient boosting with L1/L2 regularisation.",
-             "speed": "⚡ Fast", "best_for": "When LightGBM overfits"},
-            {"name": "lstm", "display_name": "LSTM", "model_type": "PyTorch",
-             "description": "2-layer LSTM with temporal attention and multi-horizon output head.",
-             "speed": "🔶 Moderate", "best_for": "Complex temporal patterns"},
             {"name": "cnn", "display_name": "CNN", "model_type": "PyTorch",
              "description": "WaveNet-style dilated causal convolutions with residual connections.",
              "speed": "🔶 Moderate", "best_for": "Periodic/seasonal signals"},
-            {"name": "neuralprophet", "display_name": "NeuralProphet", "model_type": "PyTorch",
-             "description": "Neural forecasting with trend decomposition and automatic seasonality.",
-             "speed": "🔶 Moderate", "best_for": "Strong seasonality + covariates"},
-            {"name": "dlinear", "display_name": "DLinear", "model_type": "PyTorch",
-             "description": "Decomposition-Linear: separate linear layers for trend and seasonal.",
-             "speed": "⚡ Fast", "best_for": "Simple baseline — surprisingly competitive"},
-            {"name": "nbeats", "display_name": "N-BEATS", "model_type": "PyTorch",
-             "description": "Neural Basis Expansion with doubly-residual stacking.",
-             "speed": "🔶 Moderate", "best_for": "Pure time-series without covariates"},
-            {"name": "nhits", "display_name": "N-HiTS", "model_type": "PyTorch",
-             "description": "Hierarchical interpolation with multi-rate temporal downsampling.",
-             "speed": "🔶 Moderate", "best_for": "Multi-scale temporal patterns"},
-            {"name": "tide", "display_name": "TiDE", "model_type": "PyTorch",
-             "description": "Time-series Dense Encoder with residual MLP encoder-decoder.",
-             "speed": "🔶 Moderate", "best_for": "Efficient long-horizon forecasting"},
-            {"name": "tsmixer", "display_name": "TSMixer", "model_type": "PyTorch",
-             "description": "Alternating time-mixing and feature-mixing MLP layers.",
-             "speed": "🔶 Moderate", "best_for": "Multivariate cross-channel patterns"},
-            {"name": "sparsetsf", "display_name": "SparseTSF", "model_type": "PyTorch",
-             "description": "Period-based sparse cross-period linear model.",
-             "speed": "⚡ Fast", "best_for": "Strong daily/weekly periodicity"},
-            {"name": "patchtst", "display_name": "PatchTST", "model_type": "PyTorch",
-             "description": "Channel-independent Patch Transformer with encoder.",
-             "speed": "🔶 Moderate", "best_for": "Long-range dependencies"},
-            {"name": "itransformer", "display_name": "iTransformer", "model_type": "PyTorch",
-             "description": "Inverted Transformer: attention across variables.",
-             "speed": "🔶 Moderate", "best_for": "Cross-variate correlations"},
             {"name": "crossformer", "display_name": "Crossformer", "model_type": "PyTorch",
              "description": "Segment embedding with temporal + cross-variable attention.",
              "speed": "🔶 Moderate", "best_for": "Joint temporal + cross-variate modelling"},
+            {"name": "dlinear", "display_name": "DLinear", "model_type": "PyTorch",
+             "description": "Decomposition-Linear: separate linear layers for trend and seasonal.",
+             "speed": "⚡ Fast", "best_for": "Simple baseline — surprisingly competitive"},
+            {"name": "itransformer", "display_name": "iTransformer", "model_type": "PyTorch",
+             "description": "Inverted Transformer: attention across variables.",
+             "speed": "🔶 Moderate", "best_for": "Cross-variate correlations"},
+            {"name": "lightgbm", "display_name": "LightGBM", "model_type": "Tree",
+             "description": "Gradient boosting framework optimised for speed and memory efficiency.",
+             "speed": "⚡ Very Fast", "best_for": "Default choice — fast and accurate"},
+            {"name": "lstm", "display_name": "LSTM", "model_type": "PyTorch",
+             "description": "2-layer LSTM with temporal attention and multi-horizon output head.",
+             "speed": "🔶 Moderate", "best_for": "Complex temporal patterns"},
+            {"name": "nbeats", "display_name": "N-BEATS", "model_type": "PyTorch",
+             "description": "Neural Basis Expansion with doubly-residual stacking.",
+             "speed": "🔶 Moderate", "best_for": "Pure time-series without covariates"},
+            {"name": "neuralprophet", "display_name": "NeuralProphet", "model_type": "PyTorch",
+             "description": "Neural forecasting with trend decomposition and automatic seasonality.",
+             "speed": "🔶 Moderate", "best_for": "Strong seasonality + covariates"},
+            {"name": "nhits", "display_name": "N-HiTS", "model_type": "PyTorch",
+             "description": "Hierarchical interpolation with multi-rate temporal downsampling.",
+             "speed": "🔶 Moderate", "best_for": "Multi-scale temporal patterns"},
+            {"name": "patchtst", "display_name": "PatchTST", "model_type": "PyTorch",
+             "description": "Channel-independent Patch Transformer with encoder.",
+             "speed": "🔶 Moderate", "best_for": "Long-range dependencies"},
+            {"name": "sparsetsf", "display_name": "SparseTSF", "model_type": "PyTorch",
+             "description": "Period-based sparse cross-period linear model.",
+             "speed": "⚡ Fast", "best_for": "Strong daily/weekly periodicity"},
+            {"name": "tide", "display_name": "TiDE", "model_type": "PyTorch",
+             "description": "Time-series Dense Encoder with residual MLP encoder-decoder.",
+             "speed": "🔶 Moderate", "best_for": "Efficient long-horizon forecasting"},
             {"name": "timesnet", "display_name": "TimesNet", "model_type": "PyTorch",
              "description": "FFT period detection with 2D inception convolutions.",
              "speed": "🔶 Moderate", "best_for": "Multi-periodic signals"},
+            {"name": "tsmixer", "display_name": "TSMixer", "model_type": "PyTorch",
+             "description": "Alternating time-mixing and feature-mixing MLP layers.",
+             "speed": "🔶 Moderate", "best_for": "Multivariate cross-channel patterns"},
+            {"name": "xgboost", "display_name": "XGBoost", "model_type": "Tree",
+             "description": "Extreme gradient boosting with L1/L2 regularisation.",
+             "speed": "⚡ Fast", "best_for": "When LightGBM overfits"},
         ]
 
         # Load enabled models and overrides from config
@@ -660,6 +687,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         lab_forecast = app.state.appstate.lab_forecast_data.get(name)
         feature_imps = app.state.appstate.feature_importances.get(name, [])
         deep_analysis = app.state.appstate.deep_analysis_results.get(name)
+        ensemble_result = app.state.appstate.ensemble_results.get(name)
         is_running = app.state.appstate.is_benchmark_running(name)
 
         # Get units from experiment config
@@ -698,6 +726,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 if benchmark_result
                 else None,
                 "deep_analysis": deep_analysis,
+                "ensemble_result": ensemble_result,
                 "units": units,
             },
         )
@@ -938,51 +967,51 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         }
 
         models_list = [
-            {"name": "lightgbm", "display_name": "LightGBM", "model_type": "Tree",
-             "description": "Gradient boosting framework optimised for speed and memory efficiency. Builds trees leaf-wise for faster convergence.",
-             "speed": "⚡ Very Fast (~0.5s/fold)", "hardware_accel": "No (CPU only)", "best_for": "Default choice — fast and accurate"},
-            {"name": "xgboost", "display_name": "XGBoost", "model_type": "Tree",
-             "description": "Extreme gradient boosting with L1/L2 regularisation. Builds trees level-wise with robust handling of missing values.",
-             "speed": "⚡ Fast (~1s/fold)", "hardware_accel": "No (CPU only)", "best_for": "When LightGBM overfits"},
-            {"name": "lstm", "display_name": "LSTM", "model_type": "PyTorch",
-             "description": "2-layer LSTM with temporal attention, LayerNorm, and multi-horizon output head.",
-             "speed": "🔶 Moderate (~10s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Complex temporal patterns"},
             {"name": "cnn", "display_name": "CNN", "model_type": "PyTorch",
              "description": "WaveNet-style dilated causal convolutions with learnable positional pooling and residual connections.",
              "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Periodic/seasonal signals"},
-            {"name": "neuralprophet", "display_name": "NeuralProphet", "model_type": "PyTorch",
-             "description": "Facebook's neural forecasting library combining trend decomposition, automatic seasonality, and neural AR components.",
-             "speed": "🔶 Moderate (~15s/fold)", "hardware_accel": "No", "best_for": "Strong seasonality + covariates"},
-            {"name": "dlinear", "display_name": "DLinear", "model_type": "PyTorch",
-             "description": "Decomposition-Linear: decomposes input into trend (moving average) and seasonal, applies separate linear layers.",
-             "speed": "⚡ Fast (~2s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Simple baseline — surprisingly competitive"},
-            {"name": "nbeats", "display_name": "N-BEATS", "model_type": "PyTorch",
-             "description": "Neural Basis Expansion Analysis with doubly-residual stacking of fully-connected blocks.",
-             "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Pure time-series without covariates"},
-            {"name": "nhits", "display_name": "N-HiTS", "model_type": "PyTorch",
-             "description": "Neural Hierarchical Interpolation: N-BEATS with multi-rate temporal downsampling per stack.",
-             "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Multi-scale temporal patterns"},
-            {"name": "tide", "display_name": "TiDE", "model_type": "PyTorch",
-             "description": "Time-series Dense Encoder: residual MLP encoder-decoder with skip connections and LayerNorm.",
-             "speed": "🔶 Moderate (~6s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Efficient long-horizon forecasting"},
-            {"name": "tsmixer", "display_name": "TSMixer", "model_type": "PyTorch",
-             "description": "Alternating time-mixing and feature-mixing MLP layers with residual connections.",
-             "speed": "🔶 Moderate (~6s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Multivariate cross-channel patterns"},
-            {"name": "sparsetsf", "display_name": "SparseTSF", "model_type": "PyTorch",
-             "description": "Period-based sparse cross-period linear model exploiting periodic structure in time series.",
-             "speed": "⚡ Fast (~2s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Strong daily/weekly periodicity"},
-            {"name": "patchtst", "display_name": "PatchTST", "model_type": "PyTorch",
-             "description": "Channel-independent Patch Transformer: patches the time series, embeds, and applies Transformer encoder.",
-             "speed": "🔶 Moderate (~12s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Long-range dependencies"},
-            {"name": "itransformer", "display_name": "iTransformer", "model_type": "PyTorch",
-             "description": "Inverted Transformer: treats each variable as a token and applies attention across variables.",
-             "speed": "🔶 Moderate (~10s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Cross-variate correlations"},
             {"name": "crossformer", "display_name": "Crossformer", "model_type": "PyTorch",
              "description": "Segment embedding with temporal self-attention and cross-variable attention per layer.",
              "speed": "🔶 Moderate (~12s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Joint temporal + cross-variate modelling"},
+            {"name": "dlinear", "display_name": "DLinear", "model_type": "PyTorch",
+             "description": "Decomposition-Linear: decomposes input into trend (moving average) and seasonal, applies separate linear layers.",
+             "speed": "⚡ Fast (~2s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Simple baseline — surprisingly competitive"},
+            {"name": "itransformer", "display_name": "iTransformer", "model_type": "PyTorch",
+             "description": "Inverted Transformer: treats each variable as a token and applies attention across variables.",
+             "speed": "🔶 Moderate (~10s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Cross-variate correlations"},
+            {"name": "lightgbm", "display_name": "LightGBM", "model_type": "Tree",
+             "description": "Gradient boosting framework optimised for speed and memory efficiency. Builds trees leaf-wise for faster convergence.",
+             "speed": "⚡ Very Fast (~0.5s/fold)", "hardware_accel": "No (CPU only)", "best_for": "Default choice — fast and accurate"},
+            {"name": "lstm", "display_name": "LSTM", "model_type": "PyTorch",
+             "description": "2-layer LSTM with temporal attention, LayerNorm, and multi-horizon output head.",
+             "speed": "🔶 Moderate (~10s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Complex temporal patterns"},
+            {"name": "nbeats", "display_name": "N-BEATS", "model_type": "PyTorch",
+             "description": "Neural Basis Expansion Analysis with doubly-residual stacking of fully-connected blocks.",
+             "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Pure time-series without covariates"},
+            {"name": "neuralprophet", "display_name": "NeuralProphet", "model_type": "PyTorch",
+             "description": "Facebook's neural forecasting library combining trend decomposition, automatic seasonality, and neural AR components.",
+             "speed": "🔶 Moderate (~15s/fold)", "hardware_accel": "No", "best_for": "Strong seasonality + covariates"},
+            {"name": "nhits", "display_name": "N-HiTS", "model_type": "PyTorch",
+             "description": "Neural Hierarchical Interpolation: N-BEATS with multi-rate temporal downsampling per stack.",
+             "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Multi-scale temporal patterns"},
+            {"name": "patchtst", "display_name": "PatchTST", "model_type": "PyTorch",
+             "description": "Channel-independent Patch Transformer: patches the time series, embeds, and applies Transformer encoder.",
+             "speed": "🔶 Moderate (~12s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Long-range dependencies"},
+            {"name": "sparsetsf", "display_name": "SparseTSF", "model_type": "PyTorch",
+             "description": "Period-based sparse cross-period linear model exploiting periodic structure in time series.",
+             "speed": "⚡ Fast (~2s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Strong daily/weekly periodicity"},
+            {"name": "tide", "display_name": "TiDE", "model_type": "PyTorch",
+             "description": "Time-series Dense Encoder: residual MLP encoder-decoder with skip connections and LayerNorm.",
+             "speed": "🔶 Moderate (~6s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Efficient long-horizon forecasting"},
             {"name": "timesnet", "display_name": "TimesNet", "model_type": "PyTorch",
              "description": "FFT period detection, reshapes 1D to 2D, applies multi-scale inception convolutions.",
              "speed": "🔶 Moderate (~10s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Multi-periodic signals"},
+            {"name": "tsmixer", "display_name": "TSMixer", "model_type": "PyTorch",
+             "description": "Alternating time-mixing and feature-mixing MLP layers with residual connections.",
+             "speed": "🔶 Moderate (~6s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Multivariate cross-channel patterns"},
+            {"name": "xgboost", "display_name": "XGBoost", "model_type": "Tree",
+             "description": "Extreme gradient boosting with L1/L2 regularisation. Builds trees level-wise with robust handling of missing values.",
+             "speed": "⚡ Fast (~1s/fold)", "hardware_accel": "No (CPU only)", "best_for": "When LightGBM overfits"},
         ]
 
         # Load models_enabled from config
@@ -1470,14 +1499,19 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # The main app loop picks up the running flag and kicks off _run_benchmark
         import asyncio as _aio
 
-        # If deep_analysis is requested after benchmark, chain it
-        if "deep_analysis" in steps and app.state.appstate.deep_analysis_callback:
+        # Chain post-benchmark steps: ensemble, then deep_analysis
+        needs_chain = "ensemble" in steps or "deep_analysis" in steps
+        if needs_chain:
             async def _chain():
                 # Wait for benchmark to finish
                 while app.state.appstate.is_benchmark_running(name):
                     await _aio.sleep(2)
-                # Then trigger deep analysis
-                await app.state.appstate.deep_analysis_callback(name, "all")
+                # Run ensemble if requested
+                if "ensemble" in steps and app.state.appstate.ensemble_callback:
+                    await app.state.appstate.ensemble_callback(name)
+                # Run deep analysis if requested
+                if "deep_analysis" in steps and app.state.appstate.deep_analysis_callback:
+                    await app.state.appstate.deep_analysis_callback(name, "all")
 
             _aio.create_task(_chain())
 
@@ -1499,5 +1533,42 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         event_bus = TrainingEventBus.get_instance()
         history = event_bus.get_history(name)
         return JSONResponse(content=[ev.to_dict() for ev in history])
+
+    # ========== Ensemble endpoints ==========
+
+    @app.post("/experiment/{name}/run-ensemble")
+    async def run_ensemble(name: str, request: Request):
+        """Trigger ensemble strategies on existing benchmark results."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        if not app.state.appstate.ensemble_callback:
+            raise HTTPException(status_code=501, detail="Ensemble callback not registered")
+
+        strategies = None
+        try:
+            body = await request.json()
+            strategies = body.get("strategies")
+        except Exception:
+            pass
+
+        import asyncio as _aio
+        _aio.create_task(app.state.appstate.ensemble_callback(name, strategies))
+
+        return JSONResponse(
+            status_code=202,
+            content={"message": "Ensemble started", "experiment": name},
+        )
+
+    @app.get("/experiment/{name}/ensemble")
+    async def get_ensemble_results(name: str):
+        """Get ensemble results as JSON."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        result = app.state.appstate.ensemble_results.get(name)
+        if not result:
+            raise HTTPException(status_code=404, detail="No ensemble results yet")
+        return result.model_dump()
 
     return app
