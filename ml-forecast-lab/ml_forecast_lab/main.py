@@ -1310,21 +1310,23 @@ class MLForecastLabApp:
             }
 
             # Use last fold's predictions for display (closest to holdout behaviour)
+            # Always align to holdout timestamps so the x-axis stays consistent
+            holdout_ts = (
+                lab_forecast.model_predictions[0].timestamps
+                if lab_forecast.model_predictions else []
+            )
             for strat, eres in ensemble_results.items():
                 if eres.predictions is not None and len(eres.predictions) > 0:
                     display_preds = eres.predictions.ravel()
-                    # Use the actuals from the last fold for timestamps alignment
-                    last_actuals = fold_actuals[-1].ravel()
-                    n_pts = min(len(display_preds), len(last_actuals))
-                    # Use holdout timestamps if available and matching length
-                    timestamps = lab_forecast.model_predictions[0].timestamps if lab_forecast.model_predictions else []
-                    if len(timestamps) != n_pts:
-                        timestamps = [str(i) for i in range(n_pts)]
+                    # Trim to whichever is shorter: holdout timestamps or ensemble predictions
+                    n_pts = min(len(display_preds), len(holdout_ts))
+                    if n_pts == 0:
+                        continue
 
                     display_name = strategy_display.get(strat, strat.value)
                     lab_forecast.model_predictions.append(ModelPrediction(
                         model_name=f"Ensemble: {display_name}",
-                        timestamps=timestamps[:n_pts],
+                        timestamps=holdout_ts[:n_pts],
                         actuals=[None] * n_pts,  # Don't duplicate actuals
                         predictions=[float(v) for v in display_preds[:n_pts]],
                         color=ENSEMBLE_COLORS.get(strat.value, "#FFD700"),
