@@ -39,7 +39,7 @@ from .preprocessing import (
     subtract_series,
 )
 
-__version__ = "1.7.1"
+__version__ = "1.8.0"
 
 __all__ = [
     # Legacy

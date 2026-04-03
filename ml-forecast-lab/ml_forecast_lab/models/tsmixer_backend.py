@@ -398,11 +398,13 @@ class TSMixerModel(ForecastModel):
             "dropout": self.dropout, "learning_rate": self.learning_rate,
             "epochs": self.epochs, "batch_size": self.batch_size,
             "sequence_length": self.sequence_length, "loss_fn": self.loss_fn,
+            "patience": self.patience,
         })
 
     def set_params(self, **kwargs: Any) -> None:
         valid = {"n_mixer_layers", "hidden", "dropout", "learning_rate",
-                 "epochs", "batch_size", "sequence_length", "loss_fn"}
+                 "epochs", "batch_size", "sequence_length", "loss_fn",
+                 "patience"}
         for k, v in kwargs.items():
             if k not in valid:
                 raise ValueError(f"Unknown parameter: {k}")

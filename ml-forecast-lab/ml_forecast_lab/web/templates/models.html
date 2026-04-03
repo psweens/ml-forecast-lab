@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+
+{% block title %}Models - ML Forecast Lab{% endblock %}
+
+{% block content %}
+<section class="dashboard-header">
+    <h1>Models</h1>
+    <p class="subtitle">Configure model hyperparameters and enable/disable backends for benchmarking</p>
+</section>
+
+<section class="section">
+    <div class="experiments-grid" style="grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));">
+        {% for model in models %}
+        <div class="experiment-card model-card" id="card-{{ model.name }}" style="{% if model.name not in models_enabled %}opacity: 0.5;{% endif %}">
+            <div class="card-header">
+                <h3 class="card-title">{{ model.display_name }}</h3>
+                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                    <span class="status-badge" style="background: rgba(0,212,255,0.15); color: #00d4ff;">{{ model.model_type }}</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" data-model="{{ model.name }}"
+                               {% if model.name in models_enabled %}checked{% endif %}
+                               onchange="toggleModel(this, '{{ model.name }}')">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+            <div class="card-body">
+                <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 0.5rem;">{{ model.description }}</p>
+                <div style="display: flex; gap: 1rem; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.75rem;">
+                    <span>{{ model.speed }}</span>
+                    <span style="color: var(--accent-secondary);">{{ model.best_for }}</span>
+                </div>
+                <button class="btn-configure" onclick="toggleParams('{{ model.name }}')">
+                    <span id="chevron-{{ model.name }}">&#9654;</span> Configure
+                    {% set overrides = model_overrides.get(model.name, {}) %}
+                    {% if overrides %}
+                    <span class="override-count">{{ overrides|length }} override{{ 's' if overrides|length > 1 else '' }}</span>
+                    {% endif %}
+                </button>
+            </div>
+
+            <!-- Expandable params panel -->
+            <div class="params-panel" id="params-{{ model.name }}" style="display: none;">
+                {% if model.name in param_schema %}
+                {% set schema = param_schema[model.name] %}
+                {% set overrides = model_overrides.get(model.name, {}) %}
+                <form id="form-{{ model.name }}" onsubmit="saveParams(event, '{{ model.name }}')">
+                    {% for param_name, spec in schema.items() %}
+                    {% set current_val = overrides.get(param_name, spec.default) %}
+                    {% set is_overridden = param_name in overrides %}
+                    <div class="param-row {% if is_overridden %}param-overridden{% endif %}">
+                        <label class="param-label" for="param-{{ model.name }}-{{ param_name }}">
+                            {{ spec.label }}
+                            {% if is_overridden %}<span class="override-dot" title="Overridden from default ({{ spec.default }})"></span>{% endif %}
+                        </label>
+                        {% if spec.type == 'select' %}
+                        <select class="param-input" id="param-{{ model.name }}-{{ param_name }}"
+                                name="{{ param_name }}" data-default="{{ spec.default }}">
+                            {% for opt in spec.options %}
+                            <option value="{{ opt }}" {% if opt == current_val %}selected{% endif %}>{{ opt }}</option>
+                            {% endfor %}
+                        </select>
+                        {% elif spec.type == 'bool' %}
+                        <label class="toggle-switch toggle-sm">
+                            <input type="checkbox" id="param-{{ model.name }}-{{ param_name }}"
+                                   name="{{ param_name }}" data-default="{{ spec.default | lower }}"
+                                   {% if current_val %}checked{% endif %}>
+                            <span class="toggle-slider"></span>
+                        </label>
+                        {% elif spec.type == 'float' %}
+                        <input type="number" class="param-input" id="param-{{ model.name }}-{{ param_name }}"
+                               name="{{ param_name }}" value="{{ current_val }}"
+                               data-default="{{ spec.default }}"
+                               step="{{ spec.get('step', 0.001) }}"
+                               {% if spec.get('min') is not none %}min="{{ spec.min }}"{% endif %}
+                               {% if spec.get('max') is not none %}max="{{ spec.max }}"{% endif %}>
+                        {% else %}
+                        <input type="number" class="param-input" id="param-{{ model.name }}-{{ param_name }}"
+                               name="{{ param_name }}" value="{{ current_val }}"
+                               data-default="{{ spec.default }}" step="1"
+                               {% if spec.get('min') is not none %}min="{{ spec.min }}"{% endif %}
+                               {% if spec.get('max') is not none %}max="{{ spec.max }}"{% endif %}>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                    <div class="param-actions">
+                        <button type="submit" class="btn-save">Save</button>
+                        <button type="button" class="btn-reset" onclick="resetParams('{{ model.name }}')">Reset to Defaults</button>
+                    </div>
+                    <div class="param-status" id="status-{{ model.name }}"></div>
+                </form>
+                {% else %}
+                <p style="color: var(--text-muted); padding: 0.5rem;">No configurable parameters.</p>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</section>
+
+<style>
+    .toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider { position: absolute; cursor: pointer; inset: 0; background: var(--bg-primary);
+        border: 1px solid var(--border); border-radius: 24px; transition: 0.3s; }
+    .toggle-slider::before { content: ""; position: absolute; height: 18px; width: 18px; left: 2px; bottom: 2px;
+        background: var(--text-secondary); border-radius: 50%; transition: 0.3s; }
+    .toggle-switch input:checked + .toggle-slider { background: var(--success); border-color: var(--success); }
+    .toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); background: var(--bg-primary); }
+    .toggle-sm { width: 36px; height: 20px; }
+    .toggle-sm .toggle-slider::before { height: 14px; width: 14px; }
+    .toggle-sm input:checked + .toggle-slider::before { transform: translateX(16px); }
+
+    .model-card { transition: opacity 0.3s; }
+
+    .btn-configure {
+        background: transparent; border: 1px solid var(--border); color: var(--text-secondary);
+        padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.8rem;
+        display: flex; align-items: center; gap: 0.5rem; width: 100%; transition: all 0.2s;
+    }
+    .btn-configure:hover { border-color: var(--accent); color: var(--text-primary); }
+    .btn-configure .override-count {
+        margin-left: auto; background: rgba(0,212,255,0.15); color: #00d4ff;
+        padding: 0.1rem 0.5rem; border-radius: 10px; font-size: 0.75rem;
+    }
+
+    .params-panel {
+        border-top: 1px solid var(--border); padding: 1rem; background: rgba(0,0,0,0.15);
+    }
+
+    .param-row {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 0.4rem 0; gap: 1rem; border-left: 3px solid transparent;
+        padding-left: 0.5rem; margin-bottom: 0.15rem;
+    }
+    .param-row.param-overridden { border-left-color: var(--accent); }
+
+    .param-label {
+        font-size: 0.82rem; color: var(--text-secondary); flex: 1;
+        display: flex; align-items: center; gap: 0.4rem;
+    }
+    .override-dot {
+        display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+        background: var(--accent); flex-shrink: 0;
+    }
+
+    .param-input {
+        background: var(--bg-primary); border: 1px solid var(--border); color: var(--text-primary);
+        padding: 0.35rem 0.5rem; border-radius: 4px; font-size: 0.82rem; width: 120px;
+        text-align: right;
+    }
+    .param-input:focus { outline: none; border-color: var(--accent); }
+    select.param-input { width: 130px; text-align: left; }
+
+    .param-actions {
+        display: flex; gap: 0.75rem; margin-top: 0.75rem; padding-top: 0.75rem;
+        border-top: 1px solid var(--border);
+    }
+    .btn-save {
+        background: var(--accent); color: var(--bg-primary); border: none;
+        padding: 0.45rem 1.2rem; border-radius: 6px; cursor: pointer; font-weight: 600;
+        font-size: 0.82rem; transition: opacity 0.2s;
+    }
+    .btn-save:hover { opacity: 0.85; }
+    .btn-reset {
+        background: transparent; border: 1px solid var(--border); color: var(--text-secondary);
+        padding: 0.45rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.82rem;
+        transition: all 0.2s;
+    }
+    .btn-reset:hover { border-color: var(--warning); color: var(--warning); }
+
+    .param-status {
+        font-size: 0.8rem; margin-top: 0.5rem; min-height: 1.2rem;
+    }
+    .param-status.success { color: var(--success); }
+    .param-status.error { color: var(--error); }
+</style>
+
+<script>
+function toggleModel(el, name) {
+    var card = document.getElementById('card-' + name);
+    card.style.opacity = el.checked ? '1' : '0.5';
+    fetch(BASE_PATH + '/api/models/toggle', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({model_name: name, enabled: el.checked})
+    });
+}
+
+function toggleParams(name) {
+    var panel = document.getElementById('params-' + name);
+    var chevron = document.getElementById('chevron-' + name);
+    if (panel.style.display === 'none') {
+        panel.style.display = 'block';
+        chevron.innerHTML = '&#9660;';
+    } else {
+        panel.style.display = 'none';
+        chevron.innerHTML = '&#9654;';
+    }
+}
+
+function saveParams(event, name) {
+    event.preventDefault();
+    var form = document.getElementById('form-' + name);
+    var params = {};
+    var inputs = form.querySelectorAll('.param-input, select.param-input');
+    inputs.forEach(function(el) {
+        var val = el.value;
+        if (el.type === 'number') {
+            val = el.step && el.step.includes('.') ? parseFloat(val) : parseInt(val);
+        }
+        params[el.name] = val;
+    });
+    // Handle checkboxes (booleans)
+    form.querySelectorAll('input[type="checkbox"][name]').forEach(function(el) {
+        params[el.name] = el.checked;
+    });
+
+    var status = document.getElementById('status-' + name);
+    fetch(BASE_PATH + '/api/models/params', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({model_name: name, params: params})
+    }).then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.success) {
+            status.className = 'param-status success';
+            status.textContent = 'Saved ' + Object.keys(data.overrides).length + ' override(s)';
+            // Update override indicators
+            var rows = form.querySelectorAll('.param-row');
+            rows.forEach(function(row) {
+                var input = row.querySelector('[name]');
+                if (input && data.overrides.hasOwnProperty(input.name)) {
+                    row.classList.add('param-overridden');
+                } else {
+                    row.classList.remove('param-overridden');
+                }
+            });
+            // Update configure button badge
+            var btn = document.querySelector('#card-' + name + ' .btn-configure');
+            var badge = btn.querySelector('.override-count');
+            var count = Object.keys(data.overrides).length;
+            if (count > 0) {
+                if (!badge) {
+                    badge = document.createElement('span');
+                    badge.className = 'override-count';
+                    btn.appendChild(badge);
+                }
+                badge.textContent = count + ' override' + (count > 1 ? 's' : '');
+            } else if (badge) {
+                badge.remove();
+            }
+        } else {
+            status.className = 'param-status error';
+            status.textContent = data.error || 'Save failed';
+        }
+        setTimeout(function() { status.textContent = ''; }, 4000);
+    }).catch(function(err) {
+        status.className = 'param-status error';
+        status.textContent = 'Network error';
+    });
+}
+
+function resetParams(name) {
+    if (!confirm('Reset ' + name + ' to default hyperparameters?')) return;
+    var status = document.getElementById('status-' + name);
+    fetch(BASE_PATH + '/api/models/params/reset', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({model_name: name})
+    }).then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.success) {
+            // Update form values to defaults
+            var form = document.getElementById('form-' + name);
+            for (var key in data.defaults) {
+                var el = form.querySelector('[name="' + key + '"]');
+                if (!el) continue;
+                if (el.type === 'checkbox') {
+                    el.checked = data.defaults[key];
+                } else {
+                    el.value = data.defaults[key];
+                }
+            }
+            // Remove all override indicators
+            form.querySelectorAll('.param-overridden').forEach(function(row) {
+                row.classList.remove('param-overridden');
+            });
+            // Remove badge
+            var badge = document.querySelector('#card-' + name + ' .override-count');
+            if (badge) badge.remove();
+
+            status.className = 'param-status success';
+            status.textContent = 'Reset to defaults';
+        } else {
+            status.className = 'param-status error';
+            status.textContent = data.error || 'Reset failed';
+        }
+        setTimeout(function() { status.textContent = ''; }, 4000);
+    });
+}
+</script>
+{% endblock %}

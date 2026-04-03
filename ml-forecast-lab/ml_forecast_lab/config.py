@@ -216,6 +216,9 @@ class AppConfig:
     nice_priority: int = 10
     """Process priority for training (0=normal, 19=lowest). Default 10."""
 
+    model_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    """Per-model hyperparameter overrides. Keys are model registry names."""
+
     def __post_init__(self) -> None:
         """Validate application configuration."""
         if self.update_every_minutes < 1:
@@ -323,14 +326,58 @@ def load_config(config_path: Path | str) -> AppConfig:
         exp = ExperimentCfg(**exp_data, covariates=covariates)
         experiments.append(exp)
 
+    # Extract model_overrides before filtering
+    model_overrides = data.pop('model_overrides', {})
+    if not isinstance(model_overrides, dict):
+        logger.warning('model_overrides must be a dict; ignoring')
+        model_overrides = {}
+
     # Filter unknown app-level fields
     unknown_app = set(data) - app_fields
     if unknown_app:
         logger.warning(f'Ignoring unknown app config fields: {unknown_app}')
         data = {k: v for k, v in data.items() if k in app_fields}
 
-    app_config = AppConfig(**data, experiments=experiments)
+    app_config = AppConfig(
+        **data, experiments=experiments, model_overrides=model_overrides,
+    )
     logger.debug(
         f'Configuration loaded: {len(app_config.experiments)} experiment(s)'
     )
     return app_config
+
+
+def save_model_overrides(
+    config_path: Path | str,
+    model_name: str,
+    overrides: Dict[str, Any] | None,
+) -> None:
+    """
+    Persist per-model hyperparameter overrides to YAML.
+
+    Parameters
+    ----------
+    config_path : Path or str
+        Path to the YAML configuration file.
+    model_name : str
+        Model registry name (e.g. 'lstm', 'lightgbm').
+    overrides : dict or None
+        Parameter overrides to save. If None or empty, removes the
+        model's entry (i.e. resets to defaults).
+    """
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    mo = data.setdefault('model_overrides', {})
+    if overrides:
+        mo[model_name] = overrides
+    else:
+        mo.pop(model_name, None)
+
+    # Clean up empty section
+    if not mo:
+        data.pop('model_overrides', None)
+
+    with open(config_path, 'w', encoding='utf-8') as f:
+        yaml.dump(data, f, sort_keys=False, default_flow_style=False)

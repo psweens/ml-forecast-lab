@@ -242,6 +242,185 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         """Get the ingress base path from HA proxy headers, or empty string."""
         return request.headers.get("X-Ingress-Path", "")
 
+    def _find_config_path() -> Optional[Path]:
+        """Locate the mlfl.yaml config file."""
+        import glob as _glob
+        for p in [
+            Path("/addon_configs/ml_forecast_lab/mlfl.yaml"),
+            Path("/config/mlfl.yaml"),
+        ]:
+            if p.exists():
+                return p
+        for match in _glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
+            return Path(match)
+        return None
+
+    # ---- Model parameter schema (type, default, display label) ----
+
+    MODEL_PARAM_SCHEMA: Dict[str, Dict[str, dict]] = {
+        "lightgbm": {
+            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 10, "max": 5000},
+            "max_depth": {"type": "int", "default": 6, "label": "Max tree depth", "min": 1, "max": 20},
+            "learning_rate": {"type": "float", "default": 0.05, "label": "Learning rate", "min": 0.001, "max": 1.0, "step": 0.001},
+            "num_leaves": {"type": "int", "default": 31, "label": "Max leaves", "min": 2, "max": 256},
+            "min_child_samples": {"type": "int", "default": 10, "label": "Min samples per leaf", "min": 1, "max": 100},
+            "subsample": {"type": "float", "default": 0.8, "label": "Row subsample ratio", "min": 0.1, "max": 1.0, "step": 0.05},
+            "colsample_bytree": {"type": "float", "default": 0.8, "label": "Column subsample ratio", "min": 0.1, "max": 1.0, "step": 0.05},
+            "reg_alpha": {"type": "float", "default": 0.1, "label": "L1 regularisation", "min": 0.0, "max": 10.0, "step": 0.01},
+            "reg_lambda": {"type": "float", "default": 0.1, "label": "L2 regularisation", "min": 0.0, "max": 10.0, "step": 0.01},
+        },
+        "xgboost": {
+            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 10, "max": 5000},
+            "max_depth": {"type": "int", "default": 6, "label": "Max tree depth", "min": 1, "max": 20},
+            "learning_rate": {"type": "float", "default": 0.05, "label": "Learning rate", "min": 0.001, "max": 1.0, "step": 0.001},
+            "subsample": {"type": "float", "default": 0.8, "label": "Row subsample ratio", "min": 0.1, "max": 1.0, "step": 0.05},
+            "colsample_bytree": {"type": "float", "default": 0.8, "label": "Column subsample ratio", "min": 0.1, "max": 1.0, "step": 0.05},
+            "reg_alpha": {"type": "float", "default": 0.1, "label": "L1 regularisation", "min": 0.0, "max": 10.0, "step": 0.01},
+            "reg_lambda": {"type": "float", "default": 1.0, "label": "L2 regularisation", "min": 0.0, "max": 10.0, "step": 0.01},
+        },
+        "lstm": {
+            "hidden_size": {"type": "int", "default": 64, "label": "Hidden size", "min": 8, "max": 512},
+            "num_layers": {"type": "int", "default": 2, "label": "LSTM layers", "min": 1, "max": 8},
+            "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
+            "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "epochs": {"type": "int", "default": 100, "label": "Max epochs", "min": 10, "max": 1000},
+            "patience": {"type": "int", "default": 20, "label": "Early stopping patience", "min": 5, "max": 200},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+        },
+        "cnn": {
+            "n_filters": {"type": "int", "default": 32, "label": "Filters per layer", "min": 8, "max": 256},
+            "kernel_size": {"type": "int", "default": 3, "label": "Kernel size", "min": 2, "max": 15},
+            "n_layers": {"type": "int", "default": 4, "label": "Conv layers", "min": 1, "max": 10},
+            "dilation_base": {"type": "int", "default": 2, "label": "Dilation base", "min": 1, "max": 4},
+            "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
+            "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "epochs": {"type": "int", "default": 100, "label": "Max epochs", "min": 10, "max": 1000},
+            "patience": {"type": "int", "default": 20, "label": "Early stopping patience", "min": 5, "max": 200},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+        },
+        "neuralprophet": {
+            "n_lags": {"type": "int", "default": 12, "label": "Autoregressive lags", "min": 1, "max": 100},
+            "n_forecasts": {"type": "int", "default": 1, "label": "Forecast steps", "min": 1, "max": 48},
+            "learning_rate": {"type": "float", "default": 0.01, "label": "Learning rate", "min": 1e-5, "max": 0.1, "step": 1e-4},
+            "epochs": {"type": "int", "default": 100, "label": "Max epochs", "min": 10, "max": 1000},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
+            "yearly_seasonality": {"type": "bool", "default": False, "label": "Yearly seasonality"},
+            "weekly_seasonality": {"type": "bool", "default": True, "label": "Weekly seasonality"},
+            "daily_seasonality": {"type": "bool", "default": True, "label": "Daily seasonality"},
+            "n_changepoints": {"type": "int", "default": 10, "label": "Trend changepoints", "min": 0, "max": 50},
+        },
+        "dlinear": {
+            "kernel_size": {"type": "int", "default": 25, "label": "Decomposition kernel", "min": 3, "max": 101},
+            "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "epochs": {"type": "int", "default": 100, "label": "Max epochs", "min": 10, "max": 1000},
+            "patience": {"type": "int", "default": 20, "label": "Early stopping patience", "min": 5, "max": 200},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+        },
+        "nbeats": {
+            "hidden_size": {"type": "int", "default": 64, "label": "Hidden size", "min": 8, "max": 512},
+            "n_stacks": {"type": "int", "default": 2, "label": "Stacks", "min": 1, "max": 8},
+            "blocks_per_stack": {"type": "int", "default": 2, "label": "Blocks per stack", "min": 1, "max": 8},
+            "n_fc_layers": {"type": "int", "default": 4, "label": "FC layers per block", "min": 1, "max": 8},
+            "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "epochs": {"type": "int", "default": 100, "label": "Max epochs", "min": 10, "max": 1000},
+            "patience": {"type": "int", "default": 20, "label": "Early stopping patience", "min": 5, "max": 200},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+        },
+        "nhits": {
+            "hidden_size": {"type": "int", "default": 64, "label": "Hidden size", "min": 8, "max": 512},
+            "n_stacks": {"type": "int", "default": 3, "label": "Stacks", "min": 1, "max": 8},
+            "blocks_per_stack": {"type": "int", "default": 1, "label": "Blocks per stack", "min": 1, "max": 8},
+            "n_fc_layers": {"type": "int", "default": 4, "label": "FC layers per block", "min": 1, "max": 8},
+            "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "epochs": {"type": "int", "default": 100, "label": "Max epochs", "min": 10, "max": 1000},
+            "patience": {"type": "int", "default": 20, "label": "Early stopping patience", "min": 5, "max": 200},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+        },
+        "tide": {
+            "hidden_size": {"type": "int", "default": 64, "label": "Hidden size", "min": 8, "max": 512},
+            "encoder_layers": {"type": "int", "default": 2, "label": "Encoder layers", "min": 1, "max": 8},
+            "decoder_layers": {"type": "int", "default": 2, "label": "Decoder layers", "min": 1, "max": 8},
+            "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
+            "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "epochs": {"type": "int", "default": 100, "label": "Max epochs", "min": 10, "max": 1000},
+            "patience": {"type": "int", "default": 20, "label": "Early stopping patience", "min": 5, "max": 200},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+        },
+        "tsmixer": {
+            "n_mixer_layers": {"type": "int", "default": 4, "label": "Mixer layers", "min": 1, "max": 12},
+            "hidden": {"type": "int", "default": 64, "label": "Hidden size", "min": 8, "max": 512},
+            "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
+            "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "epochs": {"type": "int", "default": 100, "label": "Max epochs", "min": 10, "max": 1000},
+            "patience": {"type": "int", "default": 20, "label": "Early stopping patience", "min": 5, "max": 200},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+        },
+        "sparsetsf": {
+            "period_len": {"type": "int", "default": 48, "label": "Period length", "min": 2, "max": 336},
+            "dropout": {"type": "float", "default": 0.1, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
+            "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "epochs": {"type": "int", "default": 100, "label": "Max epochs", "min": 10, "max": 1000},
+            "patience": {"type": "int", "default": 20, "label": "Early stopping patience", "min": 5, "max": 200},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+        },
+        "patchtst": {
+            "patch_len": {"type": "int", "default": 8, "label": "Patch length", "min": 2, "max": 48},
+            "stride": {"type": "int", "default": 4, "label": "Stride", "min": 1, "max": 24},
+            "d_model": {"type": "int", "default": 32, "label": "Model dimension", "min": 8, "max": 256},
+            "n_heads": {"type": "int", "default": 4, "label": "Attention heads", "min": 1, "max": 16},
+            "n_encoder_layers": {"type": "int", "default": 2, "label": "Encoder layers", "min": 1, "max": 8},
+            "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
+            "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "epochs": {"type": "int", "default": 100, "label": "Max epochs", "min": 10, "max": 1000},
+            "patience": {"type": "int", "default": 20, "label": "Early stopping patience", "min": 5, "max": 200},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+        },
+        "itransformer": {
+            "d_model": {"type": "int", "default": 32, "label": "Model dimension", "min": 8, "max": 256},
+            "n_heads": {"type": "int", "default": 4, "label": "Attention heads", "min": 1, "max": 16},
+            "n_encoder_layers": {"type": "int", "default": 2, "label": "Encoder layers", "min": 1, "max": 8},
+            "dim_feedforward": {"type": "int", "default": 64, "label": "Feedforward dimension", "min": 16, "max": 512},
+            "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
+            "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "epochs": {"type": "int", "default": 100, "label": "Max epochs", "min": 10, "max": 1000},
+            "patience": {"type": "int", "default": 20, "label": "Early stopping patience", "min": 5, "max": 200},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+        },
+        "crossformer": {
+            "seg_len": {"type": "int", "default": 6, "label": "Segment length", "min": 2, "max": 48},
+            "d_model": {"type": "int", "default": 32, "label": "Model dimension", "min": 8, "max": 256},
+            "n_heads": {"type": "int", "default": 4, "label": "Attention heads", "min": 1, "max": 16},
+            "n_layers": {"type": "int", "default": 2, "label": "Encoder layers", "min": 1, "max": 8},
+            "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
+            "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "epochs": {"type": "int", "default": 100, "label": "Max epochs", "min": 10, "max": 1000},
+            "patience": {"type": "int", "default": 20, "label": "Early stopping patience", "min": 5, "max": 200},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+        },
+        "timesnet": {
+            "d_model": {"type": "int", "default": 16, "label": "Model dimension", "min": 8, "max": 256},
+            "n_layers": {"type": "int", "default": 2, "label": "TimesBlock layers", "min": 1, "max": 8},
+            "top_k": {"type": "int", "default": 3, "label": "Top-K periods", "min": 1, "max": 10},
+            "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
+            "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "epochs": {"type": "int", "default": 100, "label": "Max epochs", "min": 10, "max": 1000},
+            "patience": {"type": "int", "default": 20, "label": "Early stopping patience", "min": 5, "max": 200},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+        },
+    }
+
     # ========== HTML Routes ==========
 
     @app.get("/", response_class=Response)
@@ -268,6 +447,204 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 ),
             },
         )
+
+    @app.get("/models", response_class=Response)
+    async def models_page(request: Request):
+        """Models configuration page with per-model hyperparameter editing."""
+        import yaml
+
+        # Same models_list used by status page
+        models_list = [
+            {"name": "lightgbm", "display_name": "LightGBM", "model_type": "Tree",
+             "description": "Gradient boosting framework optimised for speed and memory efficiency.",
+             "speed": "⚡ Very Fast", "best_for": "Default choice — fast and accurate"},
+            {"name": "xgboost", "display_name": "XGBoost", "model_type": "Tree",
+             "description": "Extreme gradient boosting with L1/L2 regularisation.",
+             "speed": "⚡ Fast", "best_for": "When LightGBM overfits"},
+            {"name": "lstm", "display_name": "LSTM", "model_type": "PyTorch",
+             "description": "2-layer LSTM with temporal attention and multi-horizon output head.",
+             "speed": "🔶 Moderate", "best_for": "Complex temporal patterns"},
+            {"name": "cnn", "display_name": "CNN", "model_type": "PyTorch",
+             "description": "WaveNet-style dilated causal convolutions with residual connections.",
+             "speed": "🔶 Moderate", "best_for": "Periodic/seasonal signals"},
+            {"name": "neuralprophet", "display_name": "NeuralProphet", "model_type": "PyTorch",
+             "description": "Neural forecasting with trend decomposition and automatic seasonality.",
+             "speed": "🔶 Moderate", "best_for": "Strong seasonality + covariates"},
+            {"name": "dlinear", "display_name": "DLinear", "model_type": "PyTorch",
+             "description": "Decomposition-Linear: separate linear layers for trend and seasonal.",
+             "speed": "⚡ Fast", "best_for": "Simple baseline — surprisingly competitive"},
+            {"name": "nbeats", "display_name": "N-BEATS", "model_type": "PyTorch",
+             "description": "Neural Basis Expansion with doubly-residual stacking.",
+             "speed": "🔶 Moderate", "best_for": "Pure time-series without covariates"},
+            {"name": "nhits", "display_name": "N-HiTS", "model_type": "PyTorch",
+             "description": "Hierarchical interpolation with multi-rate temporal downsampling.",
+             "speed": "🔶 Moderate", "best_for": "Multi-scale temporal patterns"},
+            {"name": "tide", "display_name": "TiDE", "model_type": "PyTorch",
+             "description": "Time-series Dense Encoder with residual MLP encoder-decoder.",
+             "speed": "🔶 Moderate", "best_for": "Efficient long-horizon forecasting"},
+            {"name": "tsmixer", "display_name": "TSMixer", "model_type": "PyTorch",
+             "description": "Alternating time-mixing and feature-mixing MLP layers.",
+             "speed": "🔶 Moderate", "best_for": "Multivariate cross-channel patterns"},
+            {"name": "sparsetsf", "display_name": "SparseTSF", "model_type": "PyTorch",
+             "description": "Period-based sparse cross-period linear model.",
+             "speed": "⚡ Fast", "best_for": "Strong daily/weekly periodicity"},
+            {"name": "patchtst", "display_name": "PatchTST", "model_type": "PyTorch",
+             "description": "Channel-independent Patch Transformer with encoder.",
+             "speed": "🔶 Moderate", "best_for": "Long-range dependencies"},
+            {"name": "itransformer", "display_name": "iTransformer", "model_type": "PyTorch",
+             "description": "Inverted Transformer: attention across variables.",
+             "speed": "🔶 Moderate", "best_for": "Cross-variate correlations"},
+            {"name": "crossformer", "display_name": "Crossformer", "model_type": "PyTorch",
+             "description": "Segment embedding with temporal + cross-variable attention.",
+             "speed": "🔶 Moderate", "best_for": "Joint temporal + cross-variate modelling"},
+            {"name": "timesnet", "display_name": "TimesNet", "model_type": "PyTorch",
+             "description": "FFT period detection with 2D inception convolutions.",
+             "speed": "🔶 Moderate", "best_for": "Multi-periodic signals"},
+        ]
+
+        # Load enabled models and overrides from config
+        models_enabled = []
+        model_overrides = {}
+        config_path = _find_config_path()
+        if config_path:
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    yaml_data = yaml.safe_load(f) or {}
+                exps = yaml_data.get("experiments", [])
+                if exps:
+                    models_enabled = exps[0].get("models_enabled", [])
+                model_overrides = yaml_data.get("model_overrides", {})
+            except Exception:
+                pass
+
+        return templates.TemplateResponse(
+            request=request,
+            name="models.html",
+            context={
+                "request": request,
+                "base_path": _get_base_path(request),
+                "active_page": "models",
+                "version": APP_VERSION,
+                "models": models_list,
+                "models_enabled": models_enabled,
+                "model_overrides": model_overrides,
+                "param_schema": MODEL_PARAM_SCHEMA,
+            },
+        )
+
+    @app.get("/api/models/params")
+    async def get_all_model_params():
+        """Return parameter schema, defaults, and current overrides for all models."""
+        import yaml
+        model_overrides = {}
+        config_path = _find_config_path()
+        if config_path:
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    yaml_data = yaml.safe_load(f) or {}
+                model_overrides = yaml_data.get("model_overrides", {})
+            except Exception:
+                pass
+
+        result = {}
+        for model_name, schema in MODEL_PARAM_SCHEMA.items():
+            defaults = {k: v["default"] for k, v in schema.items()}
+            overrides = model_overrides.get(model_name, {})
+            current = {**defaults, **overrides}
+            result[model_name] = {
+                "defaults": defaults,
+                "overrides": overrides,
+                "current": current,
+                "schema": schema,
+            }
+        return JSONResponse(content=result)
+
+    @app.post("/api/models/params")
+    async def save_model_params(request: Request):
+        """
+        Save hyperparameter overrides for a model.
+        Body: {"model_name": "lstm", "params": {"epochs": 200, "patience": 30}}
+        """
+        import yaml
+        from ml_forecast_lab.config import save_model_overrides
+
+        try:
+            data = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        model_name = data.get("model_name")
+        params = data.get("params", {})
+
+        if not model_name or model_name not in MODEL_PARAM_SCHEMA:
+            return JSONResponse(content={"success": False, "error": f"Unknown model: {model_name}"})
+
+        schema = MODEL_PARAM_SCHEMA[model_name]
+
+        # Validate and cast param values
+        validated = {}
+        for k, v in params.items():
+            if k not in schema:
+                return JSONResponse(content={"success": False, "error": f"Unknown param '{k}' for {model_name}"})
+            spec = schema[k]
+            try:
+                if spec["type"] == "int":
+                    v = int(v)
+                elif spec["type"] == "float":
+                    v = float(v)
+                elif spec["type"] == "bool":
+                    v = bool(v)
+                elif spec["type"] == "select":
+                    v = str(v)
+                    if "options" in spec and v not in spec["options"]:
+                        return JSONResponse(content={"success": False, "error": f"Invalid value '{v}' for {k}"})
+            except (ValueError, TypeError) as e:
+                return JSONResponse(content={"success": False, "error": f"Invalid type for {k}: {e}"})
+            validated[k] = v
+
+        # Only store values that differ from defaults
+        overrides = {k: v for k, v in validated.items() if v != schema[k]["default"]}
+
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+
+        try:
+            save_model_overrides(config_path, model_name, overrides)
+            defaults = {k: v["default"] for k, v in schema.items()}
+            current = {**defaults, **overrides}
+            logger.info(f"Saved {len(overrides)} override(s) for {model_name}")
+            return JSONResponse(content={"success": True, "overrides": overrides, "current": current})
+        except Exception as e:
+            logger.error(f"Failed to save model params: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
+
+    @app.post("/api/models/params/reset")
+    async def reset_model_params(request: Request):
+        """Reset a model's params to defaults by removing its overrides."""
+        from ml_forecast_lab.config import save_model_overrides
+
+        try:
+            data = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        model_name = data.get("model_name")
+        if not model_name or model_name not in MODEL_PARAM_SCHEMA:
+            return JSONResponse(content={"success": False, "error": f"Unknown model: {model_name}"})
+
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+
+        try:
+            save_model_overrides(config_path, model_name, None)
+            defaults = {k: v["default"] for k, v in MODEL_PARAM_SCHEMA[model_name].items()}
+            logger.info(f"Reset {model_name} to defaults")
+            return JSONResponse(content={"success": True, "defaults": defaults})
+        except Exception as e:
+            logger.error(f"Failed to reset model params: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.get("/experiment/{name}", response_class=Response)
     async def experiment_detail(request: Request, name: str):

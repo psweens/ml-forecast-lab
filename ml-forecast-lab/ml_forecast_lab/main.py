@@ -656,6 +656,11 @@ class MLForecastLabApp:
         for model_name in exp_cfg.models_enabled:
             try:
                 m = self.model_registry.create(model_name)
+                # Apply user hyperparameter overrides
+                overrides = self.config.model_overrides.get(model_name, {})
+                if overrides:
+                    m.set_params(**overrides)
+                    logger.info(f"Applied {len(overrides)} override(s) for {model_name}")
                 if m.is_neural and hasattr(m, 'loss_fn'):
                     m.set_params(loss_fn=exp_cfg.loss_fn)
                 models[model_name] = m
@@ -832,6 +837,9 @@ class MLForecastLabApp:
             for m_name in exp_cfg.models_enabled:
                 try:
                     m = self.model_registry.create(m_name)
+                    overrides = self.config.model_overrides.get(m_name, {})
+                    if overrides:
+                        m.set_params(**overrides)
                     if m.is_neural and hasattr(m, 'loss_fn'):
                         m.set_params(loss_fn=exp_cfg.loss_fn)
 
@@ -1071,6 +1079,10 @@ class MLForecastLabApp:
 
         # 4. Train model on full data
         model = self.model_registry.create(prod_model_name)
+        overrides = self.config.model_overrides.get(prod_model_name, {})
+        if overrides:
+            model.set_params(**overrides)
+            logger.info(f"Applied {len(overrides)} override(s) for {prod_model_name}")
         if model.is_neural and hasattr(model, 'loss_fn'):
             model.set_params(loss_fn=exp_cfg.loss_fn)
         is_neural = model.is_neural
@@ -1544,6 +1556,9 @@ class MLForecastLabApp:
 
                     # Train and evaluate
                     model = self.model_registry.create(model_name)
+                    overrides = self.config.model_overrides.get(model_name, {})
+                    if overrides:
+                        model.set_params(**overrides)
 
                     def _train_and_eval():
                         model.fit(X_tr, y_tr)
