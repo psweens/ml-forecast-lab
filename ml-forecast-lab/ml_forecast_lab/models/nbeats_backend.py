@@ -277,6 +277,12 @@ class NBeatsModel(ForecastModel):
             self._training_history["train_loss"].append(avg_loss)
             self._training_history["val_loss"].append(val_loss)
 
+            self._emit_epoch(kwargs.get("epoch_callback"),
+                model_name=self.name, epoch=epoch + 1, total_epochs=self.epochs,
+                train_loss=avg_loss, val_loss=val_loss, lr=optimiser.param_groups[0]['lr'],
+                patience_counter=patience_counter, patience_limit=self.patience,
+                best_val_loss=best_val_loss)
+
             # Best-model checkpoint + early stopping
             if val_loss < best_val_loss:
                 best_val_loss = val_loss

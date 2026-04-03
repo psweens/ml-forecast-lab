@@ -1,0 +1,323 @@
+{% extends "base.html" %}
+{% block title %}Training — ML Forecast Lab{% endblock %}
+
+{% block content %}
+<div class="dashboard-header">
+    <h1>Training</h1>
+    <p class="subtitle">Run training pipelines and watch live loss curves in real time.</p>
+</div>
+
+<!-- Experiment selector + pipeline controls -->
+<div class="section" style="margin-bottom:2rem;">
+    <h2>Pipeline Control</h2>
+    <div style="display:flex;gap:1rem;align-items:flex-end;flex-wrap:wrap;">
+        <div style="flex:1;min-width:200px;">
+            <label style="display:block;margin-bottom:0.5rem;color:var(--text-secondary);font-weight:600;">Experiment</label>
+            <select id="exp-select" style="width:100%;padding:0.6rem 1rem;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:0.5rem;font-size:1rem;">
+                {% for exp in experiments %}
+                <option value="{{ exp.name }}">{{ exp.name }} ({{ exp.mode }})</option>
+                {% endfor %}
+                {% if not experiments %}
+                <option value="" disabled selected>No experiments configured</option>
+                {% endif %}
+            </select>
+        </div>
+        <div style="display:flex;gap:0.5rem;align-items:center;">
+            <label style="display:flex;align-items:center;gap:0.5rem;color:var(--text-secondary);cursor:pointer;">
+                <input type="checkbox" id="chk-deep" style="accent-color:var(--accent-secondary);width:18px;height:18px;">
+                <span>Include Deep Analysis</span>
+            </label>
+        </div>
+        <button id="btn-run" class="btn btn-primary" onclick="startPipeline()">
+            <span id="btn-run-text">Run Pipeline</span>
+        </button>
+    </div>
+    <div id="pipeline-status" style="margin-top:1rem;"></div>
+</div>
+
+<!-- Live training progress -->
+<div class="section" id="progress-section" style="display:none;margin-bottom:2rem;">
+    <h2>Live Training Progress</h2>
+
+    <!-- Current model + fold indicator -->
+    <div id="current-status" style="display:flex;gap:2rem;flex-wrap:wrap;margin-bottom:1.5rem;">
+        <div class="stat-box" style="flex:1;min-width:150px;">
+            <span class="stat-value" id="stat-model">—</span>
+            <span class="stat-label">Current Model</span>
+        </div>
+        <div class="stat-box" style="flex:1;min-width:100px;">
+            <span class="stat-value" id="stat-fold">—</span>
+            <span class="stat-label">Fold</span>
+        </div>
+        <div class="stat-box" style="flex:1;min-width:100px;">
+            <span class="stat-value" id="stat-epoch">—</span>
+            <span class="stat-label">Epoch</span>
+        </div>
+        <div class="stat-box" style="flex:1;min-width:100px;">
+            <span class="stat-value" id="stat-val-loss">—</span>
+            <span class="stat-label">Val Loss</span>
+        </div>
+        <div class="stat-box" style="flex:1;min-width:100px;">
+            <span class="stat-value" id="stat-best">—</span>
+            <span class="stat-label">Best Val Loss</span>
+        </div>
+        <div class="stat-box" style="flex:1;min-width:100px;">
+            <span class="stat-value" id="stat-patience">—</span>
+            <span class="stat-label">Patience</span>
+        </div>
+    </div>
+
+    <!-- Overall progress bar -->
+    <div style="margin-bottom:1.5rem;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:0.25rem;">
+            <span id="progress-label" style="color:var(--text-secondary);font-size:0.9rem;">Waiting...</span>
+            <span id="progress-pct" style="color:var(--accent-secondary);font-weight:600;font-size:0.9rem;"></span>
+        </div>
+        <div style="height:8px;background:var(--bg-tertiary);border-radius:4px;overflow:hidden;">
+            <div id="progress-bar" style="height:100%;width:0%;background:linear-gradient(90deg,var(--accent-secondary),var(--accent-primary));border-radius:4px;transition:width 0.3s;"></div>
+        </div>
+    </div>
+
+    <!-- Live loss chart -->
+    <div id="loss-chart" style="width:100%;height:400px;"></div>
+</div>
+
+<!-- Training history -->
+<div class="section" id="history-section">
+    <h2>Training Event Log</h2>
+    <div id="event-log" style="max-height:400px;overflow-y:auto;font-family:'Courier New',monospace;font-size:0.85rem;background:var(--bg-tertiary);padding:1rem;border-radius:0.5rem;color:var(--text-secondary);">
+        <em>Events will appear here when a pipeline runs...</em>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    const BASE = typeof BASE_PATH !== 'undefined' ? BASE_PATH : '';
+    let evtSource = null;
+    let lossData = {};    // { "model:fold": { epochs: [], train: [], val: [] } }
+    let totalModels = 0;
+    let completedModels = 0;
+    let currentModel = '';
+    let pipelineRunning = false;
+
+    window.startPipeline = function() {
+        const sel = document.getElementById('exp-select');
+        const expName = sel.value;
+        if (!expName) return;
+
+        const steps = ['benchmark'];
+        if (document.getElementById('chk-deep').checked) {
+            steps.push('deep_analysis');
+        }
+
+        // Disable button
+        const btn = document.getElementById('btn-run');
+        btn.disabled = true;
+        document.getElementById('btn-run-text').textContent = 'Running...';
+        pipelineRunning = true;
+
+        // Reset state
+        lossData = {};
+        totalModels = 0;
+        completedModels = 0;
+        currentModel = '';
+        document.getElementById('progress-section').style.display = 'block';
+        document.getElementById('event-log').innerHTML = '';
+        document.getElementById('progress-bar').style.width = '0%';
+        document.getElementById('progress-pct').textContent = '';
+        document.getElementById('progress-label').textContent = 'Starting pipeline...';
+        resetStats();
+
+        // Clear the loss chart
+        Plotly.purge('loss-chart');
+
+        // Trigger pipeline
+        fetch(`${BASE}/experiment/${expName}/run-pipeline`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({steps: steps}),
+        }).then(r => {
+            if (r.status === 409) {
+                logEvent('warn', 'Pipeline already running');
+                btn.disabled = false;
+                document.getElementById('btn-run-text').textContent = 'Run Pipeline';
+                pipelineRunning = false;
+                return;
+            }
+            // Connect SSE
+            connectSSE(expName);
+        }).catch(err => {
+            logEvent('error', 'Failed to start pipeline: ' + err);
+            btn.disabled = false;
+            document.getElementById('btn-run-text').textContent = 'Run Pipeline';
+            pipelineRunning = false;
+        });
+    };
+
+    function connectSSE(expName) {
+        if (evtSource) { evtSource.close(); }
+        evtSource = new EventSource(`${BASE}/experiment/${expName}/training-stream`);
+
+        evtSource.onmessage = function(e) {
+            try {
+                const ev = JSON.parse(e.data);
+                handleEvent(ev);
+            } catch (err) {
+                console.error('SSE parse error:', err);
+            }
+        };
+
+        evtSource.onerror = function() {
+            // SSE will auto-reconnect; if pipeline ended, close cleanly
+            if (!pipelineRunning) {
+                evtSource.close();
+            }
+        };
+    }
+
+    function handleEvent(ev) {
+        switch (ev.event_type) {
+            case 'pipeline_start':
+                logEvent('info', ev.message || 'Pipeline started');
+                // Try to extract model count
+                const match = (ev.message || '').match(/(\d+) model/);
+                if (match) totalModels = parseInt(match[1]);
+                break;
+
+            case 'model_start':
+                currentModel = ev.model_name;
+                document.getElementById('stat-model').textContent = ev.model_name;
+                logEvent('info', `Started: ${ev.model_name} (${ev.message})`);
+                resetStats();
+                break;
+
+            case 'epoch':
+                updateEpochStats(ev);
+                updateLossChart(ev);
+                break;
+
+            case 'early_stop':
+                logEvent('warn', `${ev.model_name}: Early stop at epoch ${ev.epoch}`);
+                break;
+
+            case 'model_end':
+                completedModels++;
+                const pct = totalModels > 0 ? Math.round(completedModels / totalModels * 100) : 0;
+                document.getElementById('progress-bar').style.width = pct + '%';
+                document.getElementById('progress-pct').textContent = pct + '%';
+                document.getElementById('progress-label').textContent =
+                    `${completedModels}/${totalModels} models complete`;
+                logEvent('success', `Completed: ${ev.model_name}`);
+                break;
+
+            case 'pipeline_end':
+                logEvent('success', ev.message || 'Pipeline finished');
+                document.getElementById('progress-bar').style.width = '100%';
+                document.getElementById('progress-pct').textContent = '100%';
+                document.getElementById('progress-label').textContent = 'Pipeline complete';
+                document.getElementById('btn-run').disabled = false;
+                document.getElementById('btn-run-text').textContent = 'Run Pipeline';
+                pipelineRunning = false;
+                if (evtSource) evtSource.close();
+                break;
+
+            default:
+                logEvent('info', `${ev.event_type}: ${ev.message || ev.model_name || ''}`);
+        }
+    }
+
+    function updateEpochStats(ev) {
+        document.getElementById('stat-model').textContent = ev.model_name || currentModel;
+        document.getElementById('stat-fold').textContent =
+            ev.total_folds > 0 ? `${ev.fold}/${ev.total_folds}` : '—';
+        document.getElementById('stat-epoch').textContent =
+            ev.total_epochs > 0 ? `${ev.epoch}/${ev.total_epochs}` : ev.epoch || '—';
+        document.getElementById('stat-val-loss').textContent =
+            ev.val_loss > 0 ? ev.val_loss.toFixed(5) : '—';
+        document.getElementById('stat-best').textContent =
+            ev.best_val_loss > 0 ? ev.best_val_loss.toFixed(5) : '—';
+        document.getElementById('stat-patience').textContent =
+            ev.patience_limit > 0 ? `${ev.patience_counter}/${ev.patience_limit}` : '—';
+    }
+
+    function updateLossChart(ev) {
+        const key = `${ev.model_name} F${ev.fold}`;
+        if (!lossData[key]) {
+            lossData[key] = { epochs: [], train: [], val: [] };
+        }
+        const d = lossData[key];
+        d.epochs.push(ev.epoch);
+        d.train.push(ev.train_loss);
+        d.val.push(ev.val_loss);
+
+        // Build traces: show only the current model's folds for clarity
+        const traces = [];
+        const foldColors = [
+            '#00d4ff', '#e94560', '#2ecc71', '#f39c12', '#9b59b6',
+            '#1abc9c', '#e67e22', '#3498db', '#e74c3c', '#2c3e50'
+        ];
+        let colorIdx = 0;
+
+        for (const [traceKey, traceData] of Object.entries(lossData)) {
+            // Only show current model's folds
+            if (!traceKey.startsWith(ev.model_name)) continue;
+            const color = foldColors[colorIdx % foldColors.length];
+            const foldLabel = traceKey.replace(ev.model_name + ' ', '');
+
+            traces.push({
+                x: traceData.epochs,
+                y: traceData.train,
+                name: `Train ${foldLabel}`,
+                mode: 'lines',
+                line: { color: color, width: 1.5, dash: 'dot' },
+            });
+            traces.push({
+                x: traceData.epochs,
+                y: traceData.val,
+                name: `Val ${foldLabel}`,
+                mode: 'lines',
+                line: { color: color, width: 2 },
+            });
+            colorIdx++;
+        }
+
+        const layout = {
+            title: `${ev.model_name} — Training & Validation Loss`,
+            xaxis: { title: 'Epoch', color: '#b0b0b0', gridcolor: '#2d3561' },
+            yaxis: { title: 'Loss', color: '#b0b0b0', gridcolor: '#2d3561', type: 'log' },
+            plot_bgcolor: '#16213e',
+            paper_bgcolor: '#1a1a2e',
+            font: { color: '#e0e0e0', size: 12 },
+            legend: { orientation: 'h', y: -0.2, font: { size: 10 } },
+            margin: { l: 70, r: 30, t: 50, b: 80 },
+            hovermode: 'x unified',
+        };
+
+        Plotly.react('loss-chart', traces, layout, { responsive: true, displayModeBar: false });
+    }
+
+    function resetStats() {
+        ['stat-fold','stat-epoch','stat-val-loss','stat-best','stat-patience'].forEach(id => {
+            document.getElementById(id).textContent = '—';
+        });
+    }
+
+    function logEvent(level, msg) {
+        const log = document.getElementById('event-log');
+        const ts = new Date().toLocaleTimeString();
+        const colors = { info: '#00d4ff', warn: '#f39c12', error: '#e74c3c', success: '#2ecc71' };
+        const color = colors[level] || '#b0b0b0';
+        const line = document.createElement('div');
+        line.innerHTML = `<span style="color:${color};">[${ts}]</span> ${msg}`;
+        log.appendChild(line);
+        log.scrollTop = log.scrollHeight;
+    }
+
+    // If we land on the page and a benchmark is running, auto-connect
+    {% for exp in experiments %}
+    {% endfor %}
+})();
+</script>
+{% endblock %}

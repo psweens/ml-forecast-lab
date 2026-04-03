@@ -266,6 +266,7 @@ class BenchmarkRunner:
         df: pd.DataFrame,
         model: ForecastModel,
         fold_indices: List[Tuple[np.ndarray, np.ndarray]],
+        epoch_callback: Any = None,
     ) -> ModelResult:
         """
         Run a single model across all CV folds.
@@ -377,8 +378,17 @@ class BenchmarkRunner:
             # Train model
             train_start = time.time()
             try:
+                # Create fold-specific epoch callback
+                fold_cb = None
+                if epoch_callback is not None:
+                    _fold_idx = fold_idx
+                    _n_folds = len(fold_indices)
+                    def fold_cb(**cb_data):
+                        epoch_callback(fold=_fold_idx + 1, total_folds=_n_folds, **cb_data)
                 model.fit(X_train, y_train, feature_names=feat_names,
-                          sample_weight=sample_weights, **sequence_kwargs)
+                          sample_weight=sample_weights,
+                          epoch_callback=fold_cb,
+                          **sequence_kwargs)
             except Exception as e:
                 logger.error(f'Model training failed for fold {fold_idx}: {e}')
                 model_result.fold_metrics.append({})

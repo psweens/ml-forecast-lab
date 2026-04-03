@@ -231,6 +231,12 @@ class DLinearModel(ForecastModel):
 
             avg_loss = epoch_loss / max(n_batches, 1)
 
+            self._emit_epoch(kwargs.get("epoch_callback"),
+                model_name=self.name, epoch=epoch + 1, total_epochs=self.epochs,
+                train_loss=avg_loss, val_loss=val_loss, lr=optimiser.param_groups[0]['lr'],
+                patience_counter=patience_counter, patience_limit=self.patience,
+                best_val_loss=best_val_loss)
+
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_state = deepcopy(self._model.state_dict())

@@ -20,6 +20,8 @@ import numpy as np
 import pandas as pd
 import uvicorn
 
+from ml_forecast_lab.training_events import TrainingEvent, TrainingEventBus
+
 logger = logging.getLogger(__name__)
 
 
@@ -681,14 +683,62 @@ class MLForecastLabApp:
         completed_models = {}
         rankings = {}
 
+        # Set up live training event bus
+        event_bus = TrainingEventBus.get_instance()
+        event_bus.clear_history(exp_cfg.name)
+        event_bus.publish(TrainingEvent(
+            event_type="pipeline_start",
+            experiment_name=exp_cfg.name,
+            message=f"Starting benchmark with {len(models)} model(s)",
+        ))
+
         for model_idx, (model_name, model) in enumerate(models.items(), 1):
             logger.info(f"")
             logger.info(f"  [{model_idx}/{len(models)}] Benchmarking: {model_name}")
 
-            model_result = await asyncio.get_running_loop().run_in_executor(
-                None, runner.run_single_model, combined, model, fold_indices
+            event_bus.publish(TrainingEvent(
+                event_type="model_start",
+                experiment_name=exp_cfg.name,
+                model_name=model_name,
+                message=f"Model {model_idx}/{len(models)}",
+            ))
+
+            # Create epoch callback for live streaming
+            def _make_epoch_cb(exp_name, m_name):
+                _start = time.time()
+                def _cb(**data):
+                    event_bus.publish(TrainingEvent(
+                        event_type="epoch",
+                        experiment_name=exp_name,
+                        model_name=m_name,
+                        fold=data.get("fold", 0),
+                        total_folds=data.get("total_folds", 0),
+                        epoch=data.get("epoch", 0),
+                        total_epochs=data.get("total_epochs", 0),
+                        train_loss=data.get("train_loss", 0.0),
+                        val_loss=data.get("val_loss", 0.0),
+                        learning_rate=data.get("lr", 0.0),
+                        patience_counter=data.get("patience_counter", 0),
+                        patience_limit=data.get("patience_limit", 0),
+                        best_val_loss=data.get("best_val_loss", 0.0),
+                        elapsed_seconds=time.time() - _start,
+                    ))
+                return _cb
+            epoch_cb = _make_epoch_cb(exp_cfg.name, model_name)
+
+            loop = asyncio.get_running_loop()
+            model_result = await loop.run_in_executor(
+                None, lambda: runner.run_single_model(
+                    combined, model, fold_indices, epoch_callback=epoch_cb,
+                )
             )
             completed_models[model_name] = model_result
+
+            event_bus.publish(TrainingEvent(
+                event_type="model_end",
+                experiment_name=exp_cfg.name,
+                model_name=model_name,
+            ))
 
             # Log model result summary
             mae_val = model_result.metrics.get("mae", np.nan)
@@ -1003,6 +1053,12 @@ class MLForecastLabApp:
         logger.info(f"  Best model: {best_model_name} ({runner.production_metric}={best_metric_value:.4f})")
         logger.info(f"{'=' * 60}")
         logger.info(f"")
+
+        event_bus.publish(TrainingEvent(
+            event_type="pipeline_end",
+            experiment_name=exp_cfg.name,
+            message=f"Benchmark complete — best model: {best_model_name}",
+        ))
 
     @staticmethod
     def _build_window_channels(df_slice, cov_cols, target_col='target'):

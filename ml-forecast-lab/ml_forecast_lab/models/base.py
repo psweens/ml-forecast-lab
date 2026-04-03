@@ -399,6 +399,14 @@ class ForecastModel(ABC):
         """
         pass
 
+    def _emit_epoch(self, callback: Any, **data: Any) -> None:
+        """Invoke an epoch callback if provided, swallowing any errors."""
+        if callback is not None:
+            try:
+                callback(**data)
+            except Exception:
+                pass  # Never let callback errors break training
+
     def _validate_fitted(self) -> None:
         """
         Raise RuntimeError if model is not fitted.

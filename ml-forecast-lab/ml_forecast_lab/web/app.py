@@ -18,7 +18,7 @@ from ml_forecast_lab import __version__ as APP_VERSION
 
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -1351,5 +1351,153 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 description="Convolutional neural network",
             ),
         ]
+
+    # ========== Training Tab: SSE + Routes ==========
+
+    @app.get("/training", response_class=Response)
+    async def training_page(request: Request):
+        """Training dashboard with live loss plots and pipeline controls."""
+        import yaml
+
+        experiments = list(app.state.appstate.experiment_statuses.values())
+
+        # Load enabled models from config for each experiment
+        exp_models: Dict[str, List[str]] = {}
+        config_path = _find_config_path()
+        if config_path:
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    yaml_data = yaml.safe_load(f) or {}
+                for exp in yaml_data.get("experiments", []):
+                    exp_models[exp.get("name", "")] = exp.get("models_enabled", [])
+            except Exception:
+                pass
+
+        return templates.TemplateResponse(
+            request=request,
+            name="training.html",
+            context={
+                "request": request,
+                "base_path": _get_base_path(request),
+                "active_page": "training",
+                "version": APP_VERSION,
+                "experiments": experiments,
+                "exp_models": exp_models,
+            },
+        )
+
+    @app.get("/experiment/{name}/training-stream")
+    async def training_stream(name: str):
+        """
+        Server-Sent Events endpoint for live training metrics.
+
+        Streams TrainingEvent objects as JSON. Replays history on connect
+        so late-joining clients catch up, then streams live events until
+        a pipeline_end event is received.
+        """
+        import asyncio as _aio
+        from ml_forecast_lab.training_events import TrainingEventBus
+
+        event_bus = TrainingEventBus.get_instance()
+        loop = _aio.get_running_loop()
+        q = event_bus.subscribe(name, loop)
+
+        async def _generate():
+            try:
+                # Replay history for reconnecting clients
+                for ev in event_bus.get_history(name):
+                    yield f"data: {json.dumps(ev.to_dict())}\n\n"
+
+                # Stream live events
+                while True:
+                    try:
+                        event = await _aio.wait_for(q.get(), timeout=30.0)
+                    except _aio.TimeoutError:
+                        # Send keep-alive comment
+                        yield ": keepalive\n\n"
+                        continue
+
+                    yield f"data: {json.dumps(event.to_dict())}\n\n"
+
+                    if event.event_type == "pipeline_end":
+                        break
+            except _aio.CancelledError:
+                pass
+            finally:
+                event_bus.unsubscribe(name, q)
+
+        return StreamingResponse(
+            _generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post("/experiment/{name}/run-pipeline")
+    async def run_pipeline(name: str, request: Request):
+        """
+        Trigger the full training pipeline for an experiment.
+
+        Accepts optional JSON body:
+          {"steps": ["benchmark"]}          — default: benchmark only
+          {"steps": ["benchmark", "deep_analysis"]} — benchmark then deep analysis
+
+        Returns 202 Accepted. Progress is streamed via the SSE endpoint.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        if app.state.appstate.is_benchmark_running(name):
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Pipeline already running for this experiment"},
+            )
+
+        steps = ["benchmark"]
+        try:
+            body = await request.json()
+            steps = body.get("steps", ["benchmark"])
+        except Exception:
+            pass
+
+        # Mark as running
+        app.state.appstate.start_benchmark(name)
+
+        # Trigger via the existing benchmark mechanism
+        # The main app loop picks up the running flag and kicks off _run_benchmark
+        import asyncio as _aio
+
+        # If deep_analysis is requested after benchmark, chain it
+        if "deep_analysis" in steps and app.state.appstate.deep_analysis_callback:
+            async def _chain():
+                # Wait for benchmark to finish
+                while app.state.appstate.is_benchmark_running(name):
+                    await _aio.sleep(2)
+                # Then trigger deep analysis
+                await app.state.appstate.deep_analysis_callback(name, "all")
+
+            _aio.create_task(_chain())
+
+        return JSONResponse(
+            status_code=202,
+            content={
+                "message": "Pipeline started",
+                "experiment": name,
+                "steps": steps,
+                "status": "running",
+            },
+        )
+
+    @app.get("/api/training/history/{name}")
+    async def training_history(name: str):
+        """Return all training events for an experiment as JSON."""
+        from ml_forecast_lab.training_events import TrainingEventBus
+
+        event_bus = TrainingEventBus.get_instance()
+        history = event_bus.get_history(name)
+        return JSONResponse(content=[ev.to_dict() for ev in history])
 
     return app
