@@ -44,28 +44,37 @@
     <h2>Live Training Progress</h2>
 
     <!-- Current model + fold indicator -->
-    <div id="current-status" style="display:flex;gap:2rem;flex-wrap:wrap;margin-bottom:1.5rem;">
-        <div class="stat-box" style="flex:1;min-width:150px;">
-            <span class="stat-value" id="stat-model">—</span>
+    <style>
+        .training-stat { flex: 1; min-width: 100px; overflow: hidden; }
+        .training-stat .stat-value {
+            font-size: clamp(0.95rem, 2.5vw, 1.4rem);
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            display: block; padding: 0 0.25rem;
+        }
+        .training-stat .stat-label { font-size: 0.8rem; }
+    </style>
+    <div id="current-status" style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem;">
+        <div class="stat-box training-stat" style="min-width:140px;">
+            <span class="stat-value" id="stat-model" style="color:var(--accent-secondary);">—</span>
             <span class="stat-label">Current Model</span>
         </div>
-        <div class="stat-box" style="flex:1;min-width:100px;">
+        <div class="stat-box training-stat">
             <span class="stat-value" id="stat-fold">—</span>
             <span class="stat-label">Fold</span>
         </div>
-        <div class="stat-box" style="flex:1;min-width:100px;">
+        <div class="stat-box training-stat">
             <span class="stat-value" id="stat-epoch">—</span>
             <span class="stat-label">Epoch</span>
         </div>
-        <div class="stat-box" style="flex:1;min-width:100px;">
+        <div class="stat-box training-stat">
             <span class="stat-value" id="stat-val-loss">—</span>
             <span class="stat-label">Val Loss</span>
         </div>
-        <div class="stat-box" style="flex:1;min-width:100px;">
+        <div class="stat-box training-stat">
             <span class="stat-value" id="stat-best">—</span>
             <span class="stat-label">Best Val Loss</span>
         </div>
-        <div class="stat-box" style="flex:1;min-width:100px;">
+        <div class="stat-box training-stat">
             <span class="stat-value" id="stat-patience">—</span>
             <span class="stat-label">Patience</span>
         </div>
@@ -105,6 +114,7 @@
     let completedModels = 0;
     let currentModel = '';
     let pipelineRunning = false;
+    let isReplaying = false;  // True during history replay to batch chart updates
 
     window.startPipeline = function() {
         const sel = document.getElementById('exp-select');
@@ -257,60 +267,122 @@
             ev.patience_limit > 0 ? `${ev.patience_counter}/${ev.patience_limit}` : '—';
     }
 
+    // Track which model the chart is currently showing and trace index per fold
+    let chartModel = '';
+    let foldTraceMap = {};  // "F1" -> { trainIdx: 0, valIdx: 1 }
+
+    const CHART_LAYOUT = {
+        title: '',
+        xaxis: { title: 'Epoch', color: '#b0b0b0', gridcolor: '#2d3561' },
+        yaxis: { title: 'Loss', color: '#b0b0b0', gridcolor: '#2d3561', type: 'log' },
+        plot_bgcolor: '#16213e',
+        paper_bgcolor: '#1a1a2e',
+        font: { color: '#e0e0e0', size: 12 },
+        legend: { orientation: 'h', y: -0.2, font: { size: 10 } },
+        margin: { l: 70, r: 30, t: 50, b: 80 },
+        hovermode: 'x unified',
+    };
+
+    const FOLD_COLORS = [
+        '#00d4ff', '#e94560', '#2ecc71', '#f39c12', '#9b59b6',
+        '#1abc9c', '#e67e22', '#3498db', '#e74c3c', '#2c3e50'
+    ];
+
     function updateLossChart(ev) {
-        const key = `${ev.model_name} F${ev.fold}`;
-        if (!lossData[key]) {
-            lossData[key] = { epochs: [], train: [], val: [] };
+        // During replay, just accumulate data — we'll render once at the end
+        if (isReplaying) {
+            const dataKey = `${ev.model_name} F${ev.fold}`;
+            if (!lossData[dataKey]) {
+                lossData[dataKey] = { epochs: [], train: [], val: [], model: ev.model_name, fold: `F${ev.fold}` };
+            }
+            lossData[dataKey].epochs.push(ev.epoch);
+            lossData[dataKey].train.push(ev.train_loss);
+            lossData[dataKey].val.push(ev.val_loss);
+            chartModel = ev.model_name;
+            return;
         }
-        const d = lossData[key];
-        d.epochs.push(ev.epoch);
-        d.train.push(ev.train_loss);
-        d.val.push(ev.val_loss);
 
-        // Build traces: show only the current model's folds for clarity
+        const foldKey = `F${ev.fold}`;
+
+        // If the model changed, rebuild the chart from scratch
+        if (ev.model_name !== chartModel) {
+            chartModel = ev.model_name;
+            foldTraceMap = {};
+            lossData = {};
+            CHART_LAYOUT.title = `${ev.model_name} — Training & Validation Loss`;
+            Plotly.newPlot('loss-chart', [], CHART_LAYOUT, { responsive: true, displayModeBar: false });
+        }
+
+        // Track data for history replay
+        const dataKey = `${ev.model_name} ${foldKey}`;
+        if (!lossData[dataKey]) {
+            lossData[dataKey] = { epochs: [], train: [], val: [] };
+        }
+        lossData[dataKey].epochs.push(ev.epoch);
+        lossData[dataKey].train.push(ev.train_loss);
+        lossData[dataKey].val.push(ev.val_loss);
+
+        // If this is a new fold, add two new traces (train + val)
+        if (!(foldKey in foldTraceMap)) {
+            const colorIdx = Object.keys(foldTraceMap).length;
+            const color = FOLD_COLORS[colorIdx % FOLD_COLORS.length];
+
+            const trainTrace = {
+                x: [ev.epoch], y: [ev.train_loss],
+                name: `Train ${foldKey}`, mode: 'lines',
+                line: { color: color, width: 1.5, dash: 'dot' },
+            };
+            const valTrace = {
+                x: [ev.epoch], y: [ev.val_loss],
+                name: `Val ${foldKey}`, mode: 'lines',
+                line: { color: color, width: 2 },
+            };
+
+            Plotly.addTraces('loss-chart', [trainTrace, valTrace]);
+
+            const chartDiv = document.getElementById('loss-chart');
+            const nTraces = chartDiv.data.length;
+            foldTraceMap[foldKey] = { trainIdx: nTraces - 2, valIdx: nTraces - 1 };
+        } else {
+            // Extend existing traces with the new epoch point
+            const { trainIdx, valIdx } = foldTraceMap[foldKey];
+            Plotly.extendTraces('loss-chart', {
+                x: [[ev.epoch], [ev.epoch]],
+                y: [[ev.train_loss], [ev.val_loss]],
+            }, [trainIdx, valIdx]);
+        }
+    }
+
+    // After replaying history, render the full chart in one go
+    function renderReplayedChart() {
+        if (!chartModel) return;
         const traces = [];
-        const foldColors = [
-            '#00d4ff', '#e94560', '#2ecc71', '#f39c12', '#9b59b6',
-            '#1abc9c', '#e67e22', '#3498db', '#e74c3c', '#2c3e50'
-        ];
         let colorIdx = 0;
+        foldTraceMap = {};
 
-        for (const [traceKey, traceData] of Object.entries(lossData)) {
-            // Only show current model's folds
-            if (!traceKey.startsWith(ev.model_name)) continue;
-            const color = foldColors[colorIdx % foldColors.length];
-            const foldLabel = traceKey.replace(ev.model_name + ' ', '');
+        for (const [dataKey, d] of Object.entries(lossData)) {
+            if (!dataKey.startsWith(chartModel)) continue;
+            const foldKey = d.fold || dataKey.replace(chartModel + ' ', '');
+            const color = FOLD_COLORS[colorIdx % FOLD_COLORS.length];
 
+            const trainIdx = traces.length;
             traces.push({
-                x: traceData.epochs,
-                y: traceData.train,
-                name: `Train ${foldLabel}`,
-                mode: 'lines',
+                x: d.epochs.slice(), y: d.train.slice(),
+                name: `Train ${foldKey}`, mode: 'lines',
                 line: { color: color, width: 1.5, dash: 'dot' },
             });
+            const valIdx = traces.length;
             traces.push({
-                x: traceData.epochs,
-                y: traceData.val,
-                name: `Val ${foldLabel}`,
-                mode: 'lines',
+                x: d.epochs.slice(), y: d.val.slice(),
+                name: `Val ${foldKey}`, mode: 'lines',
                 line: { color: color, width: 2 },
             });
+            foldTraceMap[foldKey] = { trainIdx, valIdx };
             colorIdx++;
         }
 
-        const layout = {
-            title: `${ev.model_name} — Training & Validation Loss`,
-            xaxis: { title: 'Epoch', color: '#b0b0b0', gridcolor: '#2d3561' },
-            yaxis: { title: 'Loss', color: '#b0b0b0', gridcolor: '#2d3561', type: 'log' },
-            plot_bgcolor: '#16213e',
-            paper_bgcolor: '#1a1a2e',
-            font: { color: '#e0e0e0', size: 12 },
-            legend: { orientation: 'h', y: -0.2, font: { size: 10 } },
-            margin: { l: 70, r: 30, t: 50, b: 80 },
-            hovermode: 'x unified',
-        };
-
-        Plotly.react('loss-chart', traces, layout, { responsive: true, displayModeBar: false });
+        CHART_LAYOUT.title = `${chartModel} — Training & Validation Loss`;
+        Plotly.newPlot('loss-chart', traces, CHART_LAYOUT, { responsive: true, displayModeBar: false });
     }
 
     function resetStats() {
@@ -351,13 +423,26 @@
                 }
 
                 if (hasStart) {
+                    // Reset all state before replaying
+                    lossData = {};
+                    chartModel = '';
+                    foldTraceMap = {};
+                    totalModels = 0;
+                    completedModels = 0;
+                    currentModel = '';
+
                     // Show the progress section and replay events
                     document.getElementById('progress-section').style.display = 'block';
                     document.getElementById('event-log').innerHTML = '';
+                    Plotly.purge('loss-chart');
 
+                    // Replay events — batch chart updates for performance
+                    isReplaying = true;
                     for (const ev of events) {
                         handleEvent(ev);
                     }
+                    isReplaying = false;
+                    renderReplayedChart();
 
                     // If pipeline is still running, connect SSE for live updates
                     if (!hasEnd) {
