@@ -1455,7 +1455,14 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     @app.post("/experiment/{name}/run-ensemble")
     async def run_ensemble(name: str, request: Request):
-        """Trigger ensemble strategies on existing benchmark results."""
+        """
+        Trigger ensemble strategies on existing benchmark results.
+
+        Body (all optional):
+            strategies: list[str]  — e.g. ["simple_average", "stacking"]
+            selected_models: list[str]  — explicit model names to include
+            top_n: int  — include only the top N models by production metric
+        """
         if name not in app.state.appstate.experiment_statuses:
             raise HTTPException(status_code=404, detail="Experiment not found")
 
@@ -1463,19 +1470,50 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             raise HTTPException(status_code=501, detail="Ensemble callback not registered")
 
         strategies = None
+        selected_models = None
+        top_n = None
         try:
             body = await request.json()
             strategies = body.get("strategies")
+            selected_models = body.get("selected_models")
+            top_n = body.get("top_n")
         except Exception:
             pass
 
         import asyncio as _aio
-        _aio.create_task(app.state.appstate.ensemble_callback(name, strategies))
+        _aio.create_task(app.state.appstate.ensemble_callback(
+            name, strategies,
+            selected_models=selected_models, top_n=top_n,
+        ))
 
         return JSONResponse(
             status_code=202,
             content={"message": "Ensemble started", "experiment": name},
         )
+
+    @app.get("/experiment/{name}/ensemble-models")
+    async def get_ensemble_models(name: str):
+        """Return list of models available for ensemble with their metrics."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        completed_models = getattr(app.state.appstate, '_benchmark_models', {}).get(name)
+        runner = getattr(app.state.appstate, '_benchmark_runners', {}).get(name)
+        if not completed_models:
+            return JSONResponse(content={"models": [], "production_metric": "mae"})
+
+        production_metric = runner.production_metric if runner else "mae"
+        models = []
+        for m_name, mr in completed_models.items():
+            if mr.fold_predictions and mr.fold_actuals:
+                models.append({
+                    "name": m_name,
+                    "metric_name": production_metric,
+                    "metric_value": float(mr.metrics.get(production_metric, float('inf'))),
+                })
+        # Sort by metric (best first)
+        models.sort(key=lambda x: x["metric_value"])
+        return JSONResponse(content={"models": models, "production_metric": production_metric})
 
     @app.get("/experiment/{name}/ensemble")
     async def get_ensemble_results(name: str):

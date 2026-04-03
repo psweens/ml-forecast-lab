@@ -261,9 +261,15 @@ class MLForecastLabApp:
             self.web_app.state.appstate.deep_analysis_callback = _deep_analysis_trigger
 
             # Register ensemble callback
-            async def _ensemble_trigger(experiment_name: str, strategies: list = None):
+            async def _ensemble_trigger(
+                experiment_name: str, strategies: list = None,
+                selected_models: list = None, top_n: int = None,
+            ):
                 try:
-                    await self._run_ensemble(experiment_name, strategies)
+                    await self._run_ensemble(
+                        experiment_name, strategies,
+                        selected_models=selected_models, top_n=top_n,
+                    )
                 except Exception as e:
                     logger.error(f"Ensemble failed: {e}", exc_info=True)
 
@@ -1100,6 +1106,7 @@ class MLForecastLabApp:
 
     async def _run_ensemble(
         self, experiment_name: str, strategies: Optional[list] = None,
+        selected_models: Optional[list] = None, top_n: Optional[int] = None,
     ) -> None:
         """
         Run ensemble strategies on completed benchmark results.
@@ -1113,6 +1120,10 @@ class MLForecastLabApp:
             Name of the experiment whose benchmark results to ensemble.
         strategies : list, optional
             Strategy names to run. Defaults to all three.
+        selected_models : list, optional
+            Explicit list of model names to include. Overrides top_n.
+        top_n : int, optional
+            Include only the top N models ranked by production metric.
         """
         from ml_forecast_lab.ensemble.engine import EnsembleEngine, EnsembleStrategy
         from ml_forecast_lab.training_events import TrainingEvent, TrainingEventBus
@@ -1146,10 +1157,27 @@ class MLForecastLabApp:
             logger.error(f"No benchmark results for {experiment_name}, run benchmark first")
             return
 
+        # Apply model selection: explicit list or top-N by production metric
+        if selected_models:
+            completed_models = {
+                k: v for k, v in completed_models.items() if k in selected_models
+            }
+            logger.info(f"Ensemble: using {len(completed_models)} explicitly selected model(s)")
+        elif top_n is not None and top_n > 0:
+            ranked = sorted(
+                completed_models.items(),
+                key=lambda kv: kv[1].metrics.get(runner.production_metric, np.inf),
+            )
+            completed_models = dict(ranked[:top_n])
+            logger.info(
+                f"Ensemble: using top {top_n} model(s) by {runner.production_metric}: "
+                f"{list(completed_models.keys())}"
+            )
+
         event_bus.publish(TrainingEvent(
             event_type="ensemble_start",
             experiment_name=experiment_name,
-            message=f"Running {len(strategy_enums)} ensemble strategy(ies)",
+            message=f"Running {len(strategy_enums)} ensemble strategy(ies) with {len(completed_models)} model(s)",
         ))
 
         # Gather per-fold predictions and actuals from completed models
@@ -1266,8 +1294,13 @@ class MLForecastLabApp:
         appstate.ensemble_results[experiment_name] = ensemble_data
 
         # Add ensemble predictions to the holdout chart if lab forecast data exists
+        # First remove any previous ensemble predictions to avoid duplication on re-runs
         lab_forecast = appstate.lab_forecast_data.get(experiment_name)
         if lab_forecast:
+            lab_forecast.model_predictions = [
+                mp for mp in lab_forecast.model_predictions
+                if not mp.model_name.startswith("Ensemble:")
+            ]
             from ml_forecast_lab.web.app import ModelPrediction
 
             ENSEMBLE_COLORS = {
