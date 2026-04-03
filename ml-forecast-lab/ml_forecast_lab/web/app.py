@@ -1019,7 +1019,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     @app.get("/system", response_class=Response)
     async def system_page(request: Request):
         """
-        Unified system page: health, hardware, settings, experiments, model backends.
+        Unified system page: health, hardware, settings, experiments.
         Replaces the former separate /status and /settings pages.
         """
         import yaml
@@ -1107,67 +1107,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception:
             pass
 
-        # Models enabled
-        models_enabled = ["lightgbm", "xgboost", "lstm", "cnn", "neuralprophet"]
-        if cp:
-            try:
-                with open(cp, "r", encoding="utf-8") as f:
-                    yaml_data = yaml.safe_load(f)
-                exps = yaml_data.get("experiments", [])
-                if exps and isinstance(exps, list) and len(exps) > 0:
-                    models_enabled = exps[0].get("models_enabled", models_enabled)
-            except Exception:
-                pass
-
-        # Models catalog (alphabetical)
-        models_list = [
-            {"name": "cnn", "display_name": "CNN", "model_type": "PyTorch",
-             "description": "WaveNet-style dilated causal convolutions with residual connections.",
-             "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Periodic/seasonal signals"},
-            {"name": "crossformer", "display_name": "Crossformer", "model_type": "PyTorch",
-             "description": "Segment embedding with temporal + cross-variable attention.",
-             "speed": "🔶 Moderate (~12s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Joint temporal + cross-variate modelling"},
-            {"name": "dlinear", "display_name": "DLinear", "model_type": "PyTorch",
-             "description": "Decomposition-Linear: separate linear layers for trend and seasonal.",
-             "speed": "⚡ Fast (~2s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Simple baseline — surprisingly competitive"},
-            {"name": "itransformer", "display_name": "iTransformer", "model_type": "PyTorch",
-             "description": "Inverted Transformer: attention across variables.",
-             "speed": "🔶 Moderate (~10s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Cross-variate correlations"},
-            {"name": "lightgbm", "display_name": "LightGBM", "model_type": "Tree",
-             "description": "Gradient boosting framework optimised for speed and memory efficiency.",
-             "speed": "⚡ Very Fast (~0.5s/fold)", "hardware_accel": "No (CPU only)", "best_for": "Default choice — fast and accurate"},
-            {"name": "lstm", "display_name": "LSTM", "model_type": "PyTorch",
-             "description": "2-layer LSTM with temporal attention and multi-horizon output head.",
-             "speed": "🔶 Moderate (~10s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Complex temporal patterns"},
-            {"name": "nbeats", "display_name": "N-BEATS", "model_type": "PyTorch",
-             "description": "Neural Basis Expansion with doubly-residual stacking.",
-             "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Pure time-series without covariates"},
-            {"name": "neuralprophet", "display_name": "NeuralProphet", "model_type": "PyTorch",
-             "description": "Neural forecasting with trend decomposition and automatic seasonality.",
-             "speed": "🔶 Moderate (~15s/fold)", "hardware_accel": "No", "best_for": "Strong seasonality + covariates"},
-            {"name": "nhits", "display_name": "N-HiTS", "model_type": "PyTorch",
-             "description": "Hierarchical interpolation with multi-rate temporal downsampling.",
-             "speed": "🔶 Moderate (~8s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Multi-scale temporal patterns"},
-            {"name": "patchtst", "display_name": "PatchTST", "model_type": "PyTorch",
-             "description": "Channel-independent Patch Transformer with encoder.",
-             "speed": "🔶 Moderate (~12s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Long-range dependencies"},
-            {"name": "sparsetsf", "display_name": "SparseTSF", "model_type": "PyTorch",
-             "description": "Period-based sparse cross-period linear model.",
-             "speed": "⚡ Fast (~2s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Strong daily/weekly periodicity"},
-            {"name": "tide", "display_name": "TiDE", "model_type": "PyTorch",
-             "description": "Time-series Dense Encoder with residual MLP encoder-decoder.",
-             "speed": "🔶 Moderate (~6s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Efficient long-horizon forecasting"},
-            {"name": "timesnet", "display_name": "TimesNet", "model_type": "PyTorch",
-             "description": "FFT period detection with 2D inception convolutions.",
-             "speed": "🔶 Moderate (~10s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Multi-periodic signals"},
-            {"name": "tsmixer", "display_name": "TSMixer", "model_type": "PyTorch",
-             "description": "Alternating time-mixing and feature-mixing MLP layers.",
-             "speed": "🔶 Moderate (~6s/fold)", "hardware_accel": "Yes (ONNX export)", "best_for": "Multivariate cross-channel patterns"},
-            {"name": "xgboost", "display_name": "XGBoost", "model_type": "Tree",
-             "description": "Extreme gradient boosting with L1/L2 regularisation.",
-             "speed": "⚡ Fast (~1s/fold)", "hardware_accel": "No (CPU only)", "best_for": "When LightGBM overfits"},
-        ]
-
         return templates.TemplateResponse(
             request=request,
             name="system.html",
@@ -1182,8 +1121,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "config_path": config_path_str,
                 "experiment_statuses": experiment_statuses,
                 "experiment_configs": experiment_configs,
-                "models": models_list,
-                "models_enabled": models_enabled,
             },
         )
 
@@ -1392,26 +1329,31 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         )
 
     @app.get("/experiment/{name}/training-stream")
-    async def training_stream(name: str):
+    async def training_stream(name: str, request: Request):
         """
         Server-Sent Events endpoint for live training metrics.
 
         Streams TrainingEvent objects as JSON. Replays history on connect
         so late-joining clients catch up, then streams live events until
         a pipeline_end event is received.
+
+        Pass ?no_replay=1 to skip history replay (e.g. when the client
+        already replayed via the /api/training/history endpoint).
         """
         import asyncio as _aio
         from ml_forecast_lab.training_events import TrainingEventBus
 
+        skip_replay = request.query_params.get("no_replay") == "1"
         event_bus = TrainingEventBus.get_instance()
         loop = _aio.get_running_loop()
         q = event_bus.subscribe(name, loop)
 
         async def _generate():
             try:
-                # Replay history for reconnecting clients
-                for ev in event_bus.get_history(name):
-                    yield f"data: {json.dumps(ev.to_dict())}\n\n"
+                # Replay history for reconnecting clients (unless already done)
+                if not skip_replay:
+                    for ev in event_bus.get_history(name):
+                        yield f"data: {json.dumps(ev.to_dict())}\n\n"
 
                 # Stream live events
                 while True:

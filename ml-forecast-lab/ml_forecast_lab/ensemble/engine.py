@@ -296,6 +296,32 @@ class EnsembleEngine:
             logger.warning("After filtering, <2 models remain. Skipping ensemble.")
             return {}
 
+        # Validate prediction shapes match across models per fold.
+        # Models may output different shapes (e.g. 1D vs multi-step 2D).
+        # Group by shape signature and keep the largest compatible group.
+        def _shape_sig(m: str) -> tuple:
+            return tuple(fold_predictions[m][f].shape for f in range(n_folds))
+
+        shape_groups: Dict[tuple, List[str]] = {}
+        for m in member_models:
+            sig = _shape_sig(m)
+            shape_groups.setdefault(sig, []).append(m)
+
+        if len(shape_groups) > 1:
+            # Pick the largest group
+            largest_group = max(shape_groups.values(), key=len)
+            excluded = [m for m in member_models if m not in largest_group]
+            logger.warning(
+                f"Prediction shape mismatch — excluding {excluded} from ensemble "
+                f"(keeping {len(largest_group)} models with matching shapes)"
+            )
+            fold_predictions = {m: fold_predictions[m] for m in largest_group}
+            member_models = largest_group
+
+        if len(member_models) < 2:
+            logger.warning("After shape filtering, <2 models remain. Skipping ensemble.")
+            return {}
+
         results: Dict[EnsembleStrategy, EnsembleResult] = {}
         metrics_to_compute = list(set(self.metrics + [self.production_metric]))
 

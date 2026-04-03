@@ -187,9 +187,10 @@
         });
     };
 
-    function connectSSE(expName) {
+    function connectSSE(expName, noReplay) {
         if (evtSource) { evtSource.close(); }
-        evtSource = new EventSource(`${BASE}/experiment/${expName}/training-stream`);
+        const qs = noReplay ? '?no_replay=1' : '';
+        evtSource = new EventSource(`${BASE}/experiment/${expName}/training-stream${qs}`);
 
         evtSource.onmessage = function(e) {
             try {
@@ -335,12 +336,13 @@
         if (!allLossData[ev.model_name]) allLossData[ev.model_name] = {};
         const foldKey = `F${ev.fold}`;
         if (!allLossData[ev.model_name][foldKey]) {
-            allLossData[ev.model_name][foldKey] = { epochs: [], train: [], val: [] };
+            allLossData[ev.model_name][foldKey] = { epochs: [], train: [], val: [], totalEpochs: 0 };
         }
         const fd = allLossData[ev.model_name][foldKey];
         fd.epochs.push(ev.epoch);
         fd.train.push(ev.train_loss);
         fd.val.push(ev.val_loss);
+        if (ev.total_epochs > 0) fd.totalEpochs = ev.total_epochs;
     }
 
     // Record an explicit early_stop event
@@ -356,7 +358,8 @@
         };
     }
 
-    // Detect early stop from accumulated data when model_end fires
+    // Detect early stop from accumulated data when model_end fires.
+    // Only flags early stop if training actually ended before total_epochs.
     function detectEarlyStopFromData(modelName) {
         const modelData = allLossData[modelName];
         if (!modelData) return;
@@ -365,21 +368,19 @@
             if (earlyStops[modelName] && earlyStops[modelName][foldKey]) continue;
             if (fd.epochs.length === 0) continue;
             const lastEpoch = fd.epochs[fd.epochs.length - 1];
+            // Only mark as early stopped if training ended before total epochs
+            if (fd.totalEpochs <= 0 || lastEpoch >= fd.totalEpochs) continue;
             // Find best val loss epoch
             let bestIdx = 0;
             for (let i = 1; i < fd.val.length; i++) {
                 if (fd.val[i] < fd.val[bestIdx]) bestIdx = i;
             }
-            // If training ended before the last epoch's total_epochs, it was early stopped
-            // We can also check if the best epoch is not the last epoch (patience ran out)
-            if (bestIdx < fd.val.length - 1) {
-                if (!earlyStops[modelName]) earlyStops[modelName] = {};
-                earlyStops[modelName][foldKey] = {
-                    stopEpoch: lastEpoch,
-                    bestEpoch: fd.epochs[bestIdx],
-                    bestLoss: fd.val[bestIdx],
-                };
-            }
+            if (!earlyStops[modelName]) earlyStops[modelName] = {};
+            earlyStops[modelName][foldKey] = {
+                stopEpoch: lastEpoch,
+                bestEpoch: fd.epochs[bestIdx],
+                bestLoss: fd.val[bestIdx],
+            };
         }
     }
 
@@ -530,12 +531,13 @@
                     }
 
                     // If pipeline is still running, connect SSE for live updates
+                    // Skip SSE history replay since we already replayed above
                     if (!hasEnd) {
                         pipelineRunning = true;
                         const btn = document.getElementById('btn-run');
                         btn.disabled = true;
                         document.getElementById('btn-run-text').textContent = 'Running...';
-                        connectSSE(sel.value);
+                        connectSSE(sel.value, true);
                     }
                 }
             })
