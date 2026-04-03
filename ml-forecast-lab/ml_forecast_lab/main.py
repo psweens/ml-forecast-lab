@@ -238,6 +238,11 @@ class MLForecastLabApp:
                     try:
                         self.web_app.state.appstate.start_benchmark(experiment_name)
                         await self._run_benchmark(exp_cfg)
+                        # Auto-run ensemble after benchmark completes
+                        try:
+                            await self._run_ensemble(experiment_name)
+                        except Exception as e:
+                            logger.warning(f"Auto-ensemble after benchmark failed: {e}")
                     except Exception as e:
                         logger.error(f"Benchmark failed: {e}", exc_info=True)
                     finally:
@@ -309,6 +314,11 @@ class MLForecastLabApp:
 
             if is_lab_mode:
                 await self._run_benchmark(exp_cfg)
+                # Auto-run ensemble after benchmark
+                try:
+                    await self._run_ensemble(experiment_name)
+                except Exception as e:
+                    logger.warning(f"Auto-ensemble after benchmark failed: {e}")
             else:
                 await self._run_production_inference(exp_cfg)
 

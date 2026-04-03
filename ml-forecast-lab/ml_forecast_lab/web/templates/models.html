@@ -39,6 +39,8 @@
                 </button>
             </div>
 
+            <div class="param-status" id="status-{{ model.name }}" style="padding: 0 1rem;"></div>
+
             <!-- Expandable params panel -->
             <div class="params-panel" id="params-{{ model.name }}" style="display: none;">
                 {% if model.name in param_schema %}
@@ -87,7 +89,6 @@
                         <button type="submit" class="btn-save">Save</button>
                         <button type="button" class="btn-reset" onclick="resetParams('{{ model.name }}')">Reset to Defaults</button>
                     </div>
-                    <div class="param-status" id="status-{{ model.name }}"></div>
                 </form>
                 {% else %}
                 <p style="color: var(--text-muted); padding: 0.5rem;">No configurable parameters.</p>
@@ -180,10 +181,35 @@
 function toggleModel(el, name) {
     var card = document.getElementById('card-' + name);
     card.style.opacity = el.checked ? '1' : '0.5';
+    var status = document.getElementById('status-' + name);
     fetch(BASE_PATH + '/api/models/toggle', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({model_name: name, enabled: el.checked})
+    }).then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.success) {
+            if (status) {
+                status.className = 'param-status success';
+                status.textContent = el.checked ? 'Enabled — saved' : 'Disabled — saved';
+                setTimeout(function() { status.textContent = ''; }, 3000);
+            }
+        } else {
+            if (status) {
+                status.className = 'param-status error';
+                status.textContent = 'Failed to save: ' + (data.error || 'unknown');
+            }
+            // Revert toggle
+            el.checked = !el.checked;
+            card.style.opacity = el.checked ? '1' : '0.5';
+        }
+    }).catch(function(err) {
+        if (status) {
+            status.className = 'param-status error';
+            status.textContent = 'Save failed — check connection';
+        }
+        el.checked = !el.checked;
+        card.style.opacity = el.checked ? '1' : '0.5';
     });
 }
 
