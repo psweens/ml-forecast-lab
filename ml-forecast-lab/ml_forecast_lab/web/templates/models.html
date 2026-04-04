@@ -161,7 +161,7 @@ function collectAndSaveParams(name) {
     form.querySelectorAll('.param-input').forEach(function(el) {
         var val = el.value;
         if (el.type === 'number') {
-            val = el.step && el.step.includes('.') ? parseFloat(val) : parseInt(val);
+            val = el.step && (el.step.includes('.') || el.step.includes('e')) ? parseFloat(val) : parseInt(val);
         }
         params[el.name] = val;
     });
