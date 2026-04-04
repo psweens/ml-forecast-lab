@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.21.3
+
+### Bug Fix
+- **XGBoost 2.1+ compatibility**: moved `callbacks` parameter from
+  `XGBRegressor.fit()` to the constructor, fixing "unexpected keyword
+  argument 'callbacks'" error on XGBoost >= 2.1.
+
 ## 1.21.2
 
 ### Bug Fixes
