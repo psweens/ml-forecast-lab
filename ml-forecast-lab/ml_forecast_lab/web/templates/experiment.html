@@ -139,8 +139,8 @@
                     <thead>
                         <tr>
                             <th>Fold</th>
-                            <th>MAE</th>
-                            <th>RMSE</th>
+                            <th>MAE{{ " (" + units + ")" if units else "" }}</th>
+                            <th>RMSE{{ " (" + units + ")" if units else "" }}</th>
                             <th>MAPE</th>
                         </tr>
                     </thead>
@@ -439,8 +439,8 @@
             <thead>
                 <tr>
                     <th>Strategy</th>
-                    <th>MAE</th>
-                    <th>RMSE</th>
+                    <th>MAE{{ " (" + units + ")" if units else "" }}</th>
+                    <th>RMSE{{ " (" + units + ")" if units else "" }}</th>
                     <th>MAPE</th>
                     <th>Member Models</th>
                     <th>Weights</th>
