@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.16.2
+
+### UI Fixes
+- **Consistent units on metric headers**: ensemble and per-fold tables now show
+  configured units (e.g., "MAE (%)") matching the model comparison table
+
 ## 1.16.1
 
 ### Bug Fixes
