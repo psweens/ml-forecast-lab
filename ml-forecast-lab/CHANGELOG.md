@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.20.1
+
+### Bug Fix
+- **MASE in train metrics**: overfitting diagnostics were missing `y_train`
+  when computing MASE, causing repeated "missing 1 required positional
+  argument: 'y_train'" warnings during benchmarking.
+
 ## 1.20.0
 
 ### Hyperparameter Tuning
