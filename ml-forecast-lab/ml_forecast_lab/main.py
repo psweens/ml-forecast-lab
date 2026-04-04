@@ -562,6 +562,19 @@ class MLForecastLabApp:
                 metric_means[metric_name] = float(np.nanmean(values)) if values else 0.0
                 metric_stds[metric_name] = float(np.nanstd(values)) if len(values) > 1 else 0.0
 
+            # Train metric means/stds for overfitting table
+            train_metric_means = {}
+            train_metric_stds = {}
+            if runner_model_result.fold_train_metrics:
+                for mn in ["mae", "rmse"]:
+                    vals = [
+                        fm.get(mn, np.nan)
+                        for fm in runner_model_result.fold_train_metrics if fm
+                    ]
+                    if vals:
+                        train_metric_means[mn] = float(np.nanmean(vals))
+                        train_metric_stds[mn] = float(np.nanstd(vals)) if len(vals) > 1 else 0.0
+
             web_models.append(WebModelResult(
                 name=model_name,
                 mae=MetricValue(
@@ -581,6 +594,13 @@ class MLForecastLabApp:
                 mean_rank=runner_model_result.metrics.get("mean_rank", 0.0),
                 is_production=(model_name == best_model_name),
                 fold_results=[fm for fm in fold_metrics_list if fm],
+                train_mae=MetricValue(
+                    mean=train_metric_means["mae"], std=train_metric_stds["mae"],
+                ) if "mae" in train_metric_means else None,
+                train_rmse=MetricValue(
+                    mean=train_metric_means["rmse"], std=train_metric_stds["rmse"],
+                ) if "rmse" in train_metric_means else None,
+                training_history=runner_model_result.training_history,
             ))
 
         web_result = WebBenchmarkResult(

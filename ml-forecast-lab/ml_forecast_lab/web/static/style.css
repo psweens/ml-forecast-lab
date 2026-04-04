@@ -200,6 +200,7 @@ main { flex: 1; }
 .model-name { font-weight: 600; color: var(--accent-secondary); }
 .metric-value { display: block; font-weight: 600; }
 .metric-std { display: block; font-size: 0.85rem; color: var(--text-secondary); }
+.gap-cell { font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
 
 /* --- Rank badges --- */
 .rank-badge {

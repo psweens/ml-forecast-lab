@@ -47,6 +47,9 @@ class ModelResult(BaseModel):
     mean_rank: float = 0.0
     is_production: bool = False
     fold_results: Optional[List[Dict[str, float]]] = None
+    train_mae: Optional[MetricValue] = None
+    train_rmse: Optional[MetricValue] = None
+    training_history: Optional[Dict[str, List[float]]] = None
 
 
 class BenchmarkResult(BaseModel):
@@ -739,6 +742,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "deep_analysis": deep_analysis,
                 "ensemble_result": ensemble_result,
                 "units": units,
+                "models_json": [m.model_dump() for m in (benchmark_result.models if benchmark_result else [])],
             },
         )
 

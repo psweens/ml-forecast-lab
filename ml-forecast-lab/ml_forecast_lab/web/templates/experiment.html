@@ -72,6 +72,7 @@
     <a href="#sec-results" class="active">Results</a>
     <a href="#sec-predictions">Predictions</a>
     <a href="#sec-residuals">Residuals</a>
+    <a href="#sec-generalisation">Generalisation</a>
     <a href="#sec-features">Features</a>
     <a href="#sec-ensemble">Ensemble</a>
     {% if deep_analysis %}<a href="#sec-deep-analysis">Deep Analysis</a>{% endif %}
@@ -335,6 +336,149 @@
     </script>
 </section>
 {% endif %}
+
+<!-- Generalisation Diagnostics -->
+<section class="section" id="sec-generalisation">
+    <h2>Generalisation <span class="info-tip">?<span class="tip-text">Diagnostics to assess whether models are overfitting the training data or generalising well to unseen data. A large gap between train and test error suggests overfitting. Diverging loss curves confirm it. Consistent fold metrics indicate stable generalisation.</span></span></h2>
+
+    <!-- Train vs Test Metrics Table -->
+    {% set has_train = models | selectattr('train_mae') | list %}
+    {% if has_train %}
+    <h3 style="color: var(--text-primary); margin-bottom: 1rem;">Train vs Test Error</h3>
+    <div class="table-container">
+        <table class="metrics-table">
+            <thead>
+                <tr>
+                    <th>Model</th>
+                    <th>Train MAE{{ " (" + units + ")" if units else "" }}</th>
+                    <th>Test MAE{{ " (" + units + ")" if units else "" }}</th>
+                    <th>Gap <span class="info-tip">?<span class="tip-text">Difference between test and train error. A large gap relative to train error indicates overfitting — the model performs much better on data it has seen than on new data.</span></span></th>
+                    <th>Train RMSE{{ " (" + units + ")" if units else "" }}</th>
+                    <th>Test RMSE{{ " (" + units + ")" if units else "" }}</th>
+                    <th>Gap</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for model in models %}
+                {% if model.train_mae %}
+                {% set mae_gap = model.mae.mean - model.train_mae.mean %}
+                {% set rmse_gap = model.rmse.mean - model.train_rmse.mean %}
+                {% set mae_ratio = mae_gap / model.train_mae.mean if model.train_mae.mean > 0 else 0 %}
+                {% set rmse_ratio = rmse_gap / model.train_rmse.mean if model.train_rmse.mean > 0 else 0 %}
+                <tr>
+                    <td><span class="model-name">{{ model.name }}</span></td>
+                    <td><span class="metric-value">{{ "%.3f" | format(model.train_mae.mean) }}</span></td>
+                    <td><span class="metric-value">{{ "%.3f" | format(model.mae.mean) }}</span></td>
+                    <td class="gap-cell" style="color: {% if mae_ratio > 1.0 %}var(--error){% elif mae_ratio > 0.3 %}var(--warning){% else %}var(--success){% endif %};">
+                        {{ "%.3f" | format(mae_gap) }}
+                    </td>
+                    <td><span class="metric-value">{{ "%.3f" | format(model.train_rmse.mean) }}</span></td>
+                    <td><span class="metric-value">{{ "%.3f" | format(model.rmse.mean) }}</span></td>
+                    <td class="gap-cell" style="color: {% if rmse_ratio > 1.0 %}var(--error){% elif rmse_ratio > 0.3 %}var(--warning){% else %}var(--success){% endif %};">
+                        {{ "%.3f" | format(rmse_gap) }}
+                    </td>
+                </tr>
+                {% endif %}
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <!-- Loss Curves -->
+    <h3 style="color: var(--text-primary); margin: 2rem 0 1rem 0;">Loss Curves</h3>
+    {% set has_loss = models | selectattr('training_history') | list %}
+    {% if has_loss %}
+    <div style="display: flex; flex-wrap: wrap; gap: 1.5rem;">
+        {% for model in models %}
+        {% if model.training_history %}
+        <div style="flex: 1 1 400px; min-width: 350px;">
+            <h4 style="color: var(--accent-secondary); margin-bottom: 0.5rem;">{{ model.name }}</h4>
+            <div id="loss-curve-{{ loop.index }}" style="min-height: 300px;"></div>
+            <script>
+                document.addEventListener('DOMContentLoaded', function() {
+                    const history = {{ model.training_history | tojson }};
+                    const epochs = Array.from({length: history.train_loss.length}, (_, i) => i + 1);
+
+                    const traces = [
+                        {
+                            x: epochs, y: history.train_loss,
+                            name: 'Train Loss', mode: 'lines',
+                            line: { color: '#00d4ff', width: 2 }
+                        },
+                        {
+                            x: epochs, y: history.val_loss,
+                            name: 'Val Loss', mode: 'lines',
+                            line: { color: '#e94560', width: 2, dash: 'dash' }
+                        }
+                    ];
+
+                    const layout = {
+                        xaxis: { title: 'Epoch', gridcolor: '#2d3561' },
+                        yaxis: { title: 'Loss', gridcolor: '#2d3561' },
+                        hovermode: 'x unified',
+                        plot_bgcolor: '#16213e',
+                        paper_bgcolor: '#1a1a2e',
+                        font: { color: '#e0e0e0' },
+                        legend: { orientation: 'h', y: -0.2 },
+                        margin: { l: 55, r: 15, t: 10, b: 60 }
+                    };
+
+                    Plotly.newPlot('loss-curve-{{ loop.index }}', traces, layout, { responsive: true });
+                });
+            </script>
+        </div>
+        {% endif %}
+        {% endfor %}
+    </div>
+    {% else %}
+    <p style="color: var(--text-secondary); font-style: italic;">Loss curves are only available for neural models (DLinear, SparseTSF, etc.).</p>
+    {% endif %}
+
+    <!-- Fold Stability Chart -->
+    {% if models and models[0].fold_results %}
+    <h3 style="color: var(--text-primary); margin: 2rem 0 1rem 0;">Fold Stability <span class="info-tip">?<span class="tip-text">Shows how each model's MAE varies across cross-validation folds. Consistent bars indicate stable generalisation; large variation suggests the model is sensitive to which data it trains on.</span></span></h3>
+    <div id="fold-stability-chart" style="min-height: 400px;"></div>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const modelsData = {{ models_json | tojson }};
+            const MODEL_COLORS = {
+                "lightgbm": "#2ecc71", "xgboost": "#00d4ff", "lstm": "#f39c12",
+                "cnn": "#e94560", "neuralprophet": "#9b59b6", "dlinear": "#1abc9c",
+                "nbeats": "#e67e22", "nhits": "#3498db", "tide": "#e84393",
+                "tsmixer": "#00cec9", "sparsetsf": "#ff6b6b", "patchtst": "#a29bfe",
+                "itransformer": "#ffeaa7", "crossformer": "#fd79a8", "timesnet": "#55efc4"
+            };
+
+            const traces = [];
+            modelsData.forEach(function(model) {
+                if (!model.fold_results || model.fold_results.length === 0) return;
+                const foldLabels = model.fold_results.map((_, i) => 'Fold ' + (i + 1));
+                const maeValues = model.fold_results.map(f => f.mae || 0);
+                traces.push({
+                    x: foldLabels, y: maeValues,
+                    name: model.name, type: 'bar',
+                    marker: { color: MODEL_COLORS[model.name] || '#00d4ff' }
+                });
+            });
+
+            const layout = {
+                barmode: 'group',
+                xaxis: { title: 'Fold', gridcolor: '#2d3561' },
+                yaxis: { title: 'MAE{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
+                hovermode: 'x unified',
+                plot_bgcolor: '#16213e',
+                paper_bgcolor: '#1a1a2e',
+                font: { color: '#e0e0e0' },
+                legend: { orientation: 'h', y: -0.15 },
+                margin: { l: 60, r: 20, t: 20, b: 80 }
+            };
+
+            Plotly.newPlot('fold-stability-chart', traces, layout, { responsive: true });
+        });
+    </script>
+    {% endif %}
+</section>
 
 <!-- Feature Importance -->
 <section class="section" id="sec-features">

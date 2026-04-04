@@ -48,6 +48,9 @@ class ModelResult:
     fold_predictions: List[np.ndarray] = field(default_factory=list)
     fold_actuals: List[np.ndarray] = field(default_factory=list)
     fold_train_targets: List[np.ndarray] = field(default_factory=list)
+    fold_train_metrics: List[Dict[str, float]] = field(default_factory=list)
+    train_metrics: Dict[str, float] = field(default_factory=dict)
+    training_history: Optional[Dict[str, List[float]]] = field(default=None)
 
     @property
     def mean_train_time(self) -> float:
@@ -406,6 +409,16 @@ class BenchmarkRunner:
 
             train_time = time.time() - train_start
 
+            # --- Train predictions for overfitting diagnostics ---
+            y_pred_train = None
+            try:
+                if 'sequence_data' in sequence_kwargs and model.is_neural and window_size:
+                    y_pred_train = model.predict_sequence(sequence_kwargs['sequence_data'])
+                else:
+                    y_pred_train = model.predict(X_train)
+            except Exception:
+                pass  # Never break benchmark for diagnostics
+
             # Predict — use predict_sequence for neural models
             inference_start = time.time()
             try:
@@ -465,12 +478,49 @@ class BenchmarkRunner:
                     metrics_to_compute, y_test, y_pred, y_train=y_train,
                 )
 
+            # --- Train metrics for overfitting table ---
+            fold_train_m = {}
+            if y_pred_train is not None:
+                try:
+                    if y_pred_train.ndim == 2 and y_train.ndim == 2:
+                        for h_idx, h_step in enumerate(horizon_steps or []):
+                            h_train_m = self.metric_registry.compute_all(
+                                metrics_to_compute,
+                                y_train[:, h_idx], y_pred_train[:, h_idx],
+                            )
+                            for mn, val in h_train_m.items():
+                                fold_train_m[f"{mn}_h{h_step}"] = val
+                        for mn in metrics_to_compute:
+                            h_vals = [
+                                fold_train_m.get(f"{mn}_h{h}", np.nan)
+                                for h in (horizon_steps or [])
+                            ]
+                            fold_train_m[mn] = float(np.nanmean(h_vals))
+                    else:
+                        fold_train_m = self.metric_registry.compute_all(
+                            metrics_to_compute, y_train, y_pred_train,
+                        )
+                except Exception:
+                    pass
+
             model_result.fold_metrics.append(fold_metrics)
+            model_result.fold_train_metrics.append(fold_train_m)
             model_result.train_times.append(train_time)
             model_result.inference_times.append(inference_time)
             model_result.fold_predictions.append(y_pred.copy())
             model_result.fold_actuals.append(y_test.copy())
             model_result.fold_train_targets.append(y_train.copy())
+
+            # Capture loss curves (last fold overwrites previous)
+            if hasattr(model, '_training_history') and model._training_history:
+                hist = model._training_history
+                tl = hist.get('train_loss', [])
+                vl = hist.get('val_loss', [])
+                if tl and vl and tl != vl:
+                    model_result.training_history = {
+                        'train_loss': [float(v) for v in tl],
+                        'val_loss': [float(v) for v in vl],
+                    }
 
         # Aggregate across folds — compute mean for all metrics
         if model_result.fold_metrics:
@@ -483,6 +533,17 @@ class BenchmarkRunner:
                 ]
                 if values:
                     model_result.metrics[metric_name] = float(np.nanmean(values))
+
+        # Aggregate train metrics across folds
+        if model_result.fold_train_metrics:
+            for metric_name in list(set(self.metrics + [self.production_metric])):
+                values = [
+                    fm.get(metric_name, np.nan)
+                    for fm in model_result.fold_train_metrics
+                    if fm
+                ]
+                if values:
+                    model_result.train_metrics[metric_name] = float(np.nanmean(values))
 
         logger.info(
             f'Model {model.name} completed: '

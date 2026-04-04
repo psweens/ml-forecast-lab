@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.19.0
+
+### Generalisation Diagnostics
+- **Train vs Test error table**: shows train MAE/RMSE alongside test metrics
+  with a colour-coded gap column (green/orange/red) to highlight overfitting.
+- **Loss curves**: per-epoch train and validation loss for neural models
+  (DLinear, SparseTSF, etc.), surfaced from the existing `_training_history`.
+- **Fold stability chart**: grouped bar chart of per-fold MAE across all models
+  to visualise cross-validation consistency.
+
 ## 1.18.3
 
 ### Improvement
