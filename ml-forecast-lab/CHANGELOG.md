@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.18.0
+
+### Metrics & Ranking
+- **MASE replaces MAPE**: default percentage metric is now Mean Absolute
+  Scaled Error (Hyndman & Koehler 2006) — bounded, handles near-zero
+  values, and answers "does this model beat naive?". MAPE remains
+  available as a registered metric for custom configs.
+- **Composite ranking**: model rankings and ensemble "Best" badge are now
+  determined by average rank across MAE, RMSE, and MASE rather than a
+  single production metric, rewarding consistent performance.
+
+### Ensemble
+- **Separate ensemble chart**: ensemble predictions are no longer mixed
+  into the holdout chart. A dedicated "Ensemble Predictions on Holdout
+  Data" chart with its own interval/cumulative toggle appears below the
+  ensemble results table.
+
 ## 1.17.0
 
 ### UX Polish
