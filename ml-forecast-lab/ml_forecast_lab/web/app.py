@@ -162,6 +162,9 @@ class EnsembleResultData(BaseModel):
     improvement_pct: Optional[float] = None
     best_individual_model: Optional[str] = None
     best_individual_metric: Optional[float] = None
+    best_individual_mae: Optional[float] = None
+    best_individual_rmse: Optional[float] = None
+    best_individual_mase: Optional[float] = None
 
 
 class ModelInfo(BaseModel):

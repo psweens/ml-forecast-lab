@@ -458,9 +458,9 @@
                 {% if ensemble_result.best_individual_model %}
                 <tr style="opacity: 0.7;">
                     <td><span class="model-name">Best Individual ({{ ensemble_result.best_individual_model }})</span></td>
-                    <td>{{ "%.4f"|format(ensemble_result.best_individual_metric) }}</td>
-                    <td>—</td>
-                    <td>—</td>
+                    <td>{{ "%.4f"|format(ensemble_result.best_individual_mae) }}</td>
+                    <td>{{ "%.4f"|format(ensemble_result.best_individual_rmse) }}</td>
+                    <td>{{ "%.3f"|format(ensemble_result.best_individual_mase) }}</td>
                     <td>—</td>
                     <td>—</td>
                 </tr>

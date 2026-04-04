@@ -1305,6 +1305,9 @@ class MLForecastLabApp:
         if np.isfinite(best_individual) and best_individual > 0 and np.isfinite(best_ensemble_metric):
             improvement_pct = (best_individual - best_ensemble_metric) / best_individual * 100
 
+        # Get all metrics for the best individual model
+        best_ind_metrics = completed_models[best_individual_name].metrics if best_individual_name else {}
+
         ensemble_data = EnsembleResultData(
             experiment_name=experiment_name,
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -1314,6 +1317,9 @@ class MLForecastLabApp:
             improvement_pct=improvement_pct,
             best_individual_model=best_individual_name,
             best_individual_metric=best_individual,
+            best_individual_mae=best_ind_metrics.get("mae", np.nan),
+            best_individual_rmse=best_ind_metrics.get("rmse", np.nan),
+            best_individual_mase=best_ind_metrics.get("mase", np.nan),
         )
         appstate.ensemble_results[experiment_name] = ensemble_data
 

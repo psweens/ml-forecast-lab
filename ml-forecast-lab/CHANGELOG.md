@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.18.2
+
+### Bug Fix
+- **Ensemble best-individual row**: the "Best Individual" row in the ensemble
+  table was showing the production metric (e.g. RMSE) in the MAE column.
+  Now displays correct MAE, RMSE, and MASE values in their respective columns.
+
 ## 1.18.1
 
 ### UI Fixes
