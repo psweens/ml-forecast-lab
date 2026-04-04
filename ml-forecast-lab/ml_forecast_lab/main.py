@@ -680,6 +680,8 @@ class MLForecastLabApp:
         # Re-compute rolling stats per fold to prevent feature leakage.
         rolling_windows = [6, 24, 72]
 
+        steps_per_day = max(1, 1440 // exp_cfg.interval_minutes)
+
         def feature_builder(df_sub, config, purpose="train"):
             df_out = df_sub.copy()
             # Re-compute rolling stats from fold-local target to avoid leakage
@@ -688,6 +690,12 @@ class MLForecastLabApp:
                 df_out[f"y_rolling_mean_{window}"] = target.rolling(window=window).mean()
                 df_out[f"y_rolling_std_{window}"] = target.rolling(window=window).std()
                 df_out[f"y_rolling_max_{window}"] = target.rolling(window=window).max()
+            # Re-compute periodic lags and diff from fold-local target
+            for d in [1, 2]:
+                lag_steps = steps_per_day * d
+                if lag_steps <= len(target):
+                    df_out[f"y_lag_{lag_steps}"] = target.shift(lag_steps)
+            df_out["y_diff_1"] = target.shift(1) - target.shift(2)
             cols = [c for c in df_out.columns if c != "target"]
             X = df_out[cols].values.astype(np.float32)
             # Replace any remaining NaN with 0 for model safety
@@ -1675,6 +1683,16 @@ class MLForecastLabApp:
                         forecast_features[col] = float(combined[col].iloc[-1])
                     else:
                         forecast_features[col] = 0.0
+
+            # Compute interaction features from covariates × temporal
+            for cov in covariate_cols:
+                sin_col = f"{cov}_x_hour_sin"
+                cos_col = f"{cov}_x_hour_cos"
+                if sin_col in feature_cols and cov in forecast_features.columns:
+                    forecast_features[sin_col] = forecast_features[cov] * forecast_features["hour_sin"]
+                if cos_col in feature_cols and cov in forecast_features.columns:
+                    forecast_features[cos_col] = forecast_features[cov] * forecast_features["hour_cos"]
+
             forecast_features = forecast_features[feature_cols]
 
             X_forecast = forecast_features.values.astype(np.float32)

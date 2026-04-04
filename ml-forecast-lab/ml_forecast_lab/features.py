@@ -107,7 +107,10 @@ def build_features(
     - Temporal: hour_of_day, day_of_week, is_weekend, month, day_of_month,
                 hour_sin, hour_cos, dow_sin, dow_cos
     - Lag: y_lag_1, ..., y_lag_N
+    - Periodic lag: y_lag_{steps_per_day}, y_lag_{steps_per_day*2} (same time yesterday/2d ago)
     - Rolling: y_rolling_mean_{window}, y_rolling_std_{window}, y_rolling_max_{window}
+    - Rate of change: y_diff_1 (first difference of consecutive lags)
+    - Interactions: {covariate}_x_hour_sin, {covariate}_x_hour_cos
     - Holiday: is_holiday (if country specified)
 
     Examples
@@ -162,6 +165,22 @@ def build_features(
         features[f'y_rolling_mean_{window}'] = target.rolling(window=window).mean()
         features[f'y_rolling_std_{window}'] = target.rolling(window=window).std()
         features[f'y_rolling_max_{window}'] = target.rolling(window=window).max()
+
+    # Periodic lags — "same time yesterday/2-days-ago"
+    steps_per_day = max(1, 1440 // interval_minutes)  # e.g. 48 for 30-min
+    for d in [1, 2]:
+        lag_steps = steps_per_day * d
+        if lag_steps <= len(target):
+            features[f'y_lag_{lag_steps}'] = target.shift(lag_steps)
+
+    # Rate of change — first difference of consecutive lags
+    features['y_diff_1'] = target.shift(1) - target.shift(2)
+
+    # Interaction features — covariate × time-of-day
+    cov_cols = [c for c in df.columns if c != target_col]
+    for col in cov_cols:
+        features[f'{col}_x_hour_sin'] = df[col] * features['hour_sin']
+        features[f'{col}_x_hour_cos'] = df[col] * features['hour_cos']
 
     # Holiday indicator
     if country is not None:
@@ -566,6 +585,16 @@ def create_forecast_features(
         forecast_df[f'y_rolling_mean_{window}'] = float(np.mean(available))
         forecast_df[f'y_rolling_std_{window}'] = float(np.std(available))
         forecast_df[f'y_rolling_max_{window}'] = float(np.max(available))
+
+    # Periodic lags — use value from lag array if available
+    steps_per_day = max(1, 1440 // interval_minutes)
+    for d in [1, 2]:
+        lag_idx = steps_per_day * d - 1  # 0-indexed into lag_values
+        val = float(lag_values[lag_idx]) if lag_idx < len(lag_values) else 0.0
+        forecast_df[f'y_lag_{steps_per_day * d}'] = val
+
+    # Rate of change — diff of lag_1 and lag_2
+    forecast_df['y_diff_1'] = float(lag_values[0] - lag_values[1]) if len(lag_values) >= 2 else 0.0
 
     # Holiday indicator
     if country is not None:

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.21.0
+
+### Feature Engineering
+- **Periodic lags**: `y_lag_48` and `y_lag_96` (same time yesterday and 2 days
+  ago at 30-min intervals) give models direct access to daily periodicity.
+- **Rate of change**: `y_diff_1` captures whether demand is accelerating or
+  decelerating.
+- **Interaction features**: `{covariate}_x_hour_sin` and `{covariate}_x_hour_cos`
+  encode how covariates (e.g. charge level, temperature) interact with time of day.
+- Production forecast features updated to compute interactions and periodic lags
+  at inference time.
+
 ## 1.20.1
 
 ### Bug Fix
