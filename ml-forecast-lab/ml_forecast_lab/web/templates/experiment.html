@@ -344,6 +344,9 @@
     <!-- Train vs Test Metrics Table -->
     {% set has_train = models | selectattr('train_mae') | list %}
     {% if has_train %}
+    {# Best test errors for underfitting detection — green only if competitive AND small gap #}
+    {% set best_test_mae = has_train | map(attribute='mae') | map(attribute='mean') | min %}
+    {% set best_test_rmse = has_train | map(attribute='rmse') | map(attribute='mean') | min %}
     <h3 style="color: var(--text-primary); margin-bottom: 1rem;">Train vs Test Error</h3>
     <div class="table-container">
         <table class="metrics-table">
@@ -352,7 +355,7 @@
                     <th>Model</th>
                     <th>Train MAE{{ " (" + units + ")" if units else "" }}</th>
                     <th>Test MAE{{ " (" + units + ")" if units else "" }}</th>
-                    <th>Gap <span class="info-tip">?<span class="tip-text">Difference between test and train error. A large gap relative to train error indicates overfitting — the model performs much better on data it has seen than on new data.</span></span></th>
+                    <th>Gap <span class="info-tip">?<span class="tip-text">Difference between test and train error. Green = small gap and competitive test error. Orange = moderate overfitting, or small gap but poor absolute test error (underfitting). Red = strong overfitting.</span></span></th>
                     <th>Train RMSE{{ " (" + units + ")" if units else "" }}</th>
                     <th>Test RMSE{{ " (" + units + ")" if units else "" }}</th>
                     <th>Gap</th>
@@ -365,16 +368,18 @@
                 {% set rmse_gap = model.rmse.mean - model.train_rmse.mean %}
                 {% set mae_ratio = mae_gap / model.train_mae.mean if model.train_mae.mean > 0 else 0 %}
                 {% set rmse_ratio = rmse_gap / model.train_rmse.mean if model.train_rmse.mean > 0 else 0 %}
+                {% set mae_underfit = model.mae.mean > best_test_mae * 1.5 if best_test_mae > 0 else false %}
+                {% set rmse_underfit = model.rmse.mean > best_test_rmse * 1.5 if best_test_rmse > 0 else false %}
                 <tr>
                     <td><span class="model-name">{{ model.name }}</span></td>
                     <td><span class="metric-value">{{ "%.3f" | format(model.train_mae.mean) }}</span></td>
                     <td><span class="metric-value">{{ "%.3f" | format(model.mae.mean) }}</span></td>
-                    <td class="gap-cell" style="color: {% if mae_ratio > 1.0 %}var(--error){% elif mae_ratio > 0.3 %}var(--warning){% else %}var(--success){% endif %};">
+                    <td class="gap-cell" style="color: {% if mae_ratio > 1.0 %}var(--error){% elif mae_ratio > 0.3 or mae_underfit %}var(--warning){% else %}var(--success){% endif %};">
                         {{ "%.3f" | format(mae_gap) }}
                     </td>
                     <td><span class="metric-value">{{ "%.3f" | format(model.train_rmse.mean) }}</span></td>
                     <td><span class="metric-value">{{ "%.3f" | format(model.rmse.mean) }}</span></td>
-                    <td class="gap-cell" style="color: {% if rmse_ratio > 1.0 %}var(--error){% elif rmse_ratio > 0.3 %}var(--warning){% else %}var(--success){% endif %};">
+                    <td class="gap-cell" style="color: {% if rmse_ratio > 1.0 %}var(--error){% elif rmse_ratio > 0.3 or rmse_underfit %}var(--warning){% else %}var(--success){% endif %};">
                         {{ "%.3f" | format(rmse_gap) }}
                     </td>
                 </tr>

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.19.1
+
+### Fix
+- **Gap colouring accounts for underfitting**: a small train/test gap now shows
+  orange (not green) when the model's test error is >1.5x the best model's,
+  preventing false confidence from models that underfit both train and test.
+
 ## 1.19.0
 
 ### Generalisation Diagnostics
