@@ -19,7 +19,10 @@
             <label class="field-label mb-0-5" style="display:block;">Experiment</label>
             <select id="exp-select" class="setting-input">
                 {% for exp in experiments %}
-                <option value="{{ exp.name }}">{{ exp.name | humanise }} ({{ exp.mode }})</option>
+                <option value="{{ exp.name }}"
+                        {% if exp.name in running_experiments %}selected data-running="1"{% endif %}>
+                    {{ exp.name | humanise }} ({{ exp.mode }}){% if exp.name in running_experiments %} — training{% endif %}
+                </option>
                 {% endfor %}
                 {% if not experiments %}
                 <option value="" disabled selected>No experiments configured</option>
@@ -121,10 +124,32 @@
     let isReplaying = false;
     let knownModels = [];   // Ordered list of models seen so far
 
+    // Restore selected experiment from sessionStorage if server didn't pre-select a running one
+    (function() {
+        const sel = document.getElementById('exp-select');
+        if (!sel) return;
+        const hasRunning = sel.querySelector('[data-running]');
+        if (!hasRunning) {
+            const saved = sessionStorage.getItem('mlfl-training-experiment');
+            if (saved) {
+                for (let i = 0; i < sel.options.length; i++) {
+                    if (sel.options[i].value === saved) {
+                        sel.selectedIndex = i;
+                        break;
+                    }
+                }
+            }
+        }
+        sel.addEventListener('change', function() {
+            sessionStorage.setItem('mlfl-training-experiment', sel.value);
+        });
+    })();
+
     window.startPipeline = function() {
         const sel = document.getElementById('exp-select');
         const expName = sel.value;
         if (!expName) return;
+        sessionStorage.setItem('mlfl-training-experiment', expName);
 
         const steps = ['benchmark'];
         if (document.getElementById('chk-ensemble').checked) {

@@ -152,24 +152,26 @@ function toggleParams(name) {
     }
 }
 
-function saveParams(event, name) {
-    event.preventDefault();
+var _saveTimers = {};
+
+function collectAndSaveParams(name) {
     var form = document.getElementById('form-' + name);
+    if (!form) return;
     var params = {};
-    var inputs = form.querySelectorAll('.param-input, select.param-input');
-    inputs.forEach(function(el) {
+    form.querySelectorAll('.param-input').forEach(function(el) {
         var val = el.value;
         if (el.type === 'number') {
             val = el.step && el.step.includes('.') ? parseFloat(val) : parseInt(val);
         }
         params[el.name] = val;
     });
-    // Handle checkboxes (booleans)
     form.querySelectorAll('input[type="checkbox"][name]').forEach(function(el) {
         params[el.name] = el.checked;
     });
 
     var status = document.getElementById('status-' + name);
+    status.className = 'param-status';
+    status.textContent = 'Saving...';
     fetch(BASE_PATH + '/api/models/params', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -179,7 +181,6 @@ function saveParams(event, name) {
         if (data.success) {
             status.className = 'param-status success';
             status.textContent = 'Saved ' + Object.keys(data.overrides).length + ' override(s)';
-            // Update override indicators
             var rows = form.querySelectorAll('.param-row');
             rows.forEach(function(row) {
                 var input = row.querySelector('[name]');
@@ -189,7 +190,6 @@ function saveParams(event, name) {
                     row.classList.remove('param-overridden');
                 }
             });
-            // Update configure button badge
             var btn = document.querySelector('#card-' + name + ' .btn-configure');
             var badge = btn.querySelector('.override-count');
             var count = Object.keys(data.overrides).length;
@@ -212,6 +212,12 @@ function saveParams(event, name) {
         status.className = 'param-status error';
         status.textContent = 'Network error';
     });
+}
+
+function saveParams(event, name) {
+    event.preventDefault();
+    if (_saveTimers[name]) clearTimeout(_saveTimers[name]);
+    collectAndSaveParams(name);
 }
 
 function resetParams(name) {
@@ -254,5 +260,18 @@ function doResetParams(name) {
         setTimeout(function() { status.textContent = ''; }, 4000);
     });
 }
+
+// Auto-save on input/change with debounce
+document.querySelectorAll('[id^="form-"]').forEach(function(form) {
+    var name = form.id.replace('form-', '');
+    function debounceSave() {
+        if (_saveTimers[name]) clearTimeout(_saveTimers[name]);
+        _saveTimers[name] = setTimeout(function() {
+            collectAndSaveParams(name);
+        }, 600);
+    }
+    form.addEventListener('input', debounceSave);
+    form.addEventListener('change', debounceSave);
+});
 </script>
 {% endblock %}

@@ -1461,6 +1461,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "version": APP_VERSION,
                 "experiments": experiments,
                 "exp_models": exp_models,
+                "running_experiments": app.state.appstate.running_benchmarks,
             },
         )
 

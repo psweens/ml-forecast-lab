@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.21.2
+
+### Bug Fixes
+- **Model hyperparameter auto-save**: hyperparameters in the Models tab now
+  auto-save on change with a 600ms debounce, so edits persist without needing
+  to click the Save button. The manual Save button remains as a fallback.
+- **Training tab reconnection**: navigating away from the Training tab and
+  returning now correctly restores the live training view. The backend
+  pre-selects the currently-training experiment in the dropdown, and
+  sessionStorage remembers the last selection for completed runs.
+
 ## 1.21.1
 
 ### Improvement
