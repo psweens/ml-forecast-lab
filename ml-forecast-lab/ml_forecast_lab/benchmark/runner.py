@@ -487,6 +487,7 @@ class BenchmarkRunner:
                             h_train_m = self.metric_registry.compute_all(
                                 metrics_to_compute,
                                 y_train[:, h_idx], y_pred_train[:, h_idx],
+                                y_train=y_train[:, h_idx] if y_train.ndim == 2 else y_train,
                             )
                             for mn, val in h_train_m.items():
                                 fold_train_m[f"{mn}_h{h_step}"] = val
@@ -499,6 +500,7 @@ class BenchmarkRunner:
                     else:
                         fold_train_m = self.metric_registry.compute_all(
                             metrics_to_compute, y_train, y_pred_train,
+                            y_train=y_train,
                         )
                 except Exception:
                     pass
