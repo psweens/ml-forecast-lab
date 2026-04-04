@@ -107,7 +107,7 @@ class ExperimentCfg:
     cv_embargo_periods: int = 2
     """Gap between training and test sets (in periods) to avoid temporal leakage."""
 
-    metrics: List[str] = field(default_factory=lambda: ['mae', 'rmse', 'mape'])
+    metrics: List[str] = field(default_factory=lambda: ['mae', 'rmse', 'mase'])
     """Standard metrics to compute."""
 
     custom_metrics: Optional[Dict[str, str]] = None
@@ -281,7 +281,7 @@ def load_config(config_path: Path | str) -> AppConfig:
             cv_strategy: walk_forward
             cv_folds: 5
             cv_embargo_periods: 2
-            metrics: [mae, rmse, mape]
+            metrics: [mae, rmse, mase]
             covariates:
               - entity: sensor.cloud_cover_percent
                 role: future

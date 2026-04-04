@@ -82,7 +82,7 @@
 {% if benchmark_result %}
 <!-- Model Comparison Table -->
 <section class="section" id="sec-results">
-    <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Models are ranked by mean rank across CV folds (Demšar 2006). Within each fold, models are ranked by MAE; the average of these per-fold ranks determines the final ranking. This rewards consistency — a model that reliably places 1st or 2nd beats one that's sometimes 1st but sometimes last.</span></span></h2>
+    <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Models are ranked by composite mean rank across CV folds (Demšar 2006). Within each fold, models are ranked independently by MAE, RMSE, and MASE; those per-metric ranks are averaged to give a composite fold rank, then averaged across folds. This rewards models that are consistently strong across all error measures.</span></span></h2>
     <div class="table-container">
         <table class="metrics-table">
             <thead>
@@ -90,7 +90,7 @@
                     <th>Model</th>
                     <th>MAE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Mean Absolute Error — average magnitude of prediction errors. Lower is better. The ± value shows variation across CV folds.</span></span></th>
                     <th>RMSE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Root Mean Square Error — penalises large errors more heavily than MAE. Lower is better.</span></span></th>
-                    <th>MAPE <span class="info-tip">?<span class="tip-text">Mean Absolute Percentage Error — error as a percentage of actual values. Lower is better. Can be misleading when actual values are near zero.</span></span></th>
+                    <th>MASE <span class="info-tip">?<span class="tip-text">Mean Absolute Scaled Error — prediction error relative to a naive forecast. Below 1.0 means the model beats naive; above 1.0 means worse than naive. Handles near-zero values reliably unlike MAPE.</span></span></th>
                     <th>Train Time <span class="info-tip">?<span class="tip-text">Average wall-clock training time per CV fold in seconds.</span></span></th>
                     <th>Mean Rank <span class="info-tip">?<span class="tip-text">Average rank across CV folds (1.0 = ranked 1st in every fold). Lower is better. A model with mean rank 1.4 was typically 1st or 2nd across folds, indicating strong generalisability.</span></span></th>
                     <th>Rank</th>
@@ -110,8 +110,8 @@
                         <span class="metric-std">± {{ "%.3f" | format(model.rmse.std) }}</span>
                     </td>
                     <td>
-                        <span class="metric-value">{{ "%.2f" | format(model.mape.mean) }}</span>
-                        <span class="metric-std">± {{ "%.2f" | format(model.mape.std) }}</span>
+                        <span class="metric-value">{{ "%.2f" | format(model.mase.mean) }}</span>
+                        <span class="metric-std">± {{ "%.2f" | format(model.mase.std) }}</span>
                     </td>
                     <td>{{ "%.1f" | format(model.train_time_seconds) }}s</td>
                     <td>
@@ -147,7 +147,7 @@
                             <th>Fold</th>
                             <th>MAE{{ " (" + units + ")" if units else "" }}</th>
                             <th>RMSE{{ " (" + units + ")" if units else "" }}</th>
-                            <th>MAPE</th>
+                            <th>MASE</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -156,7 +156,7 @@
                             <td>Fold {{ loop.index }}</td>
                             <td>{{ "%.3f" | format(fold_metrics.get('mae', 0)) }}</td>
                             <td>{{ "%.3f" | format(fold_metrics.get('rmse', 0)) }}</td>
-                            <td>{{ "%.2f" | format(fold_metrics.get('mape', 0)) }}</td>
+                            <td>{{ "%.3f" | format(fold_metrics.get('mase', 0)) }}</td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -227,8 +227,9 @@
                     line: { color: '#ffffff', width: 2.5, dash: 'dot' }
                 });
 
-                // Each model
+                // Each model (exclude ensemble traces)
                 labData.model_predictions.forEach(function(mp) {
+                    if (mp.model_name.startsWith('Ensemble:')) return;
                     traces.push({
                         x: mp.timestamps,
                         y: cumulative ? cumsum(mp.predictions, mp.timestamps) : mp.predictions,
@@ -447,7 +448,7 @@
                     <th>Strategy</th>
                     <th>MAE{{ " (" + units + ")" if units else "" }}</th>
                     <th>RMSE{{ " (" + units + ")" if units else "" }}</th>
-                    <th>MAPE</th>
+                    <th>MASE</th>
                     <th>Member Models</th>
                     <th>Weights</th>
                 </tr>
@@ -473,7 +474,7 @@
                     </td>
                     <td><span class="metric-value">{{ "%.4f"|format(method.mae) }}</span></td>
                     <td><span class="metric-value">{{ "%.4f"|format(method.rmse) }}</span></td>
-                    <td><span class="metric-value">{{ "%.2f"|format(method.mape) }}</span></td>
+                    <td><span class="metric-value">{{ "%.3f"|format(method.mase) }}</span></td>
                     <td style="font-size: 0.85rem; color: var(--text-secondary);">{{ method.member_models | length }} models</td>
                     <td style="font-size: 0.82rem;">
                         {% if method.weights %}
@@ -501,6 +502,104 @@
         </span>
         {% endif %}
     </div>
+    {% endif %}
+
+    <!-- Ensemble Predictions Chart -->
+    {% if lab_forecast and lab_forecast.model_predictions %}
+    {% set ns = namespace(has_ensemble=false) %}
+    {% for mp in lab_forecast.model_predictions %}{% if mp.model_name.startswith('Ensemble:') %}{% set ns.has_ensemble = true %}{% endif %}{% endfor %}
+    {% if ns.has_ensemble %}
+    <div style="margin-top: 1.5rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+            <h3 style="margin: 0;">Ensemble Predictions on Holdout Data</h3>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+                <span style="color: var(--text-secondary); font-size: 0.85rem;">Interval</span>
+                <label style="position: relative; display: inline-block; width: 44px; height: 24px; cursor: pointer;">
+                    <input type="checkbox" id="ensemble-cumulative-toggle" onchange="toggleEnsembleCumulative(this.checked)"
+                           style="opacity: 0; width: 0; height: 0;">
+                    <span style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: var(--bg-tertiary);
+                        border-radius: 12px; border: 1px solid var(--border); transition: all 0.3s;"></span>
+                    <span id="ensemble-toggle-knob" style="position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+                        background: var(--text-secondary); border-radius: 50%; transition: all 0.3s;"></span>
+                </label>
+                <span style="color: var(--text-secondary); font-size: 0.85rem;">Cumulative</span>
+            </div>
+        </div>
+        <div id="ensemble-chart" style="min-height: 500px;"></div>
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                const labData = window._holdoutData || {{ lab_forecast.model_dump() | tojson }};
+
+                function cumsum(arr, timestamps) {
+                    var result = [], sum = 0, lastDate = '';
+                    for (var i = 0; i < arr.length; i++) {
+                        var thisDate = timestamps[i].split('T')[0];
+                        if (thisDate !== lastDate) { sum = 0; lastDate = thisDate; }
+                        sum += (arr[i] !== null && arr[i] !== undefined) ? arr[i] : 0;
+                        result.push(sum);
+                    }
+                    return result;
+                }
+
+                window.renderEnsembleChart = function(cumulative) {
+                    var traces = [];
+                    // Find actuals from the first non-ensemble model
+                    var actualSource = labData.model_predictions.find(function(mp) {
+                        return !mp.model_name.startsWith('Ensemble:');
+                    });
+                    if (actualSource) {
+                        traces.push({
+                            x: actualSource.timestamps,
+                            y: cumulative ? cumsum(actualSource.actuals, actualSource.timestamps) : actualSource.actuals,
+                            name: 'Actual',
+                            mode: 'lines',
+                            line: { color: '#ffffff', width: 2.5, dash: 'dot' }
+                        });
+                    }
+                    // Ensemble traces only
+                    labData.model_predictions.forEach(function(mp) {
+                        if (!mp.model_name.startsWith('Ensemble:')) return;
+                        traces.push({
+                            x: mp.timestamps,
+                            y: cumulative ? cumsum(mp.predictions, mp.timestamps) : mp.predictions,
+                            name: mp.model_name,
+                            mode: 'lines',
+                            line: { color: mp.color, width: 2 }
+                        });
+                    });
+
+                    var layout = {
+                        title: (cumulative ? 'Daily Cumulative ' : '') + 'Ensemble Comparison on Holdout (' +
+                               labData.holdout_start.split('T')[0] + ' to ' + labData.holdout_end.split('T')[0] + ')',
+                        xaxis: { title: 'Time', gridcolor: '#2d3561' },
+                        yaxis: { title: cumulative ? 'Daily Cumulative{{ " (" + units + ")" if units else "" }}' : 'Value{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
+                        hovermode: 'x unified',
+                        plot_bgcolor: '#16213e',
+                        paper_bgcolor: '#1a1a2e',
+                        font: { color: '#e0e0e0' },
+                        legend: { orientation: 'h', y: -0.15 },
+                        margin: { l: 60, r: 20, t: 50, b: 80 }
+                    };
+
+                    Plotly.newPlot('ensemble-chart', traces, layout, { responsive: true });
+                };
+                window.renderEnsembleChart(false);
+            });
+
+            function toggleEnsembleCumulative(checked) {
+                var knob = document.getElementById('ensemble-toggle-knob');
+                if (checked) {
+                    knob.style.left = '22px';
+                    knob.style.background = 'var(--accent-secondary)';
+                } else {
+                    knob.style.left = '2px';
+                    knob.style.background = 'var(--text-secondary)';
+                }
+                if (window.renderEnsembleChart) window.renderEnsembleChart(checked);
+            }
+        </script>
+    </div>
+    {% endif %}
     {% endif %}
     </div>
     {% endif %}

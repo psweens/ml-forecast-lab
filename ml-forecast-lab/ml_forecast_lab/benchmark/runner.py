@@ -47,6 +47,7 @@ class ModelResult:
     inference_times: List[float] = field(default_factory=list)
     fold_predictions: List[np.ndarray] = field(default_factory=list)
     fold_actuals: List[np.ndarray] = field(default_factory=list)
+    fold_train_targets: List[np.ndarray] = field(default_factory=list)
 
     @property
     def mean_train_time(self) -> float:
@@ -201,7 +202,7 @@ class BenchmarkRunner:
         self.cv_strategy = experiment_cfg.get('cv_strategy', 'walk_forward')
         self.cv_folds = experiment_cfg.get('cv_folds', 5)
         self.production_metric = experiment_cfg.get('production_metric', 'mae')
-        self.metrics = experiment_cfg.get('metrics', ['mae', 'rmse', 'mape'])
+        self.metrics = experiment_cfg.get('metrics', ['mae', 'rmse', 'mase'])
 
         logger.info(
             f'BenchmarkRunner initialised: '
@@ -469,6 +470,7 @@ class BenchmarkRunner:
             model_result.inference_times.append(inference_time)
             model_result.fold_predictions.append(y_pred.copy())
             model_result.fold_actuals.append(y_test.copy())
+            model_result.fold_train_targets.append(y_train.copy())
 
         # Aggregate across folds — compute mean for all metrics
         if model_result.fold_metrics:
@@ -534,36 +536,51 @@ class BenchmarkRunner:
                 logger.error(f'Benchmark failed for model {model_name}: {e}')
                 result.model_results[model_name] = ModelResult(model_name=model_name)
 
-        # Rank models by mean rank across folds (Demšar 2006)
-        # Within each fold, rank models by production metric, then average ranks
-        higher_is_better = self.production_metric in {'r_squared', 'coverage'}
+        # Composite ranking across folds (Demšar 2006)
+        # Within each fold, rank models by each of {MAE, RMSE, MASE},
+        # average the per-metric ranks to get a composite fold rank,
+        # then average composite ranks across folds.
+        _higher_better = {'r_squared', 'coverage'}
+        ranking_metrics = [m for m in self.metrics if m not in _higher_better]
+        if not ranking_metrics:
+            ranking_metrics = [self.production_metric]
+
         model_names = list(result.model_results.keys())
         n_folds = max(
             len(mr.fold_metrics) for mr in result.model_results.values()
         ) if result.model_results else 0
 
-        # Compute per-fold ranks
+        # Compute per-fold composite ranks
         fold_ranks = {name: [] for name in model_names}
         for fold_idx in range(n_folds):
-            fold_values = {}
+            # For each ranking metric, rank models in this fold
+            per_metric_ranks = {name: [] for name in model_names}
+            for metric_name in ranking_metrics:
+                higher_is_better = metric_name in _higher_better
+                fold_values = {}
+                for name in model_names:
+                    mr = result.model_results[name]
+                    if fold_idx < len(mr.fold_metrics) and mr.fold_metrics[fold_idx]:
+                        fold_values[name] = mr.fold_metrics[fold_idx].get(
+                            metric_name, np.inf if not higher_is_better else -np.inf
+                        )
+                    else:
+                        fold_values[name] = np.inf if not higher_is_better else -np.inf
+
+                sorted_fold = sorted(
+                    fold_values.items(),
+                    key=lambda x: x[1],
+                    reverse=higher_is_better,
+                )
+                for rank, (name, _) in enumerate(sorted_fold):
+                    per_metric_ranks[name].append(rank + 1)
+
+            # Average across metrics to get composite fold rank
             for name in model_names:
-                mr = result.model_results[name]
-                if fold_idx < len(mr.fold_metrics) and mr.fold_metrics[fold_idx]:
-                    fold_values[name] = mr.fold_metrics[fold_idx].get(
-                        self.production_metric, np.inf if not higher_is_better else -np.inf
-                    )
-                else:
-                    fold_values[name] = np.inf if not higher_is_better else -np.inf
+                composite = float(np.mean(per_metric_ranks[name])) if per_metric_ranks[name] else float('inf')
+                fold_ranks[name].append(composite)
 
-            sorted_fold = sorted(
-                fold_values.items(),
-                key=lambda x: x[1],
-                reverse=higher_is_better,
-            )
-            for rank, (name, _) in enumerate(sorted_fold):
-                fold_ranks[name].append(rank + 1)
-
-        # Mean rank per model
+        # Mean composite rank per model across folds
         mean_ranks = {
             name: float(np.mean(ranks)) if ranks else float('inf')
             for name, ranks in fold_ranks.items()

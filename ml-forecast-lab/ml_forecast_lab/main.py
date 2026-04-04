@@ -572,9 +572,9 @@ class MLForecastLabApp:
                     mean=metric_means.get("rmse", 0.0),
                     std=metric_stds.get("rmse", 0.0),
                 ),
-                mape=MetricValue(
-                    mean=metric_means.get("mape", 0.0),
-                    std=metric_stds.get("mape", 0.0),
+                mase=MetricValue(
+                    mean=metric_means.get("mase", 0.0),
+                    std=metric_stds.get("mase", 0.0),
                 ),
                 train_time_seconds=runner_model_result.mean_train_time,
                 rank=rank,
@@ -1103,7 +1103,7 @@ class MLForecastLabApp:
                 f"  {m_name:<12} "
                 f"{mr.metrics.get('mae', np.nan):>8.4f} "
                 f"{mr.metrics.get('rmse', np.nan):>8.4f} "
-                f"{mr.metrics.get('mape', np.nan):>8.2f} "
+                f"{mr.metrics.get('mase', np.nan):>8.3f} "
                 f"{mr.mean_train_time:>7.1f}s "
                 f"{'#' + str(rank):>5}{marker}"
             )
@@ -1194,15 +1194,17 @@ class MLForecastLabApp:
             message=f"Running {len(strategy_enums)} ensemble strategy(ies) with {len(completed_models)} model(s)",
         ))
 
-        # Gather per-fold predictions and actuals from completed models
+        # Gather per-fold predictions, actuals, and train targets from completed models
         # Only include models that have fold_predictions populated
         fold_predictions = {}
         fold_actuals = None
+        fold_train_targets = None
         for m_name, mr in completed_models.items():
             if mr.fold_predictions and mr.fold_actuals:
                 fold_predictions[m_name] = mr.fold_predictions
                 if fold_actuals is None:
                     fold_actuals = mr.fold_actuals
+                    fold_train_targets = mr.fold_train_targets if mr.fold_train_targets else None
 
         if not fold_actuals or len(fold_predictions) < 2:
             logger.warning(
@@ -1231,6 +1233,7 @@ class MLForecastLabApp:
         )
 
         loop = asyncio.get_running_loop()
+        _fold_train = fold_train_targets  # capture for lambda
         ensemble_results = await loop.run_in_executor(
             None,
             lambda: engine.run_all(
@@ -1238,6 +1241,7 @@ class MLForecastLabApp:
                 fold_predictions,
                 fold_actuals,
                 model_metrics,
+                fold_train_targets=_fold_train,
             ),
         )
 
@@ -1264,17 +1268,9 @@ class MLForecastLabApp:
         best_individual_name = min(model_metrics, key=model_metrics.get) if model_metrics else ""
 
         method_results = []
-        best_ensemble_metric = np.inf
-        best_strategy = None
 
         for strat, eres in ensemble_results.items():
             pm = eres.metrics.get(runner.production_metric, np.inf)
-            # Compute std across fold metrics
-            fold_vals = [
-                fm.get(runner.production_metric, np.nan)
-                for fm in eres.fold_metrics if fm
-            ]
-            std_pm = float(np.nanstd(fold_vals)) if len(fold_vals) > 1 else 0.0
 
             method_results.append(EnsembleMethodResult(
                 strategy=strat.value,
@@ -1282,13 +1278,27 @@ class MLForecastLabApp:
                 member_models=eres.member_models,
                 mae=pm if runner.production_metric == "mae" else eres.metrics.get("mae", np.nan),
                 rmse=eres.metrics.get("rmse", np.nan),
-                mape=eres.metrics.get("mape", np.nan),
+                mase=eres.metrics.get("mase", np.nan),
                 weights=eres.weights,
             ))
 
-            if pm < best_ensemble_metric:
-                best_ensemble_metric = pm
-                best_strategy = strat.value
+        # Composite ranking: rank strategies by each metric, average ranks
+        _ranking_metrics = ["mae", "rmse", "mase"]
+        strat_keys = list(ensemble_results.keys())
+        if strat_keys:
+            composite_ranks = {s: [] for s in strat_keys}
+            for metric_name in _ranking_metrics:
+                vals = {s: ensemble_results[s].metrics.get(metric_name, np.inf) for s in strat_keys}
+                for rank, (s, _) in enumerate(sorted(vals.items(), key=lambda x: x[1])):
+                    composite_ranks[s].append(rank + 1)
+            best_strat = min(composite_ranks, key=lambda s: np.mean(composite_ranks[s]))
+            best_strategy = best_strat.value
+            best_ensemble_metric = ensemble_results[best_strat].metrics.get(
+                runner.production_metric, np.inf
+            )
+        else:
+            best_strategy = None
+            best_ensemble_metric = np.inf
 
         # Improvement vs best individual
         improvement_pct = None
@@ -1353,7 +1363,7 @@ class MLForecastLabApp:
         for mr in method_results:
             logger.info(
                 f"    {mr.display_name:<20} "
-                f"MAE={mr.mae:>8.4f}  RMSE={mr.rmse:>8.4f}  MAPE={mr.mape:>8.2f}"
+                f"MAE={mr.mae:>8.4f}  RMSE={mr.rmse:>8.4f}  MASE={mr.mase:>8.3f}"
             )
         if improvement_pct is not None:
             direction = "better" if improvement_pct > 0 else "worse"

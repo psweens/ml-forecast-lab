@@ -64,7 +64,7 @@ class EnsembleEngine:
     ) -> None:
         self.metric_registry = metric_registry
         self.production_metric = production_metric
-        self.metrics = metrics or ["mae", "rmse", "mape"]
+        self.metrics = metrics or ["mae", "rmse", "mase"]
 
     # ------------------------------------------------------------------
     # Strategy implementations
@@ -253,6 +253,7 @@ class EnsembleEngine:
         fold_predictions: Dict[str, List[np.ndarray]],
         fold_actuals: List[np.ndarray],
         model_metrics: Optional[Dict[str, float]] = None,
+        fold_train_targets: Optional[List[np.ndarray]] = None,
     ) -> Dict[EnsembleStrategy, EnsembleResult]:
         """
         Run all requested ensemble strategies and compute metrics.
@@ -267,6 +268,8 @@ class EnsembleEngine:
             Per-fold actual values.
         model_metrics : dict[str, float], optional
             Per-model MAE (or production metric) for weighted averaging.
+        fold_train_targets : list[np.ndarray], optional
+            Per-fold training targets for MASE computation.
 
         Returns
         -------
@@ -321,9 +324,8 @@ class EnsembleEngine:
             fold_actuals[f] = fold_actuals[f].ravel()[:min_len]
 
         results: Dict[EnsembleStrategy, EnsembleResult] = {}
-        # Exclude metrics that require y_train (e.g. mase) — we don't have
-        # training data available in the ensemble context
-        _skip = {"mase"}
+        # Exclude metrics that require y_train if training data not provided
+        _skip = set() if fold_train_targets else {"mase"}
         metrics_to_compute = [
             m for m in set(self.metrics + [self.production_metric])
             if m not in _skip
@@ -364,10 +366,14 @@ class EnsembleEngine:
                     y_pred = combined[f].ravel()
                     # Align lengths (stacking/ravel may differ)
                     min_len = min(len(y_true), len(y_pred))
+                    extra_kwargs = {}
+                    if fold_train_targets and f < len(fold_train_targets):
+                        extra_kwargs["y_train"] = fold_train_targets[f].ravel()
                     fm = self.metric_registry.compute_all(
                         metrics_to_compute,
                         y_true[:min_len],
                         y_pred[:min_len],
+                        **extra_kwargs,
                     )
                     fold_metrics_list.append(fm)
 

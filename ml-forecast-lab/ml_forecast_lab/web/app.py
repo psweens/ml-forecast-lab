@@ -41,7 +41,7 @@ class ModelResult(BaseModel):
     name: str
     mae: MetricValue
     rmse: MetricValue
-    mape: MetricValue
+    mase: MetricValue
     train_time_seconds: float
     rank: int
     mean_rank: float = 0.0
@@ -147,7 +147,7 @@ class EnsembleMethodResult(BaseModel):
     member_models: List[str]
     mae: float
     rmse: float
-    mape: float
+    mase: float
     weights: Optional[Dict[str, float]] = None
 
 
