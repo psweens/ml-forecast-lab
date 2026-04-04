@@ -166,21 +166,6 @@ class XGBoostModel(ForecastModel):
             X_val, y_val = eval_set
             w_train = sample_weight
 
-        # Create XGBRegressor with specified hyperparameters
-        self.model = xgb.XGBRegressor(
-            n_estimators=self.n_estimators,
-            max_depth=self.max_depth,
-            learning_rate=self.learning_rate,
-            subsample=self.subsample,
-            colsample_bytree=self.colsample_bytree,
-            reg_alpha=self.reg_alpha,
-            reg_lambda=self.reg_lambda,
-            tree_method=self.tree_method,
-            verbosity=self.verbose,
-            random_state=42,
-            early_stopping_rounds=50,
-        )
-
         # Build per-round callback for live training progress
         epoch_callback = kwargs.get("epoch_callback")
         best_val_loss = float('inf')
@@ -221,6 +206,23 @@ class XGBoostModel(ForecastModel):
                     return False  # Don't stop training
             xgb_callbacks.append(_EpochCB())
 
+        # Create XGBRegressor with specified hyperparameters
+        # callbacks passed to constructor for XGBoost 2.1+ compatibility
+        self.model = xgb.XGBRegressor(
+            n_estimators=self.n_estimators,
+            max_depth=self.max_depth,
+            learning_rate=self.learning_rate,
+            subsample=self.subsample,
+            colsample_bytree=self.colsample_bytree,
+            reg_alpha=self.reg_alpha,
+            reg_lambda=self.reg_lambda,
+            tree_method=self.tree_method,
+            verbosity=self.verbose,
+            random_state=42,
+            early_stopping_rounds=50,
+            callbacks=xgb_callbacks if xgb_callbacks else None,
+        )
+
         # Train with early stopping
         self.model.fit(
             X_train_split,
@@ -228,7 +230,6 @@ class XGBoostModel(ForecastModel):
             sample_weight=w_train,
             eval_set=[(X_val, y_val)],
             verbose=False,
-            callbacks=xgb_callbacks if xgb_callbacks else None,
         )
 
         # Extract training metadata
