@@ -456,8 +456,13 @@
             </thead>
             <tbody>
                 {% if ensemble_result.best_individual_model %}
-                <tr style="opacity: 0.7;">
-                    <td><span class="model-name">Best Individual ({{ ensemble_result.best_individual_model }})</span></td>
+                <tr {% if ensemble_result.best_strategy == "best_individual" %}class="best-model"{% else %}style="opacity: 0.7;"{% endif %}>
+                    <td>
+                        <span class="model-name">Best Individual ({{ ensemble_result.best_individual_model }})</span>
+                        {% if ensemble_result.best_strategy == "best_individual" %}
+                        <span class="badge badge-success" style="margin-left: 0.5rem;">Best</span>
+                        {% endif %}
+                    </td>
                     <td>{{ "%.4f"|format(ensemble_result.best_individual_mae) }}</td>
                     <td>{{ "%.4f"|format(ensemble_result.best_individual_rmse) }}</td>
                     <td>{{ "%.3f"|format(ensemble_result.best_individual_mase) }}</td>

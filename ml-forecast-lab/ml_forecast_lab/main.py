@@ -1282,17 +1282,30 @@ class MLForecastLabApp:
                 weights=eres.weights,
             ))
 
-        # Composite ranking: rank strategies by each metric, average ranks
+        # Composite ranking: rank all candidates (ensembles + best individual)
         _ranking_metrics = ["mae", "rmse", "mase"]
+        best_ind_metrics = completed_models[best_individual_name].metrics if best_individual_name else {}
         strat_keys = list(ensemble_results.keys())
         if strat_keys:
-            composite_ranks = {s: [] for s in strat_keys}
+            # Include best individual as a candidate in the ranking
+            _BEST_IND_KEY = "__best_individual__"
+            candidate_keys = strat_keys + [_BEST_IND_KEY]
+            composite_ranks = {c: [] for c in candidate_keys}
             for metric_name in _ranking_metrics:
                 vals = {s: ensemble_results[s].metrics.get(metric_name, np.inf) for s in strat_keys}
-                for rank, (s, _) in enumerate(sorted(vals.items(), key=lambda x: x[1])):
-                    composite_ranks[s].append(rank + 1)
-            best_strat = min(composite_ranks, key=lambda s: np.mean(composite_ranks[s]))
-            best_strategy = best_strat.value
+                vals[_BEST_IND_KEY] = best_ind_metrics.get(metric_name, np.inf)
+                for rank, (c, _) in enumerate(sorted(vals.items(), key=lambda x: x[1])):
+                    composite_ranks[c].append(rank + 1)
+            best_candidate = min(composite_ranks, key=lambda c: np.mean(composite_ranks[c]))
+
+            if best_candidate == _BEST_IND_KEY:
+                best_strategy = "best_individual"
+            else:
+                best_strategy = best_candidate.value
+
+            # Best ensemble strategy (excluding individual) for improvement calc
+            ensemble_only_ranks = {s: composite_ranks[s] for s in strat_keys}
+            best_strat = min(ensemble_only_ranks, key=lambda s: np.mean(ensemble_only_ranks[s]))
             best_ensemble_metric = ensemble_results[best_strat].metrics.get(
                 runner.production_metric, np.inf
             )
@@ -1304,9 +1317,6 @@ class MLForecastLabApp:
         improvement_pct = None
         if np.isfinite(best_individual) and best_individual > 0 and np.isfinite(best_ensemble_metric):
             improvement_pct = (best_individual - best_ensemble_metric) / best_individual * 100
-
-        # Get all metrics for the best individual model
-        best_ind_metrics = completed_models[best_individual_name].metrics if best_individual_name else {}
 
         ensemble_data = EnsembleResultData(
             experiment_name=experiment_name,

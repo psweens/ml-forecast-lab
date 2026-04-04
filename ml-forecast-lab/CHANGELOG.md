@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.18.3
+
+### Improvement
+- **Ensemble "Best" badge**: the "Best" badge now considers the best individual
+  model alongside ensemble strategies in the composite ranking. If the individual
+  model beats all ensembles, it gets the badge instead.
+
 ## 1.18.2
 
 ### Bug Fix
