@@ -118,14 +118,14 @@ class CNNModel(ForecastModel):
 
     def __init__(
         self,
-        n_filters: int = 32,
+        n_filters: int = 16,
         kernel_size: int = 3,
         n_layers: int = 4,
         dilation_base: int = 2,
         learning_rate: float = 2e-4,
         epochs: int = 100,
         batch_size: int = 64,
-        dropout: float = 0.2,
+        dropout: float = 0.15,
         loss_fn: str = 'mse',
         patience: int = 20,
     ) -> None:

@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.20.0
+
+### Hyperparameter Tuning
+- **LightGBM**: stronger regularisation to reduce overfitting — num_leaves 31→20,
+  min_child_samples 10→25, max_depth 6→5, reg_lambda 0.1→1.0, reg_alpha 0.1→0.5,
+  learning_rate 0.05→0.03, subsample 0.8→0.7
+- **XGBoost**: aligned with LightGBM changes — max_depth 6→5, learning_rate
+  0.05→0.03, reg_alpha 0.1→0.5, subsample 0.8→0.7
+- **DLinear**: kernel_size 25→13 (sharper daily patterns), learning_rate 2e-4→5e-4
+- **SparseTSF**: dropout 0.1→0.05, learning_rate 2e-4→5e-4
+- **LSTM**: hidden_size 64→32, num_layers 2→1, dropout 0.2→0.1
+- **CNN**: n_filters 32→16, dropout 0.2→0.15
+- **PatchTST**: d_model 32→16, n_heads 4→2, n_encoder_layers 2→1
+- **N-BEATS/N-HiTS**: hidden_size 64→32
+
 ## 1.19.1
 
 ### Fix

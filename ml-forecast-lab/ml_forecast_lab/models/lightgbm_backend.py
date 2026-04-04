@@ -45,14 +45,14 @@ class LightGBMModel(ForecastModel):
     def __init__(
         self,
         n_estimators: int = 500,
-        max_depth: int = 6,
-        learning_rate: float = 0.05,
-        num_leaves: int = 31,
-        min_child_samples: int = 10,
-        subsample: float = 0.8,
+        max_depth: int = 5,
+        learning_rate: float = 0.03,
+        num_leaves: int = 20,
+        min_child_samples: int = 25,
+        subsample: float = 0.7,
         colsample_bytree: float = 0.8,
-        reg_alpha: float = 0.1,
-        reg_lambda: float = 0.1,
+        reg_alpha: float = 0.5,
+        reg_lambda: float = 1.0,
         verbose: int = -1,
     ):
         """

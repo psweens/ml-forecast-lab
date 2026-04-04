@@ -100,7 +100,7 @@ class NBeatsModel(ForecastModel):
 
     def __init__(
         self,
-        hidden_size: int = 64,
+        hidden_size: int = 32,
         n_stacks: int = 2,
         blocks_per_stack: int = 2,
         n_fc_layers: int = 4,

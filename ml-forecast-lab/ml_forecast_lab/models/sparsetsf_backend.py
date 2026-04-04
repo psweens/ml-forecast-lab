@@ -104,8 +104,8 @@ class SparseTSFModel(ForecastModel):
     def __init__(
         self,
         period_len: int = 48,
-        dropout: float = 0.1,
-        learning_rate: float = 2e-4,
+        dropout: float = 0.05,
+        learning_rate: float = 5e-4,
         epochs: int = 100,
         batch_size: int = 64,
         sequence_length: Optional[int] = None,

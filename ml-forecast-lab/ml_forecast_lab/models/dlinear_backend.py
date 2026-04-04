@@ -75,8 +75,8 @@ class DLinearModel(ForecastModel):
 
     def __init__(
         self,
-        kernel_size: int = 25,
-        learning_rate: float = 2e-4,
+        kernel_size: int = 13,
+        learning_rate: float = 5e-4,
         epochs: int = 100,
         batch_size: int = 64,
         sequence_length: Optional[int] = None,

@@ -95,9 +95,9 @@ class LSTMModel(ForecastModel):
 
     def __init__(
         self,
-        hidden_size: int = 64,
-        num_layers: int = 2,
-        dropout: float = 0.2,
+        hidden_size: int = 32,
+        num_layers: int = 1,
+        dropout: float = 0.1,
         learning_rate: float = 2e-4,
         epochs: int = 100,
         batch_size: int = 64,

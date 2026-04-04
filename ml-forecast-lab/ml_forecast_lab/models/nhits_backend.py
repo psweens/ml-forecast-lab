@@ -141,7 +141,7 @@ class NHiTSModel(ForecastModel):
 
     def __init__(
         self,
-        hidden_size: int = 64,
+        hidden_size: int = 32,
         n_stacks: int = 3,
         blocks_per_stack: int = 1,
         pool_kernels: Optional[List[int]] = None,
