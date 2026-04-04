@@ -364,7 +364,10 @@ class BenchmarkRunner:
                     if target_col in df_train.columns:
                         # Use original df slice (with DatetimeIndex) for temporal features
                         df_train_raw = df.iloc[train_idx]
-                        window_size = min(48, len(df_train_raw) // 3)
+                        # Window ≥ 2× max horizon for sufficient context
+                        max_horizon = max(horizon_steps) if horizon_steps else 1
+                        min_window = max(48, max_horizon * 2)
+                        window_size = min(min_window, len(df_train_raw) // 3)
                         if window_size >= 12:
                             seq_X, seq_y, channel_names = create_sliding_windows(
                                 df_train_raw, target_col, window_size=window_size,

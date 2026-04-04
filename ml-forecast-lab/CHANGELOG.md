@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.21.1
+
+### Improvement
+- **Neural model window size**: sliding window size is now derived from
+  `max(48, 2 × max_horizon_steps)` instead of a fixed cap of 48. For
+  horizons [2h, 8h, 12h, 24h] at 30-min intervals this gives 96 steps
+  (48 hours of context), giving neural models twice as much lookback as
+  their longest prediction horizon.
+
 ## 1.21.0
 
 ### Feature Engineering
