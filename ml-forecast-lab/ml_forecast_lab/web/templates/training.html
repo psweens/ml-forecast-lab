@@ -1,6 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Training — ML Forecast Lab{% endblock %}
 
+{% block head_scripts %}
+<script src="{{ base_path | default('') }}/static/plotly-basic.min.js"></script>
+{% endblock %}
+
 {% block content %}
 <div class="dashboard-header">
     <h1>Training</h1>
@@ -44,15 +48,6 @@
     <h2>Live Training Progress</h2>
 
     <!-- Current model + fold indicator -->
-    <style>
-        .training-stat { flex: 1; min-width: 100px; overflow: hidden; }
-        .training-stat .stat-value {
-            font-size: clamp(0.95rem, 2.5vw, 1.4rem);
-            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-            display: block; padding: 0 0.25rem;
-        }
-        .training-stat .stat-label { font-size: 0.8rem; }
-    </style>
     <div id="current-status" style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem;">
         <div class="stat-box training-stat" style="min-width:140px;">
             <span class="stat-value" id="stat-model" style="color:var(--accent-secondary);">—</span>
@@ -142,6 +137,7 @@
         // Disable button
         const btn = document.getElementById('btn-run');
         btn.disabled = true;
+        btn.classList.add('btn-loading');
         document.getElementById('btn-run-text').textContent = 'Running...';
         pipelineRunning = true;
 
@@ -173,6 +169,7 @@
             if (r.status === 409) {
                 logEvent('warn', 'Pipeline already running');
                 btn.disabled = false;
+                btn.classList.remove('btn-loading');
                 document.getElementById('btn-run-text').textContent = 'Run Pipeline';
                 pipelineRunning = false;
                 return;
@@ -182,6 +179,7 @@
         }).catch(err => {
             logEvent('error', 'Failed to start pipeline: ' + err);
             btn.disabled = false;
+            btn.classList.remove('btn-loading');
             document.getElementById('btn-run-text').textContent = 'Run Pipeline';
             pipelineRunning = false;
         });
@@ -276,7 +274,9 @@
                 document.getElementById('progress-bar').style.width = '100%';
                 document.getElementById('progress-pct').textContent = '100%';
                 document.getElementById('progress-label').textContent = 'Pipeline complete';
-                document.getElementById('btn-run').disabled = false;
+                var doneBtn = document.getElementById('btn-run');
+                doneBtn.disabled = false;
+                doneBtn.classList.remove('btn-loading');
                 document.getElementById('btn-run-text').textContent = 'Run Pipeline';
                 pipelineRunning = false;
                 if (evtSource) evtSource.close();

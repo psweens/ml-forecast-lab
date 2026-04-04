@@ -2,7 +2,18 @@
 
 {% block title %}{{ experiment.name }} - ML Forecast Lab{% endblock %}
 
+{% block head_scripts %}
+<script src="{{ base_path | default('') }}/static/plotly-basic.min.js"></script>
+{% endblock %}
+
 {% block content %}
+<!-- Breadcrumb -->
+<nav class="breadcrumb">
+    <a href="{{ base_path | default('') }}/">Dashboard</a>
+    <span class="breadcrumb-sep">&rsaquo;</span>
+    <span class="breadcrumb-current">{{ experiment.name }}</span>
+</nav>
+
 <div class="experiment-header">
     <div class="header-top">
         <h1>{{ experiment.name }}</h1>
@@ -49,9 +60,22 @@
     <div id="promote-message"></div>
 </div>
 
+<!-- Section navigation -->
+{% if benchmark_result %}
+<nav class="section-nav" id="section-nav">
+    <a href="#sec-results" class="active">Results</a>
+    <a href="#sec-predictions">Predictions</a>
+    <a href="#sec-residuals">Residuals</a>
+    <a href="#sec-features">Features</a>
+    <a href="#sec-ensemble">Ensemble</a>
+    {% if deep_analysis %}<a href="#sec-deep-analysis">Deep Analysis</a>{% endif %}
+    <a href="#sec-run-info">Run Info</a>
+</nav>
+{% endif %}
+
 {% if benchmark_result %}
 <!-- Model Comparison Table -->
-<section class="section">
+<section class="section" id="sec-results">
     <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Models are ranked by mean rank across CV folds (Demšar 2006). Within each fold, models are ranked by MAE; the average of these per-fold ranks determines the final ranking. This rewards consistency — a model that reliably places 1st or 2nd beats one that's sometimes 1st but sometimes last.</span></span></h2>
     <div class="table-container">
         <table class="metrics-table">
@@ -139,7 +163,7 @@
 </section>
 
 <!-- Multi-Model Predictions (Lab Mode) -->
-<section class="section">
+<section class="section" id="sec-predictions">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
         <h2 style="margin-bottom: 0;">Model Predictions on Holdout Data <span class="info-tip">?<span class="tip-text">Shows how each model's predictions (coloured lines) compare to actual values (white dotted line) on the last 20% of data held out from training. Toggle to cumulative view to see total demand over time — useful for assessing overall accuracy.</span></span></h2>
         {% if lab_forecast and lab_forecast.model_predictions %}
@@ -246,14 +270,16 @@
     </script>
     {% else %}
     <div class="empty-state">
-        <p>No holdout predictions yet. Run a benchmark to generate model comparison charts.</p>
+        <span class="empty-state-icon">📊</span>
+        <p>No holdout predictions yet.</p>
+        <p class="empty-state-hint">Run a benchmark to generate model comparison charts.</p>
     </div>
     {% endif %}
 </section>
 
 <!-- Residual Plot -->
 {% if lab_forecast and lab_forecast.model_predictions %}
-<section class="section">
+<section class="section" id="sec-residuals">
     <h2>Prediction Residuals <span class="info-tip">?<span class="tip-text">Residuals = Actual minus Predicted. Values near zero mean accurate predictions. Consistent positive values indicate underestimation; negative values indicate overestimation. Patterns (e.g. time-of-day bias) suggest the model is missing a feature.</span></span></h2>
     <div id="residual-chart" style="min-height: 400px;"></div>
     <script>
@@ -303,7 +329,7 @@
 {% endif %}
 
 <!-- Feature Importance -->
-<section class="section">
+<section class="section" id="sec-features">
     <h2>Feature Importance <span class="info-tip">?<span class="tip-text">Shows which input features contribute most to the model's predictions. Higher importance means the feature has more influence. Only available for tree-based models (LightGBM, XGBoost).</span></span></h2>
     {% if feature_importances %}
     {% for fi in feature_importances %}
@@ -320,7 +346,7 @@
                 y: names,
                 type: 'bar',
                 orientation: 'h',
-                marker: { color: '#0f3460' }
+                marker: { color: '#00d4ff' }
             };
 
             const layout = {
@@ -338,14 +364,16 @@
     {% endfor %}
     {% else %}
     <div class="empty-state">
-        <p>Feature importance data will appear after a benchmark run with tree-based models.</p>
+        <span class="empty-state-icon">🌲</span>
+        <p>No feature importance data yet.</p>
+        <p class="empty-state-hint">Run a benchmark with tree-based models (LightGBM, XGBoost) to see feature rankings.</p>
     </div>
     {% endif %}
 </section>
 
 <!-- Ensemble Configuration -->
 {% if benchmark_result %}
-<section class="section" id="ensemble-config-section">
+<section class="section" id="sec-ensemble">
     <h2>Ensemble <span class="info-tip">?<span class="tip-text">Combines predictions from multiple models. Select which models to include using Top-N (auto-picks best by production metric) or custom selection. You can re-run ensemble with different settings without re-training.</span></span></h2>
 
     <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin-bottom:1rem;">
@@ -475,7 +503,7 @@
 
 <!-- Deep Analysis Results -->
 {% if deep_analysis %}
-<section class="section">
+<section class="section" id="sec-deep-analysis">
     <h2>Deep Covariate Analysis <span class="info-tip">?<span class="tip-text">Tests every model with different covariate combinations to find which external features help and which ones hurt. The % change column shows impact relative to the "All covariates" baseline. Positive = worse, negative = better.</span></span></h2>
 
     {% if deep_analysis.status == 'running' %}
@@ -544,7 +572,7 @@
 {% endif %}
 
 <!-- Benchmark Run Info -->
-<div class="benchmark-info">
+<div class="benchmark-info" id="sec-run-info">
     <h3>Latest Benchmark Run</h3>
     <dl>
         <dt>Status:</dt>
@@ -567,7 +595,9 @@
 {% else %}
 <section class="section">
     <div class="empty-state">
-        <p>No benchmark results yet. Click "Run Benchmark" to start model comparison.</p>
+        <span class="empty-state-icon">🚀</span>
+        <p>No benchmark results yet.</p>
+        <p class="empty-state-hint">Click "Run Benchmark" above to start model comparison.</p>
     </div>
 </section>
 {% endif %}
@@ -598,12 +628,13 @@
 
     function runEnsemble(name, btn) {
         btn.disabled = true;
+        btn.classList.add('btn-loading');
         btn.textContent = 'Running...';
 
         var topNSelect = document.getElementById('ensemble-top-n');
         var strategies = Array.from(document.querySelectorAll('.ensemble-strategy:checked')).map(function(cb) { return cb.value; });
         if (strategies.length === 0) {
-            alert('Select at least one ensemble strategy');
+            mlfl.toast('Select at least one ensemble strategy', 'warning');
             btn.disabled = false;
             btn.textContent = 'Run Ensemble';
             return;
@@ -614,7 +645,7 @@
         if (topNSelect.value === 'custom') {
             var selected = Array.from(document.querySelectorAll('.ensemble-model-cb:checked')).map(function(cb) { return cb.value; });
             if (selected.length < 2) {
-                alert('Select at least 2 models for ensemble');
+                mlfl.toast('Select at least 2 models for ensemble', 'warning');
                 btn.disabled = false;
                 btn.textContent = 'Run Ensemble';
                 return;
@@ -645,7 +676,7 @@
             }, 2000);
         })
         .catch(function(err) {
-            alert('Failed to start ensemble: ' + err);
+            mlfl.toast('Failed to start ensemble: ' + err, 'error');
             btn.disabled = false;
             btn.textContent = 'Run Ensemble';
         });
@@ -654,7 +685,8 @@
     // Deep analysis button
     function runDeepAnalysis(name, btn) {
         btn.disabled = true;
-        btn.textContent = '⏳ Analysing...';
+        btn.classList.add('btn-loading');
+        btn.textContent = 'Analysing...';
         var modelSelect = document.getElementById('deep-analysis-model');
         var selectedModel = modelSelect ? modelSelect.value : 'all';
         fetch(BASE_PATH + '/experiment/' + name + '/run-deep-analysis', {
@@ -678,20 +710,45 @@
                 }, 5000);
             })
             .catch(err => {
-                alert('Failed to start deep analysis: ' + err);
+                mlfl.toast('Failed to start deep analysis: ' + err, 'error');
                 btn.disabled = false;
                 btn.textContent = '🔬 Deep Analysis';
             });
     }
 
     const benchmarkBtn = document.getElementById('run-benchmark-btn');
-    if (benchmarkBtn && !benchmarkBtn.disabled && benchmarkBtn.hx-post) {
-        // When clicked, set up polling
+    if (benchmarkBtn && !benchmarkBtn.disabled) {
         benchmarkBtn.addEventListener('htmx:xhr:loadstart', function() {
             benchmarkBtn.disabled = true;
-            benchmarkBtn.textContent = '⏳ Running...';
+            benchmarkBtn.classList.add('btn-loading');
+            benchmarkBtn.textContent = 'Running...';
             window.mlfl.pollBenchmarkStatus('{{ experiment.name }}');
         });
     }
+
+    // Scroll-spy: highlight active section nav pill
+    (function() {
+        var nav = document.getElementById('section-nav');
+        if (!nav) return;
+        var links = nav.querySelectorAll('a[href^="#"]');
+        var sections = [];
+        links.forEach(function(a) {
+            var target = document.querySelector(a.getAttribute('href'));
+            if (target) sections.push({ link: a, el: target });
+        });
+        if (sections.length === 0) return;
+
+        var observer = new IntersectionObserver(function(entries) {
+            entries.forEach(function(entry) {
+                if (entry.isIntersecting) {
+                    links.forEach(function(l) { l.classList.remove('active'); });
+                    var match = sections.find(function(s) { return s.el === entry.target; });
+                    if (match) match.link.classList.add('active');
+                }
+            });
+        }, { rootMargin: '-80px 0px -60% 0px', threshold: 0 });
+
+        sections.forEach(function(s) { observer.observe(s.el); });
+    })();
 </script>
 {% endblock %}

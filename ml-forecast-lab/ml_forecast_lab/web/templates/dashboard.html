@@ -22,11 +22,10 @@
     </div>
     <div class="action-buttons">
         <button class="btn btn-primary"
-                hx-post="{{ base_path | default('') }}/experiment/*/run-benchmark"
-                hx-confirm="Run all benchmarks? This may take some time."
-                hx-target="#status-message"
-                hx-swap="innerHTML swap:1s">
-            ▶ Run All Benchmarks
+                onclick="mlfl.confirm('Run all benchmarks? This may take some time.', function() {
+                    htmx.ajax('POST', BASE_PATH + '/experiment/*/run-benchmark', {target:'#status-message', swap:'innerHTML swap:1s'});
+                })">
+            Run All Benchmarks
         </button>
     </div>
     <div id="status-message"></div>
@@ -99,7 +98,9 @@
         {% endfor %}
     {% else %}
     <div class="empty-state">
-        <p>No experiments configured. Add experiments to your configuration file.</p>
+        <span class="empty-state-icon">🧪</span>
+        <p>No experiments configured yet.</p>
+        <p class="empty-state-hint">Add experiments to your <code style="color: var(--accent-secondary);">mlfl.yaml</code> configuration file to get started.</p>
     </div>
     {% endif %}
 </section>
@@ -118,7 +119,7 @@
                 location.reload();
             })
             .catch(err => {
-                alert('Failed to toggle mode: ' + err);
+                mlfl.toast('Failed to toggle mode: ' + err, 'error');
                 btn.disabled = false;
             });
     }

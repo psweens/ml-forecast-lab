@@ -99,84 +99,6 @@
     </div>
 </section>
 
-<style>
-    .toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
-    .toggle-switch input { opacity: 0; width: 0; height: 0; }
-    .toggle-slider { position: absolute; cursor: pointer; inset: 0; background: var(--bg-primary);
-        border: 1px solid var(--border); border-radius: 24px; transition: 0.3s; }
-    .toggle-slider::before { content: ""; position: absolute; height: 18px; width: 18px; left: 2px; bottom: 2px;
-        background: var(--text-secondary); border-radius: 50%; transition: 0.3s; }
-    .toggle-switch input:checked + .toggle-slider { background: var(--success); border-color: var(--success); }
-    .toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); background: var(--bg-primary); }
-    .toggle-sm { width: 36px; height: 20px; }
-    .toggle-sm .toggle-slider::before { height: 14px; width: 14px; }
-    .toggle-sm input:checked + .toggle-slider::before { transform: translateX(16px); }
-
-    .model-card { transition: opacity 0.3s; }
-
-    .btn-configure {
-        background: transparent; border: 1px solid var(--border); color: var(--text-secondary);
-        padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.8rem;
-        display: flex; align-items: center; gap: 0.5rem; width: 100%; transition: all 0.2s;
-    }
-    .btn-configure:hover { border-color: var(--accent); color: var(--text-primary); }
-    .btn-configure .override-count {
-        margin-left: auto; background: rgba(0,212,255,0.15); color: #00d4ff;
-        padding: 0.1rem 0.5rem; border-radius: 10px; font-size: 0.75rem;
-    }
-
-    .params-panel {
-        border-top: 1px solid var(--border); padding: 1rem; background: rgba(0,0,0,0.15);
-    }
-
-    .param-row {
-        display: flex; align-items: center; justify-content: space-between;
-        padding: 0.4rem 0; gap: 1rem; border-left: 3px solid transparent;
-        padding-left: 0.5rem; margin-bottom: 0.15rem;
-    }
-    .param-row.param-overridden { border-left-color: var(--accent); }
-
-    .param-label {
-        font-size: 0.82rem; color: var(--text-secondary); flex: 1;
-        display: flex; align-items: center; gap: 0.4rem;
-    }
-    .override-dot {
-        display: inline-block; width: 6px; height: 6px; border-radius: 50%;
-        background: var(--accent); flex-shrink: 0;
-    }
-
-    .param-input {
-        background: var(--bg-primary); border: 1px solid var(--border); color: var(--text-primary);
-        padding: 0.35rem 0.5rem; border-radius: 4px; font-size: 0.82rem; width: 120px;
-        text-align: right;
-    }
-    .param-input:focus { outline: none; border-color: var(--accent); }
-    select.param-input { width: 130px; text-align: left; }
-
-    .param-actions {
-        display: flex; gap: 0.75rem; margin-top: 0.75rem; padding-top: 0.75rem;
-        border-top: 1px solid var(--border);
-    }
-    .btn-save {
-        background: var(--accent); color: var(--bg-primary); border: none;
-        padding: 0.45rem 1.2rem; border-radius: 6px; cursor: pointer; font-weight: 600;
-        font-size: 0.82rem; transition: opacity 0.2s;
-    }
-    .btn-save:hover { opacity: 0.85; }
-    .btn-reset {
-        background: transparent; border: 1px solid var(--border); color: var(--text-secondary);
-        padding: 0.45rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.82rem;
-        transition: all 0.2s;
-    }
-    .btn-reset:hover { border-color: var(--warning); color: var(--warning); }
-
-    .param-status {
-        font-size: 0.8rem; margin-top: 0.5rem; min-height: 1.2rem;
-    }
-    .param-status.success { color: var(--success); }
-    .param-status.error { color: var(--error); }
-</style>
-
 <script>
 function toggleModel(el, name) {
     var card = document.getElementById('card-' + name);
@@ -288,7 +210,9 @@ function saveParams(event, name) {
 }
 
 function resetParams(name) {
-    if (!confirm('Reset ' + name + ' to default hyperparameters?')) return;
+    mlfl.confirm('Reset ' + name + ' to default hyperparameters?', function() { doResetParams(name); });
+}
+function doResetParams(name) {
     var status = document.getElementById('status-' + name);
     fetch(BASE_PATH + '/api/models/params/reset', {
         method: 'POST',

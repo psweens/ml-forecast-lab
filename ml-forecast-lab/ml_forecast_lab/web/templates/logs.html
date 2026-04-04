@@ -29,19 +29,6 @@
         font-size: 0.8rem; line-height: 1.5; color: var(--text-primary); white-space: pre-wrap; word-wrap: break-word;">{{ log_content }}</pre>
 </section>
 
-<style>
-    .log-filter.active { background: var(--accent-secondary); color: var(--bg-primary); }
-    #log-output .log-error { color: #e74c3c; font-weight: 600; }
-    #log-output .log-warning { color: #f39c12; }
-    #log-output .log-separator { color: #00d4ff; opacity: 0.8; }
-    #log-output .log-result { color: #2ecc71; }
-    #log-output .log-star { color: #f39c12; font-weight: 600; }
-    #log-output .log-benchmark { color: #00d4ff; font-weight: 600; }
-    #log-output .log-stats { color: #b0b0b0; }
-    #log-output .log-model { color: #9b59b6; }
-    #log-output .log-timestamp { color: #5a6a7a; }
-    #log-output .log-production { color: #2ecc71; font-weight: 600; }
-</style>
 {% endblock %}
 
 {% block scripts %}

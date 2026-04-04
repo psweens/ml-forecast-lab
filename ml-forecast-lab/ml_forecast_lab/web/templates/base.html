@@ -4,125 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}ML Forecast Lab{% endblock %}</title>
-    <style>
-    :root {
-        --bg-primary: #1a1a2e; --bg-secondary: #16213e; --bg-tertiary: #0f3460;
-        --accent-primary: #e94560; --accent-secondary: #00d4ff;
-        --text-primary: #e0e0e0; --text-secondary: #b0b0b0; --border: #2d3561;
-        --success: #2ecc71; --warning: #f39c12; --error: #e74c3c;
-    }
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        background: linear-gradient(135deg, var(--bg-primary), var(--bg-secondary));
-        color: var(--text-primary); line-height: 1.6; min-height: 100vh; display: flex; flex-direction: column; }
-    main { flex: 1; }
-    .navbar { background: var(--bg-secondary); border-bottom: 2px solid var(--bg-tertiary);
-        padding: 1rem; box-shadow: 0 2px 8px rgba(0,0,0,0.3); position: sticky; top: 0; z-index: 100; }
-    .navbar-container { max-width: 1400px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; }
-    .navbar-brand { display: flex; align-items: center; gap: 1rem; color: var(--accent-secondary); font-weight: bold; font-size: 1.2rem; }
-    .brand-logo { font-size: 1.5rem; }
-    .navbar-menu { display: flex; list-style: none; gap: 2rem; }
-    .nav-link { color: var(--text-primary); text-decoration: none; padding: 0.5rem 1rem; border-radius: 0.5rem; transition: all 0.3s; }
-    .nav-link:hover { color: var(--accent-secondary); background: rgba(0,212,255,0.1); }
-    .nav-link.active { color: var(--accent-secondary); background: rgba(0,212,255,0.15); border: 1px solid rgba(0,212,255,0.3); }
-    .container { max-width: 1400px; margin: 0 auto; padding: 2rem; width: 100%; }
-    .dashboard-header { margin-bottom: 2rem; }
-    .dashboard-header h1 { font-size: 2.5rem; margin-bottom: 1rem; color: var(--accent-secondary); }
-    .subtitle { color: var(--text-secondary); margin-bottom: 1.5rem; }
-    .header-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
-    .stat-box { background: var(--bg-secondary); padding: 1.5rem; border-radius: 0.75rem; border: 1px solid var(--border); text-align: center; }
-    .stat-value { display: block; font-size: 2rem; font-weight: bold; color: var(--accent-primary); margin-bottom: 0.5rem; }
-    .stat-label { display: block; font-size: 0.9rem; color: var(--text-secondary); text-transform: uppercase; }
-    .action-buttons { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
-    .btn { padding: 0.5rem 1.5rem; border: none; border-radius: 0.5rem; font-size: 0.95rem; font-weight: 600;
-        cursor: pointer; transition: all 0.3s; text-decoration: none; display: inline-flex; align-items: center; gap: 0.5rem; }
-    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
-    .btn-primary { background: var(--accent-secondary); color: var(--bg-primary); }
-    .btn-primary:hover:not(:disabled) { background: #00c0e0; box-shadow: 0 4px 12px rgba(0,212,255,0.3); }
-    .btn-secondary { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); }
-    .btn-secondary:hover { background: var(--bg-secondary); border-color: var(--accent-secondary); }
-    .btn-success { background: var(--success); color: var(--bg-primary); }
-    .status-badge { display: inline-block; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.8rem; font-weight: 700; text-transform: uppercase; }
-    .status-lab { background: rgba(243,156,18,0.2); color: #f39c12; }
-    .status-production { background: rgba(46,204,113,0.2); color: #2ecc71; }
-    .status-running { background: rgba(52,152,219,0.2); color: #3498db; animation: pulse 2s infinite; }
-    .status-completed { background: rgba(46,204,113,0.2); color: #2ecc71; }
-    .status-failed { background: rgba(231,76,60,0.2); color: #e74c3c; }
-    .status-pending { background: rgba(0,212,255,0.15); color: #00d4ff; }
-    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
-    @keyframes glow-pulse { 0%,100% { box-shadow: 0 0 4px currentColor; } 50% { box-shadow: 0 0 12px currentColor; } }
-    .status-badge.training { animation: glow-pulse 1.5s ease-in-out infinite; }
-    .experiments-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.5rem; margin-bottom: 2rem; }
-    .experiment-card { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 0.75rem;
-        overflow: hidden; transition: all 0.3s; display: flex; flex-direction: column; }
-    .experiment-card:hover { border-color: var(--accent-secondary); box-shadow: 0 8px 20px rgba(0,212,255,0.15); transform: translateY(-4px); }
-    .card-header { padding: 1.5rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
-    .card-title { font-size: 1.3rem; color: var(--accent-secondary); margin: 0; }
-    .card-body { padding: 1.5rem; flex: 1; }
-    .card-field { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
-    .card-field:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
-    .field-label { font-size: 0.9rem; color: var(--text-secondary); font-weight: 600; text-transform: uppercase; }
-    .field-value { color: var(--text-primary); text-align: right; flex: 1; margin-left: 1rem; }
-    .monospace { font-family: 'Courier New', monospace; font-size: 0.85rem; word-break: break-all; }
-    .card-footer { padding: 1.5rem; border-top: 1px solid var(--border); }
-    .experiment-header { margin-bottom: 2rem; }
-    .header-top { display: flex; align-items: center; gap: 1.5rem; margin-bottom: 1rem; }
-    .experiment-header h1 { font-size: 2rem; color: var(--accent-secondary); }
-    .section { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 0.75rem; padding: 2rem; margin-bottom: 2rem; }
-    .section h2 { color: var(--accent-secondary); margin-bottom: 1.5rem; font-size: 1.5rem; }
-    .table-container { overflow-x: auto; }
-    .metrics-table, .fold-table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
-    .metrics-table thead, .fold-table thead { background: var(--bg-tertiary); }
-    .metrics-table th, .fold-table th { padding: 1rem; text-align: left; font-weight: 700; color: var(--accent-secondary); border-bottom: 2px solid var(--border); }
-    .metrics-table td, .fold-table td { padding: 1rem; border-bottom: 1px solid var(--border); }
-    .metrics-table tbody tr:hover { background: rgba(0,212,255,0.05); }
-    .metrics-table tbody tr.best-model { background: rgba(46,204,113,0.1); }
-    .model-name { font-weight: 600; color: var(--accent-secondary); }
-    .metric-value { display: block; font-weight: 600; }
-    .metric-std { display: block; font-size: 0.85rem; color: var(--text-secondary); }
-    .rank-badge { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 50%; font-weight: bold; }
-    .rank-1 { background: var(--success); color: var(--bg-primary); }
-    .rank-2 { background: var(--accent-secondary); color: var(--bg-primary); }
-    .rank-3 { background: #9b59b6; color: white; }
-    .badge { display: inline-block; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.8rem; font-weight: 600; }
-    .badge-success { background: rgba(46,204,113,0.2); color: #2ecc71; }
-    .badge-secondary { background: rgba(149,165,166,0.2); color: #95a5a6; }
-    .fold-metrics { margin-top: 1.5rem; padding: 1.5rem; background: var(--bg-tertiary); border-radius: 0.5rem; cursor: pointer; }
-    .fold-metrics summary { color: var(--accent-secondary); font-weight: 600; }
-    .fold-content { padding: 1.5rem; margin-top: 1.5rem; }
-    .fold-section { margin-bottom: 2rem; }
-    .fold-section h4 { color: var(--accent-secondary); margin-bottom: 1rem; }
-    .benchmark-info { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 0.75rem; padding: 1.5rem; margin-bottom: 2rem; }
-    .benchmark-info h3 { color: var(--accent-secondary); margin-bottom: 1.5rem; }
-    .benchmark-info dl { display: grid; grid-template-columns: auto 1fr; gap: 1rem 1.5rem; }
-    .benchmark-info dt { font-weight: 600; color: var(--text-secondary); }
-    .benchmark-info dd { color: var(--text-primary); }
-    .benchmark-info dd.error { color: var(--error); }
-    .empty-state { text-align: center; padding: 2rem 1.5rem; color: var(--text-secondary); }
-    .footer { background: var(--bg-secondary); border-top: 1px solid var(--border); padding: 1.5rem; text-align: center; color: var(--text-secondary); font-size: 0.9rem; margin-top: auto; }
-    #status-message, #promote-message { margin-top: 1rem; padding: 1rem; border-radius: 0.5rem; text-align: center; }
-    #status-message:not(:empty), #promote-message:not(:empty) { background: rgba(46,204,113,0.2); color: #2ecc71; border: 1px solid #2ecc71; }
-    @media (max-width: 768px) {
-        .container { padding: 1.5rem; } .dashboard-header h1 { font-size: 1.8rem; }
-        .experiments-grid { grid-template-columns: 1fr; } .action-buttons { flex-direction: column; }
-        .btn { justify-content: center; width: 100%; } .header-top { flex-direction: column; align-items: flex-start; }
-        .navbar-container { flex-direction: column; gap: 1rem; } .navbar-menu { width: 100%; justify-content: center; }
-        .card-field { flex-direction: column; } .field-value { text-align: left; margin-left: 0; margin-top: 0.25rem; }
-    }
-    .info-tip { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
-        border-radius: 50%; background: rgba(0,212,255,0.15); color: var(--accent-secondary); font-size: 0.7rem;
-        font-weight: 700; cursor: help; margin-left: 0.4rem; position: relative; vertical-align: middle; }
-    .info-tip .tip-text { display: none; position: fixed; background: var(--bg-tertiary); color: var(--text-primary);
-        padding: 0.75rem 1rem; border-radius: 0.5rem; font-size: 0.82rem; font-weight: 400; white-space: normal;
-        width: max-content; max-width: 320px; border: 1px solid var(--accent-secondary);
-        box-shadow: 0 8px 24px rgba(0,0,0,0.5); z-index: 9999; line-height: 1.5; pointer-events: none; }
-    .info-tip:hover .tip-text { display: block; }
-    :focus-visible { outline: 2px solid var(--accent-secondary); outline-offset: 2px; }
-    </style>
-    <!-- HTMX for interactive updates -->
-    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
-    <!-- Plotly for charting -->
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <link rel="stylesheet" href="{{ base_path | default('') }}/static/style.css">
+    <script src="{{ base_path | default('') }}/static/htmx.min.js"></script>
+    {% block head_scripts %}{% endblock %}
     <script>var BASE_PATH = "{{ base_path | default('') }}";</script>
 </head>
 <body>
@@ -132,7 +16,10 @@
                 <span class="brand-logo">📈</span>
                 <span class="brand-text">ML Forecast Lab</span>
             </div>
-            <ul class="navbar-menu">
+            <button class="hamburger" onclick="this.classList.toggle('open');document.getElementById('nav-menu').classList.toggle('nav-open');" aria-label="Menu">
+                <span></span><span></span><span></span>
+            </button>
+            <ul class="navbar-menu" id="nav-menu">
                 <li><a href="{{ base_path | default('') }}/" class="nav-link {% if active_page == 'dashboard' %}active{% endif %}">Dashboard</a></li>
                 <li><a href="{{ base_path | default('') }}/models" class="nav-link {% if active_page == 'models' %}active{% endif %}">Models</a></li>
                 <li><a href="{{ base_path | default('') }}/training" class="nav-link {% if active_page == 'training' %}active{% endif %}">Training</a></li>
@@ -150,11 +37,25 @@
         <p>ML Forecast Lab · Created by <a href="https://github.com/psweens" target="_blank" style="color: var(--accent-secondary); text-decoration: none;">Dr Paul W. Sweeney</a></p>
     </footer>
 
+    <!-- Toast container -->
+    <div id="toast-container"></div>
+
+    <!-- Confirm modal -->
+    <div id="confirm-modal" class="modal-overlay" style="display:none;">
+        <div class="modal-dialog">
+            <p id="confirm-modal-message"></p>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="mlfl._confirmReject()">Cancel</button>
+                <button class="btn btn-primary" onclick="mlfl._confirmAccept()">Confirm</button>
+            </div>
+        </div>
+    </div>
+
     <script>
-        // Utility functions for dashboard
+        // Utility functions
         window.mlfl = {
-            pollInterval: 5000, // 5 seconds
-            maxPolls: 120, // 10 minutes max
+            pollInterval: 5000,
+            maxPolls: 120,
 
             pollBenchmarkStatus: function(experimentName) {
                 let pollCount = 0;
@@ -166,117 +67,54 @@
                         })
                         .then(data => {
                             if (data && data.status === 'completed') {
-                                // Reload experiment page
                                 location.reload();
                                 clearInterval(pollId);
                             } else if (data && data.status === 'failed') {
-                                alert('Benchmark failed: ' + (data.error_message || 'Unknown error'));
+                                mlfl.toast('Benchmark failed: ' + (data.error_message || 'Unknown error'), 'error');
                                 clearInterval(pollId);
                             }
                             pollCount++;
-                            if (pollCount > window.mlfl.maxPolls) {
-                                clearInterval(pollId);
-                            }
+                            if (pollCount > window.mlfl.maxPolls) clearInterval(pollId);
                         })
                         .catch(err => {
                             console.error('Poll error:', err);
                             pollCount++;
-                            if (pollCount > window.mlfl.maxPolls) {
-                                clearInterval(pollId);
-                            }
+                            if (pollCount > window.mlfl.maxPolls) clearInterval(pollId);
                         });
                 }, window.mlfl.pollInterval);
             },
 
-            drawForecastChart: function(elementId, forecastData) {
-                if (!forecastData || !forecastData.points) return;
-
-                const timestamps = forecastData.points.map(p => p.timestamp);
-                const actual = forecastData.points.map(p => p.actual);
-                const predicted = forecastData.points.map(p => p.predicted_mean);
-                const lower = forecastData.points.map(p => p.predicted_lower);
-                const upper = forecastData.points.map(p => p.predicted_upper);
-
-                const trace_actual = {
-                    x: timestamps,
-                    y: actual,
-                    name: 'Actual',
-                    mode: 'lines',
-                    line: { color: '#e94560', width: 2 }
-                };
-
-                const trace_predicted = {
-                    x: timestamps,
-                    y: predicted,
-                    name: 'Predicted',
-                    mode: 'lines',
-                    line: { color: '#00d4ff', width: 2 }
-                };
-
-                const trace_upper = {
-                    x: timestamps,
-                    y: upper,
-                    name: 'Upper 95%',
-                    mode: 'lines',
-                    line: { color: 'rgba(0, 212, 255, 0)' },
-                    showlegend: false
-                };
-
-                const trace_lower = {
-                    x: timestamps,
-                    y: lower,
-                    name: 'Lower 95%',
-                    mode: 'lines',
-                    line: { color: 'rgba(0, 212, 255, 0)' },
-                    fill: 'tonexty',
-                    fillcolor: 'rgba(0, 212, 255, 0.2)',
-                    showlegend: false
-                };
-
-                const layout = {
-                    title: `Forecast: ${forecastData.experiment_name} (${forecastData.horizon_minutes}min horizon)`,
-                    xaxis: { title: 'Time' },
-                    yaxis: { title: 'Value' },
-                    hovermode: 'x unified',
-                    plot_bgcolor: '#16213e',
-                    paper_bgcolor: '#1a1a2e',
-                    font: { color: '#e0e0e0' },
-                    margin: { l: 80, r: 40, t: 60, b: 60 }
-                };
-
-                const config = { responsive: true, displayModeBar: true };
-
-                Plotly.newPlot(elementId, [trace_lower, trace_upper, trace_actual, trace_predicted], layout, config);
+            // Toast notification system
+            toast: function(message, level) {
+                level = level || 'info';
+                var container = document.getElementById('toast-container');
+                var el = document.createElement('div');
+                el.className = 'toast toast-' + level;
+                el.textContent = message;
+                container.appendChild(el);
+                // Trigger animation
+                requestAnimationFrame(function() { el.classList.add('toast-visible'); });
+                setTimeout(function() {
+                    el.classList.remove('toast-visible');
+                    setTimeout(function() { el.remove(); }, 300);
+                }, 4000);
             },
 
-            drawFeatureImportance: function(elementId, features) {
-                if (!features || features.length === 0) return;
-
-                // Take top 20 features
-                const topFeatures = features.slice(0, 20);
-                const names = topFeatures.map(f => f.name);
-                const importances = topFeatures.map(f => f.importance);
-
-                const trace = {
-                    x: importances,
-                    y: names,
-                    type: 'bar',
-                    orientation: 'h',
-                    marker: { color: '#00d4ff' }
-                };
-
-                const layout = {
-                    title: 'Top 20 Feature Importances',
-                    xaxis: { title: 'Importance' },
-                    plot_bgcolor: '#16213e',
-                    paper_bgcolor: '#1a1a2e',
-                    font: { color: '#e0e0e0' },
-                    margin: { l: 300, r: 40, t: 60, b: 60 }
-                };
-
-                const config = { responsive: true, displayModeBar: false };
-
-                Plotly.newPlot(elementId, [trace], layout, config);
+            // Styled confirm dialog
+            _confirmCallback: null,
+            confirm: function(message, onConfirm) {
+                document.getElementById('confirm-modal-message').textContent = message;
+                document.getElementById('confirm-modal').style.display = 'flex';
+                mlfl._confirmCallback = onConfirm;
+            },
+            _confirmAccept: function() {
+                document.getElementById('confirm-modal').style.display = 'none';
+                if (mlfl._confirmCallback) mlfl._confirmCallback();
+                mlfl._confirmCallback = null;
+            },
+            _confirmReject: function() {
+                document.getElementById('confirm-modal').style.display = 'none';
+                mlfl._confirmCallback = null;
             }
         };
     </script>

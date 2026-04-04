@@ -226,17 +226,6 @@
     </div>
 </section>
 
-<style>
-    .setting-input, .form-input {
-        background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border);
-        border-radius: 0.4rem; padding: 0.5rem 0.75rem; font-size: 0.95rem; font-family: inherit;
-        width: 100%; box-sizing: border-box;
-    }
-    .setting-input:focus, .form-input:focus { border-color: var(--accent-secondary); outline: none;
-        box-shadow: 0 0 0 2px rgba(0,212,255,0.2); }
-    select.setting-input, select.form-input { cursor: pointer; }
-    .form-input[type="number"] { width: 100%; }
-</style>
 {% endblock %}
 
 {% block scripts %}
@@ -264,12 +253,12 @@
                 setTimeout(function() { el.style.borderColor = ''; }, 2000);
             } else {
                 el.style.borderColor = 'var(--error)';
-                alert('Failed to save: ' + (result.error || 'Unknown error'));
+                mlfl.toast('Failed to save: ' + (result.error || 'Unknown error'), 'error');
             }
         })
         .catch(function(err) {
             el.style.borderColor = 'var(--error)';
-            alert('Error saving: ' + err);
+            mlfl.toast('Error saving: ' + err, 'error');
         });
     }
 

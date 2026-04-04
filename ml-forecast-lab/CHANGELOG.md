@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.16.0
+
+### UI Overhaul
+- **Offline-ready**: HTMX and Plotly bundled locally — no more CDN dependency
+- **Plotly conditional loading**: Plotly Basic (1MB) only loads on pages with charts
+  (experiment detail, training), not on Dashboard, Models, Logs, or System
+- **Consolidated CSS**: all inline `<style>` blocks consolidated into a single
+  `style.css`; activated the previously dead 708-line stylesheet
+- **Toast notifications**: all `alert()` calls replaced with themed slide-in toasts
+  (`mlfl.toast()`) for success, error, and warning messages
+- **Styled confirm modal**: browser `confirm()` replaced with dark-themed modal
+  dialog (`mlfl.confirm()`) for destructive actions
+- **Button loading spinners**: async operation buttons (Run Benchmark, Deep Analysis,
+  Run Ensemble, Run Pipeline) show CSS spinner during execution
+- **Experiment page navigation**: breadcrumb (Dashboard > experiment_name) and sticky
+  section nav with scroll-spy (Results, Predictions, Residuals, Features, Ensemble,
+  Deep Analysis, Run Info)
+- **Feature importance visibility**: bar colour changed from near-invisible `#0f3460`
+  to high-contrast `#00d4ff`
+- **Improved empty states**: icons and helpful hint text for missing benchmark
+  results, holdout predictions, and feature importance data
+- **Mobile hamburger menu**: responsive navigation collapses into animated
+  hamburger toggle on screens below 768px
+- **Reduced motion support**: respects `prefers-reduced-motion` media query
+
+### Cleanup
+- Deleted orphaned `settings.html` and `status.html` templates (routes already
+  redirect to `/system`)
+- Removed dead `mlfl.drawForecastChart()` and `mlfl.drawFeatureImportance()` JS
+  functions from `base.html` (never called by any template)
+
 ## 1.5.0
 
 ### Correctness Fixes
