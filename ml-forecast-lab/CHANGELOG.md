@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.18.1
+
+### UI Fixes
+- **Vibrant chart colours**: model and ensemble prediction line colours now
+  use the same high-contrast palette as the loss plots (`#00d4ff`,
+  `#e94560`, `#2ecc71`, `#f39c12`, `#9b59b6`, etc.)
+- **Residual chart cleanup**: ensemble traces filtered out of the residual
+  plot (they were only intended for the dedicated ensemble chart)
+
 ## 1.18.0
 
 ### Metrics & Ranking

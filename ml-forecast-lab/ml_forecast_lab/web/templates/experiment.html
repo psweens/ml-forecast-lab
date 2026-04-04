@@ -295,6 +295,7 @@
             const traces = [];
 
             labData.model_predictions.forEach(function(mp) {
+                if (mp.model_name.startsWith('Ensemble:')) return;
                 const residuals = mp.actuals.map(function(a, i) {
                     return (a !== null && a !== undefined) ? a - mp.predictions[i] : null;
                 });

@@ -918,20 +918,20 @@ class MLForecastLabApp:
 
         MODEL_COLORS = {
             "lightgbm": "#2ecc71",
-            "xgboost": "#3498db",
+            "xgboost": "#00d4ff",
             "lstm": "#f39c12",
-            "cnn": "#e74c3c",
+            "cnn": "#e94560",
             "neuralprophet": "#9b59b6",
             "dlinear": "#1abc9c",
             "nbeats": "#e67e22",
-            "nhits": "#d35400",
-            "tide": "#2980b9",
-            "tsmixer": "#8e44ad",
-            "sparsetsf": "#16a085",
-            "patchtst": "#c0392b",
-            "itransformer": "#f1c40f",
-            "crossformer": "#e84393",
-            "timesnet": "#00cec9",
+            "nhits": "#3498db",
+            "tide": "#e84393",
+            "tsmixer": "#00cec9",
+            "sparsetsf": "#ff6b6b",
+            "patchtst": "#a29bfe",
+            "itransformer": "#ffeaa7",
+            "crossformer": "#fd79a8",
+            "timesnet": "#55efc4",
         }
 
         def _generate_holdout_predictions():
@@ -1328,9 +1328,9 @@ class MLForecastLabApp:
             from ml_forecast_lab.web.app import ModelPrediction
 
             ENSEMBLE_COLORS = {
-                "simple_average": "#FFD700",
-                "weighted_average": "#FF6B6B",
-                "stacking": "#7B68EE",
+                "simple_average": "#f39c12",
+                "weighted_average": "#e94560",
+                "stacking": "#9b59b6",
             }
 
             # Use last fold's predictions for display (closest to holdout behaviour)
