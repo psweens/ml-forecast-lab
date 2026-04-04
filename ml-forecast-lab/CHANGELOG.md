@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.16.1
+
+### Bug Fixes
+- **SparseTSF deep analysis crash**: fixed `RuntimeError: shape '[64, 1, 0, 48]'
+  is invalid` when a "Without covariate" configuration reduced feature count below
+  `period_len` (48). The model now clamps `period_len` down to `seq_len` so at
+  least one complete period always fits.
+- **SparseTSF negative-zero slicing**: fixed `x[:, -0:, :]` silently returning
+  the full tensor instead of an empty slice, which caused the shape mismatch
+  error above.
+
 ## 1.16.0
 
 ### UI Overhaul

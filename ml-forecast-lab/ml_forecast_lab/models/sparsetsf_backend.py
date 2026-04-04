@@ -44,6 +44,11 @@ class _SparseTSFNet(nn.Module):
         self.n_channels = n_channels
         self.period_len = period_len
 
+        # Clamp period_len so at least one complete period fits
+        if period_len > seq_len:
+            period_len = max(1, seq_len)
+            self.period_len = period_len
+
         # Number of complete periods that fit in the sequence
         self.sub_len = seq_len // period_len
 
@@ -60,7 +65,7 @@ class _SparseTSFNet(nn.Module):
 
         # Use last (sub_len * period_len) timesteps to ensure complete periods
         effective_len = self.sub_len * self.period_len
-        x = x[:, -effective_len:, :]  # (batch, sub_len * period_len, n_channels)
+        x = x[:, x.size(1) - effective_len:, :]  # (batch, sub_len * period_len, n_channels)
 
         # Transpose to channel-first: (batch, n_channels, sub_len * period_len)
         x = x.transpose(1, 2)
