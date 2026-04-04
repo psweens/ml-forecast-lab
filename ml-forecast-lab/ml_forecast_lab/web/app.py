@@ -251,6 +251,13 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     templates = Jinja2Templates(directory=str(template_dir))
 
+    # Custom Jinja filters
+    def _humanise_name(value: str) -> str:
+        """Convert snake_case experiment names to Title Case for display."""
+        return value.replace("_", " ").title()
+
+    templates.env.filters["humanise"] = _humanise_name
+
     # Mount static files
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
@@ -759,6 +766,31 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "message": "Benchmark run accepted",
                 "experiment": name,
                 "status": "queued",
+            },
+        )
+
+    @app.post("/api/benchmarks/run-all")
+    async def run_all_benchmarks():
+        """Trigger benchmark runs for all experiments."""
+        queued = []
+        skipped = []
+        for name, status in app.state.appstate.experiment_statuses.items():
+            if app.state.appstate.is_benchmark_running(name):
+                skipped.append(name)
+            else:
+                app.state.appstate.start_benchmark(name)
+                if app.state.appstate.benchmark_callback:
+                    try:
+                        app.state.appstate.benchmark_callback(name)
+                    except Exception:
+                        pass
+                queued.append(name)
+        return JSONResponse(
+            status_code=202,
+            content={
+                "message": f"Queued {len(queued)} benchmark(s)",
+                "queued": queued,
+                "skipped": skipped,
             },
         )
 

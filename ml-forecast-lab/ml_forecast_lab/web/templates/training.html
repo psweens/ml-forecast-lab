@@ -14,25 +14,25 @@
 <!-- Experiment selector + pipeline controls -->
 <div class="section" style="margin-bottom:2rem;">
     <h2>Pipeline Control</h2>
-    <div style="display:flex;gap:1rem;align-items:flex-end;flex-wrap:wrap;">
-        <div style="flex:1;min-width:200px;">
-            <label style="display:block;margin-bottom:0.5rem;color:var(--text-secondary);font-weight:600;">Experiment</label>
-            <select id="exp-select" style="width:100%;padding:0.6rem 1rem;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:0.5rem;font-size:1rem;">
+    <div class="flex-row" style="align-items:flex-end;">
+        <div class="flex-1 min-w-200">
+            <label class="field-label mb-0-5" style="display:block;">Experiment</label>
+            <select id="exp-select" class="setting-input">
                 {% for exp in experiments %}
-                <option value="{{ exp.name }}">{{ exp.name }} ({{ exp.mode }})</option>
+                <option value="{{ exp.name }}">{{ exp.name | humanise }} ({{ exp.mode }})</option>
                 {% endfor %}
                 {% if not experiments %}
                 <option value="" disabled selected>No experiments configured</option>
                 {% endif %}
             </select>
         </div>
-        <div style="display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap;">
-            <label style="display:flex;align-items:center;gap:0.5rem;color:var(--text-secondary);cursor:pointer;">
-                <input type="checkbox" id="chk-ensemble" checked style="accent-color:var(--accent-secondary);width:18px;height:18px;">
+        <div class="flex-row gap-lg">
+            <label class="checkbox-label">
+                <input type="checkbox" id="chk-ensemble" checked class="checkbox-accent">
                 <span>Include Ensemble</span>
             </label>
-            <label style="display:flex;align-items:center;gap:0.5rem;color:var(--text-secondary);cursor:pointer;">
-                <input type="checkbox" id="chk-deep" style="accent-color:var(--accent-secondary);width:18px;height:18px;">
+            <label class="checkbox-label">
+                <input type="checkbox" id="chk-deep" class="checkbox-accent">
                 <span>Include Deep Analysis</span>
             </label>
         </div>

@@ -12,18 +12,18 @@
             <span class="stat-label">Total Experiments</span>
         </div>
         <div class="stat-box">
-            <span class="stat-value" style="color: #f39c12;">{{ lab_experiments }}</span>
+            <span class="stat-value color-warning">{{ lab_experiments }}</span>
             <span class="stat-label">Lab Mode</span>
         </div>
         <div class="stat-box">
-            <span class="stat-value" style="color: #2ecc71;">{{ production_experiments }}</span>
+            <span class="stat-value color-success">{{ production_experiments }}</span>
             <span class="stat-label">Production Mode</span>
         </div>
     </div>
     <div class="action-buttons">
         <button class="btn btn-primary"
                 onclick="mlfl.confirm('Run all benchmarks? This may take some time.', function() {
-                    htmx.ajax('POST', BASE_PATH + '/experiment/*/run-benchmark', {target:'#status-message', swap:'innerHTML swap:1s'});
+                    htmx.ajax('POST', BASE_PATH + '/api/benchmarks/run-all', {target:'#status-message', swap:'innerHTML swap:1s'});
                 })">
             Run All Benchmarks
         </button>
@@ -36,7 +36,7 @@
         {% for exp in experiments %}
         <div class="experiment-card">
             <div class="card-header">
-                <h3 class="card-title">{{ exp.name }}</h3>
+                <h3 class="card-title">{{ exp.name | humanise }}</h3>
                 <span class="status-badge status-{{ exp.mode | lower }} {% if exp.last_benchmark_status == 'running' %}training{% endif %}">
                     {{ exp.mode | upper }}
                 </span>
@@ -51,7 +51,7 @@
                 {% if exp.best_model %}
                 <div class="card-field">
                     <span class="field-label">{% if exp.mode == 'production' %}Production Model{% else %}Best Model{% endif %}</span>
-                    <span class="field-value" style="color: var(--accent-secondary); font-weight: 600;">{{ exp.best_model }}</span>
+                    <span class="field-value color-accent font-bold">{{ exp.best_model }}</span>
                 </div>
                 {% endif %}
 
@@ -84,14 +84,13 @@
                 {% endif %}
             </div>
 
-            <div class="card-footer" style="display: flex; gap: 0.75rem; justify-content: center; align-items: stretch;">
-                <a href="{{ base_path | default('') }}/experiment/{{ exp.name }}" class="btn btn-secondary" style="flex: 1; justify-content: center; text-align: center;">
-                    → View Details
+            <div class="card-footer card-footer-actions">
+                <a href="{{ base_path | default('') }}/experiment/{{ exp.name }}" class="btn btn-secondary flex-center">
+                    View Details
                 </a>
-                <button class="btn {% if exp.mode == 'lab' %}btn-success{% else %}btn-primary{% endif %}"
-                        style="flex: 1; justify-content: center; text-align: center; white-space: nowrap;"
+                <button class="btn {% if exp.mode == 'lab' %}btn-success{% else %}btn-primary{% endif %} flex-center nowrap"
                         onclick="toggleMode('{{ exp.name }}', this)">
-                    {% if exp.mode == 'lab' %}⚡ Production{% else %}🔬 Lab Mode{% endif %}
+                    {% if exp.mode == 'lab' %}Production{% else %}Lab Mode{% endif %}
                 </button>
             </div>
         </div>
@@ -100,7 +99,7 @@
     <div class="empty-state">
         <span class="empty-state-icon">🧪</span>
         <p>No experiments configured yet.</p>
-        <p class="empty-state-hint">Add experiments to your <code style="color: var(--accent-secondary);">mlfl.yaml</code> configuration file to get started.</p>
+        <p class="empty-state-hint">Add experiments to your <code class="color-accent">mlfl.yaml</code> configuration file to get started.</p>
     </div>
     {% endif %}
 </section>
@@ -112,7 +111,7 @@
     // Toggle mode via API
     function toggleMode(name, btn) {
         btn.disabled = true;
-        btn.textContent = '⏳ Switching...';
+        btn.classList.add('btn-loading');
         fetch(BASE_PATH + '/experiment/' + name + '/toggle-mode', { method: 'POST' })
             .then(r => r.json())
             .then(data => {
@@ -121,6 +120,7 @@
             .catch(err => {
                 mlfl.toast('Failed to toggle mode: ' + err, 'error');
                 btn.disabled = false;
+                btn.classList.remove('btn-loading');
             });
     }
 

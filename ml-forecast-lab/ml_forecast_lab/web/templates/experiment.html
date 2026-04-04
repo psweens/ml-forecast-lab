@@ -11,12 +11,12 @@
 <nav class="breadcrumb">
     <a href="{{ base_path | default('') }}/">Dashboard</a>
     <span class="breadcrumb-sep">&rsaquo;</span>
-    <span class="breadcrumb-current">{{ experiment.name }}</span>
+    <span class="breadcrumb-current">{{ experiment.name | humanise }}</span>
 </nav>
 
 <div class="experiment-header">
     <div class="header-top">
-        <h1>{{ experiment.name }}</h1>
+        <h1>{{ experiment.name | humanise }}</h1>
         <span class="status-badge status-{{ experiment.mode | lower }}">{{ experiment.mode | upper }}</span>
     </div>
     <p class="subtitle">{{ experiment.target_entity }}</p>
@@ -30,15 +30,21 @@
             {% if is_running %}⏳ Running...{% else %}▶ Run Benchmark{% endif %}
         </button>
         {% if experiment.best_model %}
+            {% if experiment.mode == 'production' %}
+        <button class="btn btn-success" disabled title="{{ experiment.best_model }} is already the production model">
+            ✓ In Production
+        </button>
+            {% else %}
         <button class="btn btn-success"
                 hx-post="{{ base_path | default('') }}/experiment/{{ experiment.name }}/promote/{{ experiment.best_model }}"
                 hx-target="#promote-message"
                 hx-swap="innerHTML swap:2s">
-            ⭐ Promote to Production
+            Promote to Production
         </button>
+            {% endif %}
         {% endif %}
-        <div style="display: inline-flex; align-items: center; gap: 0.5rem;">
-            <select id="deep-analysis-model" class="setting-input" style="padding: 0.4rem 0.6rem; font-size: 0.9rem;">
+        <div class="inline-group">
+            <select id="deep-analysis-model" class="setting-input select-narrow">
                 {% if best_model %}
                 <option value="{{ best_model }}">{{ best_model }} (best)</option>
                 {% endif %}
@@ -49,7 +55,7 @@
                 {% endfor %}
                 <option value="all">All models</option>
             </select>
-            <button class="btn" style="background: #9b59b6; color: white;"
+            <button class="btn btn-purple"
                     id="deep-analysis-btn"
                     onclick="runDeepAnalysis('{{ experiment.name }}', this)"
                     {% if deep_analysis and deep_analysis.status == 'running' %}disabled{% endif %}>

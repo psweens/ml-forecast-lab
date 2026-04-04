@@ -13,42 +13,46 @@
     <h2>System Info</h2>
     <div class="header-stats" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
         <div class="stat-box">
-            <span class="stat-value" style="color: var(--success); font-size: 1.5rem;">{{ health.status | upper }}</span>
+            <span class="stat-value text-stat-lg color-success">{{ health.status | upper }}</span>
             <span class="stat-label">Service Status</span>
         </div>
         <div class="stat-box">
-            <span class="stat-value" style="color: var(--accent-secondary); font-size: 1.5rem;">v{{ health.version }}</span>
+            <span class="stat-value text-stat-lg color-accent">v{{ health.version }}</span>
             <span class="stat-label">Version</span>
         </div>
         <div class="stat-box">
-            <span class="stat-value" style="color: var(--accent-primary); font-size: 1.5rem;">{{ health.experiments_total }}</span>
+            <span class="stat-value text-stat-lg color-accent-primary">{{ health.experiments_total }}</span>
             <span class="stat-label">Experiments</span>
         </div>
         <div class="stat-box">
-            <span class="stat-value" style="font-size: 1.5rem; color: var(--accent-secondary);">{{ system.cpu_cores }}</span>
+            <span class="stat-value text-stat-lg color-accent">{{ system.cpu_cores }}</span>
             <span class="stat-label">CPU Cores</span>
         </div>
         <div class="stat-box">
-            <span class="stat-value" style="font-size: 1.2rem; color: var(--accent-secondary);">{{ system.cpu_model }}</span>
+            <span class="stat-value text-stat-sm color-accent">{{ system.cpu_model }}</span>
             <span class="stat-label">Processor</span>
         </div>
         <div class="stat-box">
-            <span class="stat-value" style="font-size: 1.3rem; color: {% if system.memory_percent > 80 %}var(--error){% elif system.memory_percent > 60 %}var(--warning){% else %}var(--success){% endif %};">{{ system.memory_used_gb }}GB / {{ system.memory_total_gb }}GB</span>
-            <span class="stat-label">Memory ({{ system.memory_percent }}%)</span>
+            <span class="stat-value text-stat-md {% if system.memory_total_gb == 0 %}color-muted{% elif system.memory_percent > 80 %}color-error{% elif system.memory_percent > 60 %}color-warning{% else %}color-success{% endif %}">
+                {% if system.memory_total_gb == 0 %}N/A{% else %}{{ system.memory_used_gb }}GB / {{ system.memory_total_gb }}GB{% endif %}
+            </span>
+            <span class="stat-label">Memory{% if system.memory_total_gb > 0 %} ({{ system.memory_percent }}%){% endif %}</span>
         </div>
         <div class="stat-box">
-            <span class="stat-value" style="font-size: 1.3rem; color: {% if system.disk_percent > 80 %}var(--error){% elif system.disk_percent > 60 %}var(--warning){% else %}var(--success){% endif %};">{{ system.disk_used_gb }}GB / {{ system.disk_total_gb }}GB</span>
-            <span class="stat-label">Disk ({{ system.disk_percent }}%)</span>
+            <span class="stat-value text-stat-md {% if system.disk_total_gb == 0 %}color-muted{% elif system.disk_percent > 80 %}color-error{% elif system.disk_percent > 60 %}color-warning{% else %}color-success{% endif %}">
+                {% if system.disk_total_gb == 0 %}N/A{% else %}{{ system.disk_used_gb }}GB / {{ system.disk_total_gb }}GB{% endif %}
+            </span>
+            <span class="stat-label">Disk{% if system.disk_total_gb > 0 %} ({{ system.disk_percent }}%){% endif %}</span>
         </div>
     </div>
     <!-- Paths -->
-    <div style="margin-top: 1.5rem; display: grid; grid-template-columns: auto 1fr; gap: 0.5rem 1.5rem; font-size: 0.9rem;">
+    <div class="grid-paths mt-1-5">
         <span class="field-label">Config</span>
-        <span class="monospace" style="color: var(--text-secondary);">{{ config_path }}</span>
+        <span class="monospace color-muted">{{ config_path }}</span>
         <span class="field-label">Logs</span>
-        <span class="monospace" style="color: var(--text-secondary);">/data/ml_forecast_lab/logs/mlfl.log</span>
+        <span class="monospace color-muted">/data/ml_forecast_lab/logs/mlfl.log</span>
         <span class="field-label">Database</span>
-        <span class="monospace" style="color: var(--text-secondary);">/data/ml_forecast_lab/history.db</span>
+        <span class="monospace color-muted">/data/ml_forecast_lab/history.db</span>
     </div>
 </section>
 

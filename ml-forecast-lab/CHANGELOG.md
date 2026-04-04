@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.17.0
+
+### UX Polish
+- **Humanised experiment names**: experiment names display as title-case
+  (e.g. "Hot Water Demand") throughout the UI while preserving snake_case
+  in URLs and APIs. Added `humanise` Jinja filter.
+- **Dedicated run-all endpoint**: `POST /api/benchmarks/run-all` replaces
+  the brittle wildcard `POST /experiment/*/run-benchmark` pattern.
+- **Models page hint banner**: shows guidance when no models are enabled.
+- **System info N/A fallback**: memory and disk stats show "N/A" instead
+  of "0GB / 0GB" when values are unavailable (e.g. running outside container).
+- **Logs empty state**: helpful message shown when no log output exists.
+- **Promote button state**: disabled with "In Production" label when the
+  experiment is already in production mode, preventing confusing no-op clicks.
+- **Toggle keyboard accessibility**: custom toggle switches now show a
+  focus ring when navigated via keyboard (`focus-visible`).
+- **Deep Analysis select width**: constrained to `max-width: 200px` to
+  prevent stretching on wide screens.
+- **Section nav offset**: sticky top increased to 70px for reliable
+  clearance below the navbar.
+- **CSS utility classes**: extracted 50+ common inline style patterns into
+  reusable classes (`.color-success`, `.text-stat-lg`, `.flex-row`,
+  `.grid-paths`, `.hint-banner`, `.btn-purple`, etc.), reducing inline
+  `style=` attributes across dashboard, system, training, experiment, and
+  logs templates.
+
 ## 1.16.2
 
 ### UI Fixes

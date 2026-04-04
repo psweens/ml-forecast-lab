@@ -9,6 +9,11 @@
 </section>
 
 <section class="section">
+    {% if not models_enabled %}
+    <div class="hint-banner">
+        No models are currently enabled. Toggle models below to include them in benchmarking, or configure them in your <code>mlfl.yaml</code>.
+    </div>
+    {% endif %}
     <div class="experiments-grid" style="grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));">
         {% for model in models %}
         <div class="experiment-card model-card" id="card-{{ model.name }}" style="{% if model.name not in models_enabled %}opacity: 0.5;{% endif %}">
