@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.24.4
+
+### Improvements
+- **Dashboard publish toggle**: replaced large Publish/Stop Publishing buttons
+  with a compact toggle switch matching the Models tab style.
+- **Tuning holdout chart**: moved above the trials table (which is now collapsible).
+  Added interval/cumulative toggle matching the Predictions tab style.
+
 ## 1.24.3
 
 ### Bug Fix

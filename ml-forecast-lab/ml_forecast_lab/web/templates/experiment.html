@@ -634,43 +634,22 @@
         </div>
         {% endif %}
 
-        <!-- Trials table -->
-        <div class="table-container">
-            <table class="metrics-table">
-                <thead>
-                    <tr>
-                        <th>#</th>
-                        <th>MAE</th>
-                        <th>RMSE</th>
-                        <th>MASE</th>
-                        <th>Time</th>
-                        <th>Parameters</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for trial in tuning_result.trials | sort(attribute='mae') %}
-                    <tr class="{% if trial.trial_id == tuning_result.best_trial_id %}best-model{% endif %}{% if trial.status == 'failed' %} opacity-50{% endif %}">
-                        <td>{{ trial.trial_id }}</td>
-                        <td><span class="metric-value">{{ "%.4f"|format(trial.mae) if trial.mae < 1e6 else '—' }}</span></td>
-                        <td>{{ "%.4f"|format(trial.rmse) if trial.rmse < 1e6 else '—' }}</td>
-                        <td>{{ "%.3f"|format(trial.mase) if trial.mase < 1e6 else '—' }}</td>
-                        <td style="color:var(--text-secondary);font-size:0.85rem;">{{ "%.0f"|format(trial.duration_seconds) }}s</td>
-                        <td style="font-size:0.78rem;">
-                            {% for k, v in trial.params.items() %}
-                            <span style="display:inline-block;margin:0.1rem 0.15rem;padding:0.1rem 0.35rem;border-radius:0.2rem;background:var(--bg-tertiary);color:var(--text-secondary);">{{ k }}={{ "%.4g"|format(v) if v is number else v }}</span>
-                            {% endfor %}
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-        {% endif %}
-
-        <!-- Holdout comparison chart: default vs tuned -->
+        <!-- Holdout comparison chart: default vs tuned (above trials) -->
         {% if tuning_result.holdout_timestamps and tuning_result.holdout_tuned %}
-        <div style="margin-top:1.5rem;">
-            <h3>Holdout Comparison: Default vs Tuned</h3>
+        <div style="margin-bottom:1.5rem;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
+                <h3 style="margin:0;">Holdout Comparison: Default vs Tuned</h3>
+                <div style="display:flex;align-items:center;gap:0.5rem;">
+                    <span style="color:var(--text-secondary);font-size:0.85rem;">Interval</span>
+                    <label style="position:relative;display:inline-block;width:44px;height:24px;cursor:pointer;">
+                        <input type="checkbox" id="tuning-cumulative-toggle" onchange="toggleTuningCumulative(this.checked)"
+                               style="opacity:0;width:0;height:0;">
+                        <span style="position:absolute;top:0;left:0;right:0;bottom:0;background:var(--bg-tertiary);border-radius:12px;border:1px solid var(--border);transition:all 0.3s;"></span>
+                        <span id="tuning-toggle-knob" style="position:absolute;top:2px;left:2px;width:18px;height:18px;background:var(--text-secondary);border-radius:50%;transition:all 0.3s;"></span>
+                    </label>
+                    <span style="color:var(--text-secondary);font-size:0.85rem;">Cumulative</span>
+                </div>
+            </div>
             {% if tuning_result.default_mae is not none and tuning_result.best_score is not none %}
             <p style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:0.5rem;">
                 MAE: <span style="color:var(--text-muted);">{{ "%.4f"|format(tuning_result.default_mae) }} (default)</span>
@@ -683,6 +662,42 @@
             {% endif %}
             <div id="tuning-holdout-chart" style="min-height:400px;"></div>
         </div>
+        {% endif %}
+
+        <!-- Trials table -->
+        <details {% if not tuning_result.holdout_timestamps %}open{% endif %}>
+            <summary style="cursor:pointer;color:var(--text-secondary);font-weight:600;font-size:0.9rem;margin-bottom:0.5rem;">Trial Details ({{ tuning_result.trials | length }} trials)</summary>
+            <div class="table-container" style="margin-top:0.5rem;">
+                <table class="metrics-table">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>MAE</th>
+                            <th>RMSE</th>
+                            <th>MASE</th>
+                            <th>Time</th>
+                            <th>Parameters</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for trial in tuning_result.trials | sort(attribute='mae') %}
+                        <tr class="{% if trial.trial_id == tuning_result.best_trial_id %}best-model{% endif %}{% if trial.status == 'failed' %} opacity-50{% endif %}">
+                            <td>{{ trial.trial_id }}</td>
+                            <td><span class="metric-value">{{ "%.4f"|format(trial.mae) if trial.mae < 1e6 else '—' }}</span></td>
+                            <td>{{ "%.4f"|format(trial.rmse) if trial.rmse < 1e6 else '—' }}</td>
+                            <td>{{ "%.3f"|format(trial.mase) if trial.mase < 1e6 else '—' }}</td>
+                            <td style="color:var(--text-secondary);font-size:0.85rem;">{{ "%.0f"|format(trial.duration_seconds) }}s</td>
+                            <td style="font-size:0.78rem;">
+                                {% for k, v in trial.params.items() %}
+                                <span style="display:inline-block;margin:0.1rem 0.15rem;padding:0.1rem 0.35rem;border-radius:0.2rem;background:var(--bg-tertiary);color:var(--text-secondary);">{{ k }}={{ "%.4g"|format(v) if v is number else v }}</span>
+                                {% endfor %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </details>
         {% endif %}
     </div>
     {% endif %}
@@ -1039,26 +1054,49 @@ window.showTab = function(el) {
     {% endif %}
     {% endif %}
 
-    // ======== Tuning holdout comparison chart ========
+    // ======== Tuning holdout comparison chart (with cumulative toggle) ========
     {% if tuning_result and tuning_result.holdout_timestamps and tuning_result.holdout_tuned %}
-    queueChart('sec-tuning', function() {
-        var ts = {{ tuning_result.holdout_timestamps | tojson }};
-        var actuals = {{ tuning_result.holdout_actuals | tojson }};
-        var defPreds = {{ tuning_result.holdout_default | tojson }};
-        var tunedPreds = {{ tuning_result.holdout_tuned | tojson }};
+    var _tuningTs = {{ tuning_result.holdout_timestamps | tojson }};
+    var _tuningActuals = {{ tuning_result.holdout_actuals | tojson }};
+    var _tuningDefault = {{ tuning_result.holdout_default | tojson }};
+    var _tuningTuned = {{ tuning_result.holdout_tuned | tojson }};
+
+    function _tuningCumsum(arr, timestamps) {
+        var result = [], sum = 0, lastDate = '';
+        for (var i = 0; i < arr.length; i++) {
+            var thisDate = timestamps[i].split('T')[0];
+            if (thisDate !== lastDate) { sum = 0; lastDate = thisDate; }
+            sum += (arr[i] !== null && arr[i] !== undefined) ? arr[i] : 0;
+            result.push(sum);
+        }
+        return result;
+    }
+
+    window.renderTuningHoldout = function(cumulative) {
+        var a = cumulative ? _tuningCumsum(_tuningActuals, _tuningTs) : _tuningActuals;
+        var d = cumulative ? _tuningCumsum(_tuningDefault, _tuningTs) : _tuningDefault;
+        var t = cumulative ? _tuningCumsum(_tuningTuned, _tuningTs) : _tuningTuned;
         Plotly.newPlot('tuning-holdout-chart', [
-            { x: ts, y: actuals, name: 'Actual', mode: 'lines', line: { color: '#ffffff', width: 2, dash: 'dot' } },
-            { x: ts, y: defPreds, name: 'Default params', mode: 'lines', line: { color: '#ff6b6b', width: 2 } },
-            { x: ts, y: tunedPreds, name: 'Tuned params', mode: 'lines', line: { color: '#ffd93d', width: 2 } }
+            { x: _tuningTs, y: a, name: 'Actual', mode: 'lines', line: { color: '#ffffff', width: 2, dash: 'dot' } },
+            { x: _tuningTs, y: d, name: 'Default params', mode: 'lines', line: { color: '#ff6b6b', width: 2 } },
+            { x: _tuningTs, y: t, name: 'Tuned params', mode: 'lines', line: { color: '#ffd93d', width: 2 } }
         ], {
-            title: '{{ tuning_result.model_name }} — Default vs Tuned on Holdout',
+            title: (cumulative ? 'Daily Cumulative ' : '') + '{{ tuning_result.model_name }} — Default vs Tuned',
             xaxis: { title: 'Time', gridcolor: '#2d3561' },
-            yaxis: { title: 'Value{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
+            yaxis: { title: cumulative ? 'Daily Cumulative{{ " (" + units + ")" if units else "" }}' : 'Value{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
             hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
             font: { color: '#e0e0e0' }, legend: { orientation: 'h', y: -0.15 },
             margin: { l: 60, r: 20, t: 50, b: 80 }
         }, { responsive: true });
-    });
+    };
+
+    window.toggleTuningCumulative = function(checked) {
+        var knob = document.getElementById('tuning-toggle-knob');
+        if (knob) { knob.style.left = checked ? '22px' : '2px'; knob.style.background = checked ? 'var(--accent-secondary)' : 'var(--text-secondary)'; }
+        if (window.renderTuningHoldout) window.renderTuningHoldout(checked);
+    };
+
+    queueChart('sec-tuning', function() { window.renderTuningHoldout(false); });
     {% endif %}
 
     // ======== Feature importance charts ========
