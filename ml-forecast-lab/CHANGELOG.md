@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.23.2
+## 1.24.0
 
 ### New Feature: Selected Model
 - **Model selection in Results**: radio buttons in the model comparison table let
