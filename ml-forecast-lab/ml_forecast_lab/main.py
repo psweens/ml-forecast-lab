@@ -1296,6 +1296,7 @@ class MLForecastLabApp:
         # Best individual model metric for comparison
         best_individual = min(model_metrics.values()) if model_metrics else np.inf
         best_individual_name = min(model_metrics, key=model_metrics.get) if model_metrics else ""
+        best_ind_metrics = completed_models[best_individual_name].metrics if best_individual_name else {}
 
         method_results = []
 
