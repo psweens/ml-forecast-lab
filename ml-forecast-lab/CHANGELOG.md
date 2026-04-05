@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.22.2
+
+### Fix
+- **Remove early stop markers from live training charts**: the early stop
+  detection and marker rendering on loss curves didn't work reliably. Early
+  stop events are still logged to the training event log.
+
 ## 1.22.1
 
 ### UX Refinements
