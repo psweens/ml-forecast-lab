@@ -1491,7 +1491,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         # Config data
         config_data = {
-            "update_every_minutes": 360,
+            "forecast_every_minutes": 30,
+            "retrain_every_hours": 24.0,
+            "update_every_minutes": 30,
             "timezone": "UTC",
             "hailo_enabled": False,
             "cpu_cores": 0,
@@ -1506,7 +1508,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             from ml_forecast_lab.config import load_config as _load_config
             cfg = _load_config(config_path_str)
             config_data = {
-                "update_every_minutes": cfg.update_every_minutes,
+                "forecast_every_minutes": cfg.forecast_every_minutes,
+                "retrain_every_hours": cfg.retrain_every_hours,
+                "update_every_minutes": cfg.forecast_every_minutes,
                 "timezone": cfg.timezone,
                 "hailo_enabled": cfg.hailo_enabled,
                 "cpu_cores": cfg.cpu_cores,
