@@ -606,12 +606,18 @@
                     {% set cell = deep_analysis.results.get(label, {}).get(model) %}
                     <td>
                         {% if cell %}
-                        <span class="metric-value">{{ "%.4f" | format(cell.mae) }}</span>
-                        {% if cell.change_pct is not none %}
-                        <span class="metric-std" style="color: {% if cell.change_pct > 2 %}#e74c3c{% elif cell.change_pct < -2 %}#2ecc71{% else %}var(--text-secondary){% endif %};">
-                            {{ "%+.1f" | format(cell.change_pct) }}%
-                        </span>
-                        {% endif %}
+                        <div>
+                            <span class="metric-value">{{ "%.4f" | format(cell.mae) }}</span>
+                            {% if cell.change_pct is not none %}
+                            <span class="metric-std" style="color: {% if cell.change_pct > 2 %}#e74c3c{% elif cell.change_pct < -2 %}#2ecc71{% else %}var(--text-secondary){% endif %};">
+                                {{ "%+.1f" | format(cell.change_pct) }}%
+                            </span>
+                            {% endif %}
+                        </div>
+                        <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:0.15rem;">
+                            RMSE {{ "%.4f" | format(cell.rmse) }}{% if cell.rmse_change_pct is not none %} <span style="color:{% if cell.rmse_change_pct > 2 %}#e74c3c{% elif cell.rmse_change_pct < -2 %}#2ecc71{% else %}var(--text-secondary){% endif %};">{{ "%+.1f"|format(cell.rmse_change_pct) }}%</span>{% endif %}
+                            · MASE {% if cell.mase == cell.mase %}{{ "%.3f" | format(cell.mase) }}{% if cell.mase_change_pct is not none %} <span style="color:{% if cell.mase_change_pct > 2 %}#e74c3c{% elif cell.mase_change_pct < -2 %}#2ecc71{% else %}var(--text-secondary){% endif %};">{{ "%+.1f"|format(cell.mase_change_pct) }}%</span>{% endif %}{% else %}—{% endif %}
+                        </div>
                         {% else %}
                         <span style="color: var(--text-secondary);">—</span>
                         {% endif %}

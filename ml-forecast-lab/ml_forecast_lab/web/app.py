@@ -117,7 +117,10 @@ class DeepAnalysisCellResult(BaseModel):
     """Result for one model × one covariate configuration."""
     mae: float
     rmse: float
-    change_pct: Optional[float] = None  # % change vs baseline
+    mase: float = float('nan')
+    change_pct: Optional[float] = None      # MAE % change vs baseline
+    rmse_change_pct: Optional[float] = None  # RMSE % change vs baseline
+    mase_change_pct: Optional[float] = None  # MASE % change vs baseline
 
 
 class DeepAnalysisResult(BaseModel):

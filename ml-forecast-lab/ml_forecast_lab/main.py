@@ -1992,21 +1992,22 @@ class MLForecastLabApp:
                     def _train_and_eval():
                         model.fit(X_tr, y_tr)
                         y_pred = model.predict(X_te)
-                        if y_pred.ndim > 1:
-                            y_pred_flat = y_pred.ravel()
-                        else:
-                            y_pred_flat = y_pred
+                        y_pred_flat = y_pred.ravel() if y_pred.ndim > 1 else y_pred
                         mae_val = float(np.mean(np.abs(y_te - y_pred_flat)))
                         rmse_val = float(np.sqrt(np.mean((y_te - y_pred_flat) ** 2)))
-                        return mae_val, rmse_val
+                        # MASE: scale by naive forecast error from training set
+                        naive_err = float(np.mean(np.abs(np.diff(y_tr))))
+                        mase_val = float(np.mean(np.abs(y_te - y_pred_flat)) / naive_err) if naive_err > 0 else np.nan
+                        return mae_val, rmse_val, mase_val
 
-                    mae_val, rmse_val = await asyncio.get_running_loop().run_in_executor(
+                    mae_val, rmse_val, mase_val = await asyncio.get_running_loop().run_in_executor(
                         None, _train_and_eval
                     )
 
                     results[config_label][model_name] = DeepAnalysisCellResult(
                         mae=round(mae_val, 4),
                         rmse=round(rmse_val, 4),
+                        mase=round(mase_val, 3) if np.isfinite(mase_val) else float('nan'),
                     )
 
                     completed += 1
@@ -2023,32 +2024,37 @@ class MLForecastLabApp:
 
                 except Exception as e:
                     logger.warning(f"  Deep analysis failed for {config_label} × {model_name}: {e}")
-                    results[config_label][model_name] = DeepAnalysisCellResult(mae=np.nan, rmse=np.nan)
+                    results[config_label][model_name] = DeepAnalysisCellResult(mae=np.nan, rmse=np.nan, mase=float('nan'))
                     completed += 1
 
-        # Compute % change vs baseline and generate recommendations
+        # Compute % change vs baseline for all three metrics
+        _nan_cell = DeepAnalysisCellResult(mae=np.nan, rmse=np.nan, mase=float('nan'))
         baseline = results.get("All covariates", {})
         for config_label in results:
             for model_name in results[config_label]:
                 cell = results[config_label][model_name]
-                baseline_mae = baseline.get(model_name, DeepAnalysisCellResult(mae=np.nan, rmse=np.nan)).mae
-                if baseline_mae > 0 and not np.isnan(cell.mae) and not np.isnan(baseline_mae):
-                    cell.change_pct = round((cell.mae - baseline_mae) / baseline_mae * 100, 1)
+                base = baseline.get(model_name, _nan_cell)
+                if base.mae > 0 and np.isfinite(cell.mae) and np.isfinite(base.mae):
+                    cell.change_pct = round((cell.mae - base.mae) / base.mae * 100, 1)
+                if base.rmse > 0 and np.isfinite(cell.rmse) and np.isfinite(base.rmse):
+                    cell.rmse_change_pct = round((cell.rmse - base.rmse) / base.rmse * 100, 1)
+                if base.mase > 0 and np.isfinite(cell.mase) and np.isfinite(base.mase):
+                    cell.mase_change_pct = round((cell.mase - base.mase) / base.mase * 100, 1)
 
         # Generate recommendations
         recommendations = []
         no_cov = results.get("No covariates", {})
 
-        # Overall covariate value
+        # Overall covariate value (per model)
         for model_name in models_to_run:
-            base_mae = baseline.get(model_name, DeepAnalysisCellResult(mae=np.nan, rmse=np.nan)).mae
-            no_cov_mae = no_cov.get(model_name, DeepAnalysisCellResult(mae=np.nan, rmse=np.nan)).mae
-            if not np.isnan(base_mae) and not np.isnan(no_cov_mae):
+            base_mae = baseline.get(model_name, _nan_cell).mae
+            no_cov_mae = no_cov.get(model_name, _nan_cell).mae
+            if not np.isnan(base_mae) and not np.isnan(no_cov_mae) and no_cov_mae > 0:
                 improvement = (no_cov_mae - base_mae) / no_cov_mae * 100
                 if improvement > 5:
                     recommendations.append({
                         "icon": "✓",
-                        "text": f"Covariates improve {model_name} by {improvement:.1f}% — keep them",
+                        "text": f"Covariates improve {model_name} by {improvement:.1f}%",
                         "color": "#2ecc71",
                     })
                 elif improvement < -5:
@@ -2057,40 +2063,59 @@ class MLForecastLabApp:
                         "text": f"Covariates hurt {model_name} by {abs(improvement):.1f}% — consider removing",
                         "color": "#f39c12",
                     })
-                else:
-                    recommendations.append({
-                        "icon": "○",
-                        "text": f"Covariates have minimal impact on {model_name} ({improvement:+.1f}%)",
-                        "color": "#b0b0b0",
-                    })
 
-        # Per-covariate recommendations (using best tree model or first selected)
-        best_tree = "lightgbm" if "lightgbm" in models_to_run else models_to_run[0]
+        # Find the best-performing model (lowest baseline MAE) for per-covariate detail
+        ref_model = min(
+            models_to_run,
+            key=lambda m: baseline.get(m, _nan_cell).mae if np.isfinite(baseline.get(m, _nan_cell).mae) else np.inf,
+        )
+
+        # Per-covariate: cross-model consensus + detail from best model
         for cov_col in covariate_cols:
             label = f"Without {cov_col}"
             dropped = results.get(label, {})
-            drop_mae = dropped.get(best_tree, DeepAnalysisCellResult(mae=np.nan, rmse=np.nan)).mae
-            base_mae = baseline.get(best_tree, DeepAnalysisCellResult(mae=np.nan, rmse=np.nan)).mae
-            if not np.isnan(drop_mae) and not np.isnan(base_mae) and base_mae > 0:
-                impact = (drop_mae - base_mae) / base_mae * 100
-                if impact > 5:
-                    recommendations.append({
-                        "icon": "✓",
-                        "text": f"{cov_col} is important — dropping it increases {best_tree} MAE by {impact:.1f}%",
-                        "color": "#2ecc71",
-                    })
-                elif impact < -2:
-                    recommendations.append({
-                        "icon": "✗",
-                        "text": f"{cov_col} is harmful — dropping it improves {best_tree} MAE by {abs(impact):.1f}%",
-                        "color": "#e74c3c",
-                    })
-                else:
-                    recommendations.append({
-                        "icon": "○",
-                        "text": f"{cov_col} has marginal impact on {best_tree} ({impact:+.1f}%)",
-                        "color": "#b0b0b0",
-                    })
+
+            # Compute impact across ALL models
+            impacts = {}
+            for m in models_to_run:
+                d_mae = dropped.get(m, _nan_cell).mae
+                b_mae = baseline.get(m, _nan_cell).mae
+                if np.isfinite(d_mae) and np.isfinite(b_mae) and b_mae > 0:
+                    impacts[m] = (d_mae - b_mae) / b_mae * 100
+
+            if not impacts:
+                continue
+
+            avg_impact = np.mean(list(impacts.values()))
+            n_agree_helpful = sum(1 for v in impacts.values() if v > 2)
+            n_agree_harmful = sum(1 for v in impacts.values() if v < -2)
+            n_models = len(impacts)
+
+            # Cross-model consensus recommendation
+            if n_agree_helpful == n_models and avg_impact > 3:
+                recommendations.append({
+                    "icon": "✓",
+                    "text": f"{cov_col} is important — all {n_models} models agree (avg +{avg_impact:.1f}% MAE when dropped)",
+                    "color": "#2ecc71",
+                })
+            elif n_agree_harmful == n_models and avg_impact < -2:
+                recommendations.append({
+                    "icon": "✗",
+                    "text": f"{cov_col} is harmful — all {n_models} models agree (avg {avg_impact:.1f}% MAE when dropped)",
+                    "color": "#e74c3c",
+                })
+            elif n_agree_helpful > n_models / 2 and avg_impact > 3:
+                recommendations.append({
+                    "icon": "✓",
+                    "text": f"{cov_col} is important — {n_agree_helpful}/{n_models} models agree (avg +{avg_impact:.1f}% MAE when dropped)",
+                    "color": "#2ecc71",
+                })
+            elif n_agree_harmful > n_models / 2 and avg_impact < -2:
+                recommendations.append({
+                    "icon": "✗",
+                    "text": f"{cov_col} is harmful — {n_agree_harmful}/{n_models} models agree (avg {avg_impact:.1f}% MAE when dropped)",
+                    "color": "#e74c3c",
+                })
 
         # Store final results
         if self.web_app:

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.22.7
+
+### Deep Analysis Improvements
+- **MASE metric added**: deep analysis now computes MASE alongside MAE and RMSE,
+  with percentage change vs baseline for all three metrics.
+- **All metrics displayed**: each cell shows MAE (primary) with RMSE and MASE on
+  a second line, all with colour-coded change percentages.
+- **Cross-model consensus**: per-covariate recommendations now report when all
+  models (or a majority) agree a covariate is important or harmful, instead of
+  using a single reference model.
+- **Best-model reference**: per-covariate detail uses the best-performing model
+  by baseline MAE, not a hardcoded tree model preference.
+
 ## 1.22.4
 
 ### Bug Fixes
