@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.21.4
+
+### Bug Fix
+- **Training tab loses live view on tab switch**: navigating away from the
+  Training tab and returning now correctly restores the loss plot and live
+  SSE stream. Root causes: `run-pipeline` was not calling `start_benchmark()`
+  or `clear_history()`, so the UI could never detect an active run; the
+  `hasEnd` check treated any historical `pipeline_end` as proof the current
+  run had finished; and the Plotly chart rendered into a zero-dimension div
+  before the browser had laid it out.
+
 ## 1.21.3
 
 ### Bug Fix

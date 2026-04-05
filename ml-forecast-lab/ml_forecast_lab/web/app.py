@@ -1552,6 +1552,12 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if not getattr(app.state.appstate, 'benchmark_callback', None):
             raise HTTPException(status_code=501, detail="Benchmark callback not registered")
 
+        # Clear stale event history and mark as running so the UI can
+        # detect an active pipeline when the Training tab is re-opened.
+        from ml_forecast_lab.training_events import TrainingEventBus
+        TrainingEventBus.get_instance().clear_history(name)
+        app.state.appstate.start_benchmark(name)
+
         # Run the full pipeline as a background task
         async def _pipeline():
             try:
@@ -1566,6 +1572,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                     await app.state.appstate.deep_analysis_callback(name, "all")
             except Exception as e:
                 logger.error(f"Pipeline failed for {name}: {e}", exc_info=True)
+            finally:
+                app.state.appstate.end_benchmark(name)
 
         _aio.create_task(_pipeline())
 

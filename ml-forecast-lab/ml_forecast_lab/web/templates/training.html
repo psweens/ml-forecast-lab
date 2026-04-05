@@ -534,13 +534,17 @@
             .then(events => {
                 if (!events || events.length === 0) return;
 
-                // Check if there's a pipeline_start without a pipeline_end
-                let hasStart = false;
-                let hasEnd = false;
-                for (const ev of events) {
-                    if (ev.event_type === 'pipeline_start') hasStart = true;
-                    if (ev.event_type === 'pipeline_end') hasEnd = true;
+                // Find the LAST pipeline_start and check if a pipeline_end
+                // comes after it.  Old completed runs must not prevent
+                // reconnection for a newer active run.
+                let lastStartIdx = -1;
+                let lastEndIdx = -1;
+                for (let i = 0; i < events.length; i++) {
+                    if (events[i].event_type === 'pipeline_start') lastStartIdx = i;
+                    if (events[i].event_type === 'pipeline_end') lastEndIdx = i;
                 }
+                const hasStart = lastStartIdx >= 0;
+                const hasEnd = lastEndIdx > lastStartIdx;
 
                 if (hasStart) {
                     // Reset all state before replaying
@@ -566,11 +570,15 @@
                     }
                     isReplaying = false;
 
-                    // Select the last model in the dropdown and render its chart
-                    if (displayModel) {
-                        document.getElementById('model-select').value = displayModel;
-                        renderChartForModel(displayModel);
-                    }
+                    // Render the chart after the browser has laid out the
+                    // now-visible progress section so Plotly gets real
+                    // dimensions for the loss-chart div.
+                    requestAnimationFrame(() => {
+                        if (displayModel) {
+                            document.getElementById('model-select').value = displayModel;
+                            renderChartForModel(displayModel);
+                        }
+                    });
 
                     // If pipeline is still running, connect SSE for live updates
                     // Skip SSE history replay since we already replayed above
@@ -578,6 +586,7 @@
                         pipelineRunning = true;
                         const btn = document.getElementById('btn-run');
                         btn.disabled = true;
+                        btn.classList.add('btn-loading');
                         document.getElementById('btn-run-text').textContent = 'Running...';
                         connectSSE(sel.value, true);
                     }
