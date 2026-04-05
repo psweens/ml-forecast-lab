@@ -1591,84 +1591,56 @@ class MLForecastLabApp:
         future_periods = getattr(exp_cfg, 'future_periods', 48)
 
         if is_neural and 'sequence_data' in seq_kwargs:
-            # ----- Autoregressive sliding window prediction for LSTM/CNN -----
+            # ----- Direct multi-head prediction for neural models -----
+            # Build the last window in the same format used during training
+            # and call predict_sequence() to get all horizons at once.
             import torch
+            from ml_forecast_lab.features import create_sliding_windows
+
             window_size = seq_kwargs['sequence_data'].shape[1]
-            n_channels = seq_kwargs['sequence_data'].shape[2]
 
-            # Build initial window from last window_size rows of historical data
-            # Reconstruct with same channels as training
-            last_window_df = combined.iloc[-window_size:].copy()
-            last_window_df_raw = last_window_df[['target']].rename(columns={'target': 'target'})
-            raw_cov_cols_prod = [c for c in combined.columns if c not in engineered and c != 'target']
-            for c in raw_cov_cols_prod:
-                if c in last_window_df.columns:
-                    last_window_df_raw[c] = last_window_df[c]
+            # Re-create a single window from the tail of the training data
+            # using the same channel construction as create_sliding_windows
+            tail_len = window_size + max(horizon_steps_prod)
+            tail_df = combined.iloc[-tail_len:].copy()
+            seq_X_prod, _, _ = create_sliding_windows(
+                tail_df, 'target', window_size=window_size,
+                covariate_cols=raw_cov_cols_prod if raw_cov_cols_prod else None,
+                add_temporal=True,
+                horizon_steps=horizon_steps_prod,
+            )
 
-            # Add temporal features
-            idx = last_window_df.index
-            hour_rad = 2 * np.pi * idx.hour / 24
-            dow_rad = 2 * np.pi * idx.dayofweek / 7
-            last_window_df_raw['hour_sin'] = np.sin(hour_rad)
-            last_window_df_raw['hour_cos'] = np.cos(hour_rad)
-            last_window_df_raw['dow_sin'] = np.sin(dow_rad)
-            last_window_df_raw['dow_cos'] = np.cos(dow_rad)
-            last_window_df_raw['is_weekend'] = (idx.dayofweek >= 5).astype(np.float32)
+            # Use the last window for prediction
+            last_window = seq_X_prod[-1:] if len(seq_X_prod) > 0 else seq_X_prod
 
-            window = last_window_df_raw.values.astype(np.float32)
+            def _predict_multihead():
+                return model.predict_sequence(last_window)
 
-            # Apply z-score standardisation
-            if model._channel_mean is not None and model._channel_std is not None:
-                window = (window - model._channel_mean) / model._channel_std
+            multi_pred = await asyncio.get_running_loop().run_in_executor(
+                None, _predict_multihead
+            )
 
-            # Last known covariate values for filling future steps
-            last_covs = {}
-            for c in raw_cov_cols_prod:
-                last_covs[c] = float(combined[c].iloc[-1]) if c in combined.columns else 0.0
+            # multi_pred shape: (1, n_horizons) — one prediction per horizon step
+            multi_pred = multi_pred.ravel()
 
-            y_pred_list = []
-            model._model.eval()
-            with torch.no_grad():
-                for step in range(future_periods):
-                    # Predict next value from current window
-                    X_t = torch.FloatTensor(window).unsqueeze(0)  # (1, window_size, n_channels)
-                    pred_val = float(model._model(X_t).numpy().item())
-                    pred_val = max(0.0, pred_val)
-                    y_pred_list.append(pred_val)
+            # Build full forecast curve by interpolating between horizon points.
+            # horizon_steps_prod are in interval units (e.g., [4, 16, 24] for
+            # 2h, 8h, 12h at 30-min intervals).
+            if len(multi_pred) == 1:
+                # Single horizon — replicate for full curve
+                y_pred = np.full(future_periods, float(multi_pred[0]), dtype=np.float32)
+            else:
+                # Interpolate: steps 0..future_periods from the horizon anchor points
+                horizon_x = np.array(horizon_steps_prod, dtype=np.float32)
+                pred_y = multi_pred.astype(np.float32)
+                all_x = np.arange(1, future_periods + 1, dtype=np.float32)
+                y_pred = np.interp(all_x, horizon_x, pred_y).astype(np.float32)
 
-                    # Build next row for the window
-                    future_ts = last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes * (step + 1))
-                    new_row = np.zeros(n_channels, dtype=np.float32)
-                    # Channel 0: predicted target (in standardised space if applicable)
-                    if model._channel_mean is not None:
-                        new_row[0] = (pred_val - model._channel_mean[0]) / model._channel_std[0]
-                    else:
-                        new_row[0] = pred_val
-                    # Covariates (channels 1..n_cov): last known, standardised
-                    ch_idx = 1
-                    for c in raw_cov_cols_prod:
-                        val = last_covs.get(c, 0.0)
-                        if model._channel_mean is not None and ch_idx < len(model._channel_mean):
-                            new_row[ch_idx] = (val - model._channel_mean[ch_idx]) / model._channel_std[ch_idx]
-                        else:
-                            new_row[ch_idx] = val
-                        ch_idx += 1
-                    # Temporal features (standardised)
-                    hour_r = 2 * np.pi * future_ts.hour / 24
-                    dow_r = 2 * np.pi * future_ts.dayofweek / 7
-                    temporal = [np.sin(hour_r), np.cos(hour_r), np.sin(dow_r), np.cos(dow_r),
-                                float(future_ts.dayofweek >= 5)]
-                    for t_val in temporal:
-                        if model._channel_mean is not None and ch_idx < len(model._channel_mean):
-                            new_row[ch_idx] = (t_val - model._channel_mean[ch_idx]) / model._channel_std[ch_idx]
-                        else:
-                            new_row[ch_idx] = t_val
-                        ch_idx += 1
-
-                    # Shift window: drop first row, append new row
-                    window = np.vstack([window[1:], new_row.reshape(1, -1)])
-
-            y_pred = np.array(y_pred_list, dtype=np.float32)
+            y_pred = np.maximum(y_pred, 0.0)
+            logger.info(
+                f"  Multi-head prediction: {len(multi_pred)} horizons → "
+                f"{len(y_pred)} interpolated points"
+            )
         else:
             # ----- Flat feature prediction for tree models -----
             # Build future timestamps at regular intervals

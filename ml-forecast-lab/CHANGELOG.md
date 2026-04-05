@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.24.3
+
+### Bug Fix
+- **Neural production inference uses multi-head prediction**: replaced the
+  autoregressive sliding-window loop with a single `predict_sequence()` call
+  that outputs all horizons at once. This matches how the models are trained
+  (direct multi-output) and avoids error accumulation between forecast steps.
+  Intermediate points are linearly interpolated between horizon anchors.
+
 ## 1.24.2
 
 ### Improvements
