@@ -630,6 +630,14 @@ class MLForecastLabApp:
 
         self.web_app.state.appstate.benchmark_results[exp_cfg.name] = web_result
 
+        # Update experiment status with best model; default selected_model
+        # to rank-1 if the user hasn't manually chosen one yet.
+        exp_status = self.web_app.state.appstate.experiment_statuses.get(exp_cfg.name)
+        if exp_status and best_model_name:
+            exp_status.best_model = best_model_name
+            if not exp_status.selected_model:
+                exp_status.selected_model = best_model_name
+
     async def _run_benchmark(self, exp_cfg):
         """
         Run full benchmark across all enabled models using cross-validation.

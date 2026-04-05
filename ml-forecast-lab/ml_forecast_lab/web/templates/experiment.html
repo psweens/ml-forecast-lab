@@ -43,15 +43,13 @@
         </button>
         {% if experiment.best_model %}
             {% if experiment.mode == 'production' %}
-        <button class="btn btn-success" disabled title="{{ experiment.best_model }} is already the production model">
+        <button class="btn btn-success" disabled title="{{ experiment.selected_model or experiment.best_model }} is the production model">
             ✓ In Production
         </button>
             {% else %}
-        <button class="btn btn-success"
-                hx-post="{{ base_path | default('') }}/experiment/{{ experiment.name }}/promote/{{ experiment.best_model }}"
-                hx-target="#promote-message"
-                hx-swap="innerHTML swap:2s">
-            Promote to Production
+        <button class="btn btn-success" id="promote-btn"
+                onclick="promoteSelected('{{ experiment.name }}')">
+            Promote <span id="promote-model-name">{{ experiment.selected_model or experiment.best_model }}</span>
         </button>
             {% endif %}
         {% endif %}
@@ -183,6 +181,7 @@
         <table class="metrics-table">
             <thead>
                 <tr>
+                    <th style="width:2rem;"></th>
                     <th>Model</th>
                     <th>MAE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Mean Absolute Error — average magnitude of prediction errors. Lower is better. The ± value shows variation across CV folds.</span></span></th>
                     <th>RMSE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Root Mean Square Error — penalises large errors more heavily than MAE. Lower is better.</span></span></th>
@@ -190,12 +189,18 @@
                     <th>Train Time <span class="info-tip">?<span class="tip-text">Average wall-clock training time per CV fold in seconds.</span></span></th>
                     <th>Mean Rank <span class="info-tip">?<span class="tip-text">Average rank across CV folds (1.0 = ranked 1st in every fold). Lower is better. A model with mean rank 1.4 was typically 1st or 2nd across folds, indicating strong generalisability.</span></span></th>
                     <th>Rank</th>
-                    <th>Production</th>
                 </tr>
             </thead>
             <tbody>
+                {% set sel = experiment.selected_model or best_model %}
                 {% for model in models %}
-                <tr class="{% if model.rank == 1 %}best-model{% endif %}">
+                <tr class="{% if model.name == sel %}best-model{% endif %}" id="model-row-{{ model.name }}">
+                    <td style="text-align:center;">
+                        <input type="radio" name="model-select-radio" value="{{ model.name }}"
+                               {% if model.name == sel %}checked{% endif %}
+                               onchange="selectModel('{{ experiment.name }}', '{{ model.name }}')"
+                               style="accent-color:var(--accent-secondary);cursor:pointer;">
+                    </td>
                     <td class="model-name">{{ model.name }}</td>
                     <td>
                         <span class="metric-value">{{ "%.3f" | format(model.mae.mean) }}</span>
@@ -215,13 +220,6 @@
                     </td>
                     <td>
                         <span class="rank-badge rank-{{ model.rank }}">{{ model.rank }}</span>
-                    </td>
-                    <td>
-                        {% if model.is_production %}
-                        <span class="badge badge-success">✓ Production</span>
-                        {% else %}
-                        <span class="badge badge-secondary">Lab</span>
-                        {% endif %}
                     </td>
                 </tr>
                 {% endfor %}
@@ -555,8 +553,9 @@
         <div>
             <label class="field-label" style="display:block;margin-bottom:0.3rem;">Model</label>
             <select id="tuning-model" class="setting-input" style="padding:0.4rem 0.6rem;font-size:0.9rem;min-width:180px;">
+                {% set sel_model = experiment.selected_model or best_model %}
                 {% for m in exp_models_enabled %}
-                <option value="{{ m }}">{{ m }}</option>
+                <option value="{{ m }}" {% if m == sel_model %}selected{% endif %}>{{ m }}{% if m == sel_model %} (selected){% endif %}</option>
                 {% endfor %}
             </select>
         </div>
@@ -682,14 +681,10 @@
     <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin-bottom:1.5rem;">
         <div>
             <label class="field-label" style="display:block;margin-bottom:0.3rem;">Model</label>
+            {% set sel_model = experiment.selected_model or best_model %}
             <select id="deep-analysis-model" class="setting-input" style="padding:0.4rem 0.6rem;font-size:0.9rem;min-width:180px;">
-                {% if best_model %}
-                <option value="{{ best_model }}">{{ best_model }} (best)</option>
-                {% endif %}
                 {% for model in models %}
-                {% if model.name != best_model %}
-                <option value="{{ model.name }}">{{ model.name }}</option>
-                {% endif %}
+                <option value="{{ model.name }}" {% if model.name == sel_model %}selected{% endif %}>{{ model.name }}{% if model.name == sel_model %} (selected){% endif %}</option>
                 {% endfor %}
                 <option value="all">All models</option>
             </select>
@@ -1093,6 +1088,48 @@ window.showTab = function(el) {
     }
 
     // ======== Ensemble configuration ========
+    // ======== Per-experiment model toggle ========
+    // ======== Model selection (Results tab) ========
+    window.selectModel = function(expName, modelName) {
+        fetch(BASE + '/experiment/' + expName + '/select-model', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({model_name: modelName})
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success) {
+                // Update row highlights
+                document.querySelectorAll('.metrics-table tr').forEach(function(tr) {
+                    tr.classList.remove('best-model');
+                });
+                var row = document.getElementById('model-row-' + modelName);
+                if (row) row.classList.add('best-model');
+                // Update promote button text
+                var promoteLabel = document.getElementById('promote-model-name');
+                if (promoteLabel) promoteLabel.textContent = modelName;
+                // Update tuning & covariate analysis defaults
+                var tuningSelect = document.getElementById('tuning-model');
+                if (tuningSelect) tuningSelect.value = modelName;
+                var deepSelect = document.getElementById('deep-analysis-model');
+                if (deepSelect) deepSelect.value = modelName;
+            }
+        })
+        .catch(function(err) { console.error('selectModel failed:', err); });
+    };
+
+    window.promoteSelected = function(expName) {
+        var radio = document.querySelector('input[name="model-select-radio"]:checked');
+        if (!radio) { mlfl.toast('Select a model first', 'warning'); return; }
+        var modelName = radio.value;
+        fetch(BASE + '/experiment/' + expName + '/promote/' + modelName, {method: 'POST'})
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            mlfl.toast(modelName + ' promoted to production', 'success');
+            setTimeout(function() { location.reload(); }, 1000);
+        })
+        .catch(function(err) { mlfl.toast('Failed to promote: ' + err, 'error'); });
+    };
+
     // ======== Per-experiment model toggle ========
     window.toggleExpModel = function(el, modelName) {
         var card = document.getElementById('exp-model-card-' + modelName);

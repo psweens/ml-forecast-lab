@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.23.2
+
+### New Feature: Selected Model
+- **Model selection in Results**: radio buttons in the model comparison table let
+  the user select any model, not just the top-ranked one. Selection persists across
+  page reloads and feeds into Promote, Covariate Analysis, and Tuning.
+- **Promote uses selected model**: the Promote button now promotes whichever model
+  the user has selected, not just the auto-ranked best.
+- **Selector defaults**: Covariate Analysis and Tuning model dropdowns default to
+  the selected model instead of an arbitrary first option.
+- **Per-experiment model_params**: tuning results saved per-experiment take
+  precedence over global model_overrides during training.
+
 ## 1.23.1
 
 ### Improvements

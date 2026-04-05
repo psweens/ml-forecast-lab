@@ -70,6 +70,7 @@ class ExperimentStatus(BaseModel):
     target_entity: str
     mode: str  # 'lab' or 'production'
     best_model: Optional[str] = None
+    selected_model: Optional[str] = None  # User's chosen model (defaults to best)
     last_benchmark_timestamp: Optional[str] = None
     last_benchmark_status: str = "pending"
     next_update_in_seconds: Optional[int] = None
@@ -954,6 +955,29 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "model": model_name,
             }
         )
+
+    @app.post("/experiment/{name}/select-model")
+    async def select_model(name: str, request: Request):
+        """Set the user's selected model for this experiment."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        model_name = body.get("model_name")
+        if not model_name:
+            return JSONResponse(content={"success": False, "error": "model_name required"})
+
+        # Validate model exists in benchmark results
+        benchmark_result = app.state.appstate.benchmark_results.get(name)
+        if benchmark_result and not any(m.name == model_name for m in benchmark_result.models):
+            return JSONResponse(content={"success": False, "error": "Model not in results"})
+
+        app.state.appstate.experiment_statuses[name].selected_model = model_name
+        return JSONResponse(content={"success": True, "selected_model": model_name})
 
     @app.post("/experiment/{name}/toggle-mode")
     async def toggle_mode(name: str):
