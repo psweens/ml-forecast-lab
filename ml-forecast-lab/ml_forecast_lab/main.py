@@ -2379,15 +2379,34 @@ class MLForecastLabApp:
             None, lambda: study.optimize(objective, n_trials=n_trials)
         )
 
-        # Finalise
-        if study.best_trial:
-            tuning_state.best_trial_id = study.best_trial.number
-            tuning_state.best_params = dict(study.best_params)
-            tuning_state.best_score = round(study.best_value, 6)
+        # Finalise: select best trial by composite ranking across MAE, RMSE, MASE
+        # (Optuna minimised MAE to guide the search, but the winner is picked
+        # by average rank across all three metrics for robustness.)
+        valid_trials = [t for t in tuning_state.trials if t.status == "completed" and t.mae < 1e6]
+        if valid_trials:
+            for metric_key in ("mae", "rmse", "mase"):
+                sorted_by = sorted(valid_trials, key=lambda t: getattr(t, metric_key))
+                for rank, t in enumerate(sorted_by):
+                    if not hasattr(t, '_ranks'):
+                        t._ranks = []
+                    t._ranks.append(rank + 1)
 
-        logger.info(f"")
-        logger.info(f"  Tuning Complete — Best MAE: {study.best_value:.4f}")
-        logger.info(f"  Best params: {study.best_params}")
+            best_trial = min(valid_trials, key=lambda t: np.mean(t._ranks))
+            tuning_state.best_trial_id = best_trial.trial_id
+            tuning_state.best_params = best_trial.params
+            tuning_state.best_score = best_trial.mae
+
+            # Clean up temp attribute
+            for t in valid_trials:
+                if hasattr(t, '_ranks'):
+                    del t._ranks
+
+            logger.info(f"")
+            logger.info(f"  Tuning Complete — Best trial #{best_trial.trial_id} "
+                        f"(MAE={best_trial.mae:.4f}, RMSE={best_trial.rmse:.4f}, MASE={best_trial.mase:.3f})")
+            logger.info(f"  Best params: {best_trial.params}")
+        else:
+            logger.warning(f"  Tuning Complete — no valid trials")
 
         # Run holdout comparison: default params vs tuned params
         try:
@@ -2413,7 +2432,8 @@ class MLForecastLabApp:
             default_mae = float(np.mean(np.abs(y_te_h - np.array(preds_default))))
 
             # Tuned params holdout
-            preds_tuned = await loop.run_in_executor(None, lambda: _run_holdout(study.best_params))
+            best_params = tuning_state.best_params or dict(study.best_params)
+            preds_tuned = await loop.run_in_executor(None, lambda: _run_holdout(best_params))
 
             tuning_state.holdout_timestamps = holdout_ts
             tuning_state.holdout_actuals = [float(v) for v in y_te_h]
@@ -2421,7 +2441,8 @@ class MLForecastLabApp:
             tuning_state.holdout_tuned = [float(v) for v in preds_tuned]
             tuning_state.default_mae = round(default_mae, 6)
 
-            logger.info(f"  Holdout: default MAE={default_mae:.4f}, tuned MAE={study.best_value:.4f}")
+            tuned_mae = tuning_state.best_score or study.best_value
+            logger.info(f"  Holdout: default MAE={default_mae:.4f}, tuned MAE={tuned_mae:.4f}")
         except Exception as e:
             logger.warning(f"  Holdout comparison failed: {e}")
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.3
+
+### Improvement
+- **Tuning best trial uses composite ranking**: the winning trial is now
+  selected by average rank across MAE, RMSE, and MASE (same methodology as
+  the Results table), not just lowest MAE. Optuna still minimises MAE to guide
+  the search, but the final winner is the trial that performs consistently
+  well across all three metrics.
+
 ## 2.0.2
 
 ### Fix
