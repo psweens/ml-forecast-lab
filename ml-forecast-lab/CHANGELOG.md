@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.22.8
+
+### Bug Fix
+- Fix `NameError: name 'best_ind_metrics' is not defined` crash in ensemble
+  pipeline introduced in v1.22.6.
+
 ## 1.22.7
 
 ### Deep Analysis Improvements
