@@ -211,8 +211,15 @@ class ExperimentCfg:
 class AppConfig:
     """Application-level configuration."""
 
+    forecast_every_minutes: int = 30
+    """How often to run inference with the cached model and publish sensors."""
+
+    retrain_every_hours: float = 24.0
+    """How often to retrain the production model from scratch."""
+
     update_every_minutes: int = 5
-    """Update frequency for model inference and forecasts."""
+    """Legacy alias — used as forecast_every_minutes if forecast_every_minutes
+    is at its default and this is explicitly set in YAML."""
 
     timezone: str = 'UTC'
     """Timezone for temporal features."""
@@ -221,7 +228,7 @@ class AppConfig:
     """List of experiment configurations."""
 
     hailo_enabled: bool = False
-    """Whether to use Hailo accelerator (if available)."""
+    """Whether to use Hailo AI accelerator for inference (if available)."""
 
     cpu_cores: int = 0
     """Number of CPU cores for model training. 0 = all available."""
@@ -234,9 +241,17 @@ class AppConfig:
 
     def __post_init__(self) -> None:
         """Validate application configuration."""
-        if self.update_every_minutes < 1:
+        # Backward compat: if old update_every_minutes was set but new
+        # forecast_every_minutes is at default, use the old value.
+        if self.forecast_every_minutes == 30 and self.update_every_minutes != 5:
+            self.forecast_every_minutes = self.update_every_minutes
+        if self.forecast_every_minutes < 1:
             raise ValueError(
-                f'update_every_minutes must be >= 1, got {self.update_every_minutes}'
+                f'forecast_every_minutes must be >= 1, got {self.forecast_every_minutes}'
+            )
+        if self.retrain_every_hours < 0.1:
+            raise ValueError(
+                f'retrain_every_hours must be >= 0.1, got {self.retrain_every_hours}'
             )
         if not self.experiments:
             logger.warning('No experiments configured')

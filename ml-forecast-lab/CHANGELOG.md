@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.25.0
+
+### New: Decoupled Timers + Hailo AI Acceleration
+- **Separate forecast and retrain schedules**: forecast cycle (default every 30m)
+  uses a cached trained model for fast inference (<1s). Retrain cycle (default
+  every 24h) trains from scratch and updates the cache. Dashboard shows both
+  countdowns independently.
+- **Hailo AI hat integration**: after each retrain, neural models are exported to
+  ONNX and wrapped with `HailoAcceleratedModel` for NPU-accelerated inference.
+  A validation test (CPU vs Hailo comparison) runs on every retrain — if it fails
+  or diverges >1%, the system falls back to CPU with a logged warning.
+- **Model caching**: trained models are cached in memory between retrains. Forecast
+  cycles reuse the cached model, eliminating redundant retraining.
+- **System page**: "Update Interval" renamed to "Forecast Interval" + new "Retrain
+  Interval" field. Both configurable independently.
+- **Backward compatible**: existing `update_every_minutes` in YAML is automatically
+  mapped to `forecast_every_minutes`.
+
 ## 1.24.4
 
 ### Improvements

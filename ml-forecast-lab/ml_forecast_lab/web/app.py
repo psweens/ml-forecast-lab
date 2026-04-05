@@ -73,7 +73,9 @@ class ExperimentStatus(BaseModel):
     selected_model: Optional[str] = None  # User's chosen model (defaults to best)
     last_benchmark_timestamp: Optional[str] = None
     last_benchmark_status: str = "pending"
-    next_update_in_seconds: Optional[int] = None
+    next_forecast_in_seconds: Optional[int] = None
+    next_retrain_in_seconds: Optional[int] = None
+    next_update_in_seconds: Optional[int] = None  # Legacy alias for forecast
     publish_entity: Optional[str] = None  # e.g. "sensor.mlfl_solar_forecast"
 
 
@@ -1562,8 +1564,13 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 yaml_data = yaml.safe_load(f)
 
             # Update fields
-            if "update_every_minutes" in data:
+            if "forecast_every_minutes" in data:
+                yaml_data["forecast_every_minutes"] = int(data["forecast_every_minutes"])
+                yaml_data["update_every_minutes"] = int(data["forecast_every_minutes"])
+            elif "update_every_minutes" in data:
                 yaml_data["update_every_minutes"] = int(data["update_every_minutes"])
+            if "retrain_every_hours" in data:
+                yaml_data["retrain_every_hours"] = float(data["retrain_every_hours"])
             if "timezone" in data:
                 yaml_data["timezone"] = str(data["timezone"])
             if "hailo_enabled" in data:

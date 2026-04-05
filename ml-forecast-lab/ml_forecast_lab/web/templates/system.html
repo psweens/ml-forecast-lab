@@ -84,12 +84,21 @@
 
         <div style="margin-top: 1.5rem; display: flex; gap: 2rem; flex-wrap: wrap; align-items: flex-end;">
             <div>
-                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Update Interval (minutes)</label>
-                <input type="number" name="update_every_minutes" value="{{ config.update_every_minutes }}"
+                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Forecast Interval (minutes)</label>
+                <input type="number" name="forecast_every_minutes" value="{{ config.forecast_every_minutes }}"
                        min="1" max="1440" class="setting-input" style="width: 120px;">
                 <span style="color: var(--text-secondary); margin-left: 0.5rem; font-size: 0.9rem;">
-                    {% set mins = config.update_every_minutes %}
+                    {% set mins = config.forecast_every_minutes %}
                     {% if mins >= 60 %}({{ mins // 60 }}h {{ mins % 60 }}m){% endif %}
+                </span>
+            </div>
+            <div>
+                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Retrain Interval (hours)</label>
+                <input type="number" name="retrain_every_hours" value="{{ config.retrain_every_hours }}"
+                       min="0.5" max="168" step="0.5" class="setting-input" style="width: 120px;">
+                <span style="color: var(--text-secondary); margin-left: 0.5rem; font-size: 0.9rem;">
+                    {% set hrs = config.retrain_every_hours %}
+                    {% if hrs >= 24 %}({{ (hrs // 24) | int }}d {{ (hrs % 24) | int }}h){% endif %}
                 </span>
             </div>
             <div>
@@ -272,7 +281,8 @@
         var data = {
             cpu_cores: parseInt(form.cpu_cores.value),
             nice_priority: parseInt(form.nice_priority.value),
-            update_every_minutes: parseInt(form.update_every_minutes.value),
+            forecast_every_minutes: parseInt(form.forecast_every_minutes.value),
+            retrain_every_hours: parseFloat(form.retrain_every_hours.value),
             timezone: form.timezone.value,
             hailo_enabled: form.hailo_enabled.checked,
         };

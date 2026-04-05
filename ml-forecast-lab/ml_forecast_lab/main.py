@@ -45,8 +45,12 @@ class MLForecastLabApp:
         self.server = None
         self.running = False
         self._update_running = False
+        self._forecast_running = False
         self.last_update = None
         self.benchmarks_to_run = set()
+        # Cached trained models for fast forecast cycles
+        # Key: experiment name → dict with model, feature_cols, combined, etc.
+        self._cached_models = {}
 
     async def load_config(self, config_path: Optional[Path] = None):
         """
@@ -214,7 +218,9 @@ class MLForecastLabApp:
                     target_entity=exp_cfg.target_entity,
                     mode=exp_cfg.mode,
                     last_benchmark_status="pending",
-                    next_update_in_seconds=self.config.update_every_minutes * 60,
+                    next_forecast_in_seconds=self.config.forecast_every_minutes * 60,
+                    next_retrain_in_seconds=int(self.config.retrain_every_hours * 3600),
+                    next_update_in_seconds=self.config.forecast_every_minutes * 60,
                     publish_entity=f"sensor.{exp_cfg.publish_prefix}{_pub_name}_forecast",
                 )
                 self.web_app.state.appstate.experiment_statuses[exp_cfg.name] = (
@@ -1879,6 +1885,337 @@ class MLForecastLabApp:
         finally:
             self._update_running = False
 
+    async def _run_retrain_cycle(self):
+        """
+        Retrain cycle: for each experiment, retrain the model from scratch,
+        optionally export to ONNX and wrap with Hailo, then cache.
+        Lab experiments run _run_benchmark instead.
+        """
+        self._update_running = True
+        try:
+            logger.info("=== Starting retrain cycle ===")
+            await self.load_config()
+
+            for exp_cfg in self.config.experiments:
+                if exp_cfg.mode == "lab":
+                    await self.update_experiment(exp_cfg.name, is_lab=True)
+                else:
+                    # Production: train, optionally wrap with Hailo, cache
+                    try:
+                        await self._retrain_and_cache(exp_cfg)
+                    except Exception as e:
+                        logger.error(f"Retrain failed for {exp_cfg.name}: {e}", exc_info=True)
+
+            await self.publish_heartbeat()
+            logger.info("=== Retrain cycle completed ===")
+        except Exception as e:
+            logger.error(f"Error in retrain cycle: {e}", exc_info=True)
+        finally:
+            self._update_running = False
+
+    async def _retrain_and_cache(self, exp_cfg):
+        """Train a production model and cache it (with optional Hailo acceleration)."""
+        from ml_forecast_lab.features import build_features
+
+        logger.info(f"  Retraining {exp_cfg.name}...")
+
+        # Fetch and prepare data
+        df = await self._fetch_and_preprocess(exp_cfg)
+        features_df = build_features(
+            df, target_col="y",
+            interval_minutes=exp_cfg.interval_minutes,
+            country=exp_cfg.country,
+        )
+        combined = features_df.copy()
+        combined["target"] = df["y"]
+        for col in [c for c in df.columns if c != "y"]:
+            combined[col] = df[col]
+        combined = combined.dropna()
+
+        feature_cols = [c for c in combined.columns if c != "target"]
+        X = combined[feature_cols].values.astype(np.float32)
+        X = np.nan_to_num(X, nan=0.0)
+        y = combined["target"].values.astype(np.float32)
+
+        # Determine production model
+        prod_model_name = exp_cfg.production_model
+        if not prod_model_name and self.web_app:
+            bench = self.web_app.state.appstate.benchmark_results.get(exp_cfg.name)
+            if bench and bench.best_model_name:
+                prod_model_name = bench.best_model_name
+        if not prod_model_name:
+            prod_model_name = exp_cfg.models_enabled[0] if exp_cfg.models_enabled else "lightgbm"
+
+        # Create and configure model
+        model = self.model_registry.create(prod_model_name)
+        overrides = dict(self.config.model_overrides.get(prod_model_name, {}))
+        exp_params = getattr(exp_cfg, 'model_params', {}).get(prod_model_name, {})
+        if exp_params:
+            overrides.update(exp_params)
+        if model.is_neural and hasattr(model, 'loss_fn') and 'loss_fn' not in overrides:
+            model.set_params(loss_fn=exp_cfg.loss_fn)
+        if overrides:
+            model.set_params(**overrides)
+
+        # Train
+        is_neural = model.is_neural
+        seq_kwargs = {}
+        if is_neural:
+            from ml_forecast_lab.features import create_sliding_windows
+            engineered = {
+                'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
+                'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
+            }
+            engineered.update(c for c in combined.columns if c.startswith('y_lag_'))
+            raw_cov_cols = [c for c in combined.columns if c not in engineered and c != 'target']
+            window_size = min(48, len(combined) // 3)
+            horizon_steps = [h // exp_cfg.interval_minutes for h in exp_cfg.horizons_minutes]
+            if window_size >= 12:
+                seq_X, seq_y, _ = create_sliding_windows(
+                    combined, 'target', window_size=window_size,
+                    covariate_cols=raw_cov_cols if raw_cov_cols else None,
+                    add_temporal=True, horizon_steps=horizon_steps,
+                )
+                seq_kwargs['sequence_data'] = seq_X
+                y_train_seq = seq_y
+                X_train_seq = X[-len(seq_y):]
+
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None, lambda: model.fit(X_train_seq, y_train_seq, **seq_kwargs)
+                )
+            else:
+                is_neural = False
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, model.fit, X, y)
+        else:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, model.fit, X, y)
+
+        logger.info(f"  {prod_model_name} trained on {len(X)} samples")
+
+        # Hailo acceleration: export ONNX → wrap → validate
+        is_hailo = False
+        if self.config.hailo_enabled and model.supports_hardware_accel():
+            try:
+                from ml_forecast_lab.models.hailo_runtime import HailoAcceleratedModel
+
+                onnx_path = f"/tmp/mlfl_{exp_cfg.name}_{prod_model_name}.onnx"
+                if model.export_onnx(onnx_path):
+                    wrapped = HailoAcceleratedModel(model, onnx_path)
+
+                    # Validation test: compare CPU vs Hailo on a small batch
+                    X_test_small = X[-5:]
+                    y_cpu = model.predict(X_test_small)
+                    y_hailo = wrapped.predict(X_test_small)
+
+                    if y_hailo is None:
+                        logger.warning(f"  Hailo inference returned None — falling back to CPU")
+                    elif np.mean(np.abs(y_cpu.ravel() - y_hailo.ravel())) > 0.01 * np.mean(np.abs(y_cpu)):
+                        logger.warning(f"  Hailo output diverges >1% from CPU — falling back to CPU")
+                    else:
+                        logger.info(f"  Hailo validation passed — using AI accelerator")
+                        model = wrapped
+                        is_hailo = True
+                else:
+                    logger.debug(f"  ONNX export not supported for {prod_model_name}")
+            except Exception as e:
+                logger.warning(f"  Hailo setup failed: {e} — using CPU")
+
+        # Cache the trained model
+        self._cached_models[exp_cfg.name] = {
+            "model": model,
+            "model_name": prod_model_name,
+            "feature_cols": feature_cols,
+            "combined": combined,
+            "exp_cfg": exp_cfg,
+            "trained_at": datetime.now(timezone.utc),
+            "is_hailo": is_hailo,
+            "is_neural": is_neural,
+            "seq_kwargs": seq_kwargs,
+        }
+
+        # Also run a forecast immediately after retrain
+        await self._forecast_with_cached(exp_cfg.name)
+
+        # Update web status
+        if self.web_app:
+            status = self.web_app.state.appstate.experiment_statuses.get(exp_cfg.name)
+            if status:
+                status.best_model = prod_model_name
+                status.last_benchmark_timestamp = datetime.now(timezone.utc).isoformat()
+                status.last_benchmark_status = "completed"
+
+    async def _run_forecast_cycle(self):
+        """
+        Forecast cycle: use cached models for fast inference + publish sensors.
+        If no cached model exists, skip (retrain cycle will create one).
+        """
+        self._forecast_running = True
+        try:
+            await self.load_config()
+            for exp_cfg in self.config.experiments:
+                if exp_cfg.mode != "production":
+                    continue
+                if exp_cfg.name not in self._cached_models:
+                    logger.debug(f"  No cached model for {exp_cfg.name} — waiting for retrain")
+                    continue
+                try:
+                    await self._forecast_with_cached(exp_cfg.name)
+                except Exception as e:
+                    logger.error(f"Forecast failed for {exp_cfg.name}: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Error in forecast cycle: {e}", exc_info=True)
+        finally:
+            self._forecast_running = False
+
+    async def _forecast_with_cached(self, experiment_name: str):
+        """Run inference with a cached model and publish sensors."""
+        from ml_forecast_lab.features import create_forecast_features
+
+        cache = self._cached_models.get(experiment_name)
+        if not cache:
+            return
+
+        model = cache["model"]
+        exp_cfg = cache["exp_cfg"]
+        combined = cache["combined"]
+        feature_cols = cache["feature_cols"]
+        is_neural = cache.get("is_neural", False)
+        seq_kwargs = cache.get("seq_kwargs", {})
+        prod_model_name = cache.get("model_name", "unknown")
+
+        n_lags = 12
+        last_ts = combined.index[-1]
+        y = combined["target"].values.astype(np.float32)
+        lag_values = y[-n_lags:]
+        future_periods = getattr(exp_cfg, 'future_periods', 48)
+
+        # Prediction: reuse the same logic as _run_production_inference section 5
+        if is_neural and 'sequence_data' in seq_kwargs:
+            from ml_forecast_lab.features import create_sliding_windows
+            window_size = seq_kwargs['sequence_data'].shape[1]
+            horizon_steps_prod = [h // exp_cfg.interval_minutes for h in exp_cfg.horizons_minutes]
+
+            engineered = {
+                'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
+                'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
+            }
+            engineered.update(c for c in combined.columns if c.startswith('y_lag_'))
+            raw_cov_cols = [c for c in combined.columns if c not in engineered and c != 'target']
+
+            tail_len = window_size + max(horizon_steps_prod)
+            tail_df = combined.iloc[-tail_len:].copy()
+            seq_X_prod, _, _ = create_sliding_windows(
+                tail_df, 'target', window_size=window_size,
+                covariate_cols=raw_cov_cols if raw_cov_cols else None,
+                add_temporal=True, horizon_steps=horizon_steps_prod,
+            )
+            last_window = seq_X_prod[-1:] if len(seq_X_prod) > 0 else seq_X_prod
+
+            loop = asyncio.get_running_loop()
+            multi_pred = await loop.run_in_executor(None, lambda: model.predict_sequence(last_window))
+            multi_pred = multi_pred.ravel()
+
+            if len(multi_pred) == 1:
+                y_pred = np.full(future_periods, float(multi_pred[0]), dtype=np.float32)
+            else:
+                horizon_x = np.array(horizon_steps_prod, dtype=np.float32)
+                all_x = np.arange(1, future_periods + 1, dtype=np.float32)
+                y_pred = np.interp(all_x, horizon_x, multi_pred.astype(np.float32)).astype(np.float32)
+            y_pred = np.maximum(y_pred, 0.0)
+        else:
+            # Tree models: flat features
+            covariate_cols = [c for c in combined.columns
+                              if c != 'target' and not c.startswith('y_')]
+            future_minutes = [exp_cfg.interval_minutes * (i + 1) for i in range(future_periods)]
+            forecast_features = create_forecast_features(
+                last_timestamp=last_ts,
+                interval_minutes=exp_cfg.interval_minutes,
+                horizons_minutes=future_minutes,
+                n_lags=n_lags,
+                lag_values=lag_values,
+                country=exp_cfg.country,
+            )
+            for col in feature_cols:
+                if col not in forecast_features.columns:
+                    if col in covariate_cols and col in combined.columns:
+                        forecast_features[col] = float(combined[col].iloc[-1])
+                    else:
+                        forecast_features[col] = 0.0
+            forecast_features = forecast_features.reindex(columns=feature_cols, fill_value=0.0)
+            X_forecast = forecast_features.values.astype(np.float32)
+            X_forecast = np.nan_to_num(X_forecast, nan=0.0)
+
+            loop = asyncio.get_running_loop()
+            y_pred = await loop.run_in_executor(None, lambda: model.predict(X_forecast))
+
+        if y_pred.ndim > 1:
+            y_pred = y_pred.ravel()
+
+        logger.info(
+            f"  Forecast {exp_cfg.name}: {len(y_pred)} points, "
+            f"range [{y_pred.min():.3f}, {y_pred.max():.3f}]"
+            f"{' (Hailo)' if cache.get('is_hailo') else ''}"
+        )
+
+        # Publish to HA sensors (reuse the publishing section from _run_production_inference)
+        units = exp_cfg.units or ""
+        publish_name = exp_cfg.publish_name or exp_cfg.name
+        prefix = exp_cfg.publish_prefix
+
+        if self.ha_interface:
+            # Main forecast curve sensor
+            forecast_points = []
+            for i in range(len(y_pred)):
+                ts = last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes * (i + 1))
+                forecast_points.append({"datetime": ts.isoformat(), "value": round(float(y_pred[i]), 4)})
+
+            entity_id = f"sensor.{prefix}{publish_name}_forecast"
+            state = round(float(y_pred[0]), 4)
+            attrs = {
+                "forecast": forecast_points,
+                "model": prod_model_name,
+                "forecast_periods": future_periods,
+                "interval_minutes": exp_cfg.interval_minutes,
+                "last_trained": cache.get("trained_at", datetime.now(timezone.utc)).isoformat(),
+                "hailo_accelerated": cache.get("is_hailo", False),
+                "friendly_name": f"{publish_name} Forecast",
+                "unit_of_measurement": units,
+                "icon": "mdi:chart-timeline-variant",
+                "state_class": "measurement",
+            }
+            try:
+                await self.ha_interface.set_state(entity_id, state, attrs)
+            except Exception as e:
+                logger.warning(f"  Failed to publish {entity_id}: {e}")
+
+            # Per-horizon sensors
+            for h_min in exp_cfg.horizons_minutes:
+                h_steps = h_min // exp_cfg.interval_minutes
+                if h_steps <= len(y_pred):
+                    val = round(float(y_pred[h_steps - 1]), 4)
+                    if h_min >= 1440:
+                        h_label = f"{h_min // 1440}d"
+                    elif h_min >= 60:
+                        h_label = f"{h_min // 60}h"
+                    else:
+                        h_label = f"{h_min}m"
+                    h_entity = f"sensor.{prefix}{publish_name}_{h_label}"
+                    target_ts = last_ts + pd.Timedelta(minutes=h_min)
+                    h_attrs = {
+                        "horizon_minutes": h_min,
+                        "forecast_timestamp": target_ts.isoformat(),
+                        "model": prod_model_name,
+                        "friendly_name": f"{publish_name} +{h_label}",
+                        "unit_of_measurement": units,
+                        "icon": "mdi:clock-outline",
+                    }
+                    try:
+                        await self.ha_interface.set_state(h_entity, val, h_attrs)
+                    except Exception as e:
+                        logger.warning(f"  Failed to publish {h_entity}: {e}")
+
     async def _run_tuning(self, experiment_name: str, model_name: str,
                           n_trials: int = 30, strategy: str = "tpe",
                           param_schema: dict = None):
@@ -2394,35 +2731,49 @@ class MLForecastLabApp:
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-        # Calculate update interval — defer first cycle to the configured interval
-        # Training is now triggered on-demand from the Training tab
-        update_interval = self.config.update_every_minutes * 60  # Convert to seconds
-        next_update = datetime.now(timezone.utc) + timedelta(seconds=update_interval)
+        # Dual timers: forecast (fast, uses cached model) and retrain (slow, full training)
+        forecast_interval = self.config.forecast_every_minutes * 60
+        retrain_interval = int(self.config.retrain_every_hours * 3600)
+
+        now = datetime.now(timezone.utc)
+        # First retrain runs immediately so there's a cached model for forecasts
+        next_retrain = now
+        next_forecast = now + timedelta(seconds=forecast_interval)
+
+        logger.info(
+            f"Timers: forecast every {self.config.forecast_every_minutes}m, "
+            f"retrain every {self.config.retrain_every_hours}h"
+        )
 
         while self.running:
             try:
                 now = datetime.now(timezone.utc)
 
-                # Check if it's time for update
-                if now >= next_update and not self._update_running:
-                    # Run update cycle in background so web server stays responsive
-                    next_update = datetime.now(timezone.utc) + timedelta(seconds=update_interval)
-                    asyncio.create_task(self._run_update_cycle(next_update))
+                # Retrain cycle: full training + Hailo export + cache model
+                if now >= next_retrain and not self._update_running:
+                    next_retrain = now + timedelta(seconds=retrain_interval)
+                    asyncio.create_task(self._run_retrain_cycle())
 
-                # Update next_update_in_seconds counters
+                # Forecast cycle: use cached model for fast inference + publish
+                if now >= next_forecast and not self._forecast_running:
+                    next_forecast = now + timedelta(seconds=forecast_interval)
+                    asyncio.create_task(self._run_forecast_cycle())
+
+                # Update UI countdowns
                 if self.web_app:
-                    now = datetime.now(timezone.utc)
                     for exp_cfg in self.config.experiments:
                         status = self.web_app.state.appstate.experiment_statuses.get(
                             exp_cfg.name
                         )
                         if status:
-                            remaining = int(
-                                (next_update - now).total_seconds()
+                            status.next_forecast_in_seconds = max(
+                                0, int((next_forecast - now).total_seconds())
                             )
-                            status.next_update_in_seconds = max(0, remaining)
+                            status.next_retrain_in_seconds = max(
+                                0, int((next_retrain - now).total_seconds())
+                            )
+                            status.next_update_in_seconds = status.next_forecast_in_seconds
 
-                # Sleep briefly to avoid busy-waiting
                 await asyncio.sleep(1)
 
             except Exception as e:

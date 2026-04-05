@@ -91,12 +91,24 @@
                 </div>
                 {% endif %}
 
-                {% if exp.next_update_in_seconds is not none %}
+                {% if exp.next_forecast_in_seconds is not none %}
                 <div class="card-field">
-                    <span class="field-label">Next Update</span>
-                    <span class="field-value next-update" data-seconds="{{ exp.next_update_in_seconds }}">
-                        {% set s = exp.next_update_in_seconds %}
+                    <span class="field-label">Next Forecast</span>
+                    <span class="field-value next-update" data-seconds="{{ exp.next_forecast_in_seconds }}">
+                        {% set s = exp.next_forecast_in_seconds %}
                         {% if s >= 3600 %}{{ (s // 3600) }}h {{ ((s % 3600) // 60) }}m
+                        {% elif s >= 60 %}{{ (s // 60) }}m {{ (s % 60) }}s
+                        {% else %}{{ s }}s{% endif %}
+                    </span>
+                </div>
+                {% endif %}
+                {% if exp.next_retrain_in_seconds is not none %}
+                <div class="card-field">
+                    <span class="field-label">Next Retrain</span>
+                    <span class="field-value next-update" data-seconds="{{ exp.next_retrain_in_seconds }}">
+                        {% set s = exp.next_retrain_in_seconds %}
+                        {% if s >= 86400 %}{{ (s // 86400) }}d {{ ((s % 86400) // 3600) }}h
+                        {% elif s >= 3600 %}{{ (s // 3600) }}h {{ ((s % 3600) // 60) }}m
                         {% elif s >= 60 %}{{ (s // 60) }}m {{ (s % 60) }}s
                         {% else %}{{ s }}s{% endif %}
                     </span>
