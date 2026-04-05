@@ -35,16 +35,25 @@ FROM ${BUILD_FROM}
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Install only runtime dependencies (no compilers)
+# Hailo RT Python bindings are installed system-wide via apt when available;
+# the venv uses --system-site-packages so it can see them.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 \
         python3-venv \
         libgomp1 \
         ca-certificates \
+    && ( apt-get install -y --no-install-recommends python3-hailort 2>/dev/null \
+         && echo "HailoRT Python bindings installed" \
+         || echo "HailoRT not available in apt — Hailo acceleration will be disabled" ) \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy pre-built virtualenv from builder
+# Copy pre-built virtualenv from builder and allow system site-packages
+# (needed for python3-hailort which is apt-installed, not pip-installed)
 COPY --from=builder /opt/venv /opt/venv
+RUN if [ -f /opt/venv/pyvenv.cfg ]; then \
+        sed -i 's/include-system-site-packages = false/include-system-site-packages = true/' /opt/venv/pyvenv.cfg; \
+    fi
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy the ML Forecast Lab package and default config
