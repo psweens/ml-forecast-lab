@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.1
+
+### Fix
+- Dashboard card layout: View Details button and publish toggle back in the
+  card footer matching the original two-element layout.
+
 ## 2.0.0
 
 ### New: Decoupled Timers + Hailo AI Acceleration
