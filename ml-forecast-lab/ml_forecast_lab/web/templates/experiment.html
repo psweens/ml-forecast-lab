@@ -43,13 +43,13 @@
         </button>
         {% if experiment.best_model %}
             {% if experiment.mode == 'production' %}
-        <button class="btn btn-success" disabled title="{{ experiment.selected_model or experiment.best_model }} is the production model">
-            ✓ In Production
+        <button class="btn btn-success" disabled title="Publishing forecasts with {{ experiment.selected_model or experiment.best_model }}">
+            Publishing {{ experiment.selected_model or experiment.best_model }}
         </button>
             {% else %}
         <button class="btn btn-success" id="promote-btn"
                 onclick="promoteSelected('{{ experiment.name }}')">
-            Promote <span id="promote-model-name">{{ experiment.selected_model or experiment.best_model }}</span>
+            Publish <span id="promote-model-name">{{ experiment.selected_model or experiment.best_model }}</span>
         </button>
             {% endif %}
         {% endif %}

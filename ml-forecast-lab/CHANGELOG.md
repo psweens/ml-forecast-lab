@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.24.2
+
+### Improvements
+- **Dashboard publish toggle**: replaced vague "Production" / "Lab Mode" button
+  with clear "Publish" / "Stop Publishing" actions. When publishing, the card
+  shows the HA sensor entity ID being published to.
+- **Consistent language**: "Promote" renamed to "Publish" throughout — the
+  experiment detail page header says "Publish lightgbm" and "Publishing lightgbm".
+- **Mode toggle persists**: toggling publish on/off from the dashboard now saves
+  to mlfl.yaml (previously only in-memory).
+- **Publish guard**: the Publish button is disabled until a benchmark has been run,
+  preventing publishing without a trained model.
+
 ## 1.24.1
 
 ### Improvements

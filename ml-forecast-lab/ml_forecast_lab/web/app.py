@@ -74,6 +74,7 @@ class ExperimentStatus(BaseModel):
     last_benchmark_timestamp: Optional[str] = None
     last_benchmark_status: str = "pending"
     next_update_in_seconds: Optional[int] = None
+    publish_entity: Optional[str] = None  # e.g. "sensor.mlfl_solar_forecast"
 
 
 class ForecastPoint(BaseModel):
@@ -1038,6 +1039,18 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         old_mode = exp_status.mode
         new_mode = "production" if old_mode == "lab" else "lab"
         exp_status.mode = new_mode
+
+        # Persist to YAML
+        from ml_forecast_lab.config import save_experiment_field
+        config_path = _find_config_path()
+        if config_path:
+            try:
+                save_experiment_field(config_path, name, "mode", new_mode)
+                if new_mode == "production" and exp_status.selected_model:
+                    save_experiment_field(config_path, name, "production_model",
+                                         exp_status.selected_model)
+            except Exception as e:
+                logger.warning(f"Failed to persist mode toggle: {e}")
 
         return JSONResponse(
             content={

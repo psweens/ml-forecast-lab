@@ -208,12 +208,14 @@ class MLForecastLabApp:
             for exp_cfg in self.config.experiments:
                 from ml_forecast_lab.web.app import ExperimentStatus
 
+                _pub_name = exp_cfg.publish_name or exp_cfg.name
                 status = ExperimentStatus(
                     name=exp_cfg.name,
                     target_entity=exp_cfg.target_entity,
                     mode=exp_cfg.mode,
                     last_benchmark_status="pending",
                     next_update_in_seconds=self.config.update_every_minutes * 60,
+                    publish_entity=f"sensor.{exp_cfg.publish_prefix}{_pub_name}_forecast",
                 )
                 self.web_app.state.appstate.experiment_statuses[exp_cfg.name] = (
                     status

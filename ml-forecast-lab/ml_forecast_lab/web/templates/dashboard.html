@@ -104,14 +104,32 @@
                 {% endif %}
             </div>
 
+            {% if exp.mode == 'production' and exp.publish_entity %}
+            <div class="card-field" style="margin-top:0.25rem;">
+                <span class="field-label">Sensor</span>
+                <span class="field-value monospace" style="font-size:0.8rem;color:var(--accent-secondary);">{{ exp.publish_entity }}</span>
+            </div>
+            {% endif %}
+            </div>
+
             <div class="card-footer card-footer-actions">
                 <a href="{{ base_path | default('') }}/experiment/{{ exp.name }}" class="btn btn-secondary flex-center">
                     View Details
                 </a>
-                <button class="btn {% if exp.mode == 'lab' %}btn-success{% else %}btn-primary{% endif %} flex-center nowrap"
-                        onclick="toggleMode('{{ exp.name }}', this)">
-                    {% if exp.mode == 'lab' %}Production{% else %}Lab Mode{% endif %}
+                {% if exp.mode == 'production' %}
+                <button class="btn btn-primary flex-center nowrap"
+                        onclick="toggleMode('{{ exp.name }}', this)"
+                        title="Stop publishing and return to lab mode">
+                    Stop Publishing
                 </button>
+                {% else %}
+                <button class="btn btn-success flex-center nowrap"
+                        onclick="{% if exp.best_model %}toggleMode('{{ exp.name }}', this){% else %}mlfl.toast('Run a benchmark first to select a model', 'warning'){% endif %}"
+                        {% if not exp.best_model %}style="opacity:0.5;"{% endif %}
+                        title="{% if exp.best_model %}Start publishing forecasts as HA sensors{% else %}Run a benchmark first{% endif %}">
+                    Publish
+                </button>
+                {% endif %}
             </div>
         </div>
         {% endfor %}
