@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.2
+
+### Fix
+- **Covariate Analysis recommendations**: percentages now match the table
+  (both use baseline as denominator). Wording clarified: "Consider removing X
+  — dropping it reduces MAE by Y%" instead of confusing "X is harmful" language.
+  Overall recommendation now says "performs better without covariates" when
+  removing all covariates improves MAE.
+
 ## 2.0.1
 
 ### Fix

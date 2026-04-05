@@ -2597,6 +2597,8 @@ class MLForecastLabApp:
                     cell.mase_change_pct = round((cell.mase - base.mase) / base.mase * 100, 1)
 
         # Generate recommendations
+        # All percentages use baseline (All covariates) as denominator,
+        # matching the change_pct shown in the table.
         recommendations = []
         no_cov = results.get("No covariates", {})
 
@@ -2604,33 +2606,31 @@ class MLForecastLabApp:
         for model_name in models_to_run:
             base_mae = baseline.get(model_name, _nan_cell).mae
             no_cov_mae = no_cov.get(model_name, _nan_cell).mae
-            if not np.isnan(base_mae) and not np.isnan(no_cov_mae) and no_cov_mae > 0:
-                improvement = (no_cov_mae - base_mae) / no_cov_mae * 100
-                if improvement > 5:
+            if not np.isnan(base_mae) and not np.isnan(no_cov_mae) and base_mae > 0:
+                # Positive = removing covariates increases MAE (covariates help)
+                # Negative = removing covariates decreases MAE (covariates hurt)
+                change_pct = (no_cov_mae - base_mae) / base_mae * 100
+                if change_pct > 5:
                     recommendations.append({
                         "icon": "✓",
-                        "text": f"Covariates improve {model_name} by {improvement:.1f}%",
+                        "text": f"Covariates help {model_name} — removing all increases MAE by {change_pct:.1f}%",
                         "color": "#2ecc71",
                     })
-                elif improvement < -5:
+                elif change_pct < -3:
                     recommendations.append({
                         "icon": "⚠",
-                        "text": f"Covariates hurt {model_name} by {abs(improvement):.1f}% — consider removing",
+                        "text": f"{model_name} performs better without covariates (MAE drops {abs(change_pct):.1f}%)",
                         "color": "#f39c12",
                     })
 
-        # Find the best-performing model (lowest baseline MAE) for per-covariate detail
-        ref_model = min(
-            models_to_run,
-            key=lambda m: baseline.get(m, _nan_cell).mae if np.isfinite(baseline.get(m, _nan_cell).mae) else np.inf,
-        )
-
-        # Per-covariate: cross-model consensus + detail from best model
+        # Per-covariate: cross-model consensus
         for cov_col in covariate_cols:
             label = f"Without {cov_col}"
             dropped = results.get(label, {})
 
-            # Compute impact across ALL models
+            # Compute impact across ALL models (same formula as table change_pct)
+            # Negative = dropping this covariate improves MAE
+            # Positive = dropping this covariate worsens MAE (covariate is useful)
             impacts = {}
             for m in models_to_run:
                 d_mae = dropped.get(m, _nan_cell).mae
@@ -2642,33 +2642,32 @@ class MLForecastLabApp:
                 continue
 
             avg_impact = np.mean(list(impacts.values()))
-            n_agree_helpful = sum(1 for v in impacts.values() if v > 2)
-            n_agree_harmful = sum(1 for v in impacts.values() if v < -2)
+            n_helps = sum(1 for v in impacts.values() if v > 2)    # dropping hurts → covariate helps
+            n_hurts = sum(1 for v in impacts.values() if v < -2)   # dropping helps → covariate hurts
             n_models = len(impacts)
 
-            # Cross-model consensus recommendation
-            if n_agree_helpful == n_models and avg_impact > 3:
+            if n_helps == n_models and avg_impact > 3:
                 recommendations.append({
                     "icon": "✓",
-                    "text": f"{cov_col} is important — all {n_models} models agree (avg +{avg_impact:.1f}% MAE when dropped)",
+                    "text": f"Keep {cov_col} — dropping it increases MAE by {avg_impact:.1f}% across all {n_models} models",
                     "color": "#2ecc71",
                 })
-            elif n_agree_harmful == n_models and avg_impact < -2:
+            elif n_hurts == n_models and avg_impact < -2:
                 recommendations.append({
                     "icon": "✗",
-                    "text": f"{cov_col} is harmful — all {n_models} models agree (avg {avg_impact:.1f}% MAE when dropped)",
+                    "text": f"Consider removing {cov_col} — dropping it reduces MAE by {abs(avg_impact):.1f}% across all {n_models} models",
                     "color": "#e74c3c",
                 })
-            elif n_agree_helpful > n_models / 2 and avg_impact > 3:
+            elif n_helps > n_models / 2 and avg_impact > 3:
                 recommendations.append({
                     "icon": "✓",
-                    "text": f"{cov_col} is important — {n_agree_helpful}/{n_models} models agree (avg +{avg_impact:.1f}% MAE when dropped)",
+                    "text": f"Keep {cov_col} — {n_helps}/{n_models} models benefit (+{avg_impact:.1f}% MAE when dropped)",
                     "color": "#2ecc71",
                 })
-            elif n_agree_harmful > n_models / 2 and avg_impact < -2:
+            elif n_hurts > n_models / 2 and avg_impact < -2:
                 recommendations.append({
                     "icon": "✗",
-                    "text": f"{cov_col} is harmful — {n_agree_harmful}/{n_models} models agree (avg {avg_impact:.1f}% MAE when dropped)",
+                    "text": f"Consider removing {cov_col} — {n_hurts}/{n_models} models improve ({avg_impact:.1f}% MAE when dropped)",
                     "color": "#e74c3c",
                 })
 
