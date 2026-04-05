@@ -38,17 +38,6 @@
     {% endif %}
 
     <div class="action-buttons">
-        <!-- Pipeline controls -->
-        <div class="flex-row gap-lg" style="align-items:center;">
-            <label class="checkbox-label">
-                <input type="checkbox" id="chk-ensemble" checked class="checkbox-accent">
-                <span>Include Ensemble</span>
-            </label>
-            <label class="checkbox-label">
-                <input type="checkbox" id="chk-deep" class="checkbox-accent">
-                <span>Include Deep Analysis</span>
-            </label>
-        </div>
         <button id="btn-run" class="btn btn-primary" onclick="startPipeline()">
             <span id="btn-run-text">{% if is_running %}Running...{% else %}Run Pipeline{% endif %}</span>
         </button>
@@ -66,26 +55,10 @@
         </button>
             {% endif %}
         {% endif %}
-        <div class="inline-group">
-            <select id="deep-analysis-model" class="setting-input select-narrow">
-                {% if best_model %}
-                <option value="{{ best_model }}">{{ best_model }} (best)</option>
-                {% endif %}
-                {% for model in models %}
-                {% if model.name != best_model %}
-                <option value="{{ model.name }}">{{ model.name }}</option>
-                {% endif %}
-                {% endfor %}
-                <option value="all">All models</option>
-            </select>
-            <button class="btn btn-purple"
-                    id="deep-analysis-btn"
-                    onclick="runDeepAnalysis('{{ experiment.name }}', this)"
-                    {% if deep_analysis and deep_analysis.status == 'running' %}disabled{% endif %}>
-                {% if deep_analysis and deep_analysis.status == 'running' %}Analysing...{% else %}Deep Analysis{% endif %}
-            </button>
-        </div>
     </div>
+    <!-- Hidden checkboxes for pipeline steps (defaults: ensemble on, deep off) -->
+    <input type="hidden" id="chk-ensemble" value="1">
+    <input type="hidden" id="chk-deep" value="">
     <div id="promote-message"></div>
 </div>
 
@@ -100,7 +73,7 @@
     <a data-tab="sec-generalisation" onclick="showTab(this)">Generalisation</a>
     {% if feature_importances %}<a data-tab="sec-features" onclick="showTab(this)">Features</a>{% endif %}
     <a data-tab="sec-ensemble" onclick="showTab(this)">Ensemble</a>
-    {% if deep_analysis %}<a data-tab="sec-deep-analysis" onclick="showTab(this)">Deep Analysis</a>{% endif %}
+    <a data-tab="sec-deep-analysis" onclick="showTab(this)">Deep Analysis</a>
     {% endif %}
 </nav>
 
@@ -535,12 +508,36 @@
 </div>
 
 <!-- ====== TAB: Deep Analysis ====== -->
-{% if deep_analysis %}
+{% if deep_analysis or benchmark_result %}
 <div class="tab-section" id="sec-deep-analysis" style="display:none;">
 <section class="section">
     <h2>Deep Covariate Analysis <span class="info-tip">?<span class="tip-text">Tests every model with different covariate combinations to find which external features help and which ones hurt. The % change column shows impact relative to the "All covariates" baseline. Positive = worse, negative = better.</span></span></h2>
 
-    {% if deep_analysis.status == 'running' %}
+    <!-- Controls -->
+    <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin-bottom:1.5rem;">
+        <div>
+            <label class="field-label" style="display:block;margin-bottom:0.3rem;">Model</label>
+            <select id="deep-analysis-model" class="setting-input" style="padding:0.4rem 0.6rem;font-size:0.9rem;min-width:180px;">
+                {% if best_model %}
+                <option value="{{ best_model }}">{{ best_model }} (best)</option>
+                {% endif %}
+                {% for model in models %}
+                {% if model.name != best_model %}
+                <option value="{{ model.name }}">{{ model.name }}</option>
+                {% endif %}
+                {% endfor %}
+                <option value="all">All models</option>
+            </select>
+        </div>
+        <button class="btn btn-purple"
+                id="deep-analysis-btn"
+                onclick="runDeepAnalysis('{{ experiment.name }}', this)"
+                {% if deep_analysis and deep_analysis.status == 'running' %}disabled{% endif %}>
+            {% if deep_analysis and deep_analysis.status == 'running' %}Analysing...{% else %}Run Deep Analysis{% endif %}
+        </button>
+    </div>
+
+    {% if deep_analysis and deep_analysis.status == 'running' %}
     <div style="text-align: center; padding: 2rem; color: var(--accent-secondary);">
         <p style="font-size: 1.2rem;">Deep analysis running...</p>
         <p style="color: var(--text-secondary);">{{ deep_analysis.completed_runs }} / {{ deep_analysis.total_runs }} combinations tested</p>
@@ -977,8 +974,8 @@ window.showTab = function(el) {
 
     window.startPipeline = function() {
         var steps = ['benchmark'];
-        if (document.getElementById('chk-ensemble').checked) steps.push('ensemble');
-        if (document.getElementById('chk-deep').checked) steps.push('deep_analysis');
+        if (document.getElementById('chk-ensemble').value) steps.push('ensemble');
+        if (document.getElementById('chk-deep').value) steps.push('deep_analysis');
 
         var btn = document.getElementById('btn-run');
         btn.disabled = true; btn.classList.add('btn-loading');
