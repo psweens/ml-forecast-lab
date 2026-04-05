@@ -519,59 +519,61 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             },
         )
 
+    # Model catalog (shared between Models page and experiment detail)
+    MODEL_CATALOG = [
+        {"name": "cnn", "display_name": "CNN", "model_type": "PyTorch",
+         "description": "WaveNet-style dilated causal convolutions with residual connections.",
+         "speed": "🔶 Moderate", "best_for": "Periodic/seasonal signals"},
+        {"name": "crossformer", "display_name": "Crossformer", "model_type": "PyTorch",
+         "description": "Segment embedding with temporal + cross-variable attention.",
+         "speed": "🔶 Moderate", "best_for": "Joint temporal + cross-variate modelling"},
+        {"name": "dlinear", "display_name": "DLinear", "model_type": "PyTorch",
+         "description": "Decomposition-Linear: separate linear layers for trend and seasonal.",
+         "speed": "⚡ Fast", "best_for": "Simple baseline — surprisingly competitive"},
+        {"name": "itransformer", "display_name": "iTransformer", "model_type": "PyTorch",
+         "description": "Inverted Transformer: attention across variables.",
+         "speed": "🔶 Moderate", "best_for": "Cross-variate correlations"},
+        {"name": "lightgbm", "display_name": "LightGBM", "model_type": "Tree",
+         "description": "Gradient boosting framework optimised for speed and memory efficiency.",
+         "speed": "⚡ Very Fast", "best_for": "Default choice — fast and accurate"},
+        {"name": "lstm", "display_name": "LSTM", "model_type": "PyTorch",
+         "description": "2-layer LSTM with temporal attention and multi-horizon output head.",
+         "speed": "🔶 Moderate", "best_for": "Complex temporal patterns"},
+        {"name": "nbeats", "display_name": "N-BEATS", "model_type": "PyTorch",
+         "description": "Neural Basis Expansion with doubly-residual stacking.",
+         "speed": "🔶 Moderate", "best_for": "Pure time-series without covariates"},
+        {"name": "neuralprophet", "display_name": "NeuralProphet", "model_type": "PyTorch",
+         "description": "Neural forecasting with trend decomposition and automatic seasonality.",
+         "speed": "🔶 Moderate", "best_for": "Strong seasonality + covariates"},
+        {"name": "nhits", "display_name": "N-HiTS", "model_type": "PyTorch",
+         "description": "Hierarchical interpolation with multi-rate temporal downsampling.",
+         "speed": "🔶 Moderate", "best_for": "Multi-scale temporal patterns"},
+        {"name": "patchtst", "display_name": "PatchTST", "model_type": "PyTorch",
+         "description": "Channel-independent Patch Transformer with encoder.",
+         "speed": "🔶 Moderate", "best_for": "Long-range dependencies"},
+        {"name": "sparsetsf", "display_name": "SparseTSF", "model_type": "PyTorch",
+         "description": "Period-based sparse cross-period linear model.",
+         "speed": "⚡ Fast", "best_for": "Strong daily/weekly periodicity"},
+        {"name": "tide", "display_name": "TiDE", "model_type": "PyTorch",
+         "description": "Time-series Dense Encoder with residual MLP encoder-decoder.",
+         "speed": "🔶 Moderate", "best_for": "Efficient long-horizon forecasting"},
+        {"name": "timesnet", "display_name": "TimesNet", "model_type": "PyTorch",
+         "description": "FFT period detection with 2D inception convolutions.",
+         "speed": "🔶 Moderate", "best_for": "Multi-periodic signals"},
+        {"name": "tsmixer", "display_name": "TSMixer", "model_type": "PyTorch",
+         "description": "Alternating time-mixing and feature-mixing MLP layers.",
+         "speed": "🔶 Moderate", "best_for": "Multivariate cross-channel patterns"},
+        {"name": "xgboost", "display_name": "XGBoost", "model_type": "Tree",
+         "description": "Extreme gradient boosting with L1/L2 regularisation.",
+         "speed": "⚡ Fast", "best_for": "When LightGBM overfits"},
+    ]
+
     @app.get("/models", response_class=Response)
     async def models_page(request: Request):
         """Models configuration page with per-model hyperparameter editing."""
         import yaml
 
-        # Models listed alphabetically by display name
-        models_list = [
-            {"name": "cnn", "display_name": "CNN", "model_type": "PyTorch",
-             "description": "WaveNet-style dilated causal convolutions with residual connections.",
-             "speed": "🔶 Moderate", "best_for": "Periodic/seasonal signals"},
-            {"name": "crossformer", "display_name": "Crossformer", "model_type": "PyTorch",
-             "description": "Segment embedding with temporal + cross-variable attention.",
-             "speed": "🔶 Moderate", "best_for": "Joint temporal + cross-variate modelling"},
-            {"name": "dlinear", "display_name": "DLinear", "model_type": "PyTorch",
-             "description": "Decomposition-Linear: separate linear layers for trend and seasonal.",
-             "speed": "⚡ Fast", "best_for": "Simple baseline — surprisingly competitive"},
-            {"name": "itransformer", "display_name": "iTransformer", "model_type": "PyTorch",
-             "description": "Inverted Transformer: attention across variables.",
-             "speed": "🔶 Moderate", "best_for": "Cross-variate correlations"},
-            {"name": "lightgbm", "display_name": "LightGBM", "model_type": "Tree",
-             "description": "Gradient boosting framework optimised for speed and memory efficiency.",
-             "speed": "⚡ Very Fast", "best_for": "Default choice — fast and accurate"},
-            {"name": "lstm", "display_name": "LSTM", "model_type": "PyTorch",
-             "description": "2-layer LSTM with temporal attention and multi-horizon output head.",
-             "speed": "🔶 Moderate", "best_for": "Complex temporal patterns"},
-            {"name": "nbeats", "display_name": "N-BEATS", "model_type": "PyTorch",
-             "description": "Neural Basis Expansion with doubly-residual stacking.",
-             "speed": "🔶 Moderate", "best_for": "Pure time-series without covariates"},
-            {"name": "neuralprophet", "display_name": "NeuralProphet", "model_type": "PyTorch",
-             "description": "Neural forecasting with trend decomposition and automatic seasonality.",
-             "speed": "🔶 Moderate", "best_for": "Strong seasonality + covariates"},
-            {"name": "nhits", "display_name": "N-HiTS", "model_type": "PyTorch",
-             "description": "Hierarchical interpolation with multi-rate temporal downsampling.",
-             "speed": "🔶 Moderate", "best_for": "Multi-scale temporal patterns"},
-            {"name": "patchtst", "display_name": "PatchTST", "model_type": "PyTorch",
-             "description": "Channel-independent Patch Transformer with encoder.",
-             "speed": "🔶 Moderate", "best_for": "Long-range dependencies"},
-            {"name": "sparsetsf", "display_name": "SparseTSF", "model_type": "PyTorch",
-             "description": "Period-based sparse cross-period linear model.",
-             "speed": "⚡ Fast", "best_for": "Strong daily/weekly periodicity"},
-            {"name": "tide", "display_name": "TiDE", "model_type": "PyTorch",
-             "description": "Time-series Dense Encoder with residual MLP encoder-decoder.",
-             "speed": "🔶 Moderate", "best_for": "Efficient long-horizon forecasting"},
-            {"name": "timesnet", "display_name": "TimesNet", "model_type": "PyTorch",
-             "description": "FFT period detection with 2D inception convolutions.",
-             "speed": "🔶 Moderate", "best_for": "Multi-periodic signals"},
-            {"name": "tsmixer", "display_name": "TSMixer", "model_type": "PyTorch",
-             "description": "Alternating time-mixing and feature-mixing MLP layers.",
-             "speed": "🔶 Moderate", "best_for": "Multivariate cross-channel patterns"},
-            {"name": "xgboost", "display_name": "XGBoost", "model_type": "Tree",
-             "description": "Extreme gradient boosting with L1/L2 regularisation.",
-             "speed": "⚡ Fast", "best_for": "When LightGBM overfits"},
-        ]
+        models_list = MODEL_CATALOG
 
         # Load enabled models and overrides from config
         models_enabled = []
@@ -778,8 +780,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "total_epochs": _total_epochs,
             }
 
-        # Get units from experiment config
+        # Get units and per-experiment models_enabled from config
         units = ""
+        exp_models_enabled: list = []
         try:
             from ml_forecast_lab.config import load_config as _lc
             import glob as _g
@@ -791,6 +794,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                     for exp in cfg.experiments:
                         if exp.name == name:
                             units = exp.units or ""
+                            exp_models_enabled = list(exp.models_enabled)
                     break
         except Exception:
             pass
@@ -819,6 +823,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "models_json": [m.model_dump() for m in (benchmark_result.models if benchmark_result else [])],
                 "embedded_history": embedded_history,
                 "training_summary": training_summary,
+                "model_catalog": MODEL_CATALOG,
+                "exp_models_enabled": exp_models_enabled,
             },
         )
 
@@ -1124,6 +1130,56 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         except Exception as e:
             logger.error(f"Failed to toggle model: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
+
+    @app.post("/api/experiment/{exp_name}/models/toggle")
+    async def toggle_experiment_model(exp_name: str, request: Request):
+        """
+        Toggle a model on/off for a specific experiment.
+        Body: {"model_name": "lstm", "enabled": true}
+        """
+        import yaml
+        import glob as _glob
+
+        try:
+            data = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        model_name = data.get("model_name")
+        enabled = data.get("enabled", True)
+
+        if not model_name:
+            return JSONResponse(content={"success": False, "error": "model_name required"})
+
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                yaml_data = yaml.safe_load(f)
+
+            # Update models_enabled only for the target experiment
+            for exp in yaml_data.get("experiments", []):
+                if exp.get("name") != exp_name:
+                    continue
+                models = exp.get("models_enabled", [])
+                if enabled and model_name not in models:
+                    models.append(model_name)
+                elif not enabled and model_name in models:
+                    models.remove(model_name)
+                exp["models_enabled"] = models
+                break
+
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+
+            logger.info(f"Model {model_name} {'enabled' if enabled else 'disabled'} for {exp_name}")
+            return JSONResponse(content={"success": True})
+
+        except Exception as e:
+            logger.error(f"Failed to toggle model for {exp_name}: {e}")
             return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.get("/settings")

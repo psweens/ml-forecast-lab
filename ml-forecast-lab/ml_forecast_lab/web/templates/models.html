@@ -5,29 +5,16 @@
 {% block content %}
 <section class="dashboard-header">
     <h1>Models</h1>
-    <p class="subtitle">Configure model hyperparameters and enable/disable backends for benchmarking</p>
+    <p class="subtitle">Configure default hyperparameters for each model backend. Select which models to train in each experiment's detail page.</p>
 </section>
 
 <section class="section">
-    {% if not models_enabled %}
-    <div class="hint-banner">
-        No models are currently enabled. Toggle models below to include them in benchmarking, or configure them in your <code>mlfl.yaml</code>.
-    </div>
-    {% endif %}
     <div class="experiments-grid" style="grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));">
         {% for model in models %}
-        <div class="experiment-card model-card" id="card-{{ model.name }}" style="{% if model.name not in models_enabled %}opacity: 0.5;{% endif %}">
+        <div class="experiment-card model-card" id="card-{{ model.name }}">
             <div class="card-header">
                 <h3 class="card-title">{{ model.display_name }}</h3>
-                <div style="display: flex; align-items: center; gap: 0.75rem;">
-                    <span class="status-badge" style="background: rgba(0,212,255,0.15); color: #00d4ff;">{{ model.model_type }}</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" data-model="{{ model.name }}"
-                               {% if model.name in models_enabled %}checked{% endif %}
-                               onchange="toggleModel(this, '{{ model.name }}')">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
+                <span class="status-badge" style="background: rgba(0,212,255,0.15); color: #00d4ff;">{{ model.model_type }}</span>
             </div>
             <div class="card-body">
                 <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 0.5rem;">{{ model.description }}</p>
@@ -105,41 +92,6 @@
 </section>
 
 <script>
-function toggleModel(el, name) {
-    var card = document.getElementById('card-' + name);
-    card.style.opacity = el.checked ? '1' : '0.5';
-    var status = document.getElementById('status-' + name);
-    fetch(BASE_PATH + '/api/models/toggle', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({model_name: name, enabled: el.checked})
-    }).then(function(r) { return r.json(); })
-    .then(function(data) {
-        if (data.success) {
-            if (status) {
-                status.className = 'param-status success';
-                status.textContent = el.checked ? 'Enabled — saved' : 'Disabled — saved';
-                setTimeout(function() { status.textContent = ''; }, 3000);
-            }
-        } else {
-            if (status) {
-                status.className = 'param-status error';
-                status.textContent = 'Failed to save: ' + (data.error || 'unknown');
-            }
-            // Revert toggle
-            el.checked = !el.checked;
-            card.style.opacity = el.checked ? '1' : '0.5';
-        }
-    }).catch(function(err) {
-        if (status) {
-            status.className = 'param-status error';
-            status.textContent = 'Save failed — check connection';
-        }
-        el.checked = !el.checked;
-        card.style.opacity = el.checked ? '1' : '0.5';
-    });
-}
-
 function toggleParams(name) {
     var panel = document.getElementById('params-' + name);
     var chevron = document.getElementById('chevron-' + name);

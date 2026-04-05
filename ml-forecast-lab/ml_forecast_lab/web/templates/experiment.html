@@ -64,6 +64,7 @@
 
 <!-- Section navigation (tab-style) -->
 <nav class="section-nav" id="section-nav">
+    <a data-tab="sec-models" onclick="showTab(this)">Models</a>
     {% if is_running or embedded_history.get(experiment.name) %}
     <a data-tab="sec-training" onclick="showTab(this)">Training</a>
     {% endif %}
@@ -76,6 +77,39 @@
     <a data-tab="sec-deep-analysis" onclick="showTab(this)">Deep Analysis</a>
     {% endif %}
 </nav>
+
+<!-- ====== TAB: Models (per-experiment selection) ====== -->
+<div class="tab-section" id="sec-models" style="display:none;">
+<section class="section">
+    <h2>Model Selection</h2>
+    <p style="color:var(--text-secondary);margin-bottom:1rem;">Choose which models to include when running the pipeline. Visit the <a href="{{ base_path | default('') }}/models" style="color:var(--accent-secondary);">Models</a> page to configure hyperparameters.</p>
+    <div class="experiments-grid" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr));">
+        {% for m in model_catalog %}
+        <div class="experiment-card model-card" id="exp-model-card-{{ m.name }}" style="{% if m.name not in exp_models_enabled %}opacity:0.5;{% endif %}">
+            <div class="card-header" style="padding:0.75rem 1rem;">
+                <h3 class="card-title" style="font-size:1rem;">{{ m.display_name }}</h3>
+                <div style="display:flex;align-items:center;gap:0.5rem;">
+                    <span class="status-badge" style="background:rgba(0,212,255,0.15);color:#00d4ff;font-size:0.7rem;padding:0.1rem 0.4rem;">{{ m.model_type }}</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" data-model="{{ m.name }}"
+                               {% if m.name in exp_models_enabled %}checked{% endif %}
+                               onchange="toggleExpModel(this, '{{ m.name }}')">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+            <div class="card-body" style="padding:0.5rem 1rem 0.75rem;">
+                <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:0.25rem;">{{ m.description }}</p>
+                <div style="display:flex;gap:0.75rem;font-size:0.75rem;color:var(--text-muted);">
+                    <span>{{ m.speed }}</span>
+                    <span style="color:var(--accent-secondary);">{{ m.best_for }}</span>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</section>
+</div>
 
 <!-- ====== TAB: Training (live progress) ====== -->
 <div class="tab-section" id="sec-training" style="display:none;">
@@ -903,6 +937,28 @@ window.showTab = function(el) {
     }
 
     // ======== Ensemble configuration ========
+    // ======== Per-experiment model toggle ========
+    window.toggleExpModel = function(el, modelName) {
+        var card = document.getElementById('exp-model-card-' + modelName);
+        fetch(BASE + '/api/experiment/' + EXP_NAME + '/models/toggle', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model_name: modelName, enabled: el.checked })
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success) {
+                card.style.opacity = el.checked ? '1' : '0.5';
+            } else {
+                el.checked = !el.checked;
+                mlfl.toast('Failed to toggle model: ' + (data.error || ''), 'error');
+            }
+        })
+        .catch(function(err) {
+            el.checked = !el.checked;
+            mlfl.toast('Failed to toggle model: ' + err, 'error');
+        });
+    };
+
     window.toggleEnsembleCustom = function(value) {
         var panel = document.getElementById('ensemble-custom-panel');
         if (panel) panel.style.display = (value === 'custom') ? 'block' : 'none';
@@ -1253,9 +1309,10 @@ window.showTab = function(el) {
     if (pipelineRunning || (typeof EMBEDDED_HISTORY !== 'undefined' && EMBEDDED_HISTORY[EXP_NAME] && EMBEDDED_HISTORY[EXP_NAME].length > 0)) {
         autoReconnect();
     } else {
-        // Default to Results tab (or first available)
-        var firstPill = document.querySelector('.section-nav a');
-        if (firstPill) showTab(firstPill);
+        // Default to Results if available, otherwise Models
+        var defaultTab = document.querySelector('.section-nav a[data-tab="sec-results"]')
+                      || document.querySelector('.section-nav a[data-tab="sec-models"]');
+        if (defaultTab) showTab(defaultTab);
     }
 })();
 </script>

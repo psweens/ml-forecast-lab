@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.22.1
+
+### UX Refinements
+- **Per-experiment model selection**: model enable/disable toggles moved from the
+  global Models page into the experiment detail page ("Models" tab). Each experiment
+  now independently selects which models to train.
+- **Models page simplified**: now a pure catalog with hyperparameter configuration.
+  Toggle switches removed; subtitle directs users to experiment detail for selection.
+- **Header decluttered**: ensemble/deep-analysis checkboxes removed from the header.
+  Ensemble always included by default; deep analysis controls moved into the Deep
+  Analysis tab where they have full context.
+
 ## 1.22.0
 
 ### Major UI Overhaul
