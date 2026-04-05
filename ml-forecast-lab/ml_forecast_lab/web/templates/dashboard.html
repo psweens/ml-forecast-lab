@@ -114,20 +114,6 @@
                     </span>
                 </div>
                 {% endif %}
-            </div>
-
-                <div class="card-field">
-                    <span class="field-label">Publish</span>
-                    <span class="field-value">
-                        <label class="toggle-switch" title="{% if exp.best_model %}Toggle live forecast publishing{% else %}Run a benchmark first{% endif %}">
-                            <input type="checkbox"
-                                   {% if exp.mode == 'production' %}checked{% endif %}
-                                   {% if not exp.best_model %}disabled{% endif %}
-                                   onchange="toggleMode('{{ exp.name }}', this)">
-                            <span class="toggle-slider"></span>
-                        </label>
-                    </span>
-                </div>
 
                 {% if exp.mode == 'production' and exp.publish_entity %}
                 <div class="card-field">
@@ -138,9 +124,16 @@
             </div>
 
             <div class="card-footer card-footer-actions">
-                <a href="{{ base_path | default('') }}/experiment/{{ exp.name }}" class="btn btn-secondary flex-center" style="width:100%;">
+                <a href="{{ base_path | default('') }}/experiment/{{ exp.name }}" class="btn btn-secondary flex-center">
                     View Details
                 </a>
+                <label class="toggle-switch" title="{% if exp.best_model %}Toggle live forecast publishing{% else %}Run a benchmark first{% endif %}" style="flex-shrink:0;">
+                    <input type="checkbox"
+                           {% if exp.mode == 'production' %}checked{% endif %}
+                           {% if not exp.best_model %}disabled{% endif %}
+                           onchange="toggleMode('{{ exp.name }}', this)">
+                    <span class="toggle-slider"></span>
+                </label>
             </div>
         </div>
         {% endfor %}
