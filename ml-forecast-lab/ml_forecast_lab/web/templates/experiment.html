@@ -1010,7 +1010,6 @@ window.showTab = function(el) {
     // ======== Training pipeline (migrated from training.html) ========
     var evtSource = null;
     var allLossData = {};
-    var earlyStops = {};
     var totalModels = 0, completedModels = 0;
     var currentModel = '', displayModel = '';
     var pipelineRunning = {{ 'true' if is_running else 'false' }};
@@ -1039,7 +1038,7 @@ window.showTab = function(el) {
         pipelineRunning = true;
 
         // Reset state
-        allLossData = {}; earlyStops = {}; totalModels = 0; completedModels = 0;
+        allLossData = {}; totalModels = 0; completedModels = 0;
         currentModel = ''; displayModel = ''; knownModels = []; foldTraceMap = {};
         document.getElementById('model-select').innerHTML = '<option value="">— select model —</option>';
         document.getElementById('event-log').innerHTML = '';
@@ -1112,11 +1111,10 @@ window.showTab = function(el) {
                 if (!isReplaying && ev.model_name === displayModel) liveUpdateChart(ev);
                 break;
             case 'early_stop':
-                recordEarlyStop(ev.model_name, ev);
                 logEvent('warn', ev.model_name + ': Early stop at epoch ' + ev.epoch);
                 break;
             case 'model_end':
-                completedModels++; detectEarlyStopFromData(ev.model_name);
+                completedModels++;
                 var pct = totalModels > 0 ? Math.round(completedModels / totalModels * 100) : 0;
                 document.getElementById('progress-bar').style.width = pct + '%';
                 document.getElementById('progress-pct').textContent = pct + '%';
@@ -1166,28 +1164,6 @@ window.showTab = function(el) {
         if (ev.best_val_loss > 0) fd.bestValLoss = ev.best_val_loss;
     }
 
-    function recordEarlyStop(modelName, ev) {
-        if (!earlyStops[modelName]) earlyStops[modelName] = {};
-        earlyStops[modelName]['F' + ev.fold] = { stopEpoch: ev.epoch, bestEpoch: ev.epoch - (ev.patience_counter || 0), bestLoss: ev.best_val_loss || ev.val_loss };
-    }
-
-    function detectEarlyStopFromData(modelName) {
-        var modelData = allLossData[modelName]; if (!modelData) return;
-        for (var foldKey in modelData) {
-            var fd = modelData[foldKey];
-            if (earlyStops[modelName] && earlyStops[modelName][foldKey]) continue;
-            if (fd.epochs.length === 0) continue;
-            var lastEpoch = fd.epochs[fd.epochs.length - 1];
-            var patienceExhausted = fd.lastPatienceLimit > 0 && fd.lastPatienceCounter >= fd.lastPatienceLimit;
-            var endedEarly = fd.totalEpochs > 0 && lastEpoch < fd.totalEpochs;
-            if (!patienceExhausted && !endedEarly) continue;
-            var bestIdx = 0;
-            for (var i = 1; i < fd.val.length; i++) { if (fd.val[i] < fd.val[bestIdx]) bestIdx = i; }
-            if (!earlyStops[modelName]) earlyStops[modelName] = {};
-            earlyStops[modelName][foldKey] = { stopEpoch: lastEpoch, bestEpoch: fd.epochs[bestIdx], bestLoss: fd.val[bestIdx] };
-        }
-    }
-
     function addModelToDropdown(modelName) {
         if (knownModels.indexOf(modelName) >= 0) return;
         knownModels.push(modelName);
@@ -1210,14 +1186,6 @@ window.showTab = function(el) {
             traces.push({ x: fd.epochs.slice(), y: fd.val.slice(), name: 'Val ' + foldKey, mode: 'lines', line: { color: color, width: 2 } });
             foldTraceMap[foldKey] = { trainIdx: trainIdx, valIdx: valIdx };
             colorIdx++;
-            var es = earlyStops[modelName] && earlyStops[modelName][foldKey];
-            if (es) {
-                traces.push({ x: [es.bestEpoch], y: [es.bestLoss], name: 'Early Stop ' + foldKey, mode: 'markers+text',
-                    marker: { color: '#ff6b6b', size: 12, symbol: 'circle', line: { color: '#fff', width: 2 } },
-                    text: ['Early Stop'], textposition: 'top center', textfont: { color: '#ff6b6b', size: 10 },
-                    showlegend: colorIdx === 1, legendgroup: 'earlystop',
-                    hovertemplate: 'Best Val Loss: %{y:.5f}<br>Epoch: %{x}<extra>Early Stop ' + foldKey + '</extra>' });
-            }
         }
         CHART_LAYOUT.title = modelName + ' — Training & Validation Loss';
         Plotly.newPlot('loss-chart', traces, CHART_LAYOUT, { responsive: true, displayModeBar: false });
