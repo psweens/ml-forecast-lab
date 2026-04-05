@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.24.1
+
+### Improvements
+- **Remove harmful covariates**: Covariate Analysis rows where dropping a covariate
+  improves average MAE now show a "Remove" button. One click removes it from the
+  experiment's YAML config.
+- **Apply & Promote**: Tuning "Apply Best" replaced with "Apply & Promote" which
+  saves tuned params AND promotes the model to production in one action.
+- **Holdout comparison chart**: after tuning completes, a Plotly chart shows the
+  model's default-params vs tuned-params predictions on holdout data with MAE
+  improvement percentage.
+- **Promotion persists**: promoting a model now saves `production_model` and `mode`
+  to mlfl.yaml so the choice survives add-on restarts.
+
+### Bug Fix
+- **Pydantic validation error**: `ModelPrediction.predictions` field now accepts
+  `Optional[float]` values, fixing ensemble padding errors in logs.
+
 ## 1.24.0
 
 ### New Feature: Selected Model

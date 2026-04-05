@@ -2069,7 +2069,6 @@ class MLForecastLabApp:
         )
 
         # Finalise
-        tuning_state.status = "completed"
         if study.best_trial:
             tuning_state.best_trial_id = study.best_trial.number
             tuning_state.best_params = dict(study.best_params)
@@ -2078,6 +2077,44 @@ class MLForecastLabApp:
         logger.info(f"")
         logger.info(f"  Tuning Complete — Best MAE: {study.best_value:.4f}")
         logger.info(f"  Best params: {study.best_params}")
+
+        # Run holdout comparison: default params vs tuned params
+        try:
+            logger.info(f"  Running holdout comparison...")
+            feature_cols = [c for c in combined.columns if c != "target"]
+            split_80 = int(len(combined) * 0.8)
+            X_all = combined[feature_cols].values.astype(np.float32)
+            X_all = np.nan_to_num(X_all, nan=0.0)
+            y_all = combined["target"].values.astype(np.float32)
+            X_tr_h, X_te_h = X_all[:split_80], X_all[split_80:]
+            y_tr_h, y_te_h = y_all[:split_80], y_all[split_80:]
+            holdout_ts = [t.isoformat() for t in combined.index[split_80:]]
+
+            def _run_holdout(params):
+                m = self.model_registry.create(model_name, **params)
+                m.fit(X_tr_h, y_tr_h)
+                p = m.predict(X_te_h)
+                return (p.ravel() if p.ndim > 1 else p).tolist()
+
+            # Default params holdout
+            default_overrides = dict(self.config.model_overrides.get(model_name, {}))
+            preds_default = await loop.run_in_executor(None, lambda: _run_holdout(default_overrides))
+            default_mae = float(np.mean(np.abs(y_te_h - np.array(preds_default))))
+
+            # Tuned params holdout
+            preds_tuned = await loop.run_in_executor(None, lambda: _run_holdout(study.best_params))
+
+            tuning_state.holdout_timestamps = holdout_ts
+            tuning_state.holdout_actuals = [float(v) for v in y_te_h]
+            tuning_state.holdout_default = [float(v) for v in preds_default]
+            tuning_state.holdout_tuned = [float(v) for v in preds_tuned]
+            tuning_state.default_mae = round(default_mae, 6)
+
+            logger.info(f"  Holdout: default MAE={default_mae:.4f}, tuned MAE={study.best_value:.4f}")
+        except Exception as e:
+            logger.warning(f"  Holdout comparison failed: {e}")
+
+        tuning_state.status = "completed"
         logger.info(f"{'=' * 60}")
 
     async def _run_deep_analysis(self, exp_cfg, selected_model: str = "all"):

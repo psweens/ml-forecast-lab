@@ -546,7 +546,7 @@
 <!-- ====== TAB: Tuning ====== -->
 <div class="tab-section" id="sec-tuning" style="display:none;">
 <section class="section">
-    <h2>Hyperparameter Tuning <span class="info-tip">?<span class="tip-text">Bayesian optimisation (Optuna TPE) automatically searches for the best hyperparameters. Each trial trains the model with 2-fold CV and reports MAE. After tuning, click "Apply Best" to save the winning params, then run the full pipeline to benchmark.</span></span></h2>
+    <h2>Hyperparameter Tuning <span class="info-tip">?<span class="tip-text">Bayesian optimisation (Optuna TPE) automatically searches for the best hyperparameters. Each trial trains the model with 2-fold CV and reports MAE. After tuning, click "Apply & Promote" to save the winning params and promote the model to production.</span></span></h2>
 
     <!-- Controls -->
     <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin-bottom:1.5rem;">
@@ -611,7 +611,7 @@
                 <span style="color:var(--success);font-weight:600;">Best — Trial #{{ tuning_result.best_trial_id }}, MAE {{ "%.4f"|format(tuning_result.best_score) }}</span>
                 <button class="btn btn-success" style="padding:0.3rem 1rem;font-size:0.85rem;"
                         onclick="applyTuning('{{ experiment.name }}')">
-                    Apply Best
+                    Apply &amp; Promote
                 </button>
             </div>
             <table style="border:none;border-collapse:collapse;width:100%;font-size:0.82rem;">
@@ -664,6 +664,24 @@
                     {% endfor %}
                 </tbody>
             </table>
+        </div>
+        {% endif %}
+
+        <!-- Holdout comparison chart: default vs tuned -->
+        {% if tuning_result.holdout_timestamps and tuning_result.holdout_tuned %}
+        <div style="margin-top:1.5rem;">
+            <h3>Holdout Comparison: Default vs Tuned</h3>
+            {% if tuning_result.default_mae is not none and tuning_result.best_score is not none %}
+            <p style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:0.5rem;">
+                MAE: <span style="color:var(--text-muted);">{{ "%.4f"|format(tuning_result.default_mae) }} (default)</span>
+                → <span style="color:var(--accent-secondary);font-weight:600;">{{ "%.4f"|format(tuning_result.best_score) }} (tuned)</span>
+                {% set imp = ((tuning_result.default_mae - tuning_result.best_score) / tuning_result.default_mae * 100) if tuning_result.default_mae > 0 else 0 %}
+                <span style="color:{% if imp > 0 %}var(--success){% else %}var(--error){% endif %};font-weight:600;">
+                    ({{ "%+.1f"|format(imp) }}%)
+                </span>
+            </p>
+            {% endif %}
+            <div id="tuning-holdout-chart" style="min-height:400px;"></div>
         </div>
         {% endif %}
     </div>
@@ -720,10 +738,29 @@
             </thead>
             <tbody>
                 {% for label in deep_analysis.covariate_labels %}
+                {% set is_drop = label.startswith('Without ') %}
+                {# Check if dropping this covariate improves the average MAE across models #}
+                {% if is_drop %}
+                {% set ns_avg = namespace(total=0, count=0) %}
+                {% for model in deep_analysis.model_names %}
+                {% set cell = deep_analysis.results.get(label, {}).get(model) %}
+                {% if cell and cell.change_pct is not none %}
+                {% set ns_avg.total = ns_avg.total + cell.change_pct %}
+                {% set ns_avg.count = ns_avg.count + 1 %}
+                {% endif %}
+                {% endfor %}
+                {% set avg_change = ns_avg.total / ns_avg.count if ns_avg.count > 0 else 0 %}
+                {% endif %}
                 <tr {% if label == 'All covariates' %}class="best-model"{% endif %}>
-                    <td style="font-weight: 600;">
+                    <td style="font-weight: 600;white-space:nowrap;">
                         {% if label == 'All covariates' %}📊{% elif label == 'No covariates' %}🚫{% else %}➖{% endif %}
                         {{ label }}
+                        {% if is_drop and avg_change < -1 %}
+                        <button class="btn" style="padding:0.1rem 0.4rem;font-size:0.7rem;margin-left:0.5rem;background:rgba(231,76,60,0.15);color:#e74c3c;border:1px solid rgba(231,76,60,0.3);"
+                                onclick="removeCovariate('{{ experiment.name }}', '{{ label.replace('Without ', '') }}', this)">
+                            Remove
+                        </button>
+                        {% endif %}
                     </td>
                     {% for model in deep_analysis.model_names %}
                     {% set cell = deep_analysis.results.get(label, {}).get(model) %}
@@ -1002,6 +1039,28 @@ window.showTab = function(el) {
     {% endif %}
     {% endif %}
 
+    // ======== Tuning holdout comparison chart ========
+    {% if tuning_result and tuning_result.holdout_timestamps and tuning_result.holdout_tuned %}
+    queueChart('sec-tuning', function() {
+        var ts = {{ tuning_result.holdout_timestamps | tojson }};
+        var actuals = {{ tuning_result.holdout_actuals | tojson }};
+        var defPreds = {{ tuning_result.holdout_default | tojson }};
+        var tunedPreds = {{ tuning_result.holdout_tuned | tojson }};
+        Plotly.newPlot('tuning-holdout-chart', [
+            { x: ts, y: actuals, name: 'Actual', mode: 'lines', line: { color: '#ffffff', width: 2, dash: 'dot' } },
+            { x: ts, y: defPreds, name: 'Default params', mode: 'lines', line: { color: '#ff6b6b', width: 2 } },
+            { x: ts, y: tunedPreds, name: 'Tuned params', mode: 'lines', line: { color: '#ffd93d', width: 2 } }
+        ], {
+            title: '{{ tuning_result.model_name }} — Default vs Tuned on Holdout',
+            xaxis: { title: 'Time', gridcolor: '#2d3561' },
+            yaxis: { title: 'Value{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
+            hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
+            font: { color: '#e0e0e0' }, legend: { orientation: 'h', y: -0.15 },
+            margin: { l: 60, r: 20, t: 50, b: 80 }
+        }, { responsive: true });
+    });
+    {% endif %}
+
     // ======== Feature importance charts ========
     {% if feature_importances %}
     queueChart('sec-features', function() {
@@ -1117,6 +1176,27 @@ window.showTab = function(el) {
         .catch(function(err) { console.error('selectModel failed:', err); });
     };
 
+    window.removeCovariate = function(expName, entityId, btn) {
+        mlfl.confirm('Remove covariate "' + entityId + '" from this experiment?', function() {
+            btn.disabled = true; btn.textContent = '...';
+            fetch(BASE + '/experiment/' + expName + '/remove-covariate', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({entity_id: entityId})
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    mlfl.toast('Removed ' + entityId + ' — re-run pipeline to see effect', 'success');
+                    btn.closest('tr').style.opacity = '0.3';
+                } else {
+                    mlfl.toast('Failed: ' + (data.error || ''), 'error');
+                    btn.disabled = false; btn.textContent = 'Remove';
+                }
+            })
+            .catch(function(err) { mlfl.toast('Failed: ' + err, 'error'); btn.disabled = false; btn.textContent = 'Remove'; });
+        });
+    };
+
     window.promoteSelected = function(expName) {
         var radio = document.querySelector('input[name="model-select-radio"]:checked');
         if (!radio) { mlfl.toast('Select a model first', 'warning'); return; }
@@ -1221,12 +1301,13 @@ window.showTab = function(el) {
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (data.success) {
-                mlfl.toast('Best params applied for ' + data.model + ' — run pipeline to benchmark', 'success');
+                mlfl.toast(data.model + ' promoted to production with tuned params', 'success');
+                setTimeout(function() { location.reload(); }, 1500);
             } else {
-                mlfl.toast('Failed to apply: ' + (data.error || 'unknown'), 'error');
+                mlfl.toast('Failed: ' + (data.error || 'unknown'), 'error');
             }
         })
-        .catch(function(err) { mlfl.toast('Failed to apply tuning: ' + err, 'error'); });
+        .catch(function(err) { mlfl.toast('Failed: ' + err, 'error'); });
     };
 
     // ======== Deep analysis ========

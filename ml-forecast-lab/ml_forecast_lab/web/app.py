@@ -101,8 +101,8 @@ class ModelPrediction(BaseModel):
     model_name: str
     timestamps: List[str]
     actuals: List[Optional[float]]
-    predictions: List[float]
-    color: str = "#00d4ff"
+    predictions: List[Optional[float]]
+    color: str = "#ff6b6b"
 
 
 class LabForecastData(BaseModel):
@@ -164,6 +164,12 @@ class TuningResult(BaseModel):
     best_params: Optional[Dict[str, Any]] = None
     best_score: Optional[float] = None
     error_message: Optional[str] = None
+    # Holdout comparison: default vs tuned predictions
+    holdout_timestamps: Optional[List[str]] = None
+    holdout_actuals: Optional[List[Optional[float]]] = None
+    holdout_default: Optional[List[Optional[float]]] = None  # predictions with default params
+    holdout_tuned: Optional[List[Optional[float]]] = None    # predictions with best tuned params
+    default_mae: Optional[float] = None
 
 
 class FeatureImportanceData(BaseModel):
@@ -939,14 +945,24 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if not any(m.name == model_name for m in benchmark_result.models):
             raise HTTPException(status_code=404, detail="Model not found in results")
 
-        # Update status
+        # Update in-memory status
         exp_status.best_model = model_name
+        exp_status.selected_model = model_name
         exp_status.mode = "production"
 
-        # Mark all models as not production, then mark selected
         if benchmark_result:
             for model in benchmark_result.models:
                 model.is_production = model.name == model_name
+
+        # Persist to YAML so promotion survives restarts
+        from ml_forecast_lab.config import save_experiment_field
+        config_path = _find_config_path()
+        if config_path:
+            try:
+                save_experiment_field(config_path, name, "production_model", model_name)
+                save_experiment_field(config_path, name, "mode", "production")
+            except Exception as e:
+                logger.warning(f"Failed to persist promotion to YAML: {e}")
 
         return JSONResponse(
             content={
@@ -978,6 +994,37 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         app.state.appstate.experiment_statuses[name].selected_model = model_name
         return JSONResponse(content={"success": True, "selected_model": model_name})
+
+    @app.post("/experiment/{name}/remove-covariate")
+    async def remove_covariate(name: str, request: Request):
+        """Remove a covariate from experiment config."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        entity_id = body.get("entity_id")
+        if not entity_id:
+            return JSONResponse(content={"success": False, "error": "entity_id required"})
+
+        from ml_forecast_lab.config import remove_experiment_covariate
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+
+        try:
+            removed = remove_experiment_covariate(config_path, name, entity_id)
+            if removed:
+                logger.info(f"Removed covariate {entity_id} from {name}")
+                return JSONResponse(content={"success": True, "entity_id": entity_id})
+            else:
+                return JSONResponse(content={"success": False, "error": "Covariate not found"})
+        except Exception as e:
+            logger.error(f"Failed to remove covariate: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.post("/experiment/{name}/toggle-mode")
     async def toggle_mode(name: str):
@@ -1115,7 +1162,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     @app.post("/experiment/{name}/apply-tuning")
     async def apply_tuning(name: str):
-        """Apply best tuning params as per-experiment model overrides in mlfl.yaml."""
+        """Apply best tuning params and promote the model to production."""
         result = app.state.appstate.tuning_results.get(name)
         if not result or not result.best_params:
             return JSONResponse(
@@ -1123,7 +1170,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 content={"success": False, "error": "No tuning results to apply"},
             )
 
-        from ml_forecast_lab.config import save_experiment_model_params
+        from ml_forecast_lab.config import (
+            save_experiment_model_params,
+            save_experiment_field,
+        )
         config_path = _find_config_path()
         if not config_path:
             return JSONResponse(
@@ -1131,17 +1181,36 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             )
 
         try:
+            # 1. Save tuned params per-experiment
             save_experiment_model_params(
                 config_path, name, result.model_name, result.best_params
             )
+
+            # 2. Promote the tuned model to production
+            exp_status = app.state.appstate.experiment_statuses.get(name)
+            if exp_status:
+                exp_status.best_model = result.model_name
+                exp_status.selected_model = result.model_name
+                exp_status.mode = "production"
+
+            benchmark = app.state.appstate.benchmark_results.get(name)
+            if benchmark:
+                for m in benchmark.models:
+                    m.is_production = m.name == result.model_name
+
+            save_experiment_field(config_path, name, "production_model", result.model_name)
+            save_experiment_field(config_path, name, "mode", "production")
+
             logger.info(
-                f"Applied tuned params for {result.model_name} "
-                f"on experiment {name}: {result.best_params}"
+                f"Applied tuned params and promoted {result.model_name} "
+                f"for experiment {name}"
             )
-            return JSONResponse(content={"success": True, "model": result.model_name,
-                                          "params": result.best_params})
+            return JSONResponse(content={
+                "success": True, "model": result.model_name,
+                "params": result.best_params, "promoted": True,
+            })
         except Exception as e:
-            logger.error(f"Failed to apply tuning params: {e}")
+            logger.error(f"Failed to apply tuning: {e}")
             return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.get("/experiment/{name}/results")

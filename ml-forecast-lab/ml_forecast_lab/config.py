@@ -437,3 +437,67 @@ def save_experiment_model_params(
 
     with open(config_path, 'w', encoding='utf-8') as f:
         yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+
+
+def save_experiment_field(
+    config_path: Path | str,
+    experiment_name: str,
+    field: str,
+    value: Any,
+) -> None:
+    """
+    Set a single field on an experiment in the YAML config.
+
+    Parameters
+    ----------
+    config_path : Path or str
+        Path to the YAML configuration file.
+    experiment_name : str
+        Experiment name to update.
+    field : str
+        Field name to set (e.g. 'production_model', 'mode').
+    value : Any
+        Value to write.
+    """
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    for exp in data.get('experiments', []):
+        if exp.get('name') == experiment_name:
+            exp[field] = value
+            break
+
+    with open(config_path, 'w', encoding='utf-8') as f:
+        yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+
+
+def remove_experiment_covariate(
+    config_path: Path | str,
+    experiment_name: str,
+    entity_id: str,
+) -> bool:
+    """
+    Remove a covariate from an experiment's config.
+
+    Returns True if a covariate was removed, False if not found.
+    """
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    removed = False
+    for exp in data.get('experiments', []):
+        if exp.get('name') != experiment_name:
+            continue
+        covs = exp.get('covariates', [])
+        original_len = len(covs)
+        exp['covariates'] = [c for c in covs if c.get('entity') != entity_id]
+        removed = len(exp['covariates']) < original_len
+        break
+
+    if removed:
+        with open(config_path, 'w', encoding='utf-8') as f:
+            yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+
+    return removed
