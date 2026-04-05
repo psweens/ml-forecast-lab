@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.21.5
+
+### Bug Fix
+- **Training tab progress lost on tab switch**: the live training progress
+  section now reliably restores when navigating away and back. The server
+  embeds event history directly in the rendered HTML, eliminating a separate
+  fetch that could fail silently through the HA ingress proxy. Also adds
+  `pageshow` listener for bfcache resilience and `encodeURIComponent` for
+  experiment names in fallback API calls.
+
 ## 1.21.4
 
 ### Bug Fix

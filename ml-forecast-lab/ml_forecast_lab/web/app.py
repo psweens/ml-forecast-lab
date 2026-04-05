@@ -1436,6 +1436,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     async def training_page(request: Request):
         """Training dashboard with live loss plots and pipeline controls."""
         import yaml
+        from ml_forecast_lab.training_events import TrainingEventBus
 
         experiments = list(app.state.appstate.experiment_statuses.values())
 
@@ -1451,6 +1452,16 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             except Exception:
                 pass
 
+        # Embed event history for any running experiment so the Training
+        # tab can restore live-progress state without a separate fetch
+        # (which could fail silently through the ingress proxy).
+        embedded_history: Dict[str, list] = {}
+        event_bus = TrainingEventBus.get_instance()
+        for exp_name in app.state.appstate.running_benchmarks:
+            history = event_bus.get_history(exp_name)
+            if history:
+                embedded_history[exp_name] = [ev.to_dict() for ev in history]
+
         return templates.TemplateResponse(
             request=request,
             name="training.html",
@@ -1462,6 +1473,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "experiments": experiments,
                 "exp_models": exp_models,
                 "running_experiments": app.state.appstate.running_benchmarks,
+                "embedded_history": embedded_history,
             },
         )
 

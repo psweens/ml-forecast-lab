@@ -111,6 +111,10 @@
 
 {% block scripts %}
 <script>
+// Server-embedded event history for running experiments (avoids fetch on reconnect)
+var EMBEDDED_HISTORY = {{ embedded_history | tojson }};
+</script>
+<script>
 (function() {
     const BASE = typeof BASE_PATH !== 'undefined' ? BASE_PATH : '';
     let evtSource = null;
@@ -522,79 +526,111 @@
         log.scrollTop = log.scrollHeight;
     }
 
-    // On page load: check for running experiments and auto-reconnect SSE
-    // The SSE endpoint replays history, so we recover the full state
+    // Replay an array of training events and optionally reconnect SSE.
+    // Used both on initial page load (from embedded history) and on
+    // pageshow (bfcache restore).
+    function replayAndReconnect(events, expName) {
+        if (!events || events.length === 0) return;
+
+        // Find the LAST pipeline_start and check if a pipeline_end
+        // comes after it.  Old completed runs must not prevent
+        // reconnection for a newer active run.
+        let lastStartIdx = -1;
+        let lastEndIdx = -1;
+        for (let i = 0; i < events.length; i++) {
+            if (events[i].event_type === 'pipeline_start') lastStartIdx = i;
+            if (events[i].event_type === 'pipeline_end') lastEndIdx = i;
+        }
+        const hasStart = lastStartIdx >= 0;
+        const hasEnd = lastEndIdx > lastStartIdx;
+
+        if (hasStart) {
+            // Reset all state before replaying
+            allLossData = {};
+            earlyStops = {};
+            foldTraceMap = {};
+            totalModels = 0;
+            completedModels = 0;
+            currentModel = '';
+            displayModel = '';
+            knownModels = [];
+            document.getElementById('model-select').innerHTML = '<option value="">— select model —</option>';
+
+            // Show the progress section and replay events
+            document.getElementById('progress-section').style.display = 'block';
+            document.getElementById('event-log').innerHTML = '';
+            Plotly.purge('loss-chart');
+
+            // Replay events — batch chart updates for performance
+            isReplaying = true;
+            for (const ev of events) {
+                handleEvent(ev);
+            }
+            isReplaying = false;
+
+            // Render the chart after the browser has laid out the
+            // now-visible progress section so Plotly gets real
+            // dimensions for the loss-chart div.
+            requestAnimationFrame(() => {
+                if (displayModel) {
+                    document.getElementById('model-select').value = displayModel;
+                    renderChartForModel(displayModel);
+                }
+            });
+
+            // If pipeline is still running, connect SSE for live updates
+            // Skip SSE history replay since we already replayed above
+            if (!hasEnd) {
+                pipelineRunning = true;
+                const btn = document.getElementById('btn-run');
+                btn.disabled = true;
+                btn.classList.add('btn-loading');
+                document.getElementById('btn-run-text').textContent = 'Running...';
+                connectSSE(expName, true);
+            }
+        }
+    }
+
+    // On page load: restore training progress from server-embedded history
+    // (no fetch required — the server injects the events into the HTML).
+    // Falls back to an API fetch if embedded history is unavailable.
     function autoReconnect() {
         const sel = document.getElementById('exp-select');
         if (!sel || !sel.value) return;
+        const expName = sel.value;
 
-        // Fetch training history to see if there's an active or recent session
-        fetch(`${BASE}/api/training/history/${sel.value}`)
+        // Prefer server-embedded history (avoids a separate fetch that can
+        // fail silently through the HA ingress proxy).
+        if (typeof EMBEDDED_HISTORY !== 'undefined' && EMBEDDED_HISTORY[expName]) {
+            replayAndReconnect(EMBEDDED_HISTORY[expName], expName);
+            return;
+        }
+
+        // Fallback: fetch from API (e.g. experiment started after page
+        // was first rendered, or embedded history not available).
+        fetch(`${BASE}/api/training/history/${encodeURIComponent(expName)}`)
             .then(r => r.json())
-            .then(events => {
-                if (!events || events.length === 0) return;
-
-                // Find the LAST pipeline_start and check if a pipeline_end
-                // comes after it.  Old completed runs must not prevent
-                // reconnection for a newer active run.
-                let lastStartIdx = -1;
-                let lastEndIdx = -1;
-                for (let i = 0; i < events.length; i++) {
-                    if (events[i].event_type === 'pipeline_start') lastStartIdx = i;
-                    if (events[i].event_type === 'pipeline_end') lastEndIdx = i;
-                }
-                const hasStart = lastStartIdx >= 0;
-                const hasEnd = lastEndIdx > lastStartIdx;
-
-                if (hasStart) {
-                    // Reset all state before replaying
-                    allLossData = {};
-                    earlyStops = {};
-                    foldTraceMap = {};
-                    totalModels = 0;
-                    completedModels = 0;
-                    currentModel = '';
-                    displayModel = '';
-                    knownModels = [];
-                    document.getElementById('model-select').innerHTML = '<option value="">— select model —</option>';
-
-                    // Show the progress section and replay events
-                    document.getElementById('progress-section').style.display = 'block';
-                    document.getElementById('event-log').innerHTML = '';
-                    Plotly.purge('loss-chart');
-
-                    // Replay events — batch chart updates for performance
-                    isReplaying = true;
-                    for (const ev of events) {
-                        handleEvent(ev);
-                    }
-                    isReplaying = false;
-
-                    // Render the chart after the browser has laid out the
-                    // now-visible progress section so Plotly gets real
-                    // dimensions for the loss-chart div.
-                    requestAnimationFrame(() => {
-                        if (displayModel) {
-                            document.getElementById('model-select').value = displayModel;
-                            renderChartForModel(displayModel);
-                        }
-                    });
-
-                    // If pipeline is still running, connect SSE for live updates
-                    // Skip SSE history replay since we already replayed above
-                    if (!hasEnd) {
-                        pipelineRunning = true;
-                        const btn = document.getElementById('btn-run');
-                        btn.disabled = true;
-                        btn.classList.add('btn-loading');
-                        document.getElementById('btn-run-text').textContent = 'Running...';
-                        connectSSE(sel.value, true);
-                    }
-                }
-            })
-            .catch(() => {});
+            .then(events => { replayAndReconnect(events, expName); })
+            .catch(err => { console.error('autoReconnect fetch failed:', err); });
     }
     autoReconnect();
+
+    // Handle bfcache restoration: browsers may cache the page state when
+    // navigating away and restore it (with dead SSE connections) when
+    // navigating back.  The pageshow event fires in both cases.
+    window.addEventListener('pageshow', function(e) {
+        if (e.persisted) {
+            // Page was restored from bfcache — SSE connection is dead.
+            // Re-fetch fresh history and reconnect.
+            var sel = document.getElementById('exp-select');
+            if (!sel || !sel.value) return;
+            var expName = sel.value;
+            fetch(`${BASE}/api/training/history/${encodeURIComponent(expName)}`)
+                .then(function(r) { return r.json(); })
+                .then(function(events) { replayAndReconnect(events, expName); })
+                .catch(function(err) { console.error('pageshow reconnect failed:', err); });
+        }
+    });
 })();
 </script>
 {% endblock %}
