@@ -1312,50 +1312,31 @@ class MLForecastLabApp:
                 weights=eres.weights,
             ))
 
-        # Composite ranking: rank all candidates (ensembles + best individual)
-        _ranking_metrics = ["mae", "rmse", "mase"]
-        best_ind_metrics = completed_models[best_individual_name].metrics if best_individual_name else {}
+        # Determine the overall winner using the production metric so
+        # the "Best" badge and the improvement text always agree.
         strat_keys = list(ensemble_results.keys())
-        if strat_keys:
-            # Include best individual as a candidate in the ranking
-            _BEST_IND_KEY = "__best_individual__"
-            candidate_keys = strat_keys + [_BEST_IND_KEY]
-            composite_ranks = {c: [] for c in candidate_keys}
-            for metric_name in _ranking_metrics:
-                vals = {s: ensemble_results[s].metrics.get(metric_name, np.inf) for s in strat_keys}
-                vals[_BEST_IND_KEY] = best_ind_metrics.get(metric_name, np.inf)
-                for rank, (c, _) in enumerate(sorted(vals.items(), key=lambda x: x[1])):
-                    composite_ranks[c].append(rank + 1)
-            best_candidate = min(composite_ranks, key=lambda c: np.mean(composite_ranks[c]))
+        best_strategy = None
+        best_ensemble_metric = np.inf
+        improvement_pct = None
 
-            if best_candidate == _BEST_IND_KEY:
+        if strat_keys:
+            # Find the best ensemble strategy by production metric
+            best_ens_key = min(
+                strat_keys,
+                key=lambda s: ensemble_results[s].metrics.get(runner.production_metric, np.inf),
+            )
+            best_ensemble_metric = ensemble_results[best_ens_key].metrics.get(
+                runner.production_metric, np.inf
+            )
+
+            # Compare against best individual
+            if best_individual <= best_ensemble_metric:
                 best_strategy = "best_individual"
             else:
-                best_strategy = best_candidate.value
+                best_strategy = best_ens_key.value
 
-            # For improvement_pct, compare the badge-winning strategy against
-            # best individual using the production metric so the text and
-            # badge always agree.
-            if best_candidate == _BEST_IND_KEY:
-                # Individual won — compare against best ensemble
-                ensemble_only_ranks = {s: composite_ranks[s] for s in strat_keys}
-                best_ens = min(ensemble_only_ranks, key=lambda s: np.mean(ensemble_only_ranks[s]))
-                best_ensemble_metric = ensemble_results[best_ens].metrics.get(
-                    runner.production_metric, np.inf
-                )
-            else:
-                # An ensemble won — use that strategy's metric
-                best_ensemble_metric = ensemble_results[best_candidate].metrics.get(
-                    runner.production_metric, np.inf
-                )
-        else:
-            best_strategy = None
-            best_ensemble_metric = np.inf
-
-        # Improvement vs best individual (positive = ensemble better)
-        improvement_pct = None
-        if np.isfinite(best_individual) and best_individual > 0 and np.isfinite(best_ensemble_metric):
-            improvement_pct = (best_individual - best_ensemble_metric) / best_individual * 100
+            if np.isfinite(best_individual) and best_individual > 0 and np.isfinite(best_ensemble_metric):
+                improvement_pct = (best_individual - best_ensemble_metric) / best_individual * 100
 
         ensemble_data = EnsembleResultData(
             experiment_name=experiment_name,
