@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.25.0
+## 2.0.0
 
 ### New: Decoupled Timers + Hailo AI Acceleration
 - **Separate forecast and retrain schedules**: forecast cycle (default every 30m)
