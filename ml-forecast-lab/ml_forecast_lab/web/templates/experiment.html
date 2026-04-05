@@ -808,8 +808,8 @@ window.showTab = function(el) {
             var history = {{ model.training_history | tojson }};
             var epochs = Array.from({length: history.train_loss.length}, function(_, i) { return i + 1; });
             Plotly.newPlot('loss-curve-{{ loop.index }}', [
-                { x: epochs, y: history.train_loss, name: 'Train Loss', mode: 'lines', line: { color: '#00d4ff', width: 2 } },
-                { x: epochs, y: history.val_loss, name: 'Val Loss', mode: 'lines', line: { color: '#e94560', width: 2, dash: 'dash' } }
+                { x: epochs, y: history.train_loss, name: 'Train Loss', mode: 'lines', line: { color: '#ffd93d', width: 2 } },
+                { x: epochs, y: history.val_loss, name: 'Val Loss', mode: 'lines', line: { color: '#ff6b6b', width: 2, dash: 'dash' } }
             ], {
                 xaxis: { title: 'Epoch', gridcolor: '#2d3561' }, yaxis: { title: 'Loss', gridcolor: '#2d3561' },
                 hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
@@ -824,11 +824,11 @@ window.showTab = function(el) {
         {% if models and models[0].fold_results %}
         var modelsData = {{ models_json | tojson }};
         var MODEL_COLORS = {
-            "lightgbm": "#2ecc71", "xgboost": "#00d4ff", "lstm": "#f39c12",
-            "cnn": "#e94560", "neuralprophet": "#9b59b6", "dlinear": "#1abc9c",
-            "nbeats": "#e67e22", "nhits": "#3498db", "tide": "#e84393",
-            "tsmixer": "#00cec9", "sparsetsf": "#ff6b6b", "patchtst": "#a29bfe",
-            "itransformer": "#ffeaa7", "crossformer": "#fd79a8", "timesnet": "#55efc4"
+            "lightgbm": "#ff6b6b", "xgboost": "#ffd93d", "lstm": "#6bcb77",
+            "cnn": "#4d96ff", "neuralprophet": "#c084fc", "dlinear": "#ff922b",
+            "nbeats": "#22d3ee", "nhits": "#f472b6", "tide": "#a3e635",
+            "tsmixer": "#38bdf8", "sparsetsf": "#fb923c", "patchtst": "#a78bfa",
+            "itransformer": "#34d399", "crossformer": "#f87171", "timesnet": "#facc15"
         };
         var traces = [];
         modelsData.forEach(function(model) {
@@ -837,7 +837,7 @@ window.showTab = function(el) {
                 x: model.fold_results.map(function(_, i) { return 'Fold ' + (i + 1); }),
                 y: model.fold_results.map(function(f) { return f.mae || 0; }),
                 name: model.name, type: 'bar',
-                marker: { color: MODEL_COLORS[model.name] || '#00d4ff' }
+                marker: { color: MODEL_COLORS[model.name] || '#ff6b6b' }
             });
         });
         Plotly.newPlot('fold-stability-chart', traces, {
@@ -860,7 +860,7 @@ window.showTab = function(el) {
             Plotly.newPlot('feature-importance-{{ fi.model_name }}', [{
                 x: features.map(function(f) { return f.importance; }).reverse(),
                 y: features.map(function(f) { return f.name; }).reverse(),
-                type: 'bar', orientation: 'h', marker: { color: '#00d4ff' }
+                type: 'bar', orientation: 'h', marker: { color: '#ff6b6b' }
             }], {
                 title: '{{ fi.model_name }} — Top Features',
                 xaxis: { title: 'Importance', gridcolor: '#2d3561' },
@@ -1025,7 +1025,7 @@ window.showTab = function(el) {
         legend: { orientation: 'h', y: -0.15, font: { size: 10 } },
         margin: { l: 70, r: 30, t: 50, b: 80 }, hovermode: 'x unified'
     };
-    var FOLD_COLORS = ['#00d4ff','#e94560','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22','#3498db','#e74c3c','#2c3e50'];
+    var FOLD_COLORS = ['#ff6b6b','#ffd93d','#6bcb77','#4d96ff','#c084fc','#ff922b','#22d3ee','#f472b6','#a3e635','#38bdf8'];
 
     window.startPipeline = function() {
         var steps = ['benchmark'];

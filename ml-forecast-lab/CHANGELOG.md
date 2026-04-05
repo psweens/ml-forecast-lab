@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.22.3
+
+### Improvement
+- **High-contrast chart colours**: replaced the old green/blue palette with
+  a high-contrast scheme (coral, amber, green, blue, purple...) so that 2-3
+  model experiments are easy to read at a glance. Applied consistently to
+  prediction charts, residuals, fold stability, loss curves, ensemble
+  predictions, and live training fold traces.
+
 ## 1.22.2
 
 ### Fix

@@ -944,22 +944,24 @@ class MLForecastLabApp:
             ts.isoformat() for ts in holdout_part.index
         ]
 
+        # High-contrast palette: first colours are maximally distinct so
+        # 2-3 model experiments are easy to read at a glance.
         MODEL_COLORS = {
-            "lightgbm": "#2ecc71",
-            "xgboost": "#00d4ff",
-            "lstm": "#f39c12",
-            "cnn": "#e94560",
-            "neuralprophet": "#9b59b6",
-            "dlinear": "#1abc9c",
-            "nbeats": "#e67e22",
-            "nhits": "#3498db",
-            "tide": "#e84393",
-            "tsmixer": "#00cec9",
-            "sparsetsf": "#ff6b6b",
-            "patchtst": "#a29bfe",
-            "itransformer": "#ffeaa7",
-            "crossformer": "#fd79a8",
-            "timesnet": "#55efc4",
+            "lightgbm": "#ff6b6b",      # coral red
+            "xgboost": "#ffd93d",        # amber yellow
+            "lstm": "#6bcb77",           # green
+            "cnn": "#4d96ff",            # blue
+            "neuralprophet": "#c084fc",  # purple
+            "dlinear": "#ff922b",        # orange
+            "nbeats": "#22d3ee",         # cyan
+            "nhits": "#f472b6",          # pink
+            "tide": "#a3e635",           # lime
+            "tsmixer": "#38bdf8",        # sky blue
+            "sparsetsf": "#fb923c",      # tangerine
+            "patchtst": "#a78bfa",       # violet
+            "itransformer": "#34d399",   # emerald
+            "crossformer": "#f87171",    # rose
+            "timesnet": "#facc15",       # gold
         }
 
         def _generate_holdout_predictions():
@@ -1065,7 +1067,7 @@ class MLForecastLabApp:
                         timestamps=_holdout_ts,
                         actuals=[float(v) if not np.isnan(v) else None for v in _y_holdout_display],
                         predictions=[float(v) for v in y_p_display],
-                        color=MODEL_COLORS.get(m_name, "#00d4ff"),
+                        color=MODEL_COLORS.get(m_name, "#ff6b6b"),
                     ))
 
                     if hasattr(m, 'training_metadata') and m.training_metadata:
@@ -1372,9 +1374,9 @@ class MLForecastLabApp:
             from ml_forecast_lab.web.app import ModelPrediction
 
             ENSEMBLE_COLORS = {
-                "simple_average": "#f39c12",
-                "weighted_average": "#e94560",
-                "stacking": "#9b59b6",
+                "simple_average": "#ff922b",   # orange
+                "weighted_average": "#c084fc",  # purple
+                "stacking": "#22d3ee",          # cyan
             }
 
             # Use last fold's predictions for display (closest to holdout behaviour)
