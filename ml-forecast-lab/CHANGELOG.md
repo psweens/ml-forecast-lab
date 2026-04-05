@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.22.0
+
+### Major UI Overhaul
+- **Consolidated experiment workflow**: the dedicated Training tab has been removed.
+  Pipeline controls, live training progress (loss curves, stats, event log), and
+  all result sections now live on the experiment detail page ("View Details").
+  Train, monitor, and evaluate an experiment without leaving the page.
+- **Tab-based detail view**: the experiment detail page uses show/hide tabs instead
+  of a long scrollable layout. Only the selected section is visible, reducing
+  clutter. Charts render on first tab visit with automatic Plotly resize.
+- **Section consolidation**: reduced from 8 sections to 6. Residuals merged into
+  Predictions; Run Info moved to a compact header bar. Features and Deep Analysis
+  tabs appear only when data exists.
+- **Dashboard training status**: experiment cards now show the current model name
+  and a progress bar when training is active. Dashboard refreshes every 10s during
+  training instead of 60s.
+- **Navigation simplified**: 4 tabs (Dashboard, Models, Logs, System) instead of 5.
+  The old `/training` URL redirects to the Dashboard.
+
 ## 1.21.5
 
 ### Bug Fix

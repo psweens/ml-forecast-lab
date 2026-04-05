@@ -21,13 +21,36 @@
     </div>
     <p class="subtitle">{{ experiment.target_entity }}</p>
 
+    {% if benchmark_result %}
+    <!-- Compact run info bar -->
+    <div style="display:flex;gap:1.5rem;flex-wrap:wrap;align-items:center;margin:0.75rem 0;padding:0.5rem 0.75rem;background:var(--bg-tertiary);border-radius:0.5rem;font-size:0.85rem;color:var(--text-secondary);">
+        <span>
+            <span class="status-badge status-{{ benchmark_result.status | lower }}" style="font-size:0.75rem;padding:0.15rem 0.5rem;">{{ benchmark_result.status | title }}</span>
+        </span>
+        <span id="benchmark-timestamp" data-iso="{{ benchmark_result.timestamp }}">{{ benchmark_result.timestamp[:19] | replace('T', ' ') }}</span>
+        {% if benchmark_result.best_model_name %}
+        <span>Best: <strong style="color:var(--accent-secondary);">{{ benchmark_result.best_model_name }}</strong></span>
+        {% endif %}
+        {% if benchmark_result.error_message %}
+        <span style="color:var(--error);">{{ benchmark_result.error_message }}</span>
+        {% endif %}
+    </div>
+    {% endif %}
+
     <div class="action-buttons">
-        <button class="btn btn-primary"
-                id="run-benchmark-btn"
-                hx-post="{{ base_path | default('') }}/experiment/{{ experiment.name }}/run-benchmark"
-                hx-swap="none"
-                {% if is_running %}disabled{% endif %}>
-            {% if is_running %}⏳ Running...{% else %}▶ Run Benchmark{% endif %}
+        <!-- Pipeline controls -->
+        <div class="flex-row gap-lg" style="align-items:center;">
+            <label class="checkbox-label">
+                <input type="checkbox" id="chk-ensemble" checked class="checkbox-accent">
+                <span>Include Ensemble</span>
+            </label>
+            <label class="checkbox-label">
+                <input type="checkbox" id="chk-deep" class="checkbox-accent">
+                <span>Include Deep Analysis</span>
+            </label>
+        </div>
+        <button id="btn-run" class="btn btn-primary" onclick="startPipeline()">
+            <span id="btn-run-text">{% if is_running %}Running...{% else %}Run Pipeline{% endif %}</span>
         </button>
         {% if experiment.best_model %}
             {% if experiment.mode == 'production' %}
@@ -59,30 +82,94 @@
                     id="deep-analysis-btn"
                     onclick="runDeepAnalysis('{{ experiment.name }}', this)"
                     {% if deep_analysis and deep_analysis.status == 'running' %}disabled{% endif %}>
-                {% if deep_analysis and deep_analysis.status == 'running' %}⏳ Analysing...{% else %}🔬 Deep Analysis{% endif %}
+                {% if deep_analysis and deep_analysis.status == 'running' %}Analysing...{% else %}Deep Analysis{% endif %}
             </button>
         </div>
     </div>
     <div id="promote-message"></div>
 </div>
 
-<!-- Section navigation -->
-{% if benchmark_result %}
+<!-- Section navigation (tab-style) -->
 <nav class="section-nav" id="section-nav">
-    <a href="#sec-results" class="active">Results</a>
-    <a href="#sec-predictions">Predictions</a>
-    <a href="#sec-residuals">Residuals</a>
-    <a href="#sec-generalisation">Generalisation</a>
-    <a href="#sec-features">Features</a>
-    <a href="#sec-ensemble">Ensemble</a>
-    {% if deep_analysis %}<a href="#sec-deep-analysis">Deep Analysis</a>{% endif %}
-    <a href="#sec-run-info">Run Info</a>
+    {% if is_running or embedded_history.get(experiment.name) %}
+    <a data-tab="sec-training" onclick="showTab(this)">Training</a>
+    {% endif %}
+    {% if benchmark_result %}
+    <a data-tab="sec-results" onclick="showTab(this)">Results</a>
+    <a data-tab="sec-predictions" onclick="showTab(this)">Predictions</a>
+    <a data-tab="sec-generalisation" onclick="showTab(this)">Generalisation</a>
+    {% if feature_importances %}<a data-tab="sec-features" onclick="showTab(this)">Features</a>{% endif %}
+    <a data-tab="sec-ensemble" onclick="showTab(this)">Ensemble</a>
+    {% if deep_analysis %}<a data-tab="sec-deep-analysis" onclick="showTab(this)">Deep Analysis</a>{% endif %}
+    {% endif %}
 </nav>
-{% endif %}
+
+<!-- ====== TAB: Training (live progress) ====== -->
+<div class="tab-section" id="sec-training" style="display:none;">
+<section class="section">
+    <h2>Live Training Progress</h2>
+    <div id="progress-section">
+        <div id="current-status" style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem;">
+            <div class="stat-box training-stat" style="min-width:140px;">
+                <span class="stat-value" id="stat-model" style="color:var(--accent-secondary);">—</span>
+                <span class="stat-label">Current Model</span>
+            </div>
+            <div class="stat-box training-stat">
+                <span class="stat-value" id="stat-fold">—</span>
+                <span class="stat-label">Fold</span>
+            </div>
+            <div class="stat-box training-stat">
+                <span class="stat-value" id="stat-epoch">—</span>
+                <span class="stat-label">Epoch</span>
+            </div>
+            <div class="stat-box training-stat">
+                <span class="stat-value" id="stat-val-loss">—</span>
+                <span class="stat-label">Val Loss</span>
+            </div>
+            <div class="stat-box training-stat">
+                <span class="stat-value" id="stat-best">—</span>
+                <span class="stat-label">Best Val Loss</span>
+            </div>
+            <div class="stat-box training-stat">
+                <span class="stat-value" id="stat-patience">—</span>
+                <span class="stat-label">Patience</span>
+            </div>
+        </div>
+
+        <div style="margin-bottom:1.5rem;">
+            <div style="display:flex;justify-content:space-between;margin-bottom:0.25rem;">
+                <span id="progress-label" style="color:var(--text-secondary);font-size:0.9rem;">Waiting...</span>
+                <span id="progress-pct" style="color:var(--accent-secondary);font-weight:600;font-size:0.9rem;"></span>
+            </div>
+            <div style="height:8px;background:var(--bg-tertiary);border-radius:4px;overflow:hidden;">
+                <div id="progress-bar" style="height:100%;width:0%;background:linear-gradient(90deg,var(--accent-secondary),var(--accent-primary));border-radius:4px;transition:width 0.3s;"></div>
+            </div>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:1rem;margin-bottom:0.75rem;">
+            <label style="color:var(--text-secondary);font-weight:600;font-size:0.9rem;">Model</label>
+            <select id="model-select" onchange="switchChartModel(this.value)"
+                    style="padding:0.4rem 0.8rem;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:0.5rem;font-size:0.9rem;min-width:180px;">
+                <option value="">— select model —</option>
+            </select>
+        </div>
+        <div id="loss-chart" style="width:100%;height:400px;"></div>
+    </div>
+
+    <!-- Collapsible event log -->
+    <details style="margin-top:1rem;">
+        <summary style="cursor:pointer;color:var(--text-secondary);font-weight:600;font-size:0.9rem;">Training Event Log</summary>
+        <div id="event-log" style="max-height:300px;overflow-y:auto;font-family:'Courier New',monospace;font-size:0.85rem;background:var(--bg-tertiary);padding:1rem;border-radius:0.5rem;color:var(--text-secondary);margin-top:0.5rem;">
+            <em>Events will appear here when a pipeline runs...</em>
+        </div>
+    </details>
+</section>
+</div>
 
 {% if benchmark_result %}
-<!-- Model Comparison Table -->
-<section class="section" id="sec-results">
+<!-- ====== TAB: Results ====== -->
+<div class="tab-section" id="sec-results" style="display:none;">
+<section class="section">
     <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Models are ranked by composite mean rank across CV folds (Demšar 2006). Within each fold, models are ranked independently by MAE, RMSE, and MASE; those per-metric ranks are averaged to give a composite fold rank, then averaged across folds. This rewards models that are consistently strong across all error measures.</span></span></h2>
     <div class="table-container">
         <table class="metrics-table">
@@ -134,7 +221,6 @@
         </table>
     </div>
 
-    <!-- Per-Fold Metrics (Expandable) -->
     <details class="fold-metrics">
         <summary>Per-Fold Metrics</summary>
         <div class="fold-content">
@@ -168,9 +254,11 @@
         </div>
     </details>
 </section>
+</div>
 
-<!-- Multi-Model Predictions (Lab Mode) -->
-<section class="section" id="sec-predictions">
+<!-- ====== TAB: Predictions (includes residuals) ====== -->
+<div class="tab-section" id="sec-predictions" style="display:none;">
+<section class="section">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
         <h2 style="margin-bottom: 0;">Model Predictions on Holdout Data <span class="info-tip">?<span class="tip-text">Shows how each model's predictions (coloured lines) compare to actual values (white dotted line) on the last 20% of data held out from training. Toggle to cumulative view to see total demand over time — useful for assessing overall accuracy.</span></span></h2>
         {% if lab_forecast and lab_forecast.model_predictions %}
@@ -190,92 +278,10 @@
     </div>
     {% if lab_forecast and lab_forecast.model_predictions %}
     <div id="lab-forecast-chart" style="min-height: 500px;"></div>
-    <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            const labData = {{ lab_forecast.model_dump() | tojson }};
 
-            // Store raw data for toggling
-            window._holdoutData = labData;
-
-            // Helper: daily cumulative sum (resets at midnight)
-            function cumsum(arr, timestamps) {
-                var result = [];
-                var sum = 0;
-                var lastDate = '';
-                for (var i = 0; i < arr.length; i++) {
-                    // Check if we've crossed midnight
-                    var thisDate = timestamps[i].split('T')[0];
-                    if (thisDate !== lastDate) {
-                        sum = 0;
-                        lastDate = thisDate;
-                    }
-                    sum += (arr[i] !== null && arr[i] !== undefined) ? arr[i] : 0;
-                    result.push(sum);
-                }
-                return result;
-            }
-
-            window.renderHoldoutChart = function(cumulative) {
-                var traces = [];
-                var first = labData.model_predictions[0];
-
-                // Actual values
-                traces.push({
-                    x: first.timestamps,
-                    y: cumulative ? cumsum(first.actuals, first.timestamps) : first.actuals,
-                    name: 'Actual',
-                    mode: 'lines',
-                    line: { color: '#ffffff', width: 2.5, dash: 'dot' }
-                });
-
-                // Each model (exclude ensemble traces)
-                labData.model_predictions.forEach(function(mp) {
-                    if (mp.model_name.startsWith('Ensemble:')) return;
-                    traces.push({
-                        x: mp.timestamps,
-                        y: cumulative ? cumsum(mp.predictions, mp.timestamps) : mp.predictions,
-                        name: mp.model_name,
-                        mode: 'lines',
-                        line: { color: mp.color, width: 2 }
-                    });
-                });
-
-                var layout = {
-                    title: (cumulative ? 'Daily Cumulative ' : '') + 'Model Comparison on Holdout (' +
-                           labData.holdout_start.split('T')[0] + ' to ' + labData.holdout_end.split('T')[0] + ')',
-                    xaxis: { title: 'Time', gridcolor: '#2d3561' },
-                    yaxis: { title: cumulative ? 'Daily Cumulative{{ " (" + units + ")" if units else "" }}' : 'Value{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
-                    hovermode: 'x unified',
-                    plot_bgcolor: '#16213e',
-                    paper_bgcolor: '#1a1a2e',
-                    font: { color: '#e0e0e0' },
-                    legend: { orientation: 'h', y: -0.15 },
-                    margin: { l: 60, r: 20, t: 50, b: 80 }
-                };
-
-                Plotly.newPlot('lab-forecast-chart', traces, layout, { responsive: true });
-            };
-
-            // Initial render (interval view)
-            window.renderHoldoutChart(false);
-        });
-
-        function toggleCumulative(checked) {
-            // Update toggle visual
-            var knob = document.getElementById('toggle-knob');
-            if (checked) {
-                knob.style.left = '22px';
-                knob.style.background = 'var(--accent-secondary)';
-            } else {
-                knob.style.left = '2px';
-                knob.style.background = 'var(--text-secondary)';
-            }
-            // Re-render chart
-            if (window.renderHoldoutChart) {
-                window.renderHoldoutChart(checked);
-            }
-        }
-    </script>
+    <!-- Residuals (merged into predictions tab) -->
+    <h3 style="color: var(--text-primary); margin: 2rem 0 1rem 0;">Prediction Residuals <span class="info-tip">?<span class="tip-text">Residuals = Actual minus Predicted. Values near zero mean accurate predictions. Consistent positive values indicate underestimation; negative values indicate overestimation. Patterns (e.g. time-of-day bias) suggest the model is missing a feature.</span></span></h3>
+    <div id="residual-chart" style="min-height: 400px;"></div>
     {% else %}
     <div class="empty-state">
         <span class="empty-state-icon">📊</span>
@@ -284,67 +290,15 @@
     </div>
     {% endif %}
 </section>
+</div>
 
-<!-- Residual Plot -->
-{% if lab_forecast and lab_forecast.model_predictions %}
-<section class="section" id="sec-residuals">
-    <h2>Prediction Residuals <span class="info-tip">?<span class="tip-text">Residuals = Actual minus Predicted. Values near zero mean accurate predictions. Consistent positive values indicate underestimation; negative values indicate overestimation. Patterns (e.g. time-of-day bias) suggest the model is missing a feature.</span></span></h2>
-    <div id="residual-chart" style="min-height: 400px;"></div>
-    <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            const labData = {{ lab_forecast.model_dump() | tojson }};
-            const traces = [];
-
-            labData.model_predictions.forEach(function(mp) {
-                if (mp.model_name.startsWith('Ensemble:')) return;
-                const residuals = mp.actuals.map(function(a, i) {
-                    return (a !== null && a !== undefined) ? a - mp.predictions[i] : null;
-                });
-                traces.push({
-                    x: mp.timestamps,
-                    y: residuals,
-                    name: mp.model_name,
-                    mode: 'lines',
-                    line: { color: mp.color, width: 1.5 }
-                });
-            });
-
-            // Zero line
-            traces.push({
-                x: labData.model_predictions[0].timestamps,
-                y: labData.model_predictions[0].timestamps.map(function() { return 0; }),
-                name: 'Zero',
-                mode: 'lines',
-                line: { color: '#ffffff', width: 1, dash: 'dash' },
-                showlegend: false
-            });
-
-            const layout = {
-                title: 'Residuals (Actual - Predicted)',
-                xaxis: { title: 'Time', gridcolor: '#2d3561' },
-                yaxis: { title: 'Residual{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561', zeroline: true, zerolinecolor: '#ffffff' },
-                hovermode: 'x unified',
-                plot_bgcolor: '#16213e',
-                paper_bgcolor: '#1a1a2e',
-                font: { color: '#e0e0e0' },
-                legend: { orientation: 'h', y: -0.15 },
-                margin: { l: 60, r: 20, t: 50, b: 80 }
-            };
-
-            Plotly.newPlot('residual-chart', traces, layout, { responsive: true });
-        });
-    </script>
-</section>
-{% endif %}
-
-<!-- Generalisation Diagnostics -->
-<section class="section" id="sec-generalisation">
+<!-- ====== TAB: Generalisation ====== -->
+<div class="tab-section" id="sec-generalisation" style="display:none;">
+<section class="section">
     <h2>Generalisation <span class="info-tip">?<span class="tip-text">Diagnostics to assess whether models are overfitting the training data or generalising well to unseen data. A large gap between train and test error suggests overfitting. Diverging loss curves confirm it. Consistent fold metrics indicate stable generalisation.</span></span></h2>
 
-    <!-- Train vs Test Metrics Table -->
     {% set has_train = models | selectattr('train_mae') | list %}
     {% if has_train %}
-    {# Best test errors for underfitting detection — green only if competitive AND small gap #}
     {% set best_test_mae = has_train | map(attribute='mae') | map(attribute='mean') | min %}
     {% set best_test_rmse = has_train | map(attribute='rmse') | map(attribute='mean') | min %}
     <h3 style="color: var(--text-primary); margin-bottom: 1rem;">Train vs Test Error</h3>
@@ -390,7 +344,6 @@
     </div>
     {% endif %}
 
-    <!-- Loss Curves -->
     <h3 style="color: var(--text-primary); margin: 2rem 0 1rem 0;">Loss Curves</h3>
     {% set has_loss = models | selectattr('training_history') | list %}
     {% if has_loss %}
@@ -400,38 +353,6 @@
         <div style="flex: 1 1 400px; min-width: 350px;">
             <h4 style="color: var(--accent-secondary); margin-bottom: 0.5rem;">{{ model.name }}</h4>
             <div id="loss-curve-{{ loop.index }}" style="min-height: 300px;"></div>
-            <script>
-                document.addEventListener('DOMContentLoaded', function() {
-                    const history = {{ model.training_history | tojson }};
-                    const epochs = Array.from({length: history.train_loss.length}, (_, i) => i + 1);
-
-                    const traces = [
-                        {
-                            x: epochs, y: history.train_loss,
-                            name: 'Train Loss', mode: 'lines',
-                            line: { color: '#00d4ff', width: 2 }
-                        },
-                        {
-                            x: epochs, y: history.val_loss,
-                            name: 'Val Loss', mode: 'lines',
-                            line: { color: '#e94560', width: 2, dash: 'dash' }
-                        }
-                    ];
-
-                    const layout = {
-                        xaxis: { title: 'Epoch', gridcolor: '#2d3561' },
-                        yaxis: { title: 'Loss', gridcolor: '#2d3561' },
-                        hovermode: 'x unified',
-                        plot_bgcolor: '#16213e',
-                        paper_bgcolor: '#1a1a2e',
-                        font: { color: '#e0e0e0' },
-                        legend: { orientation: 'h', y: -0.2 },
-                        margin: { l: 55, r: 15, t: 10, b: 60 }
-                    };
-
-                    Plotly.newPlot('loss-curve-{{ loop.index }}', traces, layout, { responsive: true });
-                });
-            </script>
         </div>
         {% endif %}
         {% endfor %}
@@ -440,101 +361,32 @@
     <p style="color: var(--text-secondary); font-style: italic;">Loss curves are only available for neural models (DLinear, SparseTSF, etc.).</p>
     {% endif %}
 
-    <!-- Fold Stability Chart -->
     {% if models and models[0].fold_results %}
     <h3 style="color: var(--text-primary); margin: 2rem 0 1rem 0;">Fold Stability <span class="info-tip">?<span class="tip-text">Shows how each model's MAE varies across cross-validation folds. Consistent bars indicate stable generalisation; large variation suggests the model is sensitive to which data it trains on.</span></span></h3>
     <div id="fold-stability-chart" style="min-height: 400px;"></div>
-    <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            const modelsData = {{ models_json | tojson }};
-            const MODEL_COLORS = {
-                "lightgbm": "#2ecc71", "xgboost": "#00d4ff", "lstm": "#f39c12",
-                "cnn": "#e94560", "neuralprophet": "#9b59b6", "dlinear": "#1abc9c",
-                "nbeats": "#e67e22", "nhits": "#3498db", "tide": "#e84393",
-                "tsmixer": "#00cec9", "sparsetsf": "#ff6b6b", "patchtst": "#a29bfe",
-                "itransformer": "#ffeaa7", "crossformer": "#fd79a8", "timesnet": "#55efc4"
-            };
-
-            const traces = [];
-            modelsData.forEach(function(model) {
-                if (!model.fold_results || model.fold_results.length === 0) return;
-                const foldLabels = model.fold_results.map((_, i) => 'Fold ' + (i + 1));
-                const maeValues = model.fold_results.map(f => f.mae || 0);
-                traces.push({
-                    x: foldLabels, y: maeValues,
-                    name: model.name, type: 'bar',
-                    marker: { color: MODEL_COLORS[model.name] || '#00d4ff' }
-                });
-            });
-
-            const layout = {
-                barmode: 'group',
-                xaxis: { title: 'Fold', gridcolor: '#2d3561' },
-                yaxis: { title: 'MAE{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
-                hovermode: 'x unified',
-                plot_bgcolor: '#16213e',
-                paper_bgcolor: '#1a1a2e',
-                font: { color: '#e0e0e0' },
-                legend: { orientation: 'h', y: -0.15 },
-                margin: { l: 60, r: 20, t: 20, b: 80 }
-            };
-
-            Plotly.newPlot('fold-stability-chart', traces, layout, { responsive: true });
-        });
-    </script>
     {% endif %}
 </section>
+</div>
 
-<!-- Feature Importance -->
-<section class="section" id="sec-features">
+<!-- ====== TAB: Features ====== -->
+{% if feature_importances %}
+<div class="tab-section" id="sec-features" style="display:none;">
+<section class="section">
     <h2>Feature Importance <span class="info-tip">?<span class="tip-text">Shows which input features contribute most to the model's predictions. Higher importance means the feature has more influence. Only available for tree-based models (LightGBM, XGBoost).</span></span></h2>
-    {% if feature_importances %}
     {% for fi in feature_importances %}
     <h3 style="color: var(--accent-secondary); margin-bottom: 0.5rem;">{{ fi.model_name }}</h3>
     <div id="feature-importance-{{ fi.model_name }}" style="min-height: 400px;"></div>
-    <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            const features = {{ fi.features | tojson }};
-            const names = features.map(f => f.name).reverse();
-            const importances = features.map(f => f.importance).reverse();
-
-            const trace = {
-                x: importances,
-                y: names,
-                type: 'bar',
-                orientation: 'h',
-                marker: { color: '#00d4ff' }
-            };
-
-            const layout = {
-                title: '{{ fi.model_name }} — Top Features',
-                xaxis: { title: 'Importance', gridcolor: '#2d3561' },
-                plot_bgcolor: '#16213e',
-                paper_bgcolor: '#1a1a2e',
-                font: { color: '#e0e0e0' },
-                margin: { l: 200, r: 20, t: 50, b: 50 }
-            };
-
-            Plotly.newPlot('feature-importance-{{ fi.model_name }}', [trace], layout, { responsive: true, displayModeBar: false });
-        });
-    </script>
     {% endfor %}
-    {% else %}
-    <div class="empty-state">
-        <span class="empty-state-icon">🌲</span>
-        <p>No feature importance data yet.</p>
-        <p class="empty-state-hint">Run a benchmark with tree-based models (LightGBM, XGBoost) to see feature rankings.</p>
-    </div>
-    {% endif %}
 </section>
+</div>
+{% endif %}
 
-<!-- Ensemble Configuration -->
-{% if benchmark_result %}
-<section class="section" id="sec-ensemble">
+<!-- ====== TAB: Ensemble ====== -->
+<div class="tab-section" id="sec-ensemble" style="display:none;">
+<section class="section">
     <h2>Ensemble <span class="info-tip">?<span class="tip-text">Combines predictions from multiple models. Select which models to include using Top-N (auto-picks best by production metric) or custom selection. You can re-run ensemble with different settings without re-training.</span></span></h2>
 
     <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin-bottom:1rem;">
-        <!-- Top-N selector -->
         <div>
             <label class="field-label" style="display:block;margin-bottom:0.3rem;">Model Selection</label>
             <select id="ensemble-top-n" class="setting-input" style="padding:0.4rem 0.6rem;font-size:0.9rem;min-width:180px;"
@@ -546,8 +398,6 @@
                 <option value="custom">Custom selection</option>
             </select>
         </div>
-
-        <!-- Strategy checkboxes -->
         <div>
             <label class="field-label" style="display:block;margin-bottom:0.3rem;">Strategies</label>
             <div style="display:flex;gap:1rem;align-items:center;">
@@ -565,15 +415,12 @@
                 </label>
             </div>
         </div>
-
-        <!-- Run button -->
         <button class="btn" style="background:#e67e22;color:white;" id="run-ensemble-btn"
                 onclick="runEnsemble('{{ experiment.name }}', this)">
             Run Ensemble
         </button>
     </div>
 
-    <!-- Custom model selection (hidden by default) -->
     <div id="ensemble-custom-panel" style="display:none;margin-top:0.5rem;padding:1rem;background:var(--bg-tertiary);border-radius:0.5rem;">
         <label class="field-label" style="display:block;margin-bottom:0.5rem;">Select models to include:</label>
         <div style="display:flex;flex-wrap:wrap;gap:0.5rem;">
@@ -588,7 +435,6 @@
         </div>
     </div>
 
-    <!-- Ensemble results (rendered below when available) -->
     {% if ensemble_result and ensemble_result.status == 'completed' %}
     <div style="margin-top:1.5rem;">
     <div class="table-container">
@@ -659,7 +505,6 @@
     </div>
     {% endif %}
 
-    <!-- Ensemble Predictions Chart -->
     {% if lab_forecast and lab_forecast.model_predictions %}
     {% set ns = namespace(has_ensemble=false) %}
     {% for mp in lab_forecast.model_predictions %}{% if mp.model_name.startswith('Ensemble:') %}{% set ns.has_ensemble = true %}{% endif %}{% endfor %}
@@ -681,94 +526,23 @@
             </div>
         </div>
         <div id="ensemble-chart" style="min-height: 500px;"></div>
-        <script>
-            document.addEventListener('DOMContentLoaded', function() {
-                const labData = window._holdoutData || {{ lab_forecast.model_dump() | tojson }};
-
-                function cumsum(arr, timestamps) {
-                    var result = [], sum = 0, lastDate = '';
-                    for (var i = 0; i < arr.length; i++) {
-                        var thisDate = timestamps[i].split('T')[0];
-                        if (thisDate !== lastDate) { sum = 0; lastDate = thisDate; }
-                        sum += (arr[i] !== null && arr[i] !== undefined) ? arr[i] : 0;
-                        result.push(sum);
-                    }
-                    return result;
-                }
-
-                window.renderEnsembleChart = function(cumulative) {
-                    var traces = [];
-                    // Find actuals from the first non-ensemble model
-                    var actualSource = labData.model_predictions.find(function(mp) {
-                        return !mp.model_name.startsWith('Ensemble:');
-                    });
-                    if (actualSource) {
-                        traces.push({
-                            x: actualSource.timestamps,
-                            y: cumulative ? cumsum(actualSource.actuals, actualSource.timestamps) : actualSource.actuals,
-                            name: 'Actual',
-                            mode: 'lines',
-                            line: { color: '#ffffff', width: 2.5, dash: 'dot' }
-                        });
-                    }
-                    // Ensemble traces only
-                    labData.model_predictions.forEach(function(mp) {
-                        if (!mp.model_name.startsWith('Ensemble:')) return;
-                        traces.push({
-                            x: mp.timestamps,
-                            y: cumulative ? cumsum(mp.predictions, mp.timestamps) : mp.predictions,
-                            name: mp.model_name,
-                            mode: 'lines',
-                            line: { color: mp.color, width: 2 }
-                        });
-                    });
-
-                    var layout = {
-                        title: (cumulative ? 'Daily Cumulative ' : '') + 'Ensemble Comparison on Holdout (' +
-                               labData.holdout_start.split('T')[0] + ' to ' + labData.holdout_end.split('T')[0] + ')',
-                        xaxis: { title: 'Time', gridcolor: '#2d3561' },
-                        yaxis: { title: cumulative ? 'Daily Cumulative{{ " (" + units + ")" if units else "" }}' : 'Value{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
-                        hovermode: 'x unified',
-                        plot_bgcolor: '#16213e',
-                        paper_bgcolor: '#1a1a2e',
-                        font: { color: '#e0e0e0' },
-                        legend: { orientation: 'h', y: -0.15 },
-                        margin: { l: 60, r: 20, t: 50, b: 80 }
-                    };
-
-                    Plotly.newPlot('ensemble-chart', traces, layout, { responsive: true });
-                };
-                window.renderEnsembleChart(false);
-            });
-
-            function toggleEnsembleCumulative(checked) {
-                var knob = document.getElementById('ensemble-toggle-knob');
-                if (checked) {
-                    knob.style.left = '22px';
-                    knob.style.background = 'var(--accent-secondary)';
-                } else {
-                    knob.style.left = '2px';
-                    knob.style.background = 'var(--text-secondary)';
-                }
-                if (window.renderEnsembleChart) window.renderEnsembleChart(checked);
-            }
-        </script>
     </div>
     {% endif %}
     {% endif %}
     </div>
     {% endif %}
 </section>
-{% endif %}
+</div>
 
-<!-- Deep Analysis Results -->
+<!-- ====== TAB: Deep Analysis ====== -->
 {% if deep_analysis %}
-<section class="section" id="sec-deep-analysis">
+<div class="tab-section" id="sec-deep-analysis" style="display:none;">
+<section class="section">
     <h2>Deep Covariate Analysis <span class="info-tip">?<span class="tip-text">Tests every model with different covariate combinations to find which external features help and which ones hurt. The % change column shows impact relative to the "All covariates" baseline. Positive = worse, negative = better.</span></span></h2>
 
     {% if deep_analysis.status == 'running' %}
     <div style="text-align: center; padding: 2rem; color: var(--accent-secondary);">
-        <p style="font-size: 1.2rem;">⏳ Deep analysis running...</p>
+        <p style="font-size: 1.2rem;">Deep analysis running...</p>
         <p style="color: var(--text-secondary);">{{ deep_analysis.completed_runs }} / {{ deep_analysis.total_runs }} combinations tested</p>
         <div style="background: var(--bg-tertiary); border-radius: 0.5rem; height: 8px; margin-top: 1rem; max-width: 400px; margin-left: auto; margin-right: auto;">
             <div style="background: var(--accent-secondary); height: 100%; border-radius: 0.5rem; width: {{ (deep_analysis.completed_runs / deep_analysis.total_runs * 100) if deep_analysis.total_runs > 0 else 0 }}%; transition: width 0.5s;"></div>
@@ -777,7 +551,6 @@
     {% endif %}
 
     {% if deep_analysis.status == 'completed' and deep_analysis.results %}
-    <!-- Results Table -->
     <div class="table-container">
         <table class="metrics-table">
             <thead>
@@ -816,7 +589,6 @@
         </table>
     </div>
 
-    <!-- Recommendations -->
     {% if deep_analysis.recommendations %}
     <div style="margin-top: 1.5rem; padding: 1.5rem; background: var(--bg-tertiary); border-radius: 0.5rem;">
         <h3 style="color: var(--accent-secondary); margin-bottom: 1rem;">Recommendations</h3>
@@ -829,35 +601,16 @@
     {% endif %}
     {% endif %}
 </section>
+</div>
 {% endif %}
 
-<!-- Benchmark Run Info -->
-<div class="benchmark-info" id="sec-run-info">
-    <h3>Latest Benchmark Run</h3>
-    <dl>
-        <dt>Status:</dt>
-        <dd>
-            <span class="status-badge status-{{ benchmark_result.status | lower }}">
-                {{ benchmark_result.status | title }}
-            </span>
-        </dd>
-        <dt>Timestamp:</dt>
-        <dd class="monospace" id="benchmark-timestamp" data-iso="{{ benchmark_result.timestamp }}">{{ benchmark_result.timestamp[:19] | replace('T', ' ') }}</dd>
-        <dt>Best Model:</dt>
-        <dd>{{ benchmark_result.best_model_name or 'N/A' }}</dd>
-        {% if benchmark_result.error_message %}
-        <dt>Error:</dt>
-        <dd class="error">{{ benchmark_result.error_message }}</dd>
-        {% endif %}
-    </dl>
-</div>
-
 {% else %}
+<!-- No benchmark results yet -->
 <section class="section">
     <div class="empty-state">
         <span class="empty-state-icon">🚀</span>
         <p>No benchmark results yet.</p>
-        <p class="empty-state-hint">Click "Run Benchmark" above to start model comparison.</p>
+        <p class="empty-state-hint">Click "Run Pipeline" above to start model comparison.</p>
     </div>
 </section>
 {% endif %}
@@ -866,12 +619,284 @@
 
 {% block scripts %}
 <script>
-    // Convert timestamp to relative time
+// Server-embedded event history for training reconnect
+var EMBEDDED_HISTORY = {{ embedded_history | tojson }};
+</script>
+<script>
+// ======== Tab system ========
+var _renderedTabs = {};
+
+window.showTab = function(el) {
+    // el can be a nav link element or a tab id string
+    var tabId;
+    if (typeof el === 'string') {
+        tabId = el;
+        el = document.querySelector('.section-nav a[data-tab="' + tabId + '"]');
+    } else {
+        tabId = el.getAttribute('data-tab');
+    }
+    if (!tabId) return;
+
+    // Hide all tab sections
+    document.querySelectorAll('.tab-section').forEach(function(s) { s.style.display = 'none'; });
+    // Remove active from all pills
+    document.querySelectorAll('.section-nav a').forEach(function(a) { a.classList.remove('active'); });
+
+    // Show the selected tab
+    var target = document.getElementById(tabId);
+    if (target) {
+        target.style.display = 'block';
+        // Resize Plotly charts that were rendered into a hidden container
+        if (_renderedTabs[tabId]) {
+            target.querySelectorAll('.js-plotly-plot').forEach(function(c) {
+                Plotly.Plots.resize(c);
+            });
+        }
+    }
+    if (el) el.classList.add('active');
+};
+
+// ======== Chart rendering (deferred until tab first shown) ========
+var _chartQueue = [];  // [{tabId, renderFn}]
+function queueChart(tabId, renderFn) { _chartQueue.push({tabId: tabId, fn: renderFn}); }
+function renderChartsForTab(tabId) {
+    if (_renderedTabs[tabId]) return;
+    _renderedTabs[tabId] = true;
+    _chartQueue.forEach(function(item) {
+        if (item.tabId === tabId) {
+            try { item.fn(); } catch(e) { console.error('Chart render error:', e); }
+        }
+    });
+}
+
+// Override showTab to also render deferred charts
+var _origShowTab = window.showTab;
+window.showTab = function(el) {
+    _origShowTab(el);
+    var tabId = (typeof el === 'string') ? el : el.getAttribute('data-tab');
+    if (tabId) renderChartsForTab(tabId);
+};
+</script>
+
+<script>
+(function() {
+    var BASE = typeof BASE_PATH !== 'undefined' ? BASE_PATH : '';
+    var EXP_NAME = {{ experiment.name | tojson }};
+
+    // ======== Predictions + Residuals charts ========
+    {% if lab_forecast and lab_forecast.model_predictions %}
+    var labData = {{ lab_forecast.model_dump() | tojson }};
+    window._holdoutData = labData;
+
+    function cumsum(arr, timestamps) {
+        var result = [], sum = 0, lastDate = '';
+        for (var i = 0; i < arr.length; i++) {
+            var thisDate = timestamps[i].split('T')[0];
+            if (thisDate !== lastDate) { sum = 0; lastDate = thisDate; }
+            sum += (arr[i] !== null && arr[i] !== undefined) ? arr[i] : 0;
+            result.push(sum);
+        }
+        return result;
+    }
+
+    window.renderHoldoutChart = function(cumulative) {
+        var traces = [];
+        var first = labData.model_predictions[0];
+        traces.push({
+            x: first.timestamps,
+            y: cumulative ? cumsum(first.actuals, first.timestamps) : first.actuals,
+            name: 'Actual', mode: 'lines',
+            line: { color: '#ffffff', width: 2.5, dash: 'dot' }
+        });
+        labData.model_predictions.forEach(function(mp) {
+            if (mp.model_name.startsWith('Ensemble:')) return;
+            traces.push({
+                x: mp.timestamps,
+                y: cumulative ? cumsum(mp.predictions, mp.timestamps) : mp.predictions,
+                name: mp.model_name, mode: 'lines',
+                line: { color: mp.color, width: 2 }
+            });
+        });
+        Plotly.newPlot('lab-forecast-chart', traces, {
+            title: (cumulative ? 'Daily Cumulative ' : '') + 'Model Comparison on Holdout (' +
+                   labData.holdout_start.split('T')[0] + ' to ' + labData.holdout_end.split('T')[0] + ')',
+            xaxis: { title: 'Time', gridcolor: '#2d3561' },
+            yaxis: { title: cumulative ? 'Daily Cumulative{{ " (" + units + ")" if units else "" }}' : 'Value{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
+            hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
+            font: { color: '#e0e0e0' }, legend: { orientation: 'h', y: -0.15 },
+            margin: { l: 60, r: 20, t: 50, b: 80 }
+        }, { responsive: true });
+    };
+
+    function renderResidualChart() {
+        var traces = [];
+        labData.model_predictions.forEach(function(mp) {
+            if (mp.model_name.startsWith('Ensemble:')) return;
+            traces.push({
+                x: mp.timestamps,
+                y: mp.actuals.map(function(a, i) { return (a !== null && a !== undefined) ? a - mp.predictions[i] : null; }),
+                name: mp.model_name, mode: 'lines',
+                line: { color: mp.color, width: 1.5 }
+            });
+        });
+        traces.push({
+            x: labData.model_predictions[0].timestamps,
+            y: labData.model_predictions[0].timestamps.map(function() { return 0; }),
+            name: 'Zero', mode: 'lines', line: { color: '#ffffff', width: 1, dash: 'dash' }, showlegend: false
+        });
+        Plotly.newPlot('residual-chart', traces, {
+            title: 'Residuals (Actual - Predicted)',
+            xaxis: { title: 'Time', gridcolor: '#2d3561' },
+            yaxis: { title: 'Residual{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561', zeroline: true, zerolinecolor: '#ffffff' },
+            hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
+            font: { color: '#e0e0e0' }, legend: { orientation: 'h', y: -0.15 },
+            margin: { l: 60, r: 20, t: 50, b: 80 }
+        }, { responsive: true });
+    }
+
+    queueChart('sec-predictions', function() { window.renderHoldoutChart(false); renderResidualChart(); });
+    {% endif %}
+
+    window.toggleCumulative = function(checked) {
+        var knob = document.getElementById('toggle-knob');
+        if (knob) {
+            knob.style.left = checked ? '22px' : '2px';
+            knob.style.background = checked ? 'var(--accent-secondary)' : 'var(--text-secondary)';
+        }
+        if (window.renderHoldoutChart) window.renderHoldoutChart(checked);
+    };
+
+    // ======== Generalisation charts ========
+    {% if benchmark_result %}
+    {% set has_loss = models | selectattr('training_history') | list %}
+    queueChart('sec-generalisation', function() {
+        // Loss curves
+        {% for model in models %}
+        {% if model.training_history %}
+        (function() {
+            var history = {{ model.training_history | tojson }};
+            var epochs = Array.from({length: history.train_loss.length}, function(_, i) { return i + 1; });
+            Plotly.newPlot('loss-curve-{{ loop.index }}', [
+                { x: epochs, y: history.train_loss, name: 'Train Loss', mode: 'lines', line: { color: '#00d4ff', width: 2 } },
+                { x: epochs, y: history.val_loss, name: 'Val Loss', mode: 'lines', line: { color: '#e94560', width: 2, dash: 'dash' } }
+            ], {
+                xaxis: { title: 'Epoch', gridcolor: '#2d3561' }, yaxis: { title: 'Loss', gridcolor: '#2d3561' },
+                hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
+                font: { color: '#e0e0e0' }, legend: { orientation: 'h', y: -0.2 },
+                margin: { l: 55, r: 15, t: 10, b: 60 }
+            }, { responsive: true });
+        })();
+        {% endif %}
+        {% endfor %}
+
+        // Fold stability
+        {% if models and models[0].fold_results %}
+        var modelsData = {{ models_json | tojson }};
+        var MODEL_COLORS = {
+            "lightgbm": "#2ecc71", "xgboost": "#00d4ff", "lstm": "#f39c12",
+            "cnn": "#e94560", "neuralprophet": "#9b59b6", "dlinear": "#1abc9c",
+            "nbeats": "#e67e22", "nhits": "#3498db", "tide": "#e84393",
+            "tsmixer": "#00cec9", "sparsetsf": "#ff6b6b", "patchtst": "#a29bfe",
+            "itransformer": "#ffeaa7", "crossformer": "#fd79a8", "timesnet": "#55efc4"
+        };
+        var traces = [];
+        modelsData.forEach(function(model) {
+            if (!model.fold_results || model.fold_results.length === 0) return;
+            traces.push({
+                x: model.fold_results.map(function(_, i) { return 'Fold ' + (i + 1); }),
+                y: model.fold_results.map(function(f) { return f.mae || 0; }),
+                name: model.name, type: 'bar',
+                marker: { color: MODEL_COLORS[model.name] || '#00d4ff' }
+            });
+        });
+        Plotly.newPlot('fold-stability-chart', traces, {
+            barmode: 'group', xaxis: { title: 'Fold', gridcolor: '#2d3561' },
+            yaxis: { title: 'MAE{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
+            hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
+            font: { color: '#e0e0e0' }, legend: { orientation: 'h', y: -0.15 },
+            margin: { l: 60, r: 20, t: 20, b: 80 }
+        }, { responsive: true });
+        {% endif %}
+    });
+    {% endif %}
+
+    // ======== Feature importance charts ========
+    {% if feature_importances %}
+    queueChart('sec-features', function() {
+        {% for fi in feature_importances %}
+        (function() {
+            var features = {{ fi.features | tojson }};
+            Plotly.newPlot('feature-importance-{{ fi.model_name }}', [{
+                x: features.map(function(f) { return f.importance; }).reverse(),
+                y: features.map(function(f) { return f.name; }).reverse(),
+                type: 'bar', orientation: 'h', marker: { color: '#00d4ff' }
+            }], {
+                title: '{{ fi.model_name }} — Top Features',
+                xaxis: { title: 'Importance', gridcolor: '#2d3561' },
+                plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
+                font: { color: '#e0e0e0' }, margin: { l: 200, r: 20, t: 50, b: 50 }
+            }, { responsive: true, displayModeBar: false });
+        })();
+        {% endfor %}
+    });
+    {% endif %}
+
+    // ======== Ensemble charts ========
+    {% if ensemble_result and ensemble_result.status == 'completed' and lab_forecast and lab_forecast.model_predictions %}
+    queueChart('sec-ensemble', function() {
+        var eLabData = window._holdoutData || {{ lab_forecast.model_dump() | tojson }};
+        function ecumsum(arr, timestamps) {
+            var result = [], sum = 0, lastDate = '';
+            for (var i = 0; i < arr.length; i++) {
+                var thisDate = timestamps[i].split('T')[0];
+                if (thisDate !== lastDate) { sum = 0; lastDate = thisDate; }
+                sum += (arr[i] !== null && arr[i] !== undefined) ? arr[i] : 0;
+                result.push(sum);
+            }
+            return result;
+        }
+        window.renderEnsembleChart = function(cumulative) {
+            var traces = [];
+            var actualSource = eLabData.model_predictions.find(function(mp) { return !mp.model_name.startsWith('Ensemble:'); });
+            if (actualSource) {
+                traces.push({ x: actualSource.timestamps,
+                    y: cumulative ? ecumsum(actualSource.actuals, actualSource.timestamps) : actualSource.actuals,
+                    name: 'Actual', mode: 'lines', line: { color: '#ffffff', width: 2.5, dash: 'dot' } });
+            }
+            eLabData.model_predictions.forEach(function(mp) {
+                if (!mp.model_name.startsWith('Ensemble:')) return;
+                traces.push({ x: mp.timestamps,
+                    y: cumulative ? ecumsum(mp.predictions, mp.timestamps) : mp.predictions,
+                    name: mp.model_name, mode: 'lines', line: { color: mp.color, width: 2 } });
+            });
+            Plotly.newPlot('ensemble-chart', traces, {
+                title: (cumulative ? 'Daily Cumulative ' : '') + 'Ensemble Comparison on Holdout (' +
+                       eLabData.holdout_start.split('T')[0] + ' to ' + eLabData.holdout_end.split('T')[0] + ')',
+                xaxis: { title: 'Time', gridcolor: '#2d3561' },
+                yaxis: { title: cumulative ? 'Daily Cumulative{{ " (" + units + ")" if units else "" }}' : 'Value{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
+                hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
+                font: { color: '#e0e0e0' }, legend: { orientation: 'h', y: -0.15 },
+                margin: { l: 60, r: 20, t: 50, b: 80 }
+            }, { responsive: true });
+        };
+        window.renderEnsembleChart(false);
+    });
+    {% endif %}
+
+    window.toggleEnsembleCumulative = function(checked) {
+        var knob = document.getElementById('ensemble-toggle-knob');
+        if (knob) {
+            knob.style.left = checked ? '22px' : '2px';
+            knob.style.background = checked ? 'var(--accent-secondary)' : 'var(--text-secondary)';
+        }
+        if (window.renderEnsembleChart) window.renderEnsembleChart(checked);
+    };
+
+    // ======== Timestamp humanization ========
     var tsEl = document.getElementById('benchmark-timestamp');
     if (tsEl && tsEl.dataset.iso) {
         var d = new Date(tsEl.dataset.iso);
-        var now = new Date();
-        var diff = Math.floor((now - d) / 1000);
+        var diff = Math.floor((new Date() - d) / 1000);
         var relative;
         if (diff < 60) relative = 'just now';
         else if (diff < 3600) relative = Math.floor(diff / 60) + 'm ago';
@@ -880,135 +905,361 @@
         tsEl.textContent = tsEl.textContent + ' (' + relative + ')';
     }
 
-    // Ensemble configuration
-    function toggleEnsembleCustom(value) {
+    // ======== Ensemble configuration ========
+    window.toggleEnsembleCustom = function(value) {
         var panel = document.getElementById('ensemble-custom-panel');
-        panel.style.display = (value === 'custom') ? 'block' : 'none';
-    }
+        if (panel) panel.style.display = (value === 'custom') ? 'block' : 'none';
+    };
 
-    function runEnsemble(name, btn) {
-        btn.disabled = true;
-        btn.classList.add('btn-loading');
-        btn.textContent = 'Running...';
-
-        var topNSelect = document.getElementById('ensemble-top-n');
+    window.runEnsemble = function(name, btn) {
+        btn.disabled = true; btn.classList.add('btn-loading'); btn.textContent = 'Running...';
         var strategies = Array.from(document.querySelectorAll('.ensemble-strategy:checked')).map(function(cb) { return cb.value; });
-        if (strategies.length === 0) {
-            mlfl.toast('Select at least one ensemble strategy', 'warning');
-            btn.disabled = false;
-            btn.textContent = 'Run Ensemble';
-            return;
-        }
-
+        if (strategies.length === 0) { mlfl.toast('Select at least one ensemble strategy', 'warning'); btn.disabled = false; btn.textContent = 'Run Ensemble'; return; }
         var body = { strategies: strategies };
-
+        var topNSelect = document.getElementById('ensemble-top-n');
         if (topNSelect.value === 'custom') {
             var selected = Array.from(document.querySelectorAll('.ensemble-model-cb:checked')).map(function(cb) { return cb.value; });
-            if (selected.length < 2) {
-                mlfl.toast('Select at least 2 models for ensemble', 'warning');
-                btn.disabled = false;
-                btn.textContent = 'Run Ensemble';
-                return;
-            }
+            if (selected.length < 2) { mlfl.toast('Select at least 2 models for ensemble', 'warning'); btn.disabled = false; btn.textContent = 'Run Ensemble'; return; }
             body.selected_models = selected;
-        } else if (topNSelect.value !== 'all') {
-            body.top_n = parseInt(topNSelect.value, 10);
-        }
+        } else if (topNSelect.value !== 'all') { body.top_n = parseInt(topNSelect.value, 10); }
 
-        fetch(BASE_PATH + '/experiment/' + name + '/run-ensemble', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        })
+        fetch(BASE + '/experiment/' + name + '/run-ensemble', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
         .then(function(r) { return r.json(); })
-        .then(function(data) {
-            // Poll for completion
+        .then(function() {
             var pollId = setInterval(function() {
-                fetch(BASE_PATH + '/experiment/' + name + '/ensemble')
+                fetch(BASE + '/experiment/' + name + '/ensemble')
                     .then(function(r) { if (r.ok) return r.json(); throw new Error('not ready'); })
-                    .then(function(result) {
-                        if (result.status === 'completed') {
-                            clearInterval(pollId);
-                            location.reload();
-                        }
-                    })
+                    .then(function(result) { if (result.status === 'completed') { clearInterval(pollId); location.reload(); } })
                     .catch(function() {});
             }, 2000);
         })
-        .catch(function(err) {
-            mlfl.toast('Failed to start ensemble: ' + err, 'error');
-            btn.disabled = false;
-            btn.textContent = 'Run Ensemble';
-        });
-    }
+        .catch(function(err) { mlfl.toast('Failed to start ensemble: ' + err, 'error'); btn.disabled = false; btn.textContent = 'Run Ensemble'; });
+    };
 
-    // Deep analysis button
-    function runDeepAnalysis(name, btn) {
-        btn.disabled = true;
-        btn.classList.add('btn-loading');
-        btn.textContent = 'Analysing...';
+    // ======== Deep analysis ========
+    window.runDeepAnalysis = function(name, btn) {
+        btn.disabled = true; btn.classList.add('btn-loading'); btn.textContent = 'Analysing...';
         var modelSelect = document.getElementById('deep-analysis-model');
         var selectedModel = modelSelect ? modelSelect.value : 'all';
-        fetch(BASE_PATH + '/experiment/' + name + '/run-deep-analysis', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: selectedModel })
+        fetch(BASE + '/experiment/' + name + '/run-deep-analysis', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: selectedModel }) })
+        .then(function(r) { return r.json(); })
+        .then(function() {
+            var pollId = setInterval(function() {
+                fetch(BASE + '/experiment/' + name + '/deep-analysis')
+                    .then(function(r) { if (r.ok) return r.json(); throw new Error('not ready'); })
+                    .then(function(result) { if (result.status === 'completed') { clearInterval(pollId); location.reload(); } })
+                    .catch(function() {});
+            }, 5000);
         })
-            .then(r => r.json())
-            .then(data => {
-                // Poll for completion
-                var pollId = setInterval(function() {
-                    fetch(BASE_PATH + '/experiment/' + name + '/deep-analysis')
-                        .then(r => { if (r.ok) return r.json(); throw new Error('not ready'); })
-                        .then(result => {
-                            if (result.status === 'completed') {
-                                clearInterval(pollId);
-                                location.reload();
-                            }
-                        })
-                        .catch(function() {});
-                }, 5000);
-            })
-            .catch(err => {
-                mlfl.toast('Failed to start deep analysis: ' + err, 'error');
-                btn.disabled = false;
-                btn.textContent = '🔬 Deep Analysis';
-            });
-    }
+        .catch(function(err) { mlfl.toast('Failed to start deep analysis: ' + err, 'error'); btn.disabled = false; btn.textContent = 'Deep Analysis'; });
+    };
 
-    const benchmarkBtn = document.getElementById('run-benchmark-btn');
-    if (benchmarkBtn && !benchmarkBtn.disabled) {
-        benchmarkBtn.addEventListener('htmx:xhr:loadstart', function() {
-            benchmarkBtn.disabled = true;
-            benchmarkBtn.classList.add('btn-loading');
-            benchmarkBtn.textContent = 'Running...';
-            window.mlfl.pollBenchmarkStatus('{{ experiment.name }}');
+    // ======== Training pipeline (migrated from training.html) ========
+    var evtSource = null;
+    var allLossData = {};
+    var earlyStops = {};
+    var totalModels = 0, completedModels = 0;
+    var currentModel = '', displayModel = '';
+    var pipelineRunning = {{ 'true' if is_running else 'false' }};
+    var isReplaying = false;
+    var knownModels = [];
+    var foldTraceMap = {};
+
+    var CHART_LAYOUT = {
+        title: '', xaxis: { title: 'Epoch', color: '#b0b0b0', gridcolor: '#2d3561' },
+        yaxis: { title: 'Loss', color: '#b0b0b0', gridcolor: '#2d3561', type: 'log' },
+        plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
+        font: { color: '#e0e0e0', size: 12 },
+        legend: { orientation: 'h', y: -0.15, font: { size: 10 } },
+        margin: { l: 70, r: 30, t: 50, b: 80 }, hovermode: 'x unified'
+    };
+    var FOLD_COLORS = ['#00d4ff','#e94560','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22','#3498db','#e74c3c','#2c3e50'];
+
+    window.startPipeline = function() {
+        var steps = ['benchmark'];
+        if (document.getElementById('chk-ensemble').checked) steps.push('ensemble');
+        if (document.getElementById('chk-deep').checked) steps.push('deep_analysis');
+
+        var btn = document.getElementById('btn-run');
+        btn.disabled = true; btn.classList.add('btn-loading');
+        document.getElementById('btn-run-text').textContent = 'Running...';
+        pipelineRunning = true;
+
+        // Reset state
+        allLossData = {}; earlyStops = {}; totalModels = 0; completedModels = 0;
+        currentModel = ''; displayModel = ''; knownModels = []; foldTraceMap = {};
+        document.getElementById('model-select').innerHTML = '<option value="">— select model —</option>';
+        document.getElementById('event-log').innerHTML = '';
+        document.getElementById('progress-bar').style.width = '0%';
+        document.getElementById('progress-pct').textContent = '';
+        document.getElementById('progress-label').textContent = 'Starting pipeline...';
+        resetStats(); Plotly.purge('loss-chart');
+
+        // Ensure Training tab pill exists and switch to it
+        ensureTrainingTab();
+        showTab('sec-training');
+
+        fetch(BASE + '/experiment/' + EXP_NAME + '/run-pipeline', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({steps: steps})
+        }).then(function(r) {
+            if (r.status === 409) {
+                logEvent('warn', 'Pipeline already running');
+                btn.disabled = false; btn.classList.remove('btn-loading');
+                document.getElementById('btn-run-text').textContent = 'Run Pipeline';
+                pipelineRunning = false; return;
+            }
+            connectSSE(EXP_NAME);
+        }).catch(function(err) {
+            logEvent('error', 'Failed to start pipeline: ' + err);
+            btn.disabled = false; btn.classList.remove('btn-loading');
+            document.getElementById('btn-run-text').textContent = 'Run Pipeline';
+            pipelineRunning = false;
         });
-    }
+    };
 
-    // Scroll-spy: highlight active section nav pill
-    (function() {
+    function ensureTrainingTab() {
         var nav = document.getElementById('section-nav');
         if (!nav) return;
-        var links = nav.querySelectorAll('a[href^="#"]');
-        var sections = [];
-        links.forEach(function(a) {
-            var target = document.querySelector(a.getAttribute('href'));
-            if (target) sections.push({ link: a, el: target });
+        if (nav.querySelector('[data-tab="sec-training"]')) return;
+        var pill = document.createElement('a');
+        pill.setAttribute('data-tab', 'sec-training');
+        pill.setAttribute('onclick', 'showTab(this)');
+        pill.textContent = 'Training';
+        nav.insertBefore(pill, nav.firstChild);
+    }
+
+    function connectSSE(expName, noReplay) {
+        if (evtSource) evtSource.close();
+        var qs = noReplay ? '?no_replay=1' : '';
+        evtSource = new EventSource(BASE + '/experiment/' + expName + '/training-stream' + qs);
+        evtSource.onmessage = function(e) { try { handleEvent(JSON.parse(e.data)); } catch(err) { console.error('SSE parse error:', err); } };
+        evtSource.onerror = function() { if (!pipelineRunning) evtSource.close(); };
+    }
+
+    function handleEvent(ev) {
+        switch (ev.event_type) {
+            case 'pipeline_start':
+                logEvent('info', ev.message || 'Pipeline started');
+                var match = (ev.message || '').match(/(\d+) model/);
+                if (match) totalModels = parseInt(match[1]);
+                break;
+            case 'model_start':
+                currentModel = ev.model_name;
+                addModelToDropdown(ev.model_name);
+                displayModel = ev.model_name;
+                document.getElementById('model-select').value = ev.model_name;
+                document.getElementById('stat-model').textContent = ev.model_name;
+                logEvent('info', 'Started: ' + ev.model_name + ' (' + ev.message + ')');
+                resetStats();
+                if (!isReplaying) renderChartForModel(displayModel);
+                break;
+            case 'epoch':
+                updateEpochStats(ev); accumulateEpochData(ev);
+                if (!isReplaying && ev.model_name === displayModel) liveUpdateChart(ev);
+                break;
+            case 'early_stop':
+                recordEarlyStop(ev.model_name, ev);
+                logEvent('warn', ev.model_name + ': Early stop at epoch ' + ev.epoch);
+                break;
+            case 'model_end':
+                completedModels++; detectEarlyStopFromData(ev.model_name);
+                var pct = totalModels > 0 ? Math.round(completedModels / totalModels * 100) : 0;
+                document.getElementById('progress-bar').style.width = pct + '%';
+                document.getElementById('progress-pct').textContent = pct + '%';
+                document.getElementById('progress-label').textContent = completedModels + '/' + totalModels + ' models complete';
+                logEvent('success', 'Completed: ' + ev.model_name);
+                if (!isReplaying && ev.model_name === displayModel) renderChartForModel(displayModel);
+                break;
+            case 'ensemble_start': logEvent('info', ev.message || 'Ensemble started'); break;
+            case 'ensemble_end': logEvent('success', ev.message || 'Ensemble complete'); break;
+            case 'pipeline_end':
+                logEvent('success', ev.message || 'Pipeline finished');
+                document.getElementById('progress-bar').style.width = '100%';
+                document.getElementById('progress-pct').textContent = '100%';
+                document.getElementById('progress-label').textContent = 'Pipeline complete';
+                var doneBtn = document.getElementById('btn-run');
+                doneBtn.disabled = false; doneBtn.classList.remove('btn-loading');
+                document.getElementById('btn-run-text').textContent = 'Run Pipeline';
+                pipelineRunning = false;
+                if (evtSource) evtSource.close();
+                // Reload after a short delay so the user sees "Pipeline complete"
+                if (!isReplaying) setTimeout(function() { location.reload(); }, 2000);
+                break;
+            default:
+                logEvent('info', ev.event_type + ': ' + (ev.message || ev.model_name || ''));
+        }
+    }
+
+    function updateEpochStats(ev) {
+        document.getElementById('stat-model').textContent = ev.model_name || currentModel;
+        document.getElementById('stat-fold').textContent = ev.total_folds > 0 ? ev.fold + '/' + ev.total_folds : '—';
+        document.getElementById('stat-epoch').textContent = ev.total_epochs > 0 ? ev.epoch + '/' + ev.total_epochs : ev.epoch || '—';
+        document.getElementById('stat-val-loss').textContent = ev.val_loss > 0 ? ev.val_loss.toFixed(5) : '—';
+        document.getElementById('stat-best').textContent = ev.best_val_loss > 0 ? ev.best_val_loss.toFixed(5) : '—';
+        document.getElementById('stat-patience').textContent = ev.patience_limit > 0 ? ev.patience_counter + '/' + ev.patience_limit : '—';
+    }
+
+    function accumulateEpochData(ev) {
+        if (!allLossData[ev.model_name]) allLossData[ev.model_name] = {};
+        var foldKey = 'F' + ev.fold;
+        if (!allLossData[ev.model_name][foldKey]) {
+            allLossData[ev.model_name][foldKey] = { epochs: [], train: [], val: [], totalEpochs: 0, lastPatienceCounter: 0, lastPatienceLimit: 0, bestValLoss: Infinity };
+        }
+        var fd = allLossData[ev.model_name][foldKey];
+        fd.epochs.push(ev.epoch); fd.train.push(ev.train_loss); fd.val.push(ev.val_loss);
+        if (ev.total_epochs > 0) fd.totalEpochs = ev.total_epochs;
+        if (ev.patience_limit > 0) { fd.lastPatienceCounter = ev.patience_counter; fd.lastPatienceLimit = ev.patience_limit; }
+        if (ev.best_val_loss > 0) fd.bestValLoss = ev.best_val_loss;
+    }
+
+    function recordEarlyStop(modelName, ev) {
+        if (!earlyStops[modelName]) earlyStops[modelName] = {};
+        earlyStops[modelName]['F' + ev.fold] = { stopEpoch: ev.epoch, bestEpoch: ev.epoch - (ev.patience_counter || 0), bestLoss: ev.best_val_loss || ev.val_loss };
+    }
+
+    function detectEarlyStopFromData(modelName) {
+        var modelData = allLossData[modelName]; if (!modelData) return;
+        for (var foldKey in modelData) {
+            var fd = modelData[foldKey];
+            if (earlyStops[modelName] && earlyStops[modelName][foldKey]) continue;
+            if (fd.epochs.length === 0) continue;
+            var lastEpoch = fd.epochs[fd.epochs.length - 1];
+            var patienceExhausted = fd.lastPatienceLimit > 0 && fd.lastPatienceCounter >= fd.lastPatienceLimit;
+            var endedEarly = fd.totalEpochs > 0 && lastEpoch < fd.totalEpochs;
+            if (!patienceExhausted && !endedEarly) continue;
+            var bestIdx = 0;
+            for (var i = 1; i < fd.val.length; i++) { if (fd.val[i] < fd.val[bestIdx]) bestIdx = i; }
+            if (!earlyStops[modelName]) earlyStops[modelName] = {};
+            earlyStops[modelName][foldKey] = { stopEpoch: lastEpoch, bestEpoch: fd.epochs[bestIdx], bestLoss: fd.val[bestIdx] };
+        }
+    }
+
+    function addModelToDropdown(modelName) {
+        if (knownModels.indexOf(modelName) >= 0) return;
+        knownModels.push(modelName);
+        var opt = document.createElement('option'); opt.value = modelName; opt.textContent = modelName;
+        document.getElementById('model-select').appendChild(opt);
+    }
+
+    window.switchChartModel = function(modelName) { if (!modelName) return; displayModel = modelName; renderChartForModel(modelName); };
+
+    function renderChartForModel(modelName) {
+        var modelData = allLossData[modelName];
+        if (!modelData) { CHART_LAYOUT.title = modelName + ' — Training & Validation Loss'; Plotly.newPlot('loss-chart', [], CHART_LAYOUT, { responsive: true, displayModeBar: false }); foldTraceMap = {}; return; }
+        var traces = [], colorIdx = 0; foldTraceMap = {};
+        var foldKeys = Object.keys(modelData).sort();
+        for (var k = 0; k < foldKeys.length; k++) {
+            var foldKey = foldKeys[k], fd = modelData[foldKey], color = FOLD_COLORS[colorIdx % FOLD_COLORS.length];
+            var trainIdx = traces.length;
+            traces.push({ x: fd.epochs.slice(), y: fd.train.slice(), name: 'Train ' + foldKey, mode: 'lines', line: { color: color, width: 1.5, dash: 'dot' } });
+            var valIdx = traces.length;
+            traces.push({ x: fd.epochs.slice(), y: fd.val.slice(), name: 'Val ' + foldKey, mode: 'lines', line: { color: color, width: 2 } });
+            foldTraceMap[foldKey] = { trainIdx: trainIdx, valIdx: valIdx };
+            colorIdx++;
+            var es = earlyStops[modelName] && earlyStops[modelName][foldKey];
+            if (es) {
+                traces.push({ x: [es.bestEpoch], y: [es.bestLoss], name: 'Early Stop ' + foldKey, mode: 'markers+text',
+                    marker: { color: '#ff6b6b', size: 12, symbol: 'circle', line: { color: '#fff', width: 2 } },
+                    text: ['Early Stop'], textposition: 'top center', textfont: { color: '#ff6b6b', size: 10 },
+                    showlegend: colorIdx === 1, legendgroup: 'earlystop',
+                    hovertemplate: 'Best Val Loss: %{y:.5f}<br>Epoch: %{x}<extra>Early Stop ' + foldKey + '</extra>' });
+            }
+        }
+        CHART_LAYOUT.title = modelName + ' — Training & Validation Loss';
+        Plotly.newPlot('loss-chart', traces, CHART_LAYOUT, { responsive: true, displayModeBar: false });
+    }
+
+    function liveUpdateChart(ev) {
+        var foldKey = 'F' + ev.fold;
+        if (!(foldKey in foldTraceMap)) { renderChartForModel(displayModel); }
+        else {
+            var map = foldTraceMap[foldKey];
+            Plotly.extendTraces('loss-chart', { x: [[ev.epoch], [ev.epoch]], y: [[ev.train_loss], [ev.val_loss]] }, [map.trainIdx, map.valIdx]);
+        }
+    }
+
+    function resetStats() { ['stat-fold','stat-epoch','stat-val-loss','stat-best','stat-patience'].forEach(function(id) { document.getElementById(id).textContent = '—'; }); }
+
+    function logEvent(level, msg) {
+        var log = document.getElementById('event-log');
+        var ts = new Date().toLocaleTimeString();
+        var colors = { info: '#00d4ff', warn: '#f39c12', error: '#e74c3c', success: '#2ecc71' };
+        var line = document.createElement('div');
+        line.innerHTML = '<span style="color:' + (colors[level] || '#b0b0b0') + ';">[' + ts + ']</span> ' + msg;
+        log.appendChild(line); log.scrollTop = log.scrollHeight;
+    }
+
+    // ======== Auto-reconnect from embedded history ========
+    function replayAndReconnect(events, expName) {
+        if (!events || events.length === 0) return;
+        var lastStartIdx = -1, lastEndIdx = -1;
+        for (var i = 0; i < events.length; i++) {
+            if (events[i].event_type === 'pipeline_start') lastStartIdx = i;
+            if (events[i].event_type === 'pipeline_end') lastEndIdx = i;
+        }
+        if (lastStartIdx < 0) return;
+        var hasEnd = lastEndIdx > lastStartIdx;
+
+        allLossData = {}; earlyStops = {}; foldTraceMap = {}; totalModels = 0; completedModels = 0;
+        currentModel = ''; displayModel = ''; knownModels = [];
+        document.getElementById('model-select').innerHTML = '<option value="">— select model —</option>';
+        document.getElementById('event-log').innerHTML = '';
+        Plotly.purge('loss-chart');
+
+        isReplaying = true;
+        for (var j = 0; j < events.length; j++) handleEvent(events[j]);
+        isReplaying = false;
+
+        ensureTrainingTab();
+        showTab('sec-training');
+
+        requestAnimationFrame(function() {
+            if (displayModel) {
+                document.getElementById('model-select').value = displayModel;
+                renderChartForModel(displayModel);
+            }
         });
-        if (sections.length === 0) return;
 
-        var observer = new IntersectionObserver(function(entries) {
-            entries.forEach(function(entry) {
-                if (entry.isIntersecting) {
-                    links.forEach(function(l) { l.classList.remove('active'); });
-                    var match = sections.find(function(s) { return s.el === entry.target; });
-                    if (match) match.link.classList.add('active');
-                }
-            });
-        }, { rootMargin: '-80px 0px -60% 0px', threshold: 0 });
+        if (!hasEnd) {
+            pipelineRunning = true;
+            var btn = document.getElementById('btn-run');
+            btn.disabled = true; btn.classList.add('btn-loading');
+            document.getElementById('btn-run-text').textContent = 'Running...';
+            connectSSE(expName, true);
+        }
+    }
 
-        sections.forEach(function(s) { observer.observe(s.el); });
-    })();
+    function autoReconnect() {
+        if (typeof EMBEDDED_HISTORY !== 'undefined' && EMBEDDED_HISTORY[EXP_NAME]) {
+            replayAndReconnect(EMBEDDED_HISTORY[EXP_NAME], EXP_NAME);
+            return;
+        }
+        // Fallback: fetch from API
+        fetch(BASE + '/api/training/history/' + encodeURIComponent(EXP_NAME))
+            .then(function(r) { return r.json(); })
+            .then(function(events) { replayAndReconnect(events, EXP_NAME); })
+            .catch(function(err) { console.error('autoReconnect fetch failed:', err); });
+    }
+
+    // bfcache handler
+    window.addEventListener('pageshow', function(e) {
+        if (e.persisted) {
+            fetch(BASE + '/api/training/history/' + encodeURIComponent(EXP_NAME))
+                .then(function(r) { return r.json(); })
+                .then(function(events) { replayAndReconnect(events, EXP_NAME); })
+                .catch(function(err) { console.error('pageshow reconnect failed:', err); });
+        }
+    });
+
+    // ======== Initial tab selection ========
+    if (pipelineRunning || (typeof EMBEDDED_HISTORY !== 'undefined' && EMBEDDED_HISTORY[EXP_NAME] && EMBEDDED_HISTORY[EXP_NAME].length > 0)) {
+        autoReconnect();
+    } else {
+        // Default to Results tab (or first available)
+        var firstPill = document.querySelector('.section-nav a');
+        if (firstPill) showTab(firstPill);
+    }
+})();
 </script>
 {% endblock %}

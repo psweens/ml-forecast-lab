@@ -470,6 +470,34 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         Main dashboard showing all experiments, their status, and current best models.
         """
         experiments = list(app.state.appstate.experiment_statuses.values())
+
+        # Build lightweight training summaries for running experiments
+        from ml_forecast_lab.training_events import TrainingEventBus
+        training_summaries: Dict[str, Dict] = {}
+        event_bus = TrainingEventBus.get_instance()
+        for exp_name in app.state.appstate.running_benchmarks:
+            history = event_bus.get_history(exp_name)
+            if history:
+                _cur = ""
+                _done = 0
+                _total = 0
+                for ev in history:
+                    if ev.event_type == "pipeline_start":
+                        import re as _re
+                        m = _re.search(r"(\d+) model", ev.message or "")
+                        if m:
+                            _total = int(m.group(1))
+                    elif ev.event_type == "model_start":
+                        _cur = ev.model_name
+                    elif ev.event_type == "model_end":
+                        _done += 1
+                training_summaries[exp_name] = {
+                    "current_model": _cur,
+                    "completed_models": _done,
+                    "total_models": _total,
+                    "progress_pct": round(_done / _total * 100) if _total else 0,
+                }
+
         return templates.TemplateResponse(
             request=request,
             name="dashboard.html",
@@ -486,6 +514,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "production_experiments": sum(
                     1 for e in experiments if e.mode == "production"
                 ),
+                "training_summaries": training_summaries,
+                "running_experiments": app.state.appstate.running_benchmarks,
             },
         )
 
@@ -704,6 +734,50 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         ensemble_result = app.state.appstate.ensemble_results.get(name)
         is_running = app.state.appstate.is_benchmark_running(name)
 
+        # Embed training event history so the page can restore live
+        # progress without a separate fetch (same pattern as training_page).
+        from ml_forecast_lab.training_events import TrainingEventBus
+        embedded_history: Dict[str, list] = {}
+        event_bus = TrainingEventBus.get_instance()
+        exp_history = event_bus.get_history(name)
+        if exp_history:
+            embedded_history[name] = [ev.to_dict() for ev in exp_history]
+
+        # Build a lightweight training summary for the header bar
+        training_summary: Optional[Dict] = None
+        if is_running and exp_history:
+            _cur_model = ""
+            _completed = 0
+            _total = 0
+            _fold = 0
+            _total_folds = 0
+            _epoch = 0
+            _total_epochs = 0
+            for ev in exp_history:
+                if ev.event_type == "pipeline_start":
+                    import re as _re
+                    m = _re.search(r"(\d+) model", ev.message or "")
+                    if m:
+                        _total = int(m.group(1))
+                elif ev.event_type == "model_start":
+                    _cur_model = ev.model_name
+                elif ev.event_type == "model_end":
+                    _completed += 1
+                elif ev.event_type == "epoch":
+                    _fold = ev.fold
+                    _total_folds = ev.total_folds
+                    _epoch = ev.epoch
+                    _total_epochs = ev.total_epochs
+            training_summary = {
+                "current_model": _cur_model,
+                "completed_models": _completed,
+                "total_models": _total,
+                "fold": _fold,
+                "total_folds": _total_folds,
+                "epoch": _epoch,
+                "total_epochs": _total_epochs,
+            }
+
         # Get units from experiment config
         units = ""
         try:
@@ -743,6 +817,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "ensemble_result": ensemble_result,
                 "units": units,
                 "models_json": [m.model_dump() for m in (benchmark_result.models if benchmark_result else [])],
+                "embedded_history": embedded_history,
+                "training_summary": training_summary,
             },
         )
 
@@ -1432,50 +1508,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     # ========== Training Tab: SSE + Routes ==========
 
-    @app.get("/training", response_class=Response)
+    @app.get("/training")
     async def training_page(request: Request):
-        """Training dashboard with live loss plots and pipeline controls."""
-        import yaml
-        from ml_forecast_lab.training_events import TrainingEventBus
-
-        experiments = list(app.state.appstate.experiment_statuses.values())
-
-        # Load enabled models from config for each experiment
-        exp_models: Dict[str, List[str]] = {}
-        config_path = _find_config_path()
-        if config_path:
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    yaml_data = yaml.safe_load(f) or {}
-                for exp in yaml_data.get("experiments", []):
-                    exp_models[exp.get("name", "")] = exp.get("models_enabled", [])
-            except Exception:
-                pass
-
-        # Embed event history for any running experiment so the Training
-        # tab can restore live-progress state without a separate fetch
-        # (which could fail silently through the ingress proxy).
-        embedded_history: Dict[str, list] = {}
-        event_bus = TrainingEventBus.get_instance()
-        for exp_name in app.state.appstate.running_benchmarks:
-            history = event_bus.get_history(exp_name)
-            if history:
-                embedded_history[exp_name] = [ev.to_dict() for ev in history]
-
-        return templates.TemplateResponse(
-            request=request,
-            name="training.html",
-            context={
-                "request": request,
-                "base_path": _get_base_path(request),
-                "active_page": "training",
-                "version": APP_VERSION,
-                "experiments": experiments,
-                "exp_models": exp_models,
-                "running_experiments": app.state.appstate.running_benchmarks,
-                "embedded_history": embedded_history,
-            },
-        )
+        """Redirect old Training tab URL to Dashboard (preserved for bookmarks)."""
+        return RedirectResponse(url=f"{_get_base_path(request)}/", status_code=301)
 
     @app.get("/experiment/{name}/training-stream")
     async def training_stream(name: str, request: Request):

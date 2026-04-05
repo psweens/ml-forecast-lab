@@ -58,11 +58,31 @@
                 <div class="card-field">
                     <span class="field-label">Status</span>
                     <span class="field-value">
+                        {% if exp.name in running_experiments and training_summaries.get(exp.name) %}
+                        {% set ts = training_summaries[exp.name] %}
+                        <span class="status-badge status-running training">Training: {{ ts.current_model }}</span>
+                        {% else %}
                         <span class="status-badge status-{{ exp.last_benchmark_status | lower }}">
                             {{ exp.last_benchmark_status | title }}
                         </span>
+                        {% endif %}
                     </span>
                 </div>
+
+                {% if exp.name in running_experiments and training_summaries.get(exp.name) %}
+                {% set ts = training_summaries[exp.name] %}
+                <div class="card-field">
+                    <span class="field-label">Progress</span>
+                    <span class="field-value" style="width:100%;">
+                        <div style="display:flex;align-items:center;gap:0.5rem;">
+                            <div style="flex:1;height:6px;background:var(--bg-tertiary);border-radius:3px;overflow:hidden;">
+                                <div style="height:100%;width:{{ ts.progress_pct }}%;background:linear-gradient(90deg,var(--accent-secondary),var(--accent-primary));border-radius:3px;transition:width 0.3s;"></div>
+                            </div>
+                            <span style="font-size:0.8rem;color:var(--accent-secondary);white-space:nowrap;">{{ ts.completed_models }}/{{ ts.total_models }}</span>
+                        </div>
+                    </span>
+                </div>
+                {% endif %}
 
                 {% if exp.last_benchmark_timestamp %}
                 <div class="card-field">
@@ -139,9 +159,8 @@
         }, 1000);
     });
 
-    // Auto-refresh dashboard every 60 seconds
-    setInterval(function() {
-        location.reload();
-    }, 60000);
+    // Auto-refresh dashboard (faster when training is running)
+    var _refreshMs = {{ '10000' if running_experiments else '60000' }};
+    setInterval(function() { location.reload(); }, _refreshMs);
 </script>
 {% endblock %}
