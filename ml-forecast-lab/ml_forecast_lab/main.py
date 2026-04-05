@@ -2045,6 +2045,7 @@ class MLForecastLabApp:
                 status.best_model = prod_model_name
                 status.last_benchmark_timestamp = datetime.now(timezone.utc).isoformat()
                 status.last_benchmark_status = "completed"
+                status.hailo_active = is_hailo
 
     async def _run_forecast_cycle(self):
         """

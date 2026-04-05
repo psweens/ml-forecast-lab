@@ -77,6 +77,7 @@ class ExperimentStatus(BaseModel):
     next_retrain_in_seconds: Optional[int] = None
     next_update_in_seconds: Optional[int] = None  # Legacy alias for forecast
     publish_entity: Optional[str] = None  # e.g. "sensor.mlfl_solar_forecast"
+    hailo_active: bool = False  # Whether inference is using Hailo AI accelerator
 
 
 class ForecastPoint(BaseModel):
