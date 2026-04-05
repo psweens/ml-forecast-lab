@@ -2071,8 +2071,13 @@ class MLForecastLabApp:
             self._forecast_running = False
 
     async def _forecast_with_cached(self, experiment_name: str):
-        """Run inference with a cached model and publish sensors."""
-        from ml_forecast_lab.features import create_forecast_features
+        """Run inference with a cached model and publish sensors.
+
+        Fetches fresh recent data on each call so that lag features and
+        timestamps are current, even though the model itself is cached
+        from the last retrain cycle.
+        """
+        from ml_forecast_lab.features import build_features, create_forecast_features
 
         cache = self._cached_models.get(experiment_name)
         if not cache:
@@ -2080,11 +2085,28 @@ class MLForecastLabApp:
 
         model = cache["model"]
         exp_cfg = cache["exp_cfg"]
-        combined = cache["combined"]
         feature_cols = cache["feature_cols"]
         is_neural = cache.get("is_neural", False)
         seq_kwargs = cache.get("seq_kwargs", {})
         prod_model_name = cache.get("model_name", "unknown")
+
+        # Fetch FRESH data so lag features and last_ts are current
+        try:
+            df_fresh = await self._fetch_and_preprocess(exp_cfg)
+            features_fresh = build_features(
+                df_fresh, target_col="y",
+                interval_minutes=exp_cfg.interval_minutes,
+                country=exp_cfg.country,
+            )
+            combined = features_fresh.copy()
+            combined["target"] = df_fresh["y"]
+            for col in [c for c in df_fresh.columns if c != "y"]:
+                combined[col] = df_fresh[col]
+            combined = combined.dropna()
+            logger.debug(f"  Fresh data: {len(combined)} samples, last={combined.index[-1]}")
+        except Exception as e:
+            logger.warning(f"  Fresh data fetch failed, using cached data: {e}")
+            combined = cache["combined"]
 
         n_lags = 12
         last_ts = combined.index[-1]
