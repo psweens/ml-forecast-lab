@@ -74,8 +74,8 @@
     <a data-tab="sec-generalisation" onclick="showTab(this)">Generalisation</a>
     {% if feature_importances %}<a data-tab="sec-features" onclick="showTab(this)">Features</a>{% endif %}
     <a data-tab="sec-ensemble" onclick="showTab(this)">Ensemble</a>
+    <a data-tab="sec-deep-analysis" onclick="showTab(this)">Covariate Analysis</a>
     <a data-tab="sec-tuning" onclick="showTab(this)">Tuning</a>
-    <a data-tab="sec-deep-analysis" onclick="showTab(this)">Deep Analysis</a>
     {% endif %}
 </nav>
 
@@ -383,7 +383,7 @@
 <div class="tab-section" id="sec-features" style="display:none;">
 <section class="section">
     <h2>Feature Importance <span class="info-tip">?<span class="tip-text">Shows which input features contribute most to the model's predictions. Higher importance means the feature has more influence. Only available for tree-based models (LightGBM, XGBoost).</span></span></h2>
-    <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:1rem;">Feature importance is available for tree-based models. For neural models, use the <strong>Deep Analysis</strong> tab to test the impact of each covariate on all model types.</p>
+    <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:1rem;">Feature importance is available for tree-based models. For neural models, use the <strong>Covariate Analysis</strong> tab to test the impact of each covariate on all model types.</p>
     {% for fi in feature_importances %}
     <h3 style="color: var(--accent-secondary); margin-bottom: 0.5rem;">{{ fi.model_name }}</h3>
     <div id="feature-importance-{{ fi.model_name }}" style="min-height: 400px;"></div>
@@ -606,15 +606,32 @@
         {% if tuning_result.trials %}
         <!-- Best params summary -->
         {% if tuning_result.best_params and tuning_result.status == 'completed' %}
-        <div style="display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center;margin-bottom:1rem;padding:0.75rem 1rem;background:rgba(46,204,113,0.1);border:1px solid rgba(46,204,113,0.25);border-radius:0.5rem;">
-            <span style="color:var(--success);font-weight:600;">Best (Trial #{{ tuning_result.best_trial_id }}, MAE {{ "%.4f"|format(tuning_result.best_score) }}):</span>
-            {% for k, v in tuning_result.best_params.items() %}
-            <span style="padding:0.15rem 0.5rem;border-radius:0.25rem;background:rgba(0,212,255,0.1);color:var(--accent-secondary);font-size:0.82rem;">{{ k }}={{ v }}</span>
-            {% endfor %}
-            <button class="btn btn-success" style="margin-left:auto;padding:0.3rem 1rem;font-size:0.85rem;"
-                    onclick="applyTuning('{{ experiment.name }}')">
-                Apply Best
-            </button>
+        {% set defaults = param_defaults.get(tuning_result.model_name, {}) %}
+        <div style="margin-bottom:1rem;padding:0.75rem 1rem;background:rgba(46,204,113,0.1);border:1px solid rgba(46,204,113,0.25);border-radius:0.5rem;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem;">
+                <span style="color:var(--success);font-weight:600;">Best — Trial #{{ tuning_result.best_trial_id }}, MAE {{ "%.4f"|format(tuning_result.best_score) }}</span>
+                <button class="btn btn-success" style="padding:0.3rem 1rem;font-size:0.85rem;"
+                        onclick="applyTuning('{{ experiment.name }}')">
+                    Apply Best
+                </button>
+            </div>
+            <table style="border:none;border-collapse:collapse;width:100%;font-size:0.82rem;">
+                <tr style="border:none;color:var(--text-secondary);">
+                    <th style="border:none;padding:0.2rem 0.5rem;text-align:left;font-weight:600;">Parameter</th>
+                    <th style="border:none;padding:0.2rem 0.5rem;text-align:right;">Default</th>
+                    <th style="border:none;padding:0.2rem 0.5rem;text-align:center;">→</th>
+                    <th style="border:none;padding:0.2rem 0.5rem;text-align:left;">Tuned</th>
+                </tr>
+                {% for k, v in tuning_result.best_params.items() %}
+                {% set d = defaults.get(k) %}
+                <tr style="border:none;">
+                    <td style="border:none;padding:0.15rem 0.5rem;color:var(--text-secondary);">{{ k }}</td>
+                    <td style="border:none;padding:0.15rem 0.5rem;text-align:right;color:var(--text-muted);">{{ "%.4g"|format(d) if d is number else d }}</td>
+                    <td style="border:none;padding:0.15rem 0.5rem;text-align:center;color:var(--text-muted);">→</td>
+                    <td style="border:none;padding:0.15rem 0.5rem;color:var(--accent-secondary);font-weight:600;">{{ "%.4g"|format(v) if v is number else v }}</td>
+                </tr>
+                {% endfor %}
+            </table>
         </div>
         {% endif %}
 
@@ -655,11 +672,11 @@
 </section>
 </div>
 
-<!-- ====== TAB: Deep Analysis ====== -->
+<!-- ====== TAB: Covariate Analysis ====== -->
 {% if deep_analysis or benchmark_result %}
 <div class="tab-section" id="sec-deep-analysis" style="display:none;">
 <section class="section">
-    <h2>Deep Covariate Analysis <span class="info-tip">?<span class="tip-text">Tests every model with different covariate combinations to find which external features help and which ones hurt. The % change column shows impact relative to the "All covariates" baseline. Positive = worse, negative = better.</span></span></h2>
+    <h2>Covariate Analysis <span class="info-tip">?<span class="tip-text">Tests every model with different covariate combinations to find which external features help and which ones hurt. The % change column shows impact relative to the "All covariates" baseline. Positive = worse, negative = better.</span></span></h2>
 
     <!-- Controls -->
     <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin-bottom:1.5rem;">
@@ -681,7 +698,7 @@
                 id="deep-analysis-btn"
                 onclick="runDeepAnalysis('{{ experiment.name }}', this)"
                 {% if deep_analysis and deep_analysis.status == 'running' %}disabled{% endif %}>
-            {% if deep_analysis and deep_analysis.status == 'running' %}Analysing...{% else %}Run Deep Analysis{% endif %}
+            {% if deep_analysis and deep_analysis.status == 'running' %}Analysing...{% else %}Run Covariate Analysis{% endif %}
         </button>
     </div>
 
@@ -1190,7 +1207,7 @@ window.showTab = function(el) {
                     .catch(function() {});
             }, 5000);
         })
-        .catch(function(err) { mlfl.toast('Failed to start deep analysis: ' + err, 'error'); btn.disabled = false; btn.textContent = 'Deep Analysis'; });
+        .catch(function(err) { mlfl.toast('Failed to start covariate analysis: ' + err, 'error'); btn.disabled = false; btn.textContent = 'Run Covariate Analysis'; });
     };
 
     // ======== Training pipeline (migrated from training.html) ========

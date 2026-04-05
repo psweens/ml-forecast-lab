@@ -748,15 +748,21 @@ class MLForecastLabApp:
         for model_name in exp_cfg.models_enabled:
             try:
                 m = self.model_registry.create(model_name)
-                # Apply user hyperparameter overrides
-                overrides = self.config.model_overrides.get(model_name, {})
-                # Apply experiment-level loss_fn first, then per-model overrides
-                # so per-model overrides take precedence
+                # Apply hyperparameter overrides:
+                # 1. Global model_overrides (from Models page)
+                # 2. Per-experiment model_params (from Tuning / config)
+                # Per-experiment takes precedence over global.
+                overrides = dict(self.config.model_overrides.get(model_name, {}))
+                exp_params = getattr(exp_cfg, 'model_params', {}).get(model_name, {})
+                if exp_params:
+                    overrides.update(exp_params)
+                # Apply experiment-level loss_fn first, then overrides
                 if m.is_neural and hasattr(m, 'loss_fn') and 'loss_fn' not in overrides:
                     m.set_params(loss_fn=exp_cfg.loss_fn)
                 if overrides:
                     m.set_params(**overrides)
-                    logger.info(f"Applied {len(overrides)} override(s) for {model_name}")
+                    logger.info(f"Applied {len(overrides)} override(s) for {model_name}"
+                                + (" (inc. experiment-level)" if exp_params else ""))
                 models[model_name] = m
             except Exception as e:
                 logger.warning(

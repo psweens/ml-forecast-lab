@@ -858,6 +858,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "model_catalog": MODEL_CATALOG,
                 "exp_models_enabled": exp_models_enabled,
                 "tuning_result": app.state.appstate.tuning_results.get(name),
+                "param_defaults": {m: {p: s["default"] for p, s in schema.items()}
+                                   for m, schema in MODEL_PARAM_SCHEMA.items()},
             },
         )
 
@@ -1089,7 +1091,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     @app.post("/experiment/{name}/apply-tuning")
     async def apply_tuning(name: str):
-        """Apply best tuning params as model overrides in mlfl.yaml."""
+        """Apply best tuning params as per-experiment model overrides in mlfl.yaml."""
         result = app.state.appstate.tuning_results.get(name)
         if not result or not result.best_params:
             return JSONResponse(
@@ -1097,7 +1099,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 content={"success": False, "error": "No tuning results to apply"},
             )
 
-        from ml_forecast_lab.config import save_model_overrides
+        from ml_forecast_lab.config import save_experiment_model_params
         config_path = _find_config_path()
         if not config_path:
             return JSONResponse(
@@ -1105,8 +1107,13 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             )
 
         try:
-            save_model_overrides(config_path, result.model_name, result.best_params)
-            logger.info(f"Applied tuned params for {result.model_name}: {result.best_params}")
+            save_experiment_model_params(
+                config_path, name, result.model_name, result.best_params
+            )
+            logger.info(
+                f"Applied tuned params for {result.model_name} "
+                f"on experiment {name}: {result.best_params}"
+            )
             return JSONResponse(content={"success": True, "model": result.model_name,
                                           "params": result.best_params})
         except Exception as e:

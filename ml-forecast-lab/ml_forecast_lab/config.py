@@ -161,6 +161,10 @@ class ExperimentCfg:
     database: bool = False
     """Whether to cache history in SQLite."""
 
+    model_params: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    """Per-model hyperparameter overrides specific to this experiment.
+    Takes precedence over global model_overrides. Keys are model names."""
+
     loss_fn: str = 'mse'
     """Training loss for neural models: 'mse', 'mae', or 'huber'."""
 
@@ -387,6 +391,49 @@ def save_model_overrides(
     # Clean up empty section
     if not mo:
         data.pop('model_overrides', None)
+
+    with open(config_path, 'w', encoding='utf-8') as f:
+        yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+
+
+def save_experiment_model_params(
+    config_path: Path | str,
+    experiment_name: str,
+    model_name: str,
+    params: Dict[str, Any] | None,
+) -> None:
+    """
+    Save per-experiment model hyperparameter overrides.
+
+    Unlike global ``model_overrides``, these are stored inside the
+    experiment's config and take precedence during training.
+
+    Parameters
+    ----------
+    config_path : Path or str
+        Path to the YAML configuration file.
+    experiment_name : str
+        Experiment name to update.
+    model_name : str
+        Model registry name.
+    params : dict or None
+        Parameter overrides to save. None or empty removes the entry.
+    """
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    for exp in data.get('experiments', []):
+        if exp.get('name') != experiment_name:
+            continue
+        mp = exp.setdefault('model_params', {})
+        if params:
+            mp[model_name] = params
+        else:
+            mp.pop(model_name, None)
+        if not mp:
+            exp.pop('model_params', None)
+        break
 
     with open(config_path, 'w', encoding='utf-8') as f:
         yaml.dump(data, f, sort_keys=False, default_flow_style=False)

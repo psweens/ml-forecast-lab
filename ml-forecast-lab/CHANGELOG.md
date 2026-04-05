@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.23.1
+
+### Improvements
+- **Rename**: "Deep Analysis" renamed to "Covariate Analysis" throughout the UI.
+- **Tab reorder**: Covariate Analysis now appears before Tuning in the tab bar,
+  reflecting the natural workflow (analyse covariates → tune hyperparameters).
+- **Per-experiment model params**: "Apply Best" in Tuning now saves hyperparameters
+  per-experiment (not globally). Different experiments can have different tuned
+  params for the same model. Per-experiment params take precedence over global
+  model overrides.
+- **Default vs tuned comparison**: the Tuning best-params summary now shows a
+  side-by-side table of default → tuned values for each parameter.
+
 ## 1.23.0
 
 ### New Feature: Hyperparameter Tuning
