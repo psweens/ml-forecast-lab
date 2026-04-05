@@ -1094,7 +1094,13 @@ window.showTab = function(el) {
         pill.setAttribute('data-tab', 'sec-training');
         pill.setAttribute('onclick', 'showTab(this)');
         pill.textContent = 'Training';
-        nav.insertBefore(pill, nav.firstChild);
+        // Insert after the Models pill so order is always: Models, Training, ...
+        var modelsPill = nav.querySelector('[data-tab="sec-models"]');
+        if (modelsPill && modelsPill.nextSibling) {
+            nav.insertBefore(pill, modelsPill.nextSibling);
+        } else {
+            nav.appendChild(pill);
+        }
     }
 
     function connectSSE(expName, noReplay) {
