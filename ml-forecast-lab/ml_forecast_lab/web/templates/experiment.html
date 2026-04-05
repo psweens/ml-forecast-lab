@@ -604,20 +604,26 @@
                     </td>
                     {% for model in deep_analysis.model_names %}
                     {% set cell = deep_analysis.results.get(label, {}).get(model) %}
-                    <td>
+                    <td style="padding:0.5rem 0.75rem;">
                         {% if cell %}
-                        <div>
-                            <span class="metric-value">{{ "%.4f" | format(cell.mae) }}</span>
-                            {% if cell.change_pct is not none %}
-                            <span class="metric-std" style="color: {% if cell.change_pct > 2 %}#e74c3c{% elif cell.change_pct < -2 %}#2ecc71{% else %}var(--text-secondary){% endif %};">
-                                {{ "%+.1f" | format(cell.change_pct) }}%
-                            </span>
-                            {% endif %}
-                        </div>
-                        <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:0.15rem;">
-                            RMSE {{ "%.4f" | format(cell.rmse) }}{% if cell.rmse_change_pct is not none %} <span style="color:{% if cell.rmse_change_pct > 2 %}#e74c3c{% elif cell.rmse_change_pct < -2 %}#2ecc71{% else %}var(--text-secondary){% endif %};">{{ "%+.1f"|format(cell.rmse_change_pct) }}%</span>{% endif %}
-                            · MASE {% if cell.mase == cell.mase %}{{ "%.3f" | format(cell.mase) }}{% if cell.mase_change_pct is not none %} <span style="color:{% if cell.mase_change_pct > 2 %}#e74c3c{% elif cell.mase_change_pct < -2 %}#2ecc71{% else %}var(--text-secondary){% endif %};">{{ "%+.1f"|format(cell.mase_change_pct) }}%</span>{% endif %}{% else %}—{% endif %}
-                        </div>
+                        {% macro pct_color(val) %}{% if val is not none %}{% if val > 2 %}#e74c3c{% elif val < -2 %}#2ecc71{% else %}var(--text-secondary){% endif %}{% endif %}{% endmacro %}
+                        <table style="border:none;border-collapse:collapse;width:100%;font-size:0.82rem;">
+                            <tr style="border:none;">
+                                <td style="border:none;padding:0.1rem 0;color:var(--text-secondary);width:3rem;">MAE</td>
+                                <td style="border:none;padding:0.1rem 0;"><span class="metric-value" style="font-size:0.9rem;">{{ "%.4f" | format(cell.mae) }}</span></td>
+                                <td style="border:none;padding:0.1rem 0;text-align:right;">{% if cell.change_pct is not none %}<span style="color:{{ pct_color(cell.change_pct) }};font-weight:600;">{{ "%+.1f"|format(cell.change_pct) }}%</span>{% endif %}</td>
+                            </tr>
+                            <tr style="border:none;">
+                                <td style="border:none;padding:0.1rem 0;color:var(--text-secondary);">RMSE</td>
+                                <td style="border:none;padding:0.1rem 0;">{{ "%.4f" | format(cell.rmse) }}</td>
+                                <td style="border:none;padding:0.1rem 0;text-align:right;">{% if cell.rmse_change_pct is not none %}<span style="color:{{ pct_color(cell.rmse_change_pct) }};font-weight:600;">{{ "%+.1f"|format(cell.rmse_change_pct) }}%</span>{% endif %}</td>
+                            </tr>
+                            <tr style="border:none;">
+                                <td style="border:none;padding:0.1rem 0;color:var(--text-secondary);">MASE</td>
+                                <td style="border:none;padding:0.1rem 0;">{% if cell.mase == cell.mase %}{{ "%.3f" | format(cell.mase) }}{% else %}—{% endif %}</td>
+                                <td style="border:none;padding:0.1rem 0;text-align:right;">{% if cell.mase_change_pct is not none %}<span style="color:{{ pct_color(cell.mase_change_pct) }};font-weight:600;">{{ "%+.1f"|format(cell.mase_change_pct) }}%</span>{% endif %}</td>
+                            </tr>
+                        </table>
                         {% else %}
                         <span style="color: var(--text-secondary);">—</span>
                         {% endif %}
@@ -1004,7 +1010,7 @@ window.showTab = function(el) {
             var pollId = setInterval(function() {
                 fetch(BASE + '/experiment/' + name + '/ensemble')
                     .then(function(r) { if (r.ok) return r.json(); throw new Error('not ready'); })
-                    .then(function(result) { if (result.status === 'completed') { clearInterval(pollId); location.reload(); } })
+                    .then(function(result) { if (result.status === 'completed') { clearInterval(pollId); _reloadToTab('sec-ensemble'); } })
                     .catch(function() {});
             }, 2000);
         })
@@ -1022,7 +1028,7 @@ window.showTab = function(el) {
             var pollId = setInterval(function() {
                 fetch(BASE + '/experiment/' + name + '/deep-analysis')
                     .then(function(r) { if (r.ok) return r.json(); throw new Error('not ready'); })
-                    .then(function(result) { if (result.status === 'completed') { clearInterval(pollId); location.reload(); } })
+                    .then(function(result) { if (result.status === 'completed') { clearInterval(pollId); _reloadToTab('sec-deep-analysis'); } })
                     .catch(function() {});
             }, 5000);
         })
@@ -1301,8 +1307,20 @@ window.showTab = function(el) {
         }
     });
 
+    // Reload page and return to a specific tab via URL hash
+    function _reloadToTab(tabId) {
+        window.location.hash = tabId;
+        location.reload();
+    }
+
     // ======== Initial tab selection ========
-    if (pipelineRunning || (typeof EMBEDDED_HISTORY !== 'undefined' && EMBEDDED_HISTORY[EXP_NAME] && EMBEDDED_HISTORY[EXP_NAME].length > 0)) {
+    // URL hash takes priority (e.g. after ensemble/deep-analysis reload)
+    var _hashTab = window.location.hash.replace('#', '');
+    var _hashPill = _hashTab ? document.querySelector('.section-nav a[data-tab="' + _hashTab + '"]') : null;
+    if (_hashPill) {
+        showTab(_hashPill);
+        history.replaceState(null, '', window.location.pathname + window.location.search);
+    } else if (pipelineRunning || (typeof EMBEDDED_HISTORY !== 'undefined' && EMBEDDED_HISTORY[EXP_NAME] && EMBEDDED_HISTORY[EXP_NAME].length > 0)) {
         autoReconnect();
     } else {
         // Default to Results if available, otherwise Models

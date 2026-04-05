@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.22.9
+
+### Fixes
+- **Tab preserved on reload**: running ensemble or deep analysis no longer
+  jumps to the Training tab on completion — the page reloads back to the
+  correct tab via URL hash.
+- **Deep analysis metric layout**: replaced cramped single-line layout with
+  a clean three-row grid (MAE, RMSE, MASE) each with its own change %.
+
 ## 1.22.8
 
 ### Bug Fix
