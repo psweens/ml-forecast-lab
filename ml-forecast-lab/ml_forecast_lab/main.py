@@ -2111,7 +2111,10 @@ class MLForecastLabApp:
         n_lags = 12
         last_ts = combined.index[-1]
         y = combined["target"].values.astype(np.float32)
-        lag_values = y[-n_lags:]
+        # Provide enough lag values for periodic lags (same-time-yesterday etc.)
+        steps_per_day = max(1, 1440 // exp_cfg.interval_minutes)
+        n_lag_values = max(n_lags, steps_per_day * 2 + 1)
+        lag_values = y[-n_lag_values:]
         future_periods = getattr(exp_cfg, 'future_periods', 48)
 
         # Prediction: reuse the same logic as _run_production_inference section 5
@@ -2160,13 +2163,32 @@ class MLForecastLabApp:
                 lag_values=lag_values,
                 country=exp_cfg.country,
             )
+            # Fill missing covariate columns with last known values
             for col in feature_cols:
                 if col not in forecast_features.columns:
                     if col in covariate_cols and col in combined.columns:
                         forecast_features[col] = float(combined[col].iloc[-1])
-                    else:
+                    elif not col.endswith('_x_hour_sin') and not col.endswith('_x_hour_cos'):
                         forecast_features[col] = 0.0
+
+            # Compute interaction features (covariate × time-of-day)
+            # These are created by build_features() during training and must
+            # be present for the model to predict correctly.
+            for cov in covariate_cols:
+                sin_col = f"{cov}_x_hour_sin"
+                cos_col = f"{cov}_x_hour_cos"
+                if sin_col in feature_cols and cov in forecast_features.columns:
+                    forecast_features[sin_col] = forecast_features[cov] * forecast_features["hour_sin"]
+                if cos_col in feature_cols and cov in forecast_features.columns:
+                    forecast_features[cos_col] = forecast_features[cov] * forecast_features["hour_cos"]
+
             forecast_features = forecast_features.reindex(columns=feature_cols, fill_value=0.0)
+
+            # Log any feature mismatches for debugging
+            missing = set(feature_cols) - set(forecast_features.columns)
+            if missing:
+                logger.warning(f"  Missing forecast features (filled with 0): {missing}")
+
             X_forecast = forecast_features.values.astype(np.float32)
             X_forecast = np.nan_to_num(X_forecast, nan=0.0)
 
