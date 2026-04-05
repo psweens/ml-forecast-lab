@@ -1333,17 +1333,26 @@ class MLForecastLabApp:
             else:
                 best_strategy = best_candidate.value
 
-            # Best ensemble strategy (excluding individual) for improvement calc
-            ensemble_only_ranks = {s: composite_ranks[s] for s in strat_keys}
-            best_strat = min(ensemble_only_ranks, key=lambda s: np.mean(ensemble_only_ranks[s]))
-            best_ensemble_metric = ensemble_results[best_strat].metrics.get(
-                runner.production_metric, np.inf
-            )
+            # For improvement_pct, compare the badge-winning strategy against
+            # best individual using the production metric so the text and
+            # badge always agree.
+            if best_candidate == _BEST_IND_KEY:
+                # Individual won — compare against best ensemble
+                ensemble_only_ranks = {s: composite_ranks[s] for s in strat_keys}
+                best_ens = min(ensemble_only_ranks, key=lambda s: np.mean(ensemble_only_ranks[s]))
+                best_ensemble_metric = ensemble_results[best_ens].metrics.get(
+                    runner.production_metric, np.inf
+                )
+            else:
+                # An ensemble won — use that strategy's metric
+                best_ensemble_metric = ensemble_results[best_candidate].metrics.get(
+                    runner.production_metric, np.inf
+                )
         else:
             best_strategy = None
             best_ensemble_metric = np.inf
 
-        # Improvement vs best individual
+        # Improvement vs best individual (positive = ensemble better)
         improvement_pct = None
         if np.isfinite(best_individual) and best_individual > 0 and np.isfinite(best_ensemble_metric):
             improvement_pct = (best_individual - best_ensemble_metric) / best_individual * 100
@@ -1387,18 +1396,25 @@ class MLForecastLabApp:
             )
             for strat, eres in ensemble_results.items():
                 if eres.predictions is not None and len(eres.predictions) > 0:
-                    display_preds = eres.predictions.ravel()
-                    # Trim to whichever is shorter: holdout timestamps or ensemble predictions
-                    n_pts = min(len(display_preds), len(holdout_ts))
-                    if n_pts == 0:
+                    display_preds = list(eres.predictions.ravel())
+                    n_holdout = len(holdout_ts)
+                    if n_holdout == 0:
                         continue
+
+                    # Align ensemble preds to holdout timestamps:
+                    # right-align so the end matches, pad start with None
+                    if len(display_preds) < n_holdout:
+                        pad = [None] * (n_holdout - len(display_preds))
+                        display_preds = pad + display_preds
+                    elif len(display_preds) > n_holdout:
+                        display_preds = display_preds[-n_holdout:]
 
                     display_name = strategy_display.get(strat, strat.value)
                     lab_forecast.model_predictions.append(ModelPrediction(
                         model_name=f"Ensemble: {display_name}",
-                        timestamps=holdout_ts[:n_pts],
-                        actuals=[None] * n_pts,  # Don't duplicate actuals
-                        predictions=[float(v) for v in display_preds[:n_pts]],
+                        timestamps=list(holdout_ts),
+                        actuals=[None] * n_holdout,
+                        predictions=[float(v) if v is not None else None for v in display_preds],
                         color=ENSEMBLE_COLORS.get(strat.value, "#FFD700"),
                     ))
 

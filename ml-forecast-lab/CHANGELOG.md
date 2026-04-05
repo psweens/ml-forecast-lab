@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.22.4
+
+### Bug Fixes
+- **Ensemble "Best" badge mismatch**: the improvement percentage text now
+  consistently references the same strategy that receives the "Best" badge.
+  Previously composite ranking and production metric comparison could disagree.
+- **Ensemble prediction length**: ensemble traces now span the full holdout
+  period by right-aligning to holdout timestamps and padding the start with
+  gaps, instead of being silently truncated.
+
+### Improvements
+- **Fold stability**: replaced single-metric bar chart with three line charts
+  (MAE, RMSE, MASE) showing per-fold variation for each model. Easier to spot
+  instability and compare across metrics.
+- **Loss curves moved**: neural model training loss curves relocated from the
+  Generalisation tab into a collapsible section in the Results tab where they
+  sit alongside model comparison data.
+- **Feature importance note**: added guidance directing users to Deep Analysis
+  for neural model feature insights.
+
 ## 1.22.3
 
 ### Improvement

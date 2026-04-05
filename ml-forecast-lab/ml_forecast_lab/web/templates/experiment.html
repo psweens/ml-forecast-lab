@@ -260,6 +260,23 @@
             {% endfor %}
         </div>
     </details>
+
+    {% set has_loss = models | selectattr('training_history') | list %}
+    {% if has_loss %}
+    <details class="fold-metrics" style="margin-top:1rem;">
+        <summary>Training Loss Curves (neural models)</summary>
+        <div class="fold-content" style="display:flex;flex-wrap:wrap;gap:1.5rem;padding-top:1rem;">
+            {% for model in models %}
+            {% if model.training_history %}
+            <div style="flex:1 1 400px;min-width:350px;">
+                <h4 style="color:var(--accent-secondary);margin-bottom:0.5rem;">{{ model.name }}</h4>
+                <div id="loss-curve-{{ loop.index }}" style="min-height:300px;"></div>
+            </div>
+            {% endif %}
+            {% endfor %}
+        </div>
+    </details>
+    {% endif %}
 </section>
 </div>
 
@@ -351,26 +368,11 @@
     </div>
     {% endif %}
 
-    <h3 style="color: var(--text-primary); margin: 2rem 0 1rem 0;">Loss Curves</h3>
-    {% set has_loss = models | selectattr('training_history') | list %}
-    {% if has_loss %}
-    <div style="display: flex; flex-wrap: wrap; gap: 1.5rem;">
-        {% for model in models %}
-        {% if model.training_history %}
-        <div style="flex: 1 1 400px; min-width: 350px;">
-            <h4 style="color: var(--accent-secondary); margin-bottom: 0.5rem;">{{ model.name }}</h4>
-            <div id="loss-curve-{{ loop.index }}" style="min-height: 300px;"></div>
-        </div>
-        {% endif %}
-        {% endfor %}
-    </div>
-    {% else %}
-    <p style="color: var(--text-secondary); font-style: italic;">Loss curves are only available for neural models (DLinear, SparseTSF, etc.).</p>
-    {% endif %}
-
     {% if models and models[0].fold_results %}
-    <h3 style="color: var(--text-primary); margin: 2rem 0 1rem 0;">Fold Stability <span class="info-tip">?<span class="tip-text">Shows how each model's MAE varies across cross-validation folds. Consistent bars indicate stable generalisation; large variation suggests the model is sensitive to which data it trains on.</span></span></h3>
-    <div id="fold-stability-chart" style="min-height: 400px;"></div>
+    <h3 style="color: var(--text-primary); margin: 2rem 0 1rem 0;">Fold Stability <span class="info-tip">?<span class="tip-text">Shows how each model's error metrics vary across cross-validation folds. Consistent lines indicate stable generalisation; large variation suggests the model is sensitive to which data it trains on.</span></span></h3>
+    <div id="fold-stability-mae" style="min-height: 350px;"></div>
+    <div id="fold-stability-rmse" style="min-height: 350px;margin-top:1rem;"></div>
+    <div id="fold-stability-mase" style="min-height: 350px;margin-top:1rem;"></div>
     {% endif %}
 </section>
 </div>
@@ -380,6 +382,7 @@
 <div class="tab-section" id="sec-features" style="display:none;">
 <section class="section">
     <h2>Feature Importance <span class="info-tip">?<span class="tip-text">Shows which input features contribute most to the model's predictions. Higher importance means the feature has more influence. Only available for tree-based models (LightGBM, XGBoost).</span></span></h2>
+    <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:1rem;">Feature importance is available for tree-based models. For neural models, use the <strong>Deep Analysis</strong> tab to test the impact of each covariate on all model types.</p>
     {% for fi in feature_importances %}
     <h3 style="color: var(--accent-secondary); margin-bottom: 0.5rem;">{{ fi.model_name }}</h3>
     <div id="feature-importance-{{ fi.model_name }}" style="min-height: 400px;"></div>
@@ -797,11 +800,11 @@ window.showTab = function(el) {
         if (window.renderHoldoutChart) window.renderHoldoutChart(checked);
     };
 
-    // ======== Generalisation charts ========
+    // ======== Loss curves (in Results tab, collapsible) ========
     {% if benchmark_result %}
     {% set has_loss = models | selectattr('training_history') | list %}
-    queueChart('sec-generalisation', function() {
-        // Loss curves
+    {% if has_loss %}
+    queueChart('sec-results', function() {
         {% for model in models %}
         {% if model.training_history %}
         (function() {
@@ -819,36 +822,49 @@ window.showTab = function(el) {
         })();
         {% endif %}
         {% endfor %}
-
-        // Fold stability
-        {% if models and models[0].fold_results %}
-        var modelsData = {{ models_json | tojson }};
-        var MODEL_COLORS = {
-            "lightgbm": "#ff6b6b", "xgboost": "#ffd93d", "lstm": "#6bcb77",
-            "cnn": "#4d96ff", "neuralprophet": "#c084fc", "dlinear": "#ff922b",
-            "nbeats": "#22d3ee", "nhits": "#f472b6", "tide": "#a3e635",
-            "tsmixer": "#38bdf8", "sparsetsf": "#fb923c", "patchtst": "#a78bfa",
-            "itransformer": "#34d399", "crossformer": "#f87171", "timesnet": "#facc15"
-        };
-        var traces = [];
-        modelsData.forEach(function(model) {
-            if (!model.fold_results || model.fold_results.length === 0) return;
-            traces.push({
-                x: model.fold_results.map(function(_, i) { return 'Fold ' + (i + 1); }),
-                y: model.fold_results.map(function(f) { return f.mae || 0; }),
-                name: model.name, type: 'bar',
-                marker: { color: MODEL_COLORS[model.name] || '#ff6b6b' }
-            });
-        });
-        Plotly.newPlot('fold-stability-chart', traces, {
-            barmode: 'group', xaxis: { title: 'Fold', gridcolor: '#2d3561' },
-            yaxis: { title: 'MAE{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
-            hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
-            font: { color: '#e0e0e0' }, legend: { orientation: 'h', y: -0.15 },
-            margin: { l: 60, r: 20, t: 20, b: 80 }
-        }, { responsive: true });
-        {% endif %}
     });
+    {% endif %}
+
+    // ======== Generalisation charts (fold stability) ========
+    var MODEL_COLORS = {
+        "lightgbm": "#ff6b6b", "xgboost": "#ffd93d", "lstm": "#6bcb77",
+        "cnn": "#4d96ff", "neuralprophet": "#c084fc", "dlinear": "#ff922b",
+        "nbeats": "#22d3ee", "nhits": "#f472b6", "tide": "#a3e635",
+        "tsmixer": "#38bdf8", "sparsetsf": "#fb923c", "patchtst": "#a78bfa",
+        "itransformer": "#34d399", "crossformer": "#f87171", "timesnet": "#facc15"
+    };
+
+    {% if models and models[0].fold_results %}
+    queueChart('sec-generalisation', function() {
+        var modelsData = {{ models_json | tojson }};
+        var metrics = [
+            { key: 'mae', label: 'MAE{{ " (" + units + ")" if units else "" }}', divId: 'fold-stability-mae' },
+            { key: 'rmse', label: 'RMSE{{ " (" + units + ")" if units else "" }}', divId: 'fold-stability-rmse' },
+            { key: 'mase', label: 'MASE', divId: 'fold-stability-mase' }
+        ];
+        metrics.forEach(function(metric) {
+            var traces = [];
+            modelsData.forEach(function(model) {
+                if (!model.fold_results || model.fold_results.length === 0) return;
+                traces.push({
+                    x: model.fold_results.map(function(_, i) { return 'Fold ' + (i + 1); }),
+                    y: model.fold_results.map(function(f) { return f[metric.key] || 0; }),
+                    name: model.name, mode: 'lines+markers',
+                    line: { color: MODEL_COLORS[model.name] || '#ff6b6b', width: 2 },
+                    marker: { size: 7 }
+                });
+            });
+            Plotly.newPlot(metric.divId, traces, {
+                title: metric.label + ' across Folds',
+                xaxis: { title: 'Fold', gridcolor: '#2d3561' },
+                yaxis: { title: metric.label, gridcolor: '#2d3561' },
+                hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
+                font: { color: '#e0e0e0' }, legend: { orientation: 'h', y: -0.15 },
+                margin: { l: 60, r: 20, t: 40, b: 80 }
+            }, { responsive: true });
+        });
+    });
+    {% endif %}
     {% endif %}
 
     // ======== Feature importance charts ========
