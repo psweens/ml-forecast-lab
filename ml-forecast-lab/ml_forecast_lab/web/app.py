@@ -138,6 +138,33 @@ class DeepAnalysisResult(BaseModel):
     completed_runs: int = 0
 
 
+class TuningTrialResult(BaseModel):
+    """Result for one hyperparameter tuning trial."""
+    trial_id: int
+    params: Dict[str, Any]
+    mae: float
+    rmse: float
+    mase: float
+    duration_seconds: float = 0.0
+    status: str = "completed"  # completed, pruned, failed
+
+
+class TuningResult(BaseModel):
+    """Hyperparameter tuning results for one model."""
+    experiment_name: str
+    model_name: str
+    timestamp: str
+    status: str  # running, completed, failed
+    search_strategy: str = "tpe"
+    n_trials: int = 30
+    completed_trials: int = 0
+    trials: List[TuningTrialResult] = []
+    best_trial_id: Optional[int] = None
+    best_params: Optional[Dict[str, Any]] = None
+    best_score: Optional[float] = None
+    error_message: Optional[str] = None
+
+
 class FeatureImportanceData(BaseModel):
     """Feature importance from a trained model."""
 
@@ -209,6 +236,8 @@ class AppState:
         self.ensemble_results: Dict[str, EnsembleResultData] = {}
         self.ensemble_callback = None  # Set by main app for triggering
         self.benchmark_callback = None  # Set by main app for triggering
+        self.tuning_results: Dict[str, TuningResult] = {}
+        self.tuning_callback = None  # Set by main app for triggering
         self.running_benchmarks: set = set()
         self.last_update: Optional[datetime] = None
         self.next_update_seconds: Optional[int] = None
@@ -828,6 +857,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "training_summary": training_summary,
                 "model_catalog": MODEL_CATALOG,
                 "exp_models_enabled": exp_models_enabled,
+                "tuning_result": app.state.appstate.tuning_results.get(name),
             },
         )
 
@@ -993,6 +1023,95 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if not result:
             raise HTTPException(status_code=404, detail="No deep analysis results")
         return result.model_dump()
+
+    # ========== Tuning endpoints ==========
+
+    @app.post("/experiment/{name}/run-tuning")
+    async def run_tuning(name: str, request: Request):
+        """Start hyperparameter tuning. Body: {model_name, n_trials?, strategy?}"""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        # Check if tuning is already running
+        existing = app.state.appstate.tuning_results.get(name)
+        if existing and existing.status == "running":
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Tuning already running for this experiment"},
+            )
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        model_name = body.get("model_name")
+        if not model_name:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "model_name is required"},
+            )
+
+        n_trials = body.get("n_trials", 30)
+        strategy = body.get("strategy", "tpe")
+
+        # Get the parameter schema for this model
+        schema = MODEL_PARAM_SCHEMA.get(model_name, {})
+        if not schema:
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"No parameter schema for model: {model_name}"},
+            )
+
+        if not app.state.appstate.tuning_callback:
+            raise HTTPException(status_code=501, detail="Tuning callback not registered")
+
+        import asyncio as _aio
+        _aio.create_task(
+            app.state.appstate.tuning_callback(
+                name, model_name, n_trials, strategy, schema
+            )
+        )
+
+        return JSONResponse(
+            status_code=202,
+            content={"message": "Tuning started", "model": model_name,
+                      "n_trials": n_trials, "strategy": strategy},
+        )
+
+    @app.get("/experiment/{name}/tuning")
+    async def get_tuning(name: str):
+        """Get current tuning state (for polling)."""
+        result = app.state.appstate.tuning_results.get(name)
+        if not result:
+            return JSONResponse(status_code=404, content={"error": "No tuning results"})
+        return JSONResponse(content=result.model_dump())
+
+    @app.post("/experiment/{name}/apply-tuning")
+    async def apply_tuning(name: str):
+        """Apply best tuning params as model overrides in mlfl.yaml."""
+        result = app.state.appstate.tuning_results.get(name)
+        if not result or not result.best_params:
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "error": "No tuning results to apply"},
+            )
+
+        from ml_forecast_lab.config import save_model_overrides
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(
+                content={"success": False, "error": "Config file not found"},
+            )
+
+        try:
+            save_model_overrides(config_path, result.model_name, result.best_params)
+            logger.info(f"Applied tuned params for {result.model_name}: {result.best_params}")
+            return JSONResponse(content={"success": True, "model": result.model_name,
+                                          "params": result.best_params})
+        except Exception as e:
+            logger.error(f"Failed to apply tuning params: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.get("/experiment/{name}/results")
     async def get_results(name: str):

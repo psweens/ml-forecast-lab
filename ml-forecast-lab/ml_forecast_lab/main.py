@@ -282,6 +282,23 @@ class MLForecastLabApp:
 
             self.web_app.state.appstate.ensemble_callback = _ensemble_trigger
 
+            # Register tuning callback
+            async def _tuning_trigger(experiment_name: str, model_name: str,
+                                      n_trials: int = 30, strategy: str = "tpe",
+                                      param_schema: dict = None):
+                try:
+                    await self._run_tuning(
+                        experiment_name, model_name, n_trials, strategy, param_schema
+                    )
+                except Exception as e:
+                    logger.error(f"Tuning failed: {e}", exc_info=True)
+                    tr = self.web_app.state.appstate.tuning_results.get(experiment_name)
+                    if tr:
+                        tr.status = "failed"
+                        tr.error_message = str(e)
+
+            self.web_app.state.appstate.tuning_callback = _tuning_trigger
+
             # Run in a background task
             asyncio.create_task(self.server.serve())
             logger.info(f"Web server started successfully on {host}:{port}")
@@ -1873,6 +1890,181 @@ class MLForecastLabApp:
             logger.error(f"Error in update cycle: {e}", exc_info=True)
         finally:
             self._update_running = False
+
+    async def _run_tuning(self, experiment_name: str, model_name: str,
+                          n_trials: int = 30, strategy: str = "tpe",
+                          param_schema: dict = None):
+        """
+        Run Optuna-based hyperparameter tuning for a single model.
+
+        Uses TPE (Tree-structured Parzen Estimator) or random search with
+        2-fold cross-validation for fast evaluation on constrained hardware.
+        """
+        import optuna
+        import time as _time
+        from ml_forecast_lab.features import build_features
+        from ml_forecast_lab.benchmark.runner import BenchmarkRunner
+        from ml_forecast_lab.benchmark.metrics import get_metric_registry
+        from ml_forecast_lab.web.app import TuningTrialResult, TuningResult
+
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+        # Find experiment config
+        await self.load_config()
+        exp_cfg = None
+        for cfg in self.config.experiments:
+            if cfg.name == experiment_name:
+                exp_cfg = cfg
+                break
+        if not exp_cfg:
+            raise ValueError(f"Experiment {experiment_name} not found")
+
+        if not param_schema:
+            param_schema = {}
+
+        logger.info(f"")
+        logger.info(f"{'=' * 60}")
+        logger.info(f"  TUNING: {exp_cfg.name} / {model_name}")
+        logger.info(f"  Strategy: {strategy}, Trials: {n_trials}")
+        logger.info(f"  Params: {len(param_schema)} tuneable parameters")
+        logger.info(f"{'=' * 60}")
+
+        # Initialise result in AppState
+        tuning_state = TuningResult(
+            experiment_name=experiment_name,
+            model_name=model_name,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            status="running",
+            search_strategy=strategy,
+            n_trials=n_trials,
+        )
+        if self.web_app:
+            self.web_app.state.appstate.tuning_results[experiment_name] = tuning_state
+
+        # Prepare data (same as _run_benchmark)
+        df = await self._fetch_and_preprocess(exp_cfg)
+        features_df = build_features(
+            df, target_col="y",
+            interval_minutes=exp_cfg.interval_minutes,
+            country=exp_cfg.country,
+        )
+
+        combined = features_df.copy()
+        combined["target"] = df["y"]
+        for col in [c for c in df.columns if c != "y"]:
+            combined[col] = df[col]
+        combined = combined.dropna()
+
+        # Feature builder (same as _run_benchmark)
+        rolling_windows = [6, 24, 72]
+        steps_per_day = max(1, 1440 // exp_cfg.interval_minutes)
+
+        def feature_builder(df_sub, config, purpose="train"):
+            df_out = df_sub.copy()
+            target = df_out["target"]
+            for window in rolling_windows:
+                df_out[f"y_rolling_mean_{window}"] = target.rolling(window=window).mean()
+                df_out[f"y_rolling_std_{window}"] = target.rolling(window=window).std()
+                df_out[f"y_rolling_max_{window}"] = target.rolling(window=window).max()
+            for d in [1, 2]:
+                lag_steps = steps_per_day * d
+                if lag_steps <= len(target):
+                    df_out[f"y_lag_{lag_steps}"] = target.shift(lag_steps)
+            df_out["y_diff_1"] = target.shift(1) - target.shift(2)
+            cols = [c for c in df_out.columns if c != "target"]
+            X = df_out[cols].values.astype(np.float32)
+            return np.nan_to_num(X, nan=0.0)
+
+        # Create runner with 2-fold CV for speed
+        exp_cfg_dict = dataclasses.asdict(exp_cfg)
+        exp_cfg_dict["cv_folds"] = 2
+        metric_registry = get_metric_registry()
+        runner = BenchmarkRunner(exp_cfg_dict, feature_builder, metric_registry)
+        fold_indices = runner._prepare_train_test_splits(combined)
+
+        # Parameters that benefit from log-scale search
+        LOG_PARAMS = {"learning_rate", "reg_alpha", "reg_lambda"}
+
+        def objective(trial):
+            t_start = _time.time()
+            params = {}
+            for pname, spec in param_schema.items():
+                ptype = spec.get("type", "float")
+                if ptype == "int":
+                    params[pname] = trial.suggest_int(pname, spec["min"], spec["max"])
+                elif ptype == "float":
+                    log = pname in LOG_PARAMS and spec.get("min", 0) > 0
+                    params[pname] = trial.suggest_float(
+                        pname, spec["min"], spec["max"], log=log
+                    )
+                elif ptype == "select":
+                    params[pname] = trial.suggest_categorical(pname, spec["options"])
+                elif ptype == "bool":
+                    params[pname] = trial.suggest_categorical(pname, [True, False])
+
+            try:
+                model = self.model_registry.create(model_name, **params)
+                result = runner.run_single_model(combined, model, fold_indices)
+                mae = result.metrics.get("mae", float("inf"))
+                rmse = result.metrics.get("rmse", float("inf"))
+                mase = result.metrics.get("mase", float("inf"))
+                status = "completed"
+            except Exception as e:
+                logger.warning(f"  Trial {trial.number} failed: {e}")
+                mae = float("inf")
+                rmse = float("inf")
+                mase = float("inf")
+                status = "failed"
+
+            duration = _time.time() - t_start
+
+            trial_result = TuningTrialResult(
+                trial_id=trial.number, params=params,
+                mae=round(mae, 6), rmse=round(rmse, 6), mase=round(mase, 4),
+                duration_seconds=round(duration, 1), status=status,
+            )
+            tuning_state.trials.append(trial_result)
+            tuning_state.completed_trials = len(tuning_state.trials)
+
+            # Update best so far
+            if mae < (tuning_state.best_score or float("inf")):
+                tuning_state.best_score = round(mae, 6)
+                tuning_state.best_params = params
+                tuning_state.best_trial_id = trial.number
+
+            logger.info(
+                f"  [{tuning_state.completed_trials}/{n_trials}] "
+                f"Trial {trial.number}: MAE={mae:.4f} "
+                f"({'best' if trial.number == tuning_state.best_trial_id else ''}) "
+                f"({duration:.1f}s)"
+            )
+
+            return mae
+
+        # Create and run Optuna study
+        if strategy == "tpe":
+            sampler = optuna.samplers.TPESampler(seed=42)
+        else:
+            sampler = optuna.samplers.RandomSampler(seed=42)
+
+        study = optuna.create_study(direction="minimize", sampler=sampler)
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, lambda: study.optimize(objective, n_trials=n_trials)
+        )
+
+        # Finalise
+        tuning_state.status = "completed"
+        if study.best_trial:
+            tuning_state.best_trial_id = study.best_trial.number
+            tuning_state.best_params = dict(study.best_params)
+            tuning_state.best_score = round(study.best_value, 6)
+
+        logger.info(f"")
+        logger.info(f"  Tuning Complete — Best MAE: {study.best_value:.4f}")
+        logger.info(f"  Best params: {study.best_params}")
+        logger.info(f"{'=' * 60}")
 
     async def _run_deep_analysis(self, exp_cfg, selected_model: str = "all"):
         """

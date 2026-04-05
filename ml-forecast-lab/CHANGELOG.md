@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.23.0
+
+### New Feature: Hyperparameter Tuning
+- **Optuna-based Bayesian optimisation**: new Tuning tab in the experiment detail
+  page with TPE (Tree-structured Parzen Estimator) and random search strategies.
+- **Automatic search space**: parameter ranges derived from existing model schema
+  with log-scale for learning rates and regularisation terms.
+- **Fast 2-fold CV**: each trial uses 2-fold cross-validation for speed on
+  constrained hardware (RPi5). Full benchmark validates the winner afterwards.
+- **Live progress**: poll-based progress showing completed trials, best MAE so far,
+  and a progress bar.
+- **Trials table**: all trials sorted by MAE with params displayed, best highlighted.
+- **Apply Best button**: one click saves winning hyperparameters as model overrides
+  in mlfl.yaml, ready for the next pipeline run.
+- **Per-model tuning**: select which model to tune from the experiment's enabled models.
+
 ## 1.22.9
 
 ### Fixes

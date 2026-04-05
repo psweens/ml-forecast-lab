@@ -74,6 +74,7 @@
     <a data-tab="sec-generalisation" onclick="showTab(this)">Generalisation</a>
     {% if feature_importances %}<a data-tab="sec-features" onclick="showTab(this)">Features</a>{% endif %}
     <a data-tab="sec-ensemble" onclick="showTab(this)">Ensemble</a>
+    <a data-tab="sec-tuning" onclick="showTab(this)">Tuning</a>
     <a data-tab="sec-deep-analysis" onclick="showTab(this)">Deep Analysis</a>
     {% endif %}
 </nav>
@@ -539,6 +540,116 @@
     </div>
     {% endif %}
     {% endif %}
+    </div>
+    {% endif %}
+</section>
+</div>
+
+<!-- ====== TAB: Tuning ====== -->
+<div class="tab-section" id="sec-tuning" style="display:none;">
+<section class="section">
+    <h2>Hyperparameter Tuning <span class="info-tip">?<span class="tip-text">Bayesian optimisation (Optuna TPE) automatically searches for the best hyperparameters. Each trial trains the model with 2-fold CV and reports MAE. After tuning, click "Apply Best" to save the winning params, then run the full pipeline to benchmark.</span></span></h2>
+
+    <!-- Controls -->
+    <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin-bottom:1.5rem;">
+        <div>
+            <label class="field-label" style="display:block;margin-bottom:0.3rem;">Model</label>
+            <select id="tuning-model" class="setting-input" style="padding:0.4rem 0.6rem;font-size:0.9rem;min-width:180px;">
+                {% for m in exp_models_enabled %}
+                <option value="{{ m }}">{{ m }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label class="field-label" style="display:block;margin-bottom:0.3rem;">Trials</label>
+            <input type="number" id="tuning-trials" class="setting-input" value="30" min="5" max="200"
+                   style="padding:0.4rem 0.6rem;font-size:0.9rem;width:80px;">
+        </div>
+        <div>
+            <label class="field-label" style="display:block;margin-bottom:0.3rem;">Strategy</label>
+            <select id="tuning-strategy" class="setting-input" style="padding:0.4rem 0.6rem;font-size:0.9rem;">
+                <option value="tpe">TPE (Bayesian)</option>
+                <option value="random">Random Search</option>
+            </select>
+        </div>
+        <button class="btn btn-primary" id="tuning-btn"
+                onclick="runTuning('{{ experiment.name }}', this)"
+                {% if tuning_result and tuning_result.status == 'running' %}disabled{% endif %}>
+            {% if tuning_result and tuning_result.status == 'running' %}Tuning...{% else %}Run Tuning{% endif %}
+        </button>
+    </div>
+
+    <!-- Progress (visible when running or completed) -->
+    {% if tuning_result %}
+    <div id="tuning-progress" style="margin-bottom:1.5rem;">
+        {% if tuning_result.status == 'running' %}
+        <div style="display:flex;justify-content:space-between;margin-bottom:0.25rem;">
+            <span id="tuning-progress-label" style="color:var(--text-secondary);font-size:0.9rem;">
+                Trial {{ tuning_result.completed_trials }}/{{ tuning_result.n_trials }}
+                {% if tuning_result.best_score is not none %} · Best MAE: {{ "%.4f"|format(tuning_result.best_score) }}{% endif %}
+            </span>
+            <span style="color:var(--accent-secondary);font-weight:600;font-size:0.9rem;">
+                {{ ((tuning_result.completed_trials / tuning_result.n_trials * 100) | int) if tuning_result.n_trials > 0 else 0 }}%
+            </span>
+        </div>
+        <div style="height:8px;background:var(--bg-tertiary);border-radius:4px;overflow:hidden;">
+            <div style="height:100%;width:{{ ((tuning_result.completed_trials / tuning_result.n_trials * 100) | int) if tuning_result.n_trials > 0 else 0 }}%;background:linear-gradient(90deg,var(--accent-secondary),var(--accent-primary));border-radius:4px;transition:width 0.3s;"></div>
+        </div>
+        {% endif %}
+
+        {% if tuning_result.status == 'failed' %}
+        <div style="padding:1rem;background:rgba(231,76,60,0.15);border:1px solid rgba(231,76,60,0.3);border-radius:0.5rem;color:var(--error);margin-bottom:1rem;">
+            Tuning failed: {{ tuning_result.error_message or 'Unknown error' }}
+        </div>
+        {% endif %}
+
+        {% if tuning_result.trials %}
+        <!-- Best params summary -->
+        {% if tuning_result.best_params and tuning_result.status == 'completed' %}
+        <div style="display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center;margin-bottom:1rem;padding:0.75rem 1rem;background:rgba(46,204,113,0.1);border:1px solid rgba(46,204,113,0.25);border-radius:0.5rem;">
+            <span style="color:var(--success);font-weight:600;">Best (Trial #{{ tuning_result.best_trial_id }}, MAE {{ "%.4f"|format(tuning_result.best_score) }}):</span>
+            {% for k, v in tuning_result.best_params.items() %}
+            <span style="padding:0.15rem 0.5rem;border-radius:0.25rem;background:rgba(0,212,255,0.1);color:var(--accent-secondary);font-size:0.82rem;">{{ k }}={{ v }}</span>
+            {% endfor %}
+            <button class="btn btn-success" style="margin-left:auto;padding:0.3rem 1rem;font-size:0.85rem;"
+                    onclick="applyTuning('{{ experiment.name }}')">
+                Apply Best
+            </button>
+        </div>
+        {% endif %}
+
+        <!-- Trials table -->
+        <div class="table-container">
+            <table class="metrics-table">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>MAE</th>
+                        <th>RMSE</th>
+                        <th>MASE</th>
+                        <th>Time</th>
+                        <th>Parameters</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for trial in tuning_result.trials | sort(attribute='mae') %}
+                    <tr class="{% if trial.trial_id == tuning_result.best_trial_id %}best-model{% endif %}{% if trial.status == 'failed' %} opacity-50{% endif %}">
+                        <td>{{ trial.trial_id }}</td>
+                        <td><span class="metric-value">{{ "%.4f"|format(trial.mae) if trial.mae < 1e6 else '—' }}</span></td>
+                        <td>{{ "%.4f"|format(trial.rmse) if trial.rmse < 1e6 else '—' }}</td>
+                        <td>{{ "%.3f"|format(trial.mase) if trial.mase < 1e6 else '—' }}</td>
+                        <td style="color:var(--text-secondary);font-size:0.85rem;">{{ "%.0f"|format(trial.duration_seconds) }}s</td>
+                        <td style="font-size:0.78rem;">
+                            {% for k, v in trial.params.items() %}
+                            <span style="display:inline-block;margin:0.1rem 0.15rem;padding:0.1rem 0.35rem;border-radius:0.2rem;background:var(--bg-tertiary);color:var(--text-secondary);">{{ k }}={{ "%.4g"|format(v) if v is number else v }}</span>
+                            {% endfor %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
     </div>
     {% endif %}
 </section>
@@ -1015,6 +1126,53 @@ window.showTab = function(el) {
             }, 2000);
         })
         .catch(function(err) { mlfl.toast('Failed to start ensemble: ' + err, 'error'); btn.disabled = false; btn.textContent = 'Run Ensemble'; });
+    };
+
+    // ======== Deep analysis ========
+    // ======== Tuning ========
+    window.runTuning = function(name, btn) {
+        var modelName = document.getElementById('tuning-model').value;
+        var nTrials = parseInt(document.getElementById('tuning-trials').value) || 30;
+        var strategy = document.getElementById('tuning-strategy').value;
+        if (!modelName) { mlfl.toast('Select a model to tune', 'warning'); return; }
+
+        btn.disabled = true; btn.classList.add('btn-loading'); btn.textContent = 'Tuning...';
+
+        fetch(BASE + '/experiment/' + name + '/run-tuning', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({model_name: modelName, n_trials: nTrials, strategy: strategy})
+        })
+        .then(function(r) { return r.json(); })
+        .then(function() {
+            var pollId = setInterval(function() {
+                fetch(BASE + '/experiment/' + name + '/tuning')
+                    .then(function(r) { if (r.ok) return r.json(); throw new Error('not ready'); })
+                    .then(function(result) {
+                        if (result.status === 'completed' || result.status === 'failed') {
+                            clearInterval(pollId);
+                            _reloadToTab('sec-tuning');
+                        }
+                    })
+                    .catch(function() {});
+            }, 5000);
+        })
+        .catch(function(err) {
+            mlfl.toast('Failed to start tuning: ' + err, 'error');
+            btn.disabled = false; btn.classList.remove('btn-loading'); btn.textContent = 'Run Tuning';
+        });
+    };
+
+    window.applyTuning = function(name) {
+        fetch(BASE + '/experiment/' + name + '/apply-tuning', {method: 'POST'})
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success) {
+                mlfl.toast('Best params applied for ' + data.model + ' — run pipeline to benchmark', 'success');
+            } else {
+                mlfl.toast('Failed to apply: ' + (data.error || 'unknown'), 'error');
+            }
+        })
+        .catch(function(err) { mlfl.toast('Failed to apply tuning: ' + err, 'error'); });
     };
 
     // ======== Deep analysis ========
