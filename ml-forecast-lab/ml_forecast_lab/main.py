@@ -1085,43 +1085,31 @@ class MLForecastLabApp:
                             train_part.iloc[-window_size:],
                             holdout_part,
                         ])
-                        seq_X_ho, seq_y_ho, _ = create_sliding_windows(
+                        # Use horizon_steps=[1] for inference X so we get one
+                        # window per holdout point — full coverage with no
+                        # tail-fill needed. The model was trained with dense
+                        # horizons so predict_sequence still returns
+                        # (n, future_periods); we take the h=1 column.
+                        seq_X_ho, _, _ = create_sliding_windows(
                             combined_holdout, target_col, window_size=window_size,
                             covariate_cols=cov_cols if cov_cols else None,
                             add_temporal=True,
-                            horizon_steps=horizon_steps,
+                            horizon_steps=[1],
                         )
                         y_p = m.predict_sequence(seq_X_ho)
-                        _y_holdout = seq_y_ho
-                        # Reconstruct full-coverage 1-step display arrays.
-                        #
-                        # With dense horizon_steps=[1..max_h], create_sliding_windows
-                        # produces n_windows = len(holdout) - max_h + 1 valid windows.
-                        # Each window i predicts holdout[i + h - 1] at horizon h.
-                        #
-                        # Coverage strategy:
-                        #   * holdout[0 .. n_windows-1]   ← window i, h=1   (one window per index)
-                        #   * holdout[n_windows .. end]   ← LAST window, h=2..max_h
-                        # This gives full holdout coverage matching tree models.
-                        n_windows = y_p.shape[0]
-                        max_h = max(horizon_steps)
-                        n_holdout = len(holdout_part)
-                        n_tail = max(0, n_holdout - n_windows)
-
-                        full_pred = np.empty(n_holdout, dtype=np.float32)
-                        full_pred[:n_windows] = y_p[:, 0]
-                        if n_tail > 0 and y_p.shape[1] >= 1 + n_tail:
-                            # Last window's higher horizons cover the tail
-                            full_pred[n_windows:] = y_p[-1, 1:1 + n_tail]
-                        elif n_tail > 0:
-                            # Fallback: pad with last available prediction
-                            full_pred[n_windows:] = y_p[-1, -1]
-
-                        full_actual = holdout_part[target_col].values.astype(np.float32)
-
-                        y_p_display = full_pred
-                        _y_holdout_display = full_actual
-                        _holdout_ts = holdout_timestamps
+                        if y_p.ndim == 2:
+                            y_p_display = y_p[:, 0].astype(np.float32)
+                        else:
+                            y_p_display = y_p.astype(np.float32)
+                        _y_holdout_display = holdout_part[target_col].values.astype(np.float32)
+                        # Match length defensively
+                        if len(y_p_display) != len(_y_holdout_display):
+                            n = min(len(y_p_display), len(_y_holdout_display))
+                            y_p_display = y_p_display[-n:]
+                            _y_holdout_display = _y_holdout_display[-n:]
+                            _holdout_ts = holdout_timestamps[-n:]
+                        else:
+                            _holdout_ts = holdout_timestamps
                     else:
                         y_p = m.predict(X_holdout)
                         # For chart display: use first horizon (shortest-term)

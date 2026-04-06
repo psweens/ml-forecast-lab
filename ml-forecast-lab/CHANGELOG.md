@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.4.0
+
+### Critical fix: CV runner now matches the holdout chart and production paths
+
+The CV runner was training a fundamentally different model from the one shown
+on the holdout chart and used in production:
+
+- **Sparse vs dense horizons.** CV used `horizons_minutes` from config to build
+  `horizon_steps = [4, 16, 24, 48]` (4-output multi-head), while the holdout
+  chart and production training both used dense `[1..future_periods]`
+  (96-output dense). Same neural backend, completely different architecture.
+- **Different window size.** CV used `max(48, max_horizon * 2) = 96`, the
+  holdout chart used `min(48, len/3)`. Different receptive field.
+- **Wrong "h=1" indexing in v2.3.1's fairness fix.** That fix used
+  `horizon_steps[0]` as the ranking metric. With `[4, 16, 24, 48]` that's
+  actually h=4 (2 hours ahead) — neural models were being scored on a
+  fundamentally harder task than tree models, which produce h=1 (next-step)
+  predictions. Hence the misleading 2.5× MASE gap on the leaderboard while
+  the same models tracked actuals just fine on the holdout chart.
+
+The CV runner now uses the **same** dense horizons and the **same** window
+size as the holdout chart and production. With the per-fold test path also
+switched to `horizon_steps=[1]` for inference, neural models get one window
+per test row (full coverage) and the metric is computed on h=1 for both tree
+and neural families. The leaderboard, the holdout chart, and the live
+forecast sensor now all evaluate the same model.
+
+### Holdout chart: full neural coverage without tail-fill
+
+The v2.3.1 tail-fill (last window's h=2..96 outputs) was fragile because
+residual prediction over long horizons collapses to "stay near the last
+observed value" — that's why CNN/LSTM lines went flat for the final ~48h.
+Replaced with `horizon_steps=[1]` inference, which gives one unique window
+per holdout point. Each chart point is now a true 1-step-ahead prediction
+from its own input window.
+
+### Cleanup
+- Dropped per-horizon sub-metrics (`mae_h2`, `rmse_h96`, `mae_havg`, etc.)
+  from `fold_metrics`. They were never surfaced in the UI and were a
+  consequence of the CV runner's old multi-horizon path.
+- Simplified the runner's metric block — both tree and neural models now
+  produce 1D `y_pred` / `y_test`, so a single `compute_all` call handles
+  the full leaderboard.
+
 ## 2.3.2
 
 ### Improvements

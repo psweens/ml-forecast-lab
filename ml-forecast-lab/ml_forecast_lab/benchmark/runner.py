@@ -357,17 +357,24 @@ class BenchmarkRunner:
                     engineered.update(c for c in df_train.columns if c.startswith('y_lag_'))
                     neural_cov_cols = [c for c in df_train.columns if c not in engineered and c != target_col]
 
-                    # Compute horizon steps from config
-                    horizons_min = self.experiment_cfg.get('horizons_minutes', [interval_min])
-                    horizon_steps = [h // interval_min for h in horizons_min]
+                    # Use DENSE horizons matching the production training and
+                    # holdout-chart paths so the leaderboard, holdout chart,
+                    # and live forecasts all evaluate the SAME model
+                    # architecture. Without this, neural models in CV are
+                    # trained as 4-output multi-head with horizon_steps from
+                    # the legacy `horizons_minutes` config (e.g. h=4,16,24,48)
+                    # while the holdout chart trains them as 96-output dense
+                    # — completely different models.
+                    future_periods = int(self.experiment_cfg.get('future_periods', 48))
+                    horizon_steps = list(range(1, future_periods + 1))
 
                     if target_col in df_train.columns:
                         # Use original df slice (with DatetimeIndex) for temporal features
                         df_train_raw = df.iloc[train_idx]
-                        # Window ≥ 2× max horizon for sufficient context
-                        max_horizon = max(horizon_steps) if horizon_steps else 1
-                        min_window = max(48, max_horizon * 2)
-                        window_size = min(min_window, len(df_train_raw) // 3)
+                        # Match holdout/production path: cap window at 48
+                        # (24h at 30-min). Larger windows hurt small-fold CV
+                        # by reducing effective sample size.
+                        window_size = min(48, len(df_train_raw) // 3)
                         if window_size >= 12:
                             seq_X, seq_y, channel_names = create_sliding_windows(
                                 df_train_raw, target_col, window_size=window_size,
@@ -384,7 +391,7 @@ class BenchmarkRunner:
                             logger.debug(
                                 f'Sliding windows for {model.name}: '
                                 f'{seq_X.shape[1]} steps × {seq_X.shape[2]} channels, '
-                                f'horizons={horizon_steps}: {channel_names}'
+                                f'dense horizons 1..{future_periods}: {channel_names}'
                             )
                 except Exception as e:
                     logger.debug(f'Sliding window creation failed: {e}')
@@ -413,10 +420,19 @@ class BenchmarkRunner:
             train_time = time.time() - train_start
 
             # --- Train predictions for overfitting diagnostics ---
+            # Reduce 2D neural outputs to h=1 to match the test path so train
+            # and test metrics are computed on the same horizon.
             y_pred_train = None
+            y_train_metric = y_train  # 1D for tree, will be reduced to h=1 for neural
             try:
                 if 'sequence_data' in sequence_kwargs and model.is_neural and window_size:
-                    y_pred_train = model.predict_sequence(sequence_kwargs['sequence_data'])
+                    yp = model.predict_sequence(sequence_kwargs['sequence_data'])
+                    if yp.ndim == 2:
+                        y_pred_train = yp[:, 0]
+                    else:
+                        y_pred_train = yp
+                    if y_train.ndim == 2:
+                        y_train_metric = y_train[:, 0]
                 else:
                     y_pred_train = model.predict(X_train)
             except Exception:
@@ -433,14 +449,30 @@ class BenchmarkRunner:
                         bridge_idx = np.concatenate([train_idx[-n_bridge:], test_idx])
                         df_combined_test = df.iloc[bridge_idx]
 
-                        seq_X_test, seq_y_test, _ = create_sliding_windows(
+                        # Use horizon_steps=[1] for the test windows so we get
+                        # ONE window per test row (full coverage). The model
+                        # was trained with dense horizons so y_pred still has
+                        # shape (n, future_periods); we take the h=1 column
+                        # for ranking. This matches the holdout-chart path.
+                        seq_X_test, _, _ = create_sliding_windows(
                             df_combined_test, 'target', window_size=window_size,
                             covariate_cols=neural_cov_cols if neural_cov_cols else None,
                             add_temporal=True,
-                            horizon_steps=horizon_steps,
+                            horizon_steps=[1],
                         )
-                        y_pred = model.predict_sequence(seq_X_test)
-                        y_test = seq_y_test
+                        y_pred_full = model.predict_sequence(seq_X_test)
+                        # Reduce to h=1 (1D) so the metric path treats this
+                        # like every other model — same shape as tree models.
+                        if y_pred_full.ndim == 2:
+                            y_pred = y_pred_full[:, 0]
+                        else:
+                            y_pred = y_pred_full
+                        # y_test stays as the original 1D test fold values.
+                        # Make sure shapes match (drop any leading rows the
+                        # window builder couldn't fit, which shouldn't happen
+                        # with horizon_steps=[1] but be defensive).
+                        if len(y_pred) != len(y_test):
+                            y_test = y_test[-len(y_pred):]
                     except Exception:
                         y_pred = model.predict(X_test)
                 else:
@@ -454,84 +486,32 @@ class BenchmarkRunner:
 
             inference_time = time.time() - inference_start
 
-            # Compute metrics — per-horizon for multi-output, h=1 for ranking
+            # Compute metrics on h=1 (next-step) predictions only.
+            # For tree models, y_pred / y_test are already 1D.
+            # For neural models, the test path above reduced y_pred to its
+            # h=1 column, and we use the original 1D y_test from the fold.
+            # This guarantees tree and neural models are scored on the
+            # SAME prediction horizon, with the SAME number of samples.
             metrics_to_compute = list(set(self.metrics + [self.production_metric]))
-            fold_metrics = {}
-            if y_pred.ndim == 2 and y_test.ndim == 2:
-                # Per-horizon metrics (e.g. rmse_h4, rmse_h16)
-                for h_idx, h_step in enumerate(horizon_steps or []):
-                    h_metrics = self.metric_registry.compute_all(
-                        metrics_to_compute,
-                        y_test[:, h_idx],
-                        y_pred[:, h_idx],
-                        y_train=y_train[:, h_idx] if y_train.ndim == 2 else y_train,
-                    )
-                    for metric_name, value in h_metrics.items():
-                        fold_metrics[f"{metric_name}_h{h_step}"] = value
-
-                # Un-suffixed metric for Demšar ranking: use FIRST horizon (h=1).
-                # This compares neural models fairly against tree models, which
-                # only produce h=1 predictions. Averaging across all horizons
-                # would unfairly penalize neural models for harder long-horizon
-                # forecasts that tree models never have to make.
-                # Per-horizon metrics remain available as `mae_h2`, `mae_h96`, etc.
-                first_h_idx = 0  # h=1 is always first in horizon_steps
-                first_h_metrics = self.metric_registry.compute_all(
-                    metrics_to_compute,
-                    y_test[:, first_h_idx],
-                    y_pred[:, first_h_idx],
-                    y_train=y_train[:, first_h_idx] if y_train.ndim == 2 else y_train,
-                )
-                for metric_name, value in first_h_metrics.items():
-                    fold_metrics[metric_name] = value
-
-                # Also store the horizon-averaged variant for diagnostics
-                for metric_name in metrics_to_compute:
-                    h_values = [
-                        fold_metrics.get(f"{metric_name}_h{h}", np.nan)
-                        for h in (horizon_steps or [])
-                    ]
-                    fold_metrics[f"{metric_name}_havg"] = float(np.nanmean(h_values))
-            else:
-                fold_metrics = self.metric_registry.compute_all(
-                    metrics_to_compute, y_test, y_pred, y_train=y_train,
-                )
+            # Defensively flatten any leftover singleton 2D arrays
+            yt_metric = y_test.ravel() if y_test.ndim == 2 and y_test.shape[1] == 1 else y_test
+            yp_metric = y_pred.ravel() if y_pred.ndim == 2 and y_pred.shape[1] == 1 else y_pred
+            yt_train_metric = y_train if y_train.ndim == 1 else y_train[:, 0]
+            fold_metrics = self.metric_registry.compute_all(
+                metrics_to_compute, yt_metric, yp_metric, y_train=yt_train_metric,
+            )
 
             # --- Train metrics for overfitting table ---
-            # Match the test-metric scheme: per-horizon stored as `mae_h{n}`,
-            # un-suffixed metric uses h=1 to compare fairly with tree models.
+            # Computed on h=1 only, matching the test path (y_pred_train and
+            # y_train_metric were already reduced to h=1 above for neural models).
             fold_train_m = {}
             if y_pred_train is not None:
                 try:
-                    if y_pred_train.ndim == 2 and y_train.ndim == 2:
-                        for h_idx, h_step in enumerate(horizon_steps or []):
-                            h_train_m = self.metric_registry.compute_all(
-                                metrics_to_compute,
-                                y_train[:, h_idx], y_pred_train[:, h_idx],
-                                y_train=y_train[:, h_idx] if y_train.ndim == 2 else y_train,
-                            )
-                            for mn, val in h_train_m.items():
-                                fold_train_m[f"{mn}_h{h_step}"] = val
-                        # Un-suffixed train metric: h=1 only (matches test path)
-                        first_h_train = self.metric_registry.compute_all(
-                            metrics_to_compute,
-                            y_train[:, 0], y_pred_train[:, 0],
-                            y_train=y_train[:, 0],
-                        )
-                        for mn, val in first_h_train.items():
-                            fold_train_m[mn] = val
-                        # Horizon-averaged variant for diagnostics
-                        for mn in metrics_to_compute:
-                            h_vals = [
-                                fold_train_m.get(f"{mn}_h{h}", np.nan)
-                                for h in (horizon_steps or [])
-                            ]
-                            fold_train_m[f"{mn}_havg"] = float(np.nanmean(h_vals))
-                    else:
-                        fold_train_m = self.metric_registry.compute_all(
-                            metrics_to_compute, y_train, y_pred_train,
-                            y_train=y_train,
-                        )
+                    fold_train_m = self.metric_registry.compute_all(
+                        metrics_to_compute,
+                        y_train_metric, y_pred_train,
+                        y_train=y_train_metric,
+                    )
                 except Exception:
                     pass
 
@@ -539,9 +519,9 @@ class BenchmarkRunner:
             model_result.fold_train_metrics.append(fold_train_m)
             model_result.train_times.append(train_time)
             model_result.inference_times.append(inference_time)
-            model_result.fold_predictions.append(y_pred.copy())
-            model_result.fold_actuals.append(y_test.copy())
-            model_result.fold_train_targets.append(y_train.copy())
+            model_result.fold_predictions.append(np.asarray(y_pred).copy())
+            model_result.fold_actuals.append(np.asarray(y_test).copy())
+            model_result.fold_train_targets.append(np.asarray(y_train_metric).copy())
 
             # Capture loss curves (last fold overwrites previous)
             if hasattr(model, '_training_history') and model._training_history:
