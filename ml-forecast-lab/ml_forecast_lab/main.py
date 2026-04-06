@@ -1648,24 +1648,19 @@ class MLForecastLabApp:
                 f"{len(y_pred)} interpolated points"
             )
         else:
-            # ----- Flat feature prediction for tree models -----
-            # Build future timestamps at regular intervals
-            future_minutes = [
-                exp_cfg.interval_minutes * (i + 1)
-                for i in range(future_periods)
-            ]
+            # ----- Tree models: RECURSIVE multi-step forecast -----
+            # Build a fresh feature row at each step using the rolling
+            # lag buffer (which grows with each new prediction), then
+            # predict, append, and repeat.
+            raw_cov_cols = [c for c in covariate_cols if c != 'target']
+            steps_per_day = max(1, 1440 // exp_cfg.interval_minutes)
 
-            forecast_features = create_forecast_features(
-                last_timestamp=last_ts,
-                interval_minutes=exp_cfg.interval_minutes,
-                horizons_minutes=future_minutes,
-                n_lags=n_lags,
-                lag_values=lag_values,
-                country=exp_cfg.country,
+            # Try to fetch future covariate values where available
+            future_index = pd.date_range(
+                start=last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes),
+                periods=future_periods,
+                freq=f'{exp_cfg.interval_minutes}min',
             )
-
-            # Align columns to training features
-            # For covariates with role='future', attempt to fetch actual future values
             future_cov_values = {}
             if exp_cfg.covariates and self.covariate_resolver:
                 for cov_cfg in exp_cfg.covariates:
@@ -1674,46 +1669,90 @@ class MLForecastLabApp:
                         try:
                             cov_dict = {"entity_id": cov_cfg.entity, "name": cov_name}
                             future_series = await self.covariate_resolver.fetch_future(
-                                cov_dict, forecast_features.index,
+                                cov_dict, future_index,
                             )
                             if future_series is not None and not future_series.empty:
                                 if cov_cfg.scale is not None:
                                     future_series = future_series * cov_cfg.scale
-                                future_cov_values[cov_name] = future_series
-                                logger.debug(f"Fetched future values for {cov_name}")
+                                future_cov_values[cov_name] = future_series.reindex(
+                                    future_index
+                                ).ffill().bfill()
                         except Exception as e:
                             logger.debug(f"Future fetch failed for {cov_name}: {e}")
 
-            for col in feature_cols:
-                if col not in forecast_features.columns:
-                    if col in future_cov_values:
-                        forecast_features[col] = future_cov_values[col].reindex(
-                            forecast_features.index
-                        ).ffill().bfill()
-                    elif col in covariate_cols and col in combined.columns:
-                        forecast_features[col] = float(combined[col].iloc[-1])
+            last_cov_vals = {
+                c: float(combined[c].iloc[-1]) if c in combined.columns else 0.0
+                for c in raw_cov_cols
+            }
+
+            # Lag buffer: chronological, grows with each prediction
+            lag_buffer = list(y[-max(n_lags, steps_per_day * 2 + 1):])
+
+            def _build_feature_row(ts, buf, step_idx):
+                row = {}
+                # Temporal
+                row['hour_of_day'] = ts.hour
+                row['day_of_week'] = ts.dayofweek
+                row['is_weekend'] = 1.0 if ts.dayofweek >= 5 else 0.0
+                row['month'] = ts.month
+                row['day_of_month'] = ts.day
+                hr_rad = 2 * np.pi * ts.hour / 24
+                dw_rad = 2 * np.pi * ts.dayofweek / 7
+                row['hour_sin'] = float(np.sin(hr_rad))
+                row['hour_cos'] = float(np.cos(hr_rad))
+                row['dow_sin'] = float(np.sin(dw_rad))
+                row['dow_cos'] = float(np.cos(dw_rad))
+                # Lag features
+                for lag in range(1, n_lags + 1):
+                    row[f'y_lag_{lag}'] = float(buf[-lag]) if lag <= len(buf) else 0.0
+                # Periodic lags
+                for d in [1, 2]:
+                    lag_steps = steps_per_day * d
+                    row[f'y_lag_{lag_steps}'] = float(buf[-lag_steps]) if lag_steps <= len(buf) else 0.0
+                # Rolling stats
+                for w in [6, 24, 72]:
+                    window = buf[-w:] if len(buf) >= w else buf
+                    if window:
+                        row[f'y_rolling_mean_{w}'] = float(np.mean(window))
+                        row[f'y_rolling_std_{w}'] = float(np.std(window))
+                        row[f'y_rolling_max_{w}'] = float(np.max(window))
                     else:
-                        forecast_features[col] = 0.0
+                        row[f'y_rolling_mean_{w}'] = 0.0
+                        row[f'y_rolling_std_{w}'] = 0.0
+                        row[f'y_rolling_max_{w}'] = 0.0
+                # Rate of change
+                row['y_diff_1'] = float(buf[-1] - buf[-2]) if len(buf) >= 2 else 0.0
+                # Covariates (use future values if available, else last-known)
+                for c in raw_cov_cols:
+                    if c in future_cov_values:
+                        try:
+                            row[c] = float(future_cov_values[c].iloc[step_idx])
+                        except Exception:
+                            row[c] = last_cov_vals.get(c, 0.0)
+                    else:
+                        row[c] = last_cov_vals.get(c, 0.0)
+                # Interaction features
+                for c in raw_cov_cols:
+                    row[f'{c}_x_hour_sin'] = row[c] * row['hour_sin']
+                    row[f'{c}_x_hour_cos'] = row[c] * row['hour_cos']
+                return row
 
-            # Compute interaction features from covariates × temporal
-            for cov in covariate_cols:
-                sin_col = f"{cov}_x_hour_sin"
-                cos_col = f"{cov}_x_hour_cos"
-                if sin_col in feature_cols and cov in forecast_features.columns:
-                    forecast_features[sin_col] = forecast_features[cov] * forecast_features["hour_sin"]
-                if cos_col in feature_cols and cov in forecast_features.columns:
-                    forecast_features[cos_col] = forecast_features[cov] * forecast_features["hour_cos"]
-
-            forecast_features = forecast_features[feature_cols]
-
-            X_forecast = forecast_features.values.astype(np.float32)
-            X_forecast = np.nan_to_num(X_forecast, nan=0.0)
-
-            def _predict():
-                return model.predict(X_forecast)
+            def _run_recursive_forecast():
+                preds = []
+                for step in range(future_periods):
+                    ts = last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes * (step + 1))
+                    row_dict = _build_feature_row(ts, lag_buffer, step)
+                    row_vals = [row_dict.get(c, 0.0) for c in feature_cols]
+                    X_row = np.array([row_vals], dtype=np.float32)
+                    X_row = np.nan_to_num(X_row, nan=0.0)
+                    pred = model.predict(X_row)
+                    val = float(pred.ravel()[0] if hasattr(pred, 'ravel') else pred[0])
+                    preds.append(val)
+                    lag_buffer.append(val)
+                return np.array(preds, dtype=np.float32)
 
             y_pred = await asyncio.get_running_loop().run_in_executor(
-                None, _predict
+                None, _run_recursive_forecast,
             )
 
         if y_pred.ndim > 1:
@@ -2175,49 +2214,99 @@ class MLForecastLabApp:
                 y_pred = np.interp(all_x, horizon_x, multi_pred.astype(np.float32)).astype(np.float32)
             y_pred = np.maximum(y_pred, 0.0)
         else:
-            # Tree models: flat features
-            covariate_cols = [c for c in combined.columns
-                              if c != 'target' and not c.startswith('y_')]
-            future_minutes = [exp_cfg.interval_minutes * (i + 1) for i in range(future_periods)]
-            forecast_features = create_forecast_features(
-                last_timestamp=last_ts,
-                interval_minutes=exp_cfg.interval_minutes,
-                horizons_minutes=future_minutes,
-                n_lags=n_lags,
-                lag_values=lag_values,
-                country=exp_cfg.country,
-            )
-            # Fill missing covariate columns with last known values
-            for col in feature_cols:
-                if col not in forecast_features.columns:
-                    if col in covariate_cols and col in combined.columns:
-                        forecast_features[col] = float(combined[col].iloc[-1])
-                    elif not col.endswith('_x_hour_sin') and not col.endswith('_x_hour_cos'):
-                        forecast_features[col] = 0.0
+            # Tree models: RECURSIVE multi-step forecast.
+            # At each step, we build a single feature row using the most recent
+            # lag values (which include previous predictions), predict, then
+            # roll the lag buffer forward with the new prediction.
+            engineered = {
+                'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
+                'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday', 'y_diff_1',
+            }
+            raw_cov_cols = [
+                c for c in combined.columns
+                if c != 'target'
+                and c not in engineered
+                and not c.startswith('y_')
+                and not c.endswith('_x_hour_sin')
+                and not c.endswith('_x_hour_cos')
+            ]
 
-            # Compute interaction features (covariate × time-of-day)
-            # These are created by build_features() during training and must
-            # be present for the model to predict correctly.
-            for cov in covariate_cols:
-                sin_col = f"{cov}_x_hour_sin"
-                cos_col = f"{cov}_x_hour_cos"
-                if sin_col in feature_cols and cov in forecast_features.columns:
-                    forecast_features[sin_col] = forecast_features[cov] * forecast_features["hour_sin"]
-                if cos_col in feature_cols and cov in forecast_features.columns:
-                    forecast_features[cos_col] = forecast_features[cov] * forecast_features["hour_cos"]
+            steps_per_day = max(1, 1440 // exp_cfg.interval_minutes)
 
-            forecast_features = forecast_features.reindex(columns=feature_cols, fill_value=0.0)
+            # Rolling lag buffer — starts with the last observed values,
+            # grows as we append predictions.
+            lag_buffer = list(y[-max(n_lags, steps_per_day * 2 + 1):])
 
-            # Log any feature mismatches for debugging
-            missing = set(feature_cols) - set(forecast_features.columns)
-            if missing:
-                logger.warning(f"  Missing forecast features (filled with 0): {missing}")
+            # Last known covariate values (we treat covariates as constant
+            # going forward; real future values would require per-covariate
+            # forecasts which is out of scope here)
+            last_cov_vals = {
+                c: float(combined[c].iloc[-1]) if c in combined.columns else 0.0
+                for c in raw_cov_cols
+            }
 
-            X_forecast = forecast_features.values.astype(np.float32)
-            X_forecast = np.nan_to_num(X_forecast, nan=0.0)
+            def _build_feature_row(ts: pd.Timestamp, buf: list) -> dict:
+                """Construct a single feature row matching the training schema."""
+                row = {}
+                # Temporal
+                row['hour_of_day'] = ts.hour
+                row['day_of_week'] = ts.dayofweek
+                row['is_weekend'] = 1.0 if ts.dayofweek >= 5 else 0.0
+                row['month'] = ts.month
+                row['day_of_month'] = ts.day
+                hr_rad = 2 * np.pi * ts.hour / 24
+                dw_rad = 2 * np.pi * ts.dayofweek / 7
+                row['hour_sin'] = float(np.sin(hr_rad))
+                row['hour_cos'] = float(np.cos(hr_rad))
+                row['dow_sin'] = float(np.sin(dw_rad))
+                row['dow_cos'] = float(np.cos(dw_rad))
+                # Lag features (buf is chronological: oldest..newest,
+                # y_lag_i = i-th most recent past value)
+                for lag in range(1, n_lags + 1):
+                    row[f'y_lag_{lag}'] = float(buf[-lag]) if lag <= len(buf) else 0.0
+                # Periodic lags
+                for d in [1, 2]:
+                    lag_steps = steps_per_day * d
+                    row[f'y_lag_{lag_steps}'] = float(buf[-lag_steps]) if lag_steps <= len(buf) else 0.0
+                # Rolling stats (on most recent window of buffer)
+                for w in [6, 24, 72]:
+                    window = buf[-w:] if len(buf) >= w else buf
+                    if window:
+                        row[f'y_rolling_mean_{w}'] = float(np.mean(window))
+                        row[f'y_rolling_std_{w}'] = float(np.std(window))
+                        row[f'y_rolling_max_{w}'] = float(np.max(window))
+                    else:
+                        row[f'y_rolling_mean_{w}'] = 0.0
+                        row[f'y_rolling_std_{w}'] = 0.0
+                        row[f'y_rolling_max_{w}'] = 0.0
+                # Rate of change
+                row['y_diff_1'] = float(buf[-1] - buf[-2]) if len(buf) >= 2 else 0.0
+                # Covariates (carried forward)
+                for c, v in last_cov_vals.items():
+                    row[c] = v
+                # Interaction features
+                for c in raw_cov_cols:
+                    row[f'{c}_x_hour_sin'] = last_cov_vals.get(c, 0.0) * row['hour_sin']
+                    row[f'{c}_x_hour_cos'] = last_cov_vals.get(c, 0.0) * row['hour_cos']
+                return row
+
+            def _run_recursive_forecast():
+                preds = []
+                for step in range(future_periods):
+                    ts = last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes * (step + 1))
+                    row_dict = _build_feature_row(ts, lag_buffer)
+                    # Align to training feature order
+                    row_vals = [row_dict.get(c, 0.0) for c in feature_cols]
+                    X_row = np.array([row_vals], dtype=np.float32)
+                    X_row = np.nan_to_num(X_row, nan=0.0)
+                    y = model.predict(X_row)
+                    val = float(y.ravel()[0] if hasattr(y, 'ravel') else y[0])
+                    preds.append(val)
+                    lag_buffer.append(val)
+                return np.array(preds, dtype=np.float32)
 
             loop = asyncio.get_running_loop()
-            y_pred = await loop.run_in_executor(None, lambda: model.predict(X_forecast))
+            y_pred = await loop.run_in_executor(None, _run_recursive_forecast)
 
         if y_pred.ndim > 1:
             y_pred = y_pred.ravel()
