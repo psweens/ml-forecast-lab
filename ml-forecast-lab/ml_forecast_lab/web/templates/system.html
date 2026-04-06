@@ -239,13 +239,12 @@
                         <option value="huber" {{ 'selected' if exp.loss_fn == 'huber' }}>Huber</option>
                     </select>
                 </div>
-                <div class="exp-field" style="grid-column:span 2;">
-                    <label>Forecast horizons (comma-separated minutes)</label>
-                    <input type="text" class="setting-input"
-                           value="{{ exp.horizons_minutes | join(', ') }}"
-                           data-exp="{{ exp.name }}" data-field="horizons_minutes"
-                           onchange="saveExperimentField(this)"
-                           placeholder="e.g. 120, 480, 720, 1440">
+                <div class="exp-field">
+                    <label>Forecast length (steps) <span class="info-tip">?<span class="tip-text">How many future steps to forecast. Each step = interval minutes (e.g. 48 steps × 30min = 24h).</span></span></label>
+                    <input type="number" class="setting-input" min="1" max="720" step="1"
+                           value="{{ exp.future_periods }}"
+                           data-exp="{{ exp.name }}" data-field="future_periods"
+                           onchange="saveExperimentField(this)">
                 </div>
             </div>
 
@@ -336,7 +335,7 @@
         var value = el.value;
 
         // Type coercion by field
-        var intFields = ['cv_folds', 'days_history', 'interval_minutes', 'forecast_every_minutes'];
+        var intFields = ['cv_folds', 'days_history', 'interval_minutes', 'forecast_every_minutes', 'future_periods'];
         var floatFields = ['recency_half_life_days', 'retrain_every_hours'];
         var boolFields = ['source_is_cumulative', 'reset_daily', 'log_transform'];
 

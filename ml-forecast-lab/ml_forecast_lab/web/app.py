@@ -1615,17 +1615,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if not exp_name:
             return JSONResponse(content={"success": False, "error": "Missing experiment name"})
 
-        def _parse_horizons(v):
-            if isinstance(v, list):
-                vals = v
-            else:
-                vals = [x.strip() for x in str(v).split(",") if x.strip()]
-            try:
-                ints = [int(x) for x in vals]
-                return ints if all(i > 0 for i in ints) else None
-            except Exception:
-                return None
-
         # Allowed editable fields and their types/validators
         editable = {
             "cv_strategy": lambda v: v if v in ("walk_forward", "sliding_window") else None,
@@ -1633,7 +1622,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "recency_half_life_days": lambda v: float(v) if float(v) >= 0 else None,
             "days_history": lambda v: int(v) if int(v) >= 1 else None,
             "interval_minutes": lambda v: int(v) if int(v) >= 1 else None,
-            "horizons_minutes": _parse_horizons,
+            "future_periods": lambda v: int(v) if int(v) >= 1 else None,
             "source_is_cumulative": lambda v: bool(v),
             "reset_daily": lambda v: bool(v),
             "log_transform": lambda v: bool(v),

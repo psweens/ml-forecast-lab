@@ -1009,7 +1009,8 @@ class MLForecastLabApp:
             _feature_importance_list = []
 
             # Compute horizon steps from config for neural multi-output
-            horizon_steps = [h // exp_cfg.interval_minutes for h in exp_cfg.horizons_minutes]
+            future_periods_bench = getattr(exp_cfg, 'future_periods', 48)
+            horizon_steps = list(range(1, future_periods_bench + 1))
 
             for m_name in exp_cfg.models_enabled:
                 try:
@@ -1797,56 +1798,7 @@ class MLForecastLabApp:
         )
         logger.info(f"Published forecast curve to {base_entity}_forecast")
 
-        # 8. Publish per-horizon scalar sensors
-        # Neural models: use predict_sequence for direct multi-horizon output
-        neural_horizon_preds = None
-        if is_neural and 'sequence_data' in seq_kwargs and window_size_prod:
-            try:
-                tail_df = combined.iloc[-window_size_prod:]
-                X_horizon = self._build_window_channels(
-                    tail_df, raw_cov_cols_prod, target_col='target',
-                )
-                X_horizon_input = X_horizon[np.newaxis, :, :]  # (1, window_size, n_channels)
-                neural_horizon_preds = model.predict_sequence(X_horizon_input).squeeze(0)
-            except Exception as e:
-                logger.warning(f"predict_sequence failed, using dense curve: {e}")
-
-        for h_idx, horizon_mins in enumerate(exp_cfg.horizons_minutes):
-            if neural_horizon_preds is not None and h_idx < len(neural_horizon_preds):
-                horizon_val = round(float(neural_horizon_preds[h_idx]), 4)
-                forecast_ts = (last_ts + pd.Timedelta(minutes=horizon_mins)).isoformat()
-            else:
-                target_ts = last_ts + pd.Timedelta(minutes=horizon_mins)
-                idx = (ds_future - target_ts).abs().argmin()
-                horizon_val = round(float(y_pred[idx]), 4)
-                forecast_ts = ds_future[idx].isoformat()
-
-            if horizon_mins >= 1440:
-                h_label = f"{horizon_mins // 1440}d"
-            elif horizon_mins >= 60:
-                h_label = f"{horizon_mins // 60}h"
-            else:
-                h_label = f"{horizon_mins}m"
-
-            await self.ha_interface.set_state(
-                f"{base_entity}_{h_label}",
-                str(horizon_val),
-                attributes={
-                    "friendly_name": f"{publish_name} +{h_label}",
-                    "unit_of_measurement": units,
-                    "icon": "mdi:clock-fast",
-                    "horizon_minutes": horizon_mins,
-                    "forecast_timestamp": forecast_ts,
-                    "model": prod_model_name,
-                },
-            )
-
-        logger.info(
-            f"Published {len(exp_cfg.horizons_minutes)} horizon sensors "
-            f"for {exp_cfg.name}"
-        )
-
-        # 9. Update web app status
+        # Update web app status
         if self.web_app:
             status = self.web_app.state.appstate.experiment_statuses.get(
                 exp_cfg.name
@@ -1861,11 +1813,6 @@ class MLForecastLabApp:
         logger.info(f"  Model: {prod_model_name}, trained in {train_time:.1f}s")
         logger.info(f"  Forecast: {len(y_pred)} points, {future_periods * exp_cfg.interval_minutes / 60:.0f}h ahead")
         logger.info(f"  Next interval: {next_val} {units}")
-        for h_mins in exp_cfg.horizons_minutes:
-            h_label = f"+{h_mins // 60}h" if h_mins >= 60 else f"+{h_mins}m"
-            target_ts = last_ts + pd.Timedelta(minutes=h_mins)
-            idx = (ds_future - target_ts).abs().argmin()
-            logger.info(f"    {h_label}: {round(float(y_pred[idx]), 4)} {units}")
         logger.info(f"  {'─' * 50}")
         logger.info(f"{'=' * 60}")
         logger.info(f"")
@@ -2201,18 +2148,18 @@ class MLForecastLabApp:
             multi_pred = multi_pred.ravel()
 
             # Neural models trained with dense horizons output all
-            # future_periods predictions directly. Older cached models
-            # may have fewer outputs — fall back to interpolation.
+            # future_periods predictions directly.
             if len(multi_pred) >= future_periods:
                 y_pred = multi_pred[:future_periods].astype(np.float32)
             elif len(multi_pred) == 1:
                 y_pred = np.full(future_periods, float(multi_pred[0]), dtype=np.float32)
             else:
-                # Legacy: sparse horizons → interpolate (will retrain into dense soon)
-                horizon_steps_legacy = [h // exp_cfg.interval_minutes for h in exp_cfg.horizons_minutes][:len(multi_pred)]
-                horizon_x = np.array(horizon_steps_legacy, dtype=np.float32)
-                all_x = np.arange(1, future_periods + 1, dtype=np.float32)
-                y_pred = np.interp(all_x, horizon_x, multi_pred.astype(np.float32)).astype(np.float32)
+                # Legacy cached model with fewer outputs — pad by repeating last
+                y_pred = np.concatenate([
+                    multi_pred.astype(np.float32),
+                    np.full(future_periods - len(multi_pred),
+                            float(multi_pred[-1]), dtype=np.float32),
+                ])
             y_pred = np.maximum(y_pred, 0.0)
         else:
             # Tree models: RECURSIVE multi-step forecast.
@@ -2348,32 +2295,6 @@ class MLForecastLabApp:
                 await self.ha_interface.set_state(entity_id, state, attrs)
             except Exception as e:
                 logger.warning(f"  Failed to publish {entity_id}: {e}")
-
-            # Per-horizon sensors
-            for h_min in exp_cfg.horizons_minutes:
-                h_steps = h_min // exp_cfg.interval_minutes
-                if h_steps <= len(y_pred):
-                    val = round(float(y_pred[h_steps - 1]), 4)
-                    if h_min >= 1440:
-                        h_label = f"{h_min // 1440}d"
-                    elif h_min >= 60:
-                        h_label = f"{h_min // 60}h"
-                    else:
-                        h_label = f"{h_min}m"
-                    h_entity = f"sensor.{prefix}{publish_name}_{h_label}"
-                    target_ts = last_ts + pd.Timedelta(minutes=h_min)
-                    h_attrs = {
-                        "horizon_minutes": h_min,
-                        "forecast_timestamp": target_ts.isoformat(),
-                        "model": prod_model_name,
-                        "friendly_name": f"{publish_name} +{h_label}",
-                        "unit_of_measurement": units,
-                        "icon": "mdi:clock-outline",
-                    }
-                    try:
-                        await self.ha_interface.set_state(h_entity, val, h_attrs)
-                    except Exception as e:
-                        logger.warning(f"  Failed to publish {h_entity}: {e}")
 
     async def _run_tuning(self, experiment_name: str, model_name: str,
                           n_trials: int = 30, strategy: str = "tpe",
