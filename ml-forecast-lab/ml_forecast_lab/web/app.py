@@ -1615,18 +1615,46 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if not exp_name:
             return JSONResponse(content={"success": False, "error": "Missing experiment name"})
 
+        def _parse_horizons(v):
+            if isinstance(v, list):
+                vals = v
+            else:
+                vals = [x.strip() for x in str(v).split(",") if x.strip()]
+            try:
+                ints = [int(x) for x in vals]
+                return ints if all(i > 0 for i in ints) else None
+            except Exception:
+                return None
+
         # Allowed editable fields and their types/validators
         editable = {
             "cv_strategy": lambda v: v if v in ("walk_forward", "sliding_window") else None,
             "cv_folds": lambda v: int(v) if int(v) >= 2 else None,
             "recency_half_life_days": lambda v: float(v) if float(v) >= 0 else None,
+            "days_history": lambda v: int(v) if int(v) >= 1 else None,
+            "interval_minutes": lambda v: int(v) if int(v) >= 1 else None,
+            "horizons_minutes": _parse_horizons,
+            "source_is_cumulative": lambda v: bool(v),
+            "reset_daily": lambda v: bool(v),
+            "log_transform": lambda v: bool(v),
+            "forecast_every_minutes": lambda v: int(v) if int(v) >= 1 else None,
+            "retrain_every_hours": lambda v: float(v) if float(v) >= 0.1 else None,
+            "production_metric": lambda v: v if v in ("mae", "rmse", "mase") else None,
+            "loss_fn": lambda v: v if v in ("mse", "mae", "huber") else None,
         }
+
+        # Fields where None/null means "use global default" (valid, not an error)
+        nullable_fields = {"forecast_every_minutes", "retrain_every_hours"}
 
         updates = {}
         for field, validator in editable.items():
             if field in data:
+                raw = data[field]
+                if raw is None and field in nullable_fields:
+                    updates[field] = None
+                    continue
                 try:
-                    val = validator(data[field])
+                    val = validator(raw)
                     if val is None:
                         return JSONResponse(content={
                             "success": False, "error": f"Invalid value for {field}"
@@ -1663,7 +1691,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             found = False
             for exp in experiments:
                 if exp.get("name") == exp_name:
-                    exp.update(updates)
+                    for k, v in updates.items():
+                        if v is None:
+                            exp.pop(k, None)  # remove → falls back to global default
+                        else:
+                            exp[k] = v
                     found = True
                     break
 

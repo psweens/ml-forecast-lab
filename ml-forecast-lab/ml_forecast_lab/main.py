@@ -1885,12 +1885,37 @@ class MLForecastLabApp:
         finally:
             self._update_running = False
 
+    async def _retrain_single(self, exp_cfg):
+        """Retrain a single experiment (per-experiment timer)."""
+        self._update_running = True
+        try:
+            if exp_cfg.mode == "lab":
+                await self.update_experiment(exp_cfg.name, is_lab=True)
+            else:
+                await self._retrain_and_cache(exp_cfg)
+            await self.publish_heartbeat()
+        except Exception as e:
+            logger.error(f"Retrain failed for {exp_cfg.name}: {e}", exc_info=True)
+        finally:
+            self._update_running = False
+
+    async def _forecast_single(self, exp_cfg):
+        """Run forecast for a single experiment (per-experiment timer)."""
+        if exp_cfg.mode != "production":
+            return
+        if exp_cfg.name not in self._cached_models:
+            logger.debug(f"  No cached model for {exp_cfg.name} — waiting for retrain")
+            return
+        self._forecast_running = True
+        try:
+            await self._forecast_with_cached(exp_cfg.name)
+        except Exception as e:
+            logger.error(f"Forecast failed for {exp_cfg.name}: {e}", exc_info=True)
+        finally:
+            self._forecast_running = False
+
     async def _run_retrain_cycle(self):
-        """
-        Retrain cycle: for each experiment, retrain the model from scratch,
-        optionally export to ONNX and wrap with Hailo, then cache.
-        Lab experiments run _run_benchmark instead.
-        """
+        """[Legacy] Bulk retrain for all experiments (kept for backward compat)."""
         self._update_running = True
         try:
             logger.info("=== Starting retrain cycle ===")
@@ -1900,7 +1925,6 @@ class MLForecastLabApp:
                 if exp_cfg.mode == "lab":
                     await self.update_experiment(exp_cfg.name, is_lab=True)
                 else:
-                    # Production: train, optionally wrap with Hailo, cache
                     try:
                         await self._retrain_and_cache(exp_cfg)
                     except Exception as e:
@@ -2796,33 +2820,55 @@ class MLForecastLabApp:
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-        # Dual timers: forecast (fast, uses cached model) and retrain (slow, full training)
-        forecast_interval = self.config.forecast_every_minutes * 60
-        retrain_interval = int(self.config.retrain_every_hours * 3600)
+        # Per-experiment timers: each experiment has its own forecast/retrain
+        # schedule, falling back to global config if not set.
+        self._next_forecast_per_exp = {}
+        self._next_retrain_per_exp = {}
 
         now = datetime.now(timezone.utc)
-        # First retrain runs immediately so there's a cached model for forecasts
-        next_retrain = now
-        next_forecast = now + timedelta(seconds=forecast_interval)
-
-        logger.info(
-            f"Timers: forecast every {self.config.forecast_every_minutes}m, "
-            f"retrain every {self.config.retrain_every_hours}h"
-        )
+        for exp_cfg in self.config.experiments:
+            fc_mins = exp_cfg.forecast_every_minutes or self.config.forecast_every_minutes
+            rt_hrs = exp_cfg.retrain_every_hours or self.config.retrain_every_hours
+            # First retrain runs immediately so there's a cached model
+            self._next_retrain_per_exp[exp_cfg.name] = now
+            self._next_forecast_per_exp[exp_cfg.name] = now + timedelta(seconds=fc_mins * 60)
+            logger.info(
+                f"Timers for {exp_cfg.name}: forecast every {fc_mins}m, retrain every {rt_hrs}h"
+            )
 
         while self.running:
             try:
                 now = datetime.now(timezone.utc)
 
-                # Retrain cycle: full training + Hailo export + cache model
-                if now >= next_retrain and not self._update_running:
-                    next_retrain = now + timedelta(seconds=retrain_interval)
-                    asyncio.create_task(self._run_retrain_cycle())
+                # Reload config so schedule changes from UI take effect
+                # (only reload occasionally to avoid disk thrashing)
+                if int(now.timestamp()) % 30 == 0:
+                    try:
+                        await self.load_config()
+                    except Exception:
+                        pass
 
-                # Forecast cycle: use cached model for fast inference + publish
-                if now >= next_forecast and not self._forecast_running:
-                    next_forecast = now + timedelta(seconds=forecast_interval)
-                    asyncio.create_task(self._run_forecast_cycle())
+                # Check each experiment's schedule
+                for exp_cfg in self.config.experiments:
+                    fc_mins = exp_cfg.forecast_every_minutes or self.config.forecast_every_minutes
+                    rt_hrs = exp_cfg.retrain_every_hours or self.config.retrain_every_hours
+
+                    # Initialise new experiments that didn't exist before
+                    if exp_cfg.name not in self._next_forecast_per_exp:
+                        self._next_retrain_per_exp[exp_cfg.name] = now
+                        self._next_forecast_per_exp[exp_cfg.name] = now + timedelta(seconds=fc_mins * 60)
+
+                    # Retrain this experiment
+                    if (now >= self._next_retrain_per_exp[exp_cfg.name]
+                            and not self._update_running):
+                        self._next_retrain_per_exp[exp_cfg.name] = now + timedelta(seconds=rt_hrs * 3600)
+                        asyncio.create_task(self._retrain_single(exp_cfg))
+
+                    # Forecast this experiment
+                    if (now >= self._next_forecast_per_exp[exp_cfg.name]
+                            and not self._forecast_running):
+                        self._next_forecast_per_exp[exp_cfg.name] = now + timedelta(seconds=fc_mins * 60)
+                        asyncio.create_task(self._forecast_single(exp_cfg))
 
                 # Update UI countdowns
                 if self.web_app:
@@ -2830,12 +2876,12 @@ class MLForecastLabApp:
                         status = self.web_app.state.appstate.experiment_statuses.get(
                             exp_cfg.name
                         )
-                        if status:
+                        if status and exp_cfg.name in self._next_forecast_per_exp:
                             status.next_forecast_in_seconds = max(
-                                0, int((next_forecast - now).total_seconds())
+                                0, int((self._next_forecast_per_exp[exp_cfg.name] - now).total_seconds())
                             )
                             status.next_retrain_in_seconds = max(
-                                0, int((next_retrain - now).total_seconds())
+                                0, int((self._next_retrain_per_exp[exp_cfg.name] - now).total_seconds())
                             )
                             status.next_update_in_seconds = status.next_forecast_in_seconds
 

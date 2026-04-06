@@ -165,6 +165,14 @@ class ExperimentCfg:
     """Per-model hyperparameter overrides specific to this experiment.
     Takes precedence over global model_overrides. Keys are model names."""
 
+    forecast_every_minutes: Optional[int] = None
+    """How often to run inference and publish sensors for this experiment.
+    Falls back to AppConfig.forecast_every_minutes if None."""
+
+    retrain_every_hours: Optional[float] = None
+    """How often to retrain the model from scratch for this experiment.
+    Falls back to AppConfig.retrain_every_hours if None."""
+
     loss_fn: str = 'mse'
     """Training loss for neural models: 'mse', 'mae', or 'huber'."""
 
