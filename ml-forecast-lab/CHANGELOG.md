@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.3.2
+
+### Improvements
+- **Auto-assigned plot colours**: removed the hard-coded `MODEL_COLORS` /
+  `ENSEMBLE_COLORS` dicts in `main.py` and the duplicated `MODEL_COLORS` map
+  in `experiment.html`. All multi-trace charts now share a single 15-colour
+  Plotly `colorway` defined once in the template, and traces consume colours
+  in order. Adding a new model no longer requires touching a palette in two
+  places, and the backend `ModelPrediction.color` field has been retired.
+- **Help text refresh**: updated tooltips on the system page (forecast /
+  retrain interval no longer mention a non-existent "global default", Hailo
+  toggle now describes the CPU-vs-NPU validation test and graceful fallback,
+  Settings section heading now covers the full set of global options) and the
+  Model Comparison ranking explanation now states that all metrics are
+  computed on the next-step (h=1) prediction so tree and neural models are
+  compared on the same horizon.
+- **README refresh**: configuration example now uses
+  `forecast_every_minutes` / `retrain_every_hours` (the deprecated
+  `update_every_minutes` was the v1.x name); features list now reflects all
+  15 model backends, decoupled retrain/forecast cycles, hyperparameter tuning,
+  ensembles, and covariate analysis; Hailo section mentions all neural
+  families and the validation fallback.
+
+### Fix
+- **Config-loaded log spam**: the timer loop reloads `mlfl.yaml` every 30s
+  to pick up UI edits and was logging `Configuration loaded from …` at INFO
+  on every reload — drowning out training progress. Now uses an mtime check:
+  the first load logs at INFO, real edits log `Configuration reloaded from
+  …` at INFO, and unchanged reloads drop to DEBUG.
+
 ## 2.3.1
 
 ### Fix

@@ -51,6 +51,10 @@ class MLForecastLabApp:
         # Cached trained models for fast forecast cycles
         # Key: experiment name → dict with model, feature_cols, combined, etc.
         self._cached_models = {}
+        # Track config file mtime so we only log on real changes (the timer
+        # loop reloads config every 30s; we don't want a log line each time).
+        self._last_config_path: Optional[Path] = None
+        self._last_config_mtime: Optional[float] = None
 
     async def load_config(self, config_path: Optional[Path] = None):
         """
@@ -96,7 +100,29 @@ class MLForecastLabApp:
                 from ml_forecast_lab.config import load_config
 
                 self.config = load_config(found_path)
-                logger.info(f"Configuration loaded from {found_path}")
+                # Only log at INFO when the config actually changes (first load
+                # or mtime change). The timer loop calls load_config() every
+                # 30 seconds to pick up UI edits — logging every reload would
+                # spam the log file. Steady-state reloads stay at DEBUG.
+                try:
+                    current_mtime = found_path.stat().st_mtime
+                except OSError:
+                    current_mtime = None
+
+                first_load = self._last_config_path is None
+                changed = (
+                    self._last_config_path != found_path
+                    or self._last_config_mtime != current_mtime
+                )
+                if first_load:
+                    logger.info(f"Configuration loaded from {found_path}")
+                elif changed:
+                    logger.info(f"Configuration reloaded from {found_path}")
+                else:
+                    logger.debug(f"Configuration reloaded (no changes) from {found_path}")
+
+                self._last_config_path = found_path
+                self._last_config_mtime = current_mtime
             except Exception as e:
                 logger.error(f"Failed to load configuration: {e}", exc_info=True)
                 self.config = self._create_stub_config()
@@ -983,25 +1009,9 @@ class MLForecastLabApp:
             ts.isoformat() for ts in holdout_part.index
         ]
 
-        # High-contrast palette: first colours are maximally distinct so
-        # 2-3 model experiments are easy to read at a glance.
-        MODEL_COLORS = {
-            "lightgbm": "#ff6b6b",      # coral red
-            "xgboost": "#ffd93d",        # amber yellow
-            "lstm": "#6bcb77",           # green
-            "cnn": "#4d96ff",            # blue
-            "neuralprophet": "#c084fc",  # purple
-            "dlinear": "#ff922b",        # orange
-            "nbeats": "#22d3ee",         # cyan
-            "nhits": "#f472b6",          # pink
-            "tide": "#a3e635",           # lime
-            "tsmixer": "#38bdf8",        # sky blue
-            "sparsetsf": "#fb923c",      # tangerine
-            "patchtst": "#a78bfa",       # violet
-            "itransformer": "#34d399",   # emerald
-            "crossformer": "#f87171",    # rose
-            "timesnet": "#facc15",       # gold
-        }
+        # Trace colours are auto-assigned by the frontend (Plotly colorway).
+        # No per-model mapping kept here so adding a new model doesn't require
+        # touching this file or staying in sync with a JS palette.
 
         def _generate_holdout_predictions():
             """Run holdout predictions in thread pool to avoid blocking."""
@@ -1130,7 +1140,6 @@ class MLForecastLabApp:
                         timestamps=_holdout_ts,
                         actuals=[float(v) if not np.isnan(v) else None for v in _y_holdout_display],
                         predictions=[float(v) for v in y_p_display],
-                        color=MODEL_COLORS.get(m_name, "#ff6b6b"),
                     ))
 
                     if hasattr(m, 'training_metadata') and m.training_metadata:
@@ -1427,11 +1436,7 @@ class MLForecastLabApp:
             ]
             from ml_forecast_lab.web.app import ModelPrediction
 
-            ENSEMBLE_COLORS = {
-                "simple_average": "#ff922b",   # orange
-                "weighted_average": "#c084fc",  # purple
-                "stacking": "#22d3ee",          # cyan
-            }
+            # Ensemble trace colours are auto-assigned by the frontend.
 
             # Use last fold's predictions for display (closest to holdout behaviour)
             # Always align to holdout timestamps so the x-axis stays consistent
@@ -1460,7 +1465,6 @@ class MLForecastLabApp:
                         timestamps=list(holdout_ts),
                         actuals=[None] * n_holdout,
                         predictions=[float(v) if v is not None else None for v in display_preds],
-                        color=ENSEMBLE_COLORS.get(strat.value, "#FFD700"),
                     ))
 
         # Log summary

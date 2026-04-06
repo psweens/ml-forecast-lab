@@ -58,7 +58,7 @@
 
 <!-- Settings -->
 <section class="section">
-    <h2>Settings <span class="info-tip">?<span class="tip-text">Control how much CPU the add-on uses during model training. Lower values keep HA responsive but training takes longer. Recommended: half your available cores.</span></span></h2>
+    <h2>Settings <span class="info-tip">?<span class="tip-text">Global add-on settings: how much CPU and process priority training uses, your timezone, and the Hailo AI accelerator toggle. Per-experiment overrides (intervals, models, covariates) live in the Experiments section below.</span></span></h2>
     <form id="resource-form" onsubmit="saveSettings(event)">
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; max-width: 600px;">
             <div>
@@ -98,8 +98,9 @@
                 <input type="checkbox" name="hailo_enabled" {% if config.hailo_enabled %}checked{% endif %}
                        style="margin-right: 0.5rem; accent-color: var(--accent-secondary);">
                 Enable Hailo AI Accelerator
+                <span class="info-tip">?<span class="tip-text">When enabled, retrained neural models are exported to ONNX and run on the Hailo NPU for faster forecast inference. A CPU-vs-NPU validation test runs after each retrain — if the hardware is missing or outputs diverge, the add-on automatically falls back to CPU inference and logs a warning.</span></span>
             </label>
-            <span style="color: var(--text-secondary); font-size: 0.85rem;">Requires Hailo AI HAT hardware</span>
+            <span style="color: var(--text-secondary); font-size: 0.85rem;">Requires Hailo AI HAT hardware. Falls back to CPU if unavailable.</span>
         </div>
 
         <div style="margin-top: 2rem;">
@@ -252,18 +253,18 @@
             <h4 style="color:var(--text-primary);margin:1.25rem 0 0.75rem;font-size:0.95rem;border-bottom:1px solid var(--border);padding-bottom:0.4rem;">Scheduling</h4>
             <div class="exp-field-grid">
                 <div class="exp-field">
-                    <label>Forecast interval (minutes) <span class="info-tip">?<span class="tip-text">How often to run inference with the cached model. Overrides global default.</span></span></label>
+                    <label>Forecast interval (minutes) <span class="info-tip">?<span class="tip-text">How often to run inference with the cached trained model and publish updated sensors. Cheap (&lt;1s on RPi5). Leave blank to use the default of 30 minutes.</span></span></label>
                     <input type="number" class="setting-input" min="1" max="1440" step="1"
                            value="{{ exp.forecast_every_minutes if exp.forecast_every_minutes is not none else '' }}"
-                           placeholder="Global default"
+                           placeholder="30"
                            data-exp="{{ exp.name }}" data-field="forecast_every_minutes"
                            onchange="saveExperimentField(this)">
                 </div>
                 <div class="exp-field">
-                    <label>Retrain interval (hours) <span class="info-tip">?<span class="tip-text">How often to retrain the model from scratch. Overrides global default.</span></span></label>
+                    <label>Retrain interval (hours) <span class="info-tip">?<span class="tip-text">How often to retrain the model from scratch and refresh the cache. Expensive (minutes on RPi5). Leave blank to use the default of 24 hours.</span></span></label>
                     <input type="number" class="setting-input" min="0.5" max="720" step="0.5"
                            value="{{ exp.retrain_every_hours if exp.retrain_every_hours is not none else '' }}"
-                           placeholder="Global default"
+                           placeholder="24"
                            data-exp="{{ exp.name }}" data-field="retrain_every_hours"
                            onchange="saveExperimentField(this)">
                 </div>

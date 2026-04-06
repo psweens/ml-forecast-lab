@@ -100,13 +100,16 @@ class ForecastData(BaseModel):
 
 
 class ModelPrediction(BaseModel):
-    """Predictions from a single model on holdout data."""
+    """Predictions from a single model on holdout data.
+
+    Note: trace colours are no longer set here. The frontend (Plotly)
+    auto-assigns colours from a colorway in trace order.
+    """
 
     model_name: str
     timestamps: List[str]
     actuals: List[Optional[float]]
     predictions: List[Optional[float]]
-    color: str = "#ff6b6b"
 
 
 class LabForecastData(BaseModel):

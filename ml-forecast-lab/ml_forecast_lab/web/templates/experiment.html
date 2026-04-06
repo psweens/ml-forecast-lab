@@ -176,16 +176,16 @@
 <!-- ====== TAB: Results ====== -->
 <div class="tab-section" id="sec-results" style="display:none;">
 <section class="section">
-    <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Models are ranked by composite mean rank across CV folds (Demšar 2006). Within each fold, models are ranked independently by MAE, RMSE, and MASE; those per-metric ranks are averaged to give a composite fold rank, then averaged across folds. This rewards models that are consistently strong across all error measures.</span></span></h2>
+    <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Models are ranked by composite mean rank across CV folds (Demšar 2006). Within each fold, models are ranked independently by MAE, RMSE, and MASE; those per-metric ranks are averaged to give a composite fold rank, then averaged across folds. All metrics are computed on the next-step (h=1) prediction so tree and neural models are compared on the same horizon.</span></span></h2>
     <div class="table-container">
         <table class="metrics-table">
             <thead>
                 <tr>
                     <th style="width:2rem;"></th>
                     <th>Model</th>
-                    <th>MAE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Mean Absolute Error — average magnitude of prediction errors. Lower is better. The ± value shows variation across CV folds.</span></span></th>
-                    <th>RMSE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Root Mean Square Error — penalises large errors more heavily than MAE. Lower is better.</span></span></th>
-                    <th>MASE <span class="info-tip">?<span class="tip-text">Mean Absolute Scaled Error — prediction error relative to a naive forecast. Below 1.0 means the model beats naive; above 1.0 means worse than naive. Handles near-zero values reliably unlike MAPE.</span></span></th>
+                    <th>MAE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Mean Absolute Error of the next-step (h=1) prediction — average magnitude of prediction errors. Lower is better. The ± value shows variation across CV folds.</span></span></th>
+                    <th>RMSE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Root Mean Square Error of the next-step (h=1) prediction — penalises large errors more heavily than MAE. Lower is better.</span></span></th>
+                    <th>MASE <span class="info-tip">?<span class="tip-text">Mean Absolute Scaled Error of the next-step (h=1) prediction — error relative to a naive forecast. Below 1.0 means the model beats naive; above 1.0 means worse. Handles near-zero values reliably unlike MAPE.</span></span></th>
                     <th>Train Time <span class="info-tip">?<span class="tip-text">Average wall-clock training time per CV fold in seconds.</span></span></th>
                     <th>Mean Rank <span class="info-tip">?<span class="tip-text">Average rank across CV folds (1.0 = ranked 1st in every fold). Lower is better. A model with mean rank 1.4 was typically 1st or 2nd across folds, indicating strong generalisability.</span></span></th>
                     <th>Rank</th>
@@ -904,6 +904,16 @@ window.showTab = function(el) {
     var BASE = typeof BASE_PATH !== 'undefined' ? BASE_PATH : '';
     var EXP_NAME = {{ experiment.name | tojson }};
 
+    // Shared high-contrast Plotly colorway used by every multi-trace chart.
+    // Traces consume colours in order — no per-model lookup, no need to keep
+    // a JS palette in sync with the backend, and adding a new model just
+    // means it picks up the next colour.
+    var PLOT_COLORWAY = [
+        '#ff6b6b', '#4d96ff', '#ffd93d', '#6bcb77', '#c084fc',
+        '#ff922b', '#22d3ee', '#f472b6', '#a3e635', '#38bdf8',
+        '#fb923c', '#a78bfa', '#34d399', '#f87171', '#facc15'
+    ];
+
     // ======== Predictions + Residuals charts ========
     {% if lab_forecast and lab_forecast.model_predictions %}
     var labData = {{ lab_forecast.model_dump() | tojson }};
@@ -935,7 +945,7 @@ window.showTab = function(el) {
                 x: mp.timestamps,
                 y: cumulative ? cumsum(mp.predictions, mp.timestamps) : mp.predictions,
                 name: mp.model_name, mode: 'lines',
-                line: { color: mp.color, width: 2 }
+                line: { width: 2 }
             });
         });
         Plotly.newPlot('lab-forecast-chart', traces, {
@@ -945,6 +955,7 @@ window.showTab = function(el) {
             yaxis: { title: cumulative ? 'Daily Cumulative{{ " (" + units + ")" if units else "" }}' : 'Value{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
             hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
             font: { color: '#e0e0e0' }, legend: { orientation: 'h', y: -0.15 },
+            colorway: PLOT_COLORWAY,
             margin: { l: 60, r: 20, t: 50, b: 80 }
         }, { responsive: true });
     };
@@ -957,7 +968,7 @@ window.showTab = function(el) {
                 x: mp.timestamps,
                 y: mp.actuals.map(function(a, i) { return (a !== null && a !== undefined) ? a - mp.predictions[i] : null; }),
                 name: mp.model_name, mode: 'lines',
-                line: { color: mp.color, width: 1.5 }
+                line: { width: 1.5 }
             });
         });
         traces.push({
@@ -971,6 +982,7 @@ window.showTab = function(el) {
             yaxis: { title: 'Residual{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561', zeroline: true, zerolinecolor: '#ffffff' },
             hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
             font: { color: '#e0e0e0' }, legend: { orientation: 'h', y: -0.15 },
+            colorway: PLOT_COLORWAY,
             margin: { l: 60, r: 20, t: 50, b: 80 }
         }, { responsive: true });
     }
@@ -1013,14 +1025,6 @@ window.showTab = function(el) {
     {% endif %}
 
     // ======== Generalisation charts (fold stability) ========
-    var MODEL_COLORS = {
-        "lightgbm": "#ff6b6b", "xgboost": "#ffd93d", "lstm": "#6bcb77",
-        "cnn": "#4d96ff", "neuralprophet": "#c084fc", "dlinear": "#ff922b",
-        "nbeats": "#22d3ee", "nhits": "#f472b6", "tide": "#a3e635",
-        "tsmixer": "#38bdf8", "sparsetsf": "#fb923c", "patchtst": "#a78bfa",
-        "itransformer": "#34d399", "crossformer": "#f87171", "timesnet": "#facc15"
-    };
-
     {% if models and models[0].fold_results %}
     queueChart('sec-generalisation', function() {
         var modelsData = {{ models_json | tojson }};
@@ -1037,7 +1041,7 @@ window.showTab = function(el) {
                     x: model.fold_results.map(function(_, i) { return 'Fold ' + (i + 1); }),
                     y: model.fold_results.map(function(f) { return f[metric.key] || 0; }),
                     name: model.name, mode: 'lines+markers',
-                    line: { color: MODEL_COLORS[model.name] || '#ff6b6b', width: 2 },
+                    line: { width: 2 },
                     marker: { size: 7 }
                 });
             });
@@ -1047,6 +1051,7 @@ window.showTab = function(el) {
                 yaxis: { title: metric.label, gridcolor: '#2d3561' },
                 hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
                 font: { color: '#e0e0e0' }, legend: { orientation: 'h', y: -0.15 },
+                colorway: PLOT_COLORWAY,
                 margin: { l: 60, r: 20, t: 40, b: 80 }
             }, { responsive: true });
         });
@@ -1146,7 +1151,7 @@ window.showTab = function(el) {
                 if (!mp.model_name.startsWith('Ensemble:')) return;
                 traces.push({ x: mp.timestamps,
                     y: cumulative ? ecumsum(mp.predictions, mp.timestamps) : mp.predictions,
-                    name: mp.model_name, mode: 'lines', line: { color: mp.color, width: 2 } });
+                    name: mp.model_name, mode: 'lines', line: { width: 2 } });
             });
             Plotly.newPlot('ensemble-chart', traces, {
                 title: (cumulative ? 'Daily Cumulative ' : '') + 'Ensemble Comparison on Holdout (' +
@@ -1155,6 +1160,7 @@ window.showTab = function(el) {
                 yaxis: { title: cumulative ? 'Daily Cumulative{{ " (" + units + ")" if units else "" }}' : 'Value{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
                 hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
                 font: { color: '#e0e0e0' }, legend: { orientation: 'h', y: -0.15 },
+                colorway: PLOT_COLORWAY,
                 margin: { l: 60, r: 20, t: 50, b: 80 }
             }, { responsive: true });
         };

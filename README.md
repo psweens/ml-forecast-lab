@@ -6,33 +6,47 @@ ML Forecast Lab lets you train, compare, and deploy time-series forecasting mode
 
 ## Features
 
-**Four model backends**, benchmarked on identical data splits:
+**15 model backends**, benchmarked on identical data splits:
 
-| Model | Type | Notes |
-|-------|------|-------|
-| LightGBM | Gradient boosting | Fast training, recursive multi-step prediction, early stopping |
-| XGBoost | Gradient boosting | Alternative GBDT implementation |
-| LSTM | Recurrent neural network | Pure NumPy — no PyTorch/TensorFlow dependency |
-| CNN | 1D dilated causal convolution | WaveNet-style architecture, pure NumPy, residual connections |
+| Family | Models |
+|--------|--------|
+| Gradient boosting | LightGBM, XGBoost |
+| Recurrent | LSTM |
+| Convolutional | CNN (WaveNet-style dilated causal), TimesNet |
+| Linear / MLP | DLinear, TSMixer, TiDE, SparseTSF |
+| N-BEATS family | N-BEATS, N-HiTS |
+| Transformer | PatchTST, iTransformer, Crossformer |
+| Probabilistic | NeuralProphet |
 
-The neural backends are implemented entirely in NumPy to keep the Docker image small enough for Raspberry Pi deployment (~50 MB vs ~800 MB+ for PyTorch/TensorFlow).
+All neural backends use PyTorch and support multi-horizon dense outputs with residual prediction (predict deltas, not absolute values) for stable forecasts.
 
 **Rigorous evaluation:**
 
 - Walk-forward and sliding-window cross-validation with configurable embargo gaps to prevent data leakage
-- 8 standard metrics: MAE, RMSE, MAPE, sMAPE, MASE, R², pinball loss, coverage
+- Multiple metrics: MAE, RMSE, MAPE, sMAPE, MASE, R², pinball loss, coverage
+- Composite Demšar (2006) ranking across CV folds for fair multi-metric comparison
 - Custom metrics via sandboxed Python expressions
 - Diebold-Mariano statistical test for pairwise model comparison
-- Model Confidence Sets to identify statistically indistinguishable best models
+
+**Decoupled training and inference cycles:**
+
+- **Retrain cycle** (configurable, default 24h) — trains all enabled models from scratch and refreshes the in-memory cache.
+- **Forecast cycle** (configurable, default 30min) — runs the cached model for sub-second inference and publishes forecasts as HA sensors.
 
 **Two operational modes:**
 
 - **Lab mode** — trains all enabled models, benchmarks with CV, displays results in the web UI. No forecasts published to HA. Use this for model selection.
-- **Production mode** — trains only the promoted (best) model on full history, publishes forecasts as HA sensor entities on a configurable cycle.
+- **Production mode** — trains only the selected model on full history, publishes forecasts as HA sensor entities on the forecast cycle.
 
-**26 auto-generated features** including temporal encodings (hour, day-of-week, month), cyclical sin/cos transforms, configurable lag features, rolling statistics (mean, std, max), and holiday indicators.
+**Hyperparameter tuning** — Bayesian optimisation (Optuna TPE) per-model with composite-rank trial selection. Default vs tuned holdout comparison plot included.
 
-**Built-in web UI** (FastAPI + HTMX + Plotly) on port 5052 with experiment dashboard, model comparison tables, forecast charts, and one-click model promotion.
+**Ensembles** — combine multiple models with simple averaging, inverse-metric weighting, or stacking. Re-runnable without retraining.
+
+**Covariate analysis** — automatically test every covariate combination across all enabled models to discover which external features genuinely improve forecasts.
+
+**Auto-generated features** include temporal encodings (hour, day-of-week, month), cyclical sin/cos transforms, configurable lag features, rolling statistics, holiday indicators, and per-covariate aggregations / scalings.
+
+**Built-in web UI** (FastAPI + Jinja2 + Plotly) on port 5052 with experiment dashboard, tabbed experiment view (Models, Training, Results, Predictions, Generalisation, Features, Ensemble, Covariate Analysis, Tuning), live retraining progress, and live forecast/retrain countdowns.
 
 ## Installation
 
@@ -58,21 +72,23 @@ Create `/config/mlfl.yaml` (or `/addon_configs/ml_forecast_lab/mlfl.yaml`) with 
 ```yaml
 global:
   timezone: "Europe/London"
-  update_every_minutes: 360
-  hailo_enabled: false
+  hailo_enabled: false        # Set true if you have a Hailo AI HAT (Raspberry Pi)
 
 experiments:
   - name: mixergy_demand
     target_entity: sensor.mixergy_demand_today
-    mode: lab
+    mode: lab                 # 'lab' for benchmarking, 'production' to deploy
     source_is_cumulative: true
     reset_daily: true
     interval_minutes: 30
     max_increment: 5.0
     days_history: 30
     max_age: 90
-    horizons_minutes: [120, 480, 720, 1440]
-    future_periods: 48
+    future_periods: 48        # 48 steps × 30min = 24h horizon
+
+    # Per-experiment scheduling (optional — defaults are 30min / 24h)
+    forecast_every_minutes: 30
+    retrain_every_hours: 24
 
     covariates:
       - entity: sensor.mixergy_current_charge
@@ -89,6 +105,9 @@ experiments:
       - xgboost
       - lstm
       - cnn
+      # 11 more neural backends available: dlinear, nbeats, nhits, tide,
+      # tsmixer, sparsetsf, patchtst, itransformer, crossformer, timesnet,
+      # neuralprophet
 
     cv_strategy: walk_forward
     cv_folds: 5
@@ -105,8 +124,10 @@ experiments:
 | `reset_daily` | Cumulative sensor resets at midnight | `false` |
 | `interval_minutes` | Resampling grid interval | `30` |
 | `days_history` | Days of history to fetch for training | `30` |
-| `horizons_minutes` | Forecast horizons to evaluate | `[120, 480, 1440]` |
-| `models_enabled` | Which backends to benchmark | all four |
+| `future_periods` | Number of future steps to forecast | `48` |
+| `forecast_every_minutes` | How often to run cached-model inference | `30` |
+| `retrain_every_hours` | How often to retrain the model from scratch | `24` |
+| `models_enabled` | Which backends to benchmark (15 available) | LightGBM, XGBoost |
 | `cv_strategy` | `walk_forward` or `sliding_window` | `walk_forward` |
 | `cv_folds` | Number of CV folds | `5` |
 | `cv_embargo_periods` | Gap between train/test splits | `2` |
@@ -121,50 +142,57 @@ http://homeassistant.local:5052
 
 Or via the **Open Web UI** button on the add-on page.
 
-The dashboard shows all configured experiments with status badges, and each experiment page displays model comparison tables with metrics, interactive forecast charts (via Plotly), and a button to promote the best model to production.
+The dashboard shows all configured experiments with status badges and live "Next Forecast" / "Next Retrain" countdowns. Each experiment page contains tabs for model comparison (Demšar composite ranking across CV folds), holdout predictions on a Plotly chart, generalisation diagnostics, feature importance, ensembles, hyperparameter tuning (Optuna TPE), and covariate analysis.
 
 ## API
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/status` | GET | Health check and experiment counts |
-| `/api/models` | GET | List available model backends |
-| `/experiment/{name}/results` | GET | Latest benchmark results (JSON) |
-| `/experiment/{name}/forecast` | GET | Forecast data for charting |
-| `/experiment/{name}/run-benchmark` | POST | Trigger benchmark run |
-| `/experiment/{name}/promote/{model}` | POST | Promote model to production |
+The web UI exposes a JSON API for status, benchmark results, forecasts, model selection, ensembles, hyperparameter tuning, and covariate analysis. Endpoints are not yet stabilised — browse the FastAPI auto-docs at `/docs` for the current surface.
 
 ## Architecture
 
 ```
-mlfl.yaml
-    │
-    ▼
-┌──────────────┐     ┌─────────────────┐     ┌──────────────────┐
-│ HA Interface │────▶│ History Database │────▶│ Feature Engineer │
-│  (API client)│     │    (SQLite)      │     │  (26 features)   │
-└──────────────┘     └─────────────────┘     └────────┬─────────┘
-                                                       │
-                           ┌───────────────────────────┤
-                           ▼                           ▼
-                  ┌─────────────────┐        ┌──────────────────┐
-                  │  Cross-Validator │        │  Model Registry  │
-                  │ (walk-fwd / SW) │        │ LGB│XGB│LSTM│CNN │
-                  └────────┬────────┘        └──────────────────┘
+                       mlfl.yaml
                            │
                            ▼
-                  ┌─────────────────┐
-                  │   Benchmarker   │
-                  │ metrics + stats │
-                  └────────┬────────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-        ┌──────────┐ ┌──────────┐ ┌──────────┐
-        │  Web UI  │ │ Forecast │ │   DM /   │
-        │ (5052)   │ │ Publisher│ │   MCS    │
-        └──────────┘ └──────────┘ └──────────┘
+          ┌──────────────┐     ┌──────────────────┐
+          │ HA Interface │────▶│  History Database│
+          │  (API client)│     │     (SQLite)     │
+          └──────────────┘     └────────┬─────────┘
+                                        │
+                                        ▼
+                              ┌──────────────────┐
+                              │ Feature Engineer │
+                              │ lags + temporal +│
+                              │   covariates     │
+                              └────────┬─────────┘
+                                       │
+                ┌──────────────────────┼──────────────────────┐
+                ▼                      ▼                      ▼
+       ┌─────────────────┐   ┌─────────────────┐    ┌──────────────────┐
+       │ Cross-Validator │   │ Model Registry  │    │  Hailo Wrapper   │
+       │ walk-fwd or SW  │   │ 15 backends     │    │ ONNX → NPU       │
+       └────────┬────────┘   │ tree + neural   │    │ + CPU fallback   │
+                │            └─────────────────┘    └──────────────────┘
+                ▼
+      ┌──────────────────┐         ┌──────────────────┐
+      │   Benchmarker    │────────▶│  Model Cache     │
+      │ Demšar ranking   │         │ (per experiment) │
+      └────────┬─────────┘         └────────┬─────────┘
+               │                            │
+               │                            ▼
+               │                  ┌──────────────────┐
+               │                  │ Forecast Cycle   │
+               │                  │ (every 30 min)   │
+               │                  └────────┬─────────┘
+               ▼                            │
+      ┌──────────────────┐                  ▼
+      │     Web UI       │         ┌──────────────────┐
+      │  (port 5052)     │         │ HA Sensor        │
+      └──────────────────┘         │ Publisher        │
+                                   └──────────────────┘
 ```
+
+The retrain cycle (every ~24h) trains all enabled models from scratch and refreshes the cache. The forecast cycle (every ~30min) uses the cached model for fast inference without retraining.
 
 ## Multiple experiments
 
@@ -187,13 +215,19 @@ Each experiment trains and evaluates models independently.
 
 ## Hailo AI HAT support (optional)
 
-For Raspberry Pi users with a Hailo-8L AI HAT, ML Forecast Lab can export trained neural models (LSTM, CNN) to ONNX and compile them to HEF format for NPU-accelerated inference. Training always runs on CPU; only inference is offloaded.
+For Raspberry Pi users with a Hailo-8L AI HAT, ML Forecast Lab can export trained neural models to ONNX and run inference on the NPU. Training always runs on CPU; only the forecast cycle is offloaded. Supported across all 13 neural backends (LSTM, CNN, DLinear, N-BEATS, N-HiTS, TiDE, TSMixer, SparseTSF, PatchTST, iTransformer, Crossformer, TimesNet, NeuralProphet).
+
+After every retrain a CPU-vs-NPU validation test runs on a sample of the training data. If the hardware is missing or the outputs diverge from CPU by more than 1%, the add-on falls back to CPU inference and logs a warning — Hailo never silently breaks forecasts.
 
 Set `hailo_enabled: true` in the global config to enable.
 
 ## Dependencies
 
-numpy, pandas, LightGBM, XGBoost, scikit-learn, scipy, ONNX, FastAPI, uvicorn, Jinja2, Plotly.
+Core: numpy, pandas, scikit-learn, scipy, FastAPI, uvicorn, Jinja2, Plotly.
+Tree models: LightGBM, XGBoost.
+Neural models: PyTorch (LSTM, CNN, DLinear, N-BEATS, N-HiTS, TiDE, TSMixer, SparseTSF, PatchTST, iTransformer, Crossformer, TimesNet), NeuralProphet.
+Hyperparameter tuning: Optuna.
+Hardware acceleration (optional): ONNX, hailort (Hailo NPU).
 
 ## Licence
 
