@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.3.1
+
+### Fix
+- **Holdout chart now spans full time period for neural models**: with dense
+  multi-horizon training (`horizon_steps=[1..96]`), `create_sliding_windows`
+  produces only `len(holdout) - 95` valid windows, so the Predictions tab chart
+  was missing the final ~48h of CNN/LSTM/etc. predictions while LightGBM
+  covered the entire holdout. Neural models now reconstruct full coverage by
+  using the LAST window's higher horizons (h=2..96) to fill the tail. Each
+  holdout point gets exactly one prediction at the right horizon offset.
+- **Fair leaderboard ranking between tree and neural models**: the un-suffixed
+  ranking metric for neural models was the *average* across all 96 horizons,
+  while tree models reported a single h=1 metric. Averaging long-horizon errors
+  systematically penalised neural models — even when their h=1 predictions were
+  competitive. The ranking metric now uses h=1 only for both model families,
+  matching the chart and the natural tree-model evaluation point. The
+  horizon-averaged variant is still recorded as `mae_havg`, `rmse_havg`, etc.
+  for diagnostics.
+
 ## 2.0.3
 
 ### Improvement

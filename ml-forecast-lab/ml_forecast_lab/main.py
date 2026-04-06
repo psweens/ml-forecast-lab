@@ -1083,24 +1083,47 @@ class MLForecastLabApp:
                         )
                         y_p = m.predict_sequence(seq_X_ho)
                         _y_holdout = seq_y_ho
-                        # Timestamps: predictions start at first holdout timestamp
+                        # Reconstruct full-coverage 1-step display arrays.
+                        #
+                        # With dense horizon_steps=[1..max_h], create_sliding_windows
+                        # produces n_windows = len(holdout) - max_h + 1 valid windows.
+                        # Each window i predicts holdout[i + h - 1] at horizon h.
+                        #
+                        # Coverage strategy:
+                        #   * holdout[0 .. n_windows-1]   ← window i, h=1   (one window per index)
+                        #   * holdout[n_windows .. end]   ← LAST window, h=2..max_h
+                        # This gives full holdout coverage matching tree models.
+                        n_windows = y_p.shape[0]
                         max_h = max(horizon_steps)
-                        _holdout_ts = [
-                            ts.isoformat() for ts in holdout_part.index[:len(seq_y_ho)]
-                        ]
+                        n_holdout = len(holdout_part)
+                        n_tail = max(0, n_holdout - n_windows)
+
+                        full_pred = np.empty(n_holdout, dtype=np.float32)
+                        full_pred[:n_windows] = y_p[:, 0]
+                        if n_tail > 0 and y_p.shape[1] >= 1 + n_tail:
+                            # Last window's higher horizons cover the tail
+                            full_pred[n_windows:] = y_p[-1, 1:1 + n_tail]
+                        elif n_tail > 0:
+                            # Fallback: pad with last available prediction
+                            full_pred[n_windows:] = y_p[-1, -1]
+
+                        full_actual = holdout_part[target_col].values.astype(np.float32)
+
+                        y_p_display = full_pred
+                        _y_holdout_display = full_actual
+                        _holdout_ts = holdout_timestamps
                     else:
                         y_p = m.predict(X_holdout)
+                        # For chart display: use first horizon (shortest-term)
+                        if y_p.ndim == 2:
+                            y_p_display = y_p[:, 0]
+                            _y_holdout_display = _y_holdout[:, 0] if _y_holdout.ndim == 2 else _y_holdout
+                        else:
+                            y_p_display = y_p
+                            _y_holdout_display = _y_holdout
 
-                    # For chart display: use first horizon (shortest-term)
-                    if y_p.ndim == 2:
-                        y_p_display = y_p[:, 0]
-                        _y_holdout_display = _y_holdout[:, 0] if _y_holdout.ndim == 2 else _y_holdout
-                    else:
-                        y_p_display = y_p
-                        _y_holdout_display = _y_holdout
-
-                    if y_p_display.ndim > 1:
-                        y_p_display = y_p_display.ravel()
+                        if y_p_display.ndim > 1:
+                            y_p_display = y_p_display.ravel()
 
                     _model_predictions.append(ModelPrediction(
                         model_name=m_name,

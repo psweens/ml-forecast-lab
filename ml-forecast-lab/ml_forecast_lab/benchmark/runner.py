@@ -454,7 +454,7 @@ class BenchmarkRunner:
 
             inference_time = time.time() - inference_start
 
-            # Compute metrics — per-horizon for multi-output, then averaged for ranking
+            # Compute metrics — per-horizon for multi-output, h=1 for ranking
             metrics_to_compute = list(set(self.metrics + [self.production_metric]))
             fold_metrics = {}
             if y_pred.ndim == 2 and y_test.ndim == 2:
@@ -469,19 +469,37 @@ class BenchmarkRunner:
                     for metric_name, value in h_metrics.items():
                         fold_metrics[f"{metric_name}_h{h_step}"] = value
 
-                # Horizon-averaged metrics (un-suffixed) for Demšar ranking
+                # Un-suffixed metric for Demšar ranking: use FIRST horizon (h=1).
+                # This compares neural models fairly against tree models, which
+                # only produce h=1 predictions. Averaging across all horizons
+                # would unfairly penalize neural models for harder long-horizon
+                # forecasts that tree models never have to make.
+                # Per-horizon metrics remain available as `mae_h2`, `mae_h96`, etc.
+                first_h_idx = 0  # h=1 is always first in horizon_steps
+                first_h_metrics = self.metric_registry.compute_all(
+                    metrics_to_compute,
+                    y_test[:, first_h_idx],
+                    y_pred[:, first_h_idx],
+                    y_train=y_train[:, first_h_idx] if y_train.ndim == 2 else y_train,
+                )
+                for metric_name, value in first_h_metrics.items():
+                    fold_metrics[metric_name] = value
+
+                # Also store the horizon-averaged variant for diagnostics
                 for metric_name in metrics_to_compute:
                     h_values = [
                         fold_metrics.get(f"{metric_name}_h{h}", np.nan)
                         for h in (horizon_steps or [])
                     ]
-                    fold_metrics[metric_name] = float(np.nanmean(h_values))
+                    fold_metrics[f"{metric_name}_havg"] = float(np.nanmean(h_values))
             else:
                 fold_metrics = self.metric_registry.compute_all(
                     metrics_to_compute, y_test, y_pred, y_train=y_train,
                 )
 
             # --- Train metrics for overfitting table ---
+            # Match the test-metric scheme: per-horizon stored as `mae_h{n}`,
+            # un-suffixed metric uses h=1 to compare fairly with tree models.
             fold_train_m = {}
             if y_pred_train is not None:
                 try:
@@ -494,12 +512,21 @@ class BenchmarkRunner:
                             )
                             for mn, val in h_train_m.items():
                                 fold_train_m[f"{mn}_h{h_step}"] = val
+                        # Un-suffixed train metric: h=1 only (matches test path)
+                        first_h_train = self.metric_registry.compute_all(
+                            metrics_to_compute,
+                            y_train[:, 0], y_pred_train[:, 0],
+                            y_train=y_train[:, 0],
+                        )
+                        for mn, val in first_h_train.items():
+                            fold_train_m[mn] = val
+                        # Horizon-averaged variant for diagnostics
                         for mn in metrics_to_compute:
                             h_vals = [
                                 fold_train_m.get(f"{mn}_h{h}", np.nan)
                                 for h in (horizon_steps or [])
                             ]
-                            fold_train_m[mn] = float(np.nanmean(h_vals))
+                            fold_train_m[f"{mn}_havg"] = float(np.nanmean(h_vals))
                     else:
                         fold_train_m = self.metric_registry.compute_all(
                             metrics_to_compute, y_train, y_pred_train,
