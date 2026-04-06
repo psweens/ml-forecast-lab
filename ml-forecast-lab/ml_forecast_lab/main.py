@@ -1914,7 +1914,7 @@ class MLForecastLabApp:
         self._update_running = True
         try:
             if exp_cfg.mode == "lab":
-                await self.update_experiment(exp_cfg.name, is_lab=True)
+                await self.update_experiment(exp_cfg.name, is_lab_mode=True)
             else:
                 await self._retrain_and_cache(exp_cfg)
             await self.publish_heartbeat()
@@ -1947,7 +1947,7 @@ class MLForecastLabApp:
 
             for exp_cfg in self.config.experiments:
                 if exp_cfg.mode == "lab":
-                    await self.update_experiment(exp_cfg.name, is_lab=True)
+                    await self.update_experiment(exp_cfg.name, is_lab_mode=True)
                 else:
                     try:
                         await self._retrain_and_cache(exp_cfg)

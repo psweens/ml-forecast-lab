@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.5.2
+
+### Fix
+- **Retrain cycle crashes with `unexpected keyword argument 'is_lab'`**.
+  Two callers of `update_experiment()` (in `_retrain_single` and the
+  `_run_retrain_cycle` loop) were passing `is_lab=True`, but the method's
+  parameter is `is_lab_mode`. The mismatch broke every retrain cycle for
+  lab-mode experiments. Fixed both call sites to use the correct keyword.
+
 ## 2.5.1
 
 ### Fix
