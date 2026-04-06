@@ -1,5 +1,57 @@
 # Changelog
 
+## 2.5.3
+
+### Fix
+- **Auto-ensemble was still running after every benchmark.** v2.5.0 hid the
+  Ensemble tab from the navigation but the two `_run_ensemble()` calls
+  inside `_benchmark_trigger` and `update_experiment` were still firing
+  after every CV run, wasting compute and producing results no one could
+  see. Both auto-trigger sites are now disabled. The ensemble code path,
+  the `ensemble_callback`, and the section's HTML are all left in place
+  so the feature can be re-enabled by uncommenting the nav link if needed.
+- **`remove-covariate` couldn't actually find the covariate to remove.**
+  Pre-existing bug: the deep-analysis "Remove" buttons send the short
+  name (`current_charge`) but `remove_experiment_covariate` was matching
+  against the full entity ID (`sensor.current_charge`), so the helper
+  silently failed and the YAML was never edited. The helper now matches
+  either form. Verified with five edge-case tests.
+
+### New: clearer apply / publish workflow on Tuning + Covariate tabs
+
+Both tabs now have a single prominent button that finalises the analysis
+result and immediately starts a fresh retrain — no manual `mlfl.yaml`
+editing, no waiting for the next scheduled retrain cycle.
+
+**Tuning tab — "Apply Tuned Params, Promote & Retrain"** (was "Apply &
+Promote"). The button now:
+1. Saves tuned params to `mlfl.yaml` (existing behaviour)
+2. Promotes the tuned model to production (existing behaviour)
+3. **Triggers an immediate background retrain** (new) so the live
+   forecast sensor picks up the new params right away
+4. Switches the UI to the Training tab so the user can watch the live
+   retrain progress, then reloads to refresh state
+A short explanatory paragraph below the button spells out what each
+click will do.
+
+**Covariate Analysis tab — "Apply Best & Retrain"** (new green panel
+above the results table). Reads the latest deep-analysis run, picks the
+covariate configuration with the lowest average MAE across models, and:
+* If "All covariates" wins → reports "already optimal", no changes
+* If "No covariates" wins → clears the experiment's covariate list
+* If "Without X" wins → removes covariate X
+…then triggers an immediate background retrain. Toast shows which
+covariates were dropped and the % MAE improvement vs baseline.
+
+Backed by a new `POST /experiment/{name}/apply-covariate-best` endpoint
+and a new `clear_experiment_covariates()` config helper. The existing
+per-row "Remove" buttons stay as fine-grained controls.
+
+### Plumbing
+- New `retrain_callback` slot on `AppState`, registered by `main.py` at
+  startup. Apply endpoints schedule retrains via this callback so they
+  don't have to import `MLForecastLabApp` directly.
+
 ## 2.5.2
 
 ### Fix

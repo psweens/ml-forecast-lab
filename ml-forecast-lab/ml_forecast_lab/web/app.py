@@ -264,6 +264,10 @@ class AppState:
         self.benchmark_callback = None  # Set by main app for triggering
         self.tuning_results: Dict[str, TuningResult] = {}
         self.tuning_callback = None  # Set by main app for triggering
+        # Trigger an immediate retrain for one experiment. Used by the
+        # apply-tuning and apply-covariate-best endpoints so the user
+        # doesn't have to wait for the next scheduled retrain cycle.
+        self.retrain_callback = None  # Set by main app
         self.running_benchmarks: set = set()
         self.last_update: Optional[datetime] = None
         self.next_update_seconds: Optional[int] = None
@@ -1014,6 +1018,128 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         app.state.appstate.experiment_statuses[name].selected_model = model_name
         return JSONResponse(content={"success": True, "selected_model": model_name})
 
+    @app.post("/experiment/{name}/apply-covariate-best")
+    async def apply_covariate_best(name: str):
+        """
+        Apply the winning covariate configuration from the latest deep
+        analysis run, then trigger a background retrain.
+
+        Determines which covariate set has the lowest average MAE across
+        all tested models. The winner is one of:
+            * "All covariates" — no changes needed
+            * "No covariates"  — all covariates removed
+            * "Without X"      — single covariate X removed
+
+        Returns a JSON payload describing the action taken.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        result = app.state.appstate.deep_analysis_results.get(name)
+        if not result or result.status != "completed" or not result.results:
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "error": "No completed deep analysis results"},
+            )
+
+        # Score every covariate label by its average MAE across models
+        label_scores: Dict[str, float] = {}
+        for label in result.covariate_labels:
+            cells = result.results.get(label, {})
+            maes = [
+                cell.mae for cell in cells.values()
+                if cell is not None and cell.mae is not None
+                and not (isinstance(cell.mae, float) and (cell.mae != cell.mae))  # NaN check
+            ]
+            if maes:
+                label_scores[label] = sum(maes) / len(maes)
+
+        if not label_scores:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "No valid metrics in deep analysis results"},
+            )
+
+        best_label = min(label_scores, key=label_scores.get)
+        best_score = label_scores[best_label]
+        baseline_score = label_scores.get(result.baseline_label, best_score)
+
+        from ml_forecast_lab.config import (
+            remove_experiment_covariate,
+            clear_experiment_covariates,
+        )
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(
+                content={"success": False, "error": "Config file not found"},
+            )
+
+        action = "no_change"
+        removed_covariates: List[str] = []
+        try:
+            if best_label == result.baseline_label:
+                # All covariates already optimal
+                action = "no_change"
+            elif best_label == "No covariates":
+                n_removed = clear_experiment_covariates(config_path, name)
+                action = "cleared"
+                removed_covariates = [f"{n_removed} covariate(s)"]
+            elif best_label.startswith("Without "):
+                short_name = best_label[len("Without "):]
+                if remove_experiment_covariate(config_path, name, short_name):
+                    action = "removed"
+                    removed_covariates = [short_name]
+                else:
+                    return JSONResponse(content={
+                        "success": False,
+                        "error": f"Could not find covariate '{short_name}' to remove",
+                    })
+            else:
+                return JSONResponse(content={
+                    "success": False,
+                    "error": f"Unsupported best label: {best_label}",
+                })
+
+            # Trigger a background retrain so the user sees the new
+            # configuration take effect on the live forecast sensor without
+            # waiting for the next scheduled retrain cycle. Skipped when
+            # action == "no_change" — nothing changed, no retrain needed.
+            retrain_scheduled = False
+            if action != "no_change" and app.state.appstate.retrain_callback:
+                import asyncio as _aio
+                _aio.create_task(app.state.appstate.retrain_callback(name))
+                retrain_scheduled = True
+                logger.info(
+                    f"Scheduled immediate retrain for {name} after apply-covariate-best"
+                )
+
+            improvement_pct = None
+            if baseline_score and baseline_score > 0:
+                improvement_pct = (baseline_score - best_score) / baseline_score * 100
+
+            logger.info(
+                f"apply-covariate-best ({name}): winner='{best_label}' "
+                f"action={action} removed={removed_covariates} "
+                f"improvement={improvement_pct:+.1f}% retraining={retrain_scheduled}"
+                if improvement_pct is not None else
+                f"apply-covariate-best ({name}): winner='{best_label}' "
+                f"action={action} retraining={retrain_scheduled}"
+            )
+
+            return JSONResponse(content={
+                "success": True,
+                "action": action,
+                "best_label": best_label,
+                "best_mae": round(best_score, 6),
+                "baseline_mae": round(baseline_score, 6),
+                "improvement_pct": round(improvement_pct, 2) if improvement_pct is not None else None,
+                "removed": removed_covariates,
+                "retraining": retrain_scheduled,
+            })
+        except Exception as e:
+            logger.error(f"Failed to apply covariate-best: {e}", exc_info=True)
+            return JSONResponse(content={"success": False, "error": str(e)})
+
     @app.post("/experiment/{name}/remove-covariate")
     async def remove_covariate(name: str, request: Request):
         """Remove a covariate from experiment config."""
@@ -1232,6 +1358,16 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             save_experiment_field(config_path, name, "production_model", result.model_name)
             save_experiment_field(config_path, name, "mode", "production")
 
+            # 3. Trigger an immediate retrain so the user doesn't have to
+            # wait for the next scheduled retrain cycle to see the tuned
+            # params take effect on the live forecast sensor.
+            retrain_scheduled = False
+            if app.state.appstate.retrain_callback:
+                import asyncio as _aio
+                _aio.create_task(app.state.appstate.retrain_callback(name))
+                retrain_scheduled = True
+                logger.info(f"Scheduled immediate retrain for {name} after apply-tuning")
+
             logger.info(
                 f"Applied tuned params and promoted {result.model_name} "
                 f"for experiment {name}"
@@ -1239,6 +1375,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={
                 "success": True, "model": result.model_name,
                 "params": result.best_params, "promoted": True,
+                "retraining": retrain_scheduled,
             })
         except Exception as e:
             logger.error(f"Failed to apply tuning: {e}")

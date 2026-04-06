@@ -274,11 +274,10 @@ class MLForecastLabApp:
                     try:
                         self.web_app.state.appstate.start_benchmark(experiment_name)
                         await self._run_benchmark(exp_cfg)
-                        # Auto-run ensemble after benchmark completes
-                        try:
-                            await self._run_ensemble(experiment_name)
-                        except Exception as e:
-                            logger.warning(f"Auto-ensemble after benchmark failed: {e}")
+                        # Ensemble auto-run disabled in v2.5.0 along with the
+                        # Ensemble tab. The user can still trigger it manually
+                        # via the registered ensemble_callback if the tab is
+                        # ever re-enabled.
                     except Exception as e:
                         logger.error(f"Benchmark failed: {e}", exc_info=True)
                     finally:
@@ -333,6 +332,33 @@ class MLForecastLabApp:
 
             self.web_app.state.appstate.tuning_callback = _tuning_trigger
 
+            # Register retrain callback so the apply-tuning and
+            # apply-covariate-best endpoints can trigger a fresh retrain
+            # immediately after they save config changes, instead of making
+            # the user wait for the next scheduled retrain cycle.
+            async def _retrain_trigger(experiment_name: str):
+                # Re-read config so any YAML edits applied just before this
+                # call are picked up before the retrain runs.
+                await self.load_config()
+                exp_cfg = next(
+                    (c for c in self.config.experiments if c.name == experiment_name),
+                    None,
+                )
+                if exp_cfg is None:
+                    logger.warning(
+                        f"Retrain trigger: experiment '{experiment_name}' not found in config"
+                    )
+                    return
+                try:
+                    await self._retrain_single(exp_cfg)
+                except Exception as e:
+                    logger.error(
+                        f"Retrain trigger failed for {experiment_name}: {e}",
+                        exc_info=True,
+                    )
+
+            self.web_app.state.appstate.retrain_callback = _retrain_trigger
+
             # Run in a background task
             asyncio.create_task(self.server.serve())
             logger.info(f"Web server started successfully on {host}:{port}")
@@ -367,11 +393,8 @@ class MLForecastLabApp:
 
             if is_lab_mode:
                 await self._run_benchmark(exp_cfg)
-                # Auto-run ensemble after benchmark
-                try:
-                    await self._run_ensemble(experiment_name)
-                except Exception as e:
-                    logger.warning(f"Auto-ensemble after benchmark failed: {e}")
+                # Ensemble auto-run disabled in v2.5.0 — see _benchmark_trigger
+                # comment for context.
             else:
                 await self._run_production_inference(exp_cfg)
 

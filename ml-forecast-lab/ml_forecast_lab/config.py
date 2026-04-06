@@ -503,11 +503,21 @@ def remove_experiment_covariate(
     """
     Remove a covariate from an experiment's config.
 
+    `entity_id` can be either the full entity ID (e.g. ``sensor.current_charge``)
+    or its short suffix (``current_charge``) — the deep-analysis UI uses the
+    short form because that's what becomes the dataframe column name.
+
     Returns True if a covariate was removed, False if not found.
     """
     config_path = Path(config_path)
     with open(config_path, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f) or {}
+
+    def _matches(cov: dict, target: str) -> bool:
+        ent = cov.get('entity') or ''
+        if not ent:
+            return False
+        return ent == target or ent.split('.')[-1] == target
 
     removed = False
     for exp in data.get('experiments', []):
@@ -515,11 +525,39 @@ def remove_experiment_covariate(
             continue
         covs = exp.get('covariates', [])
         original_len = len(covs)
-        exp['covariates'] = [c for c in covs if c.get('entity') != entity_id]
+        exp['covariates'] = [c for c in covs if not _matches(c, entity_id)]
         removed = len(exp['covariates']) < original_len
         break
 
     if removed:
+        with open(config_path, 'w', encoding='utf-8') as f:
+            yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+
+    return removed
+
+
+def clear_experiment_covariates(
+    config_path: Path | str,
+    experiment_name: str,
+) -> int:
+    """
+    Remove ALL covariates from an experiment's config.
+
+    Returns the number of covariates that were removed.
+    """
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    removed = 0
+    for exp in data.get('experiments', []):
+        if exp.get('name') != experiment_name:
+            continue
+        removed = len(exp.get('covariates', []))
+        exp['covariates'] = []
+        break
+
+    if removed > 0:
         with open(config_path, 'w', encoding='utf-8') as f:
             yaml.dump(data, f, sort_keys=False, default_flow_style=False)
 

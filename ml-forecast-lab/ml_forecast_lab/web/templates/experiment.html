@@ -654,13 +654,19 @@
         {% if tuning_result.best_params and tuning_result.status == 'completed' %}
         {% set defaults = param_defaults.get(tuning_result.model_name, {}) %}
         <div style="margin-bottom:1rem;padding:0.75rem 1rem;background:rgba(46,204,113,0.1);border:1px solid rgba(46,204,113,0.25);border-radius:0.5rem;">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem;flex-wrap:wrap;gap:0.5rem;">
                 <span style="color:var(--success);font-weight:600;">Best — Trial #{{ tuning_result.best_trial_id }}, composite {{ "%.4f"|format(tuning_result.best_score) }}</span>
-                <button class="btn btn-success" style="padding:0.3rem 1rem;font-size:0.85rem;"
-                        onclick="applyTuning('{{ experiment.name }}')">
-                    Apply &amp; Promote
+                <button class="btn btn-success" style="padding:0.4rem 1rem;font-size:0.85rem;"
+                        onclick="applyTuning('{{ experiment.name }}', this)"
+                        title="Save tuned params to mlfl.yaml, promote {{ tuning_result.model_name }} to production, and start a fresh retrain so the live forecast picks up the new params immediately.">
+                    Apply Tuned Params, Promote &amp; Retrain
                 </button>
             </div>
+            <p style="margin:0 0 0.4rem 0;color:var(--text-secondary);font-size:0.82rem;">
+                Clicking the button above writes the tuned params to <code style="color:var(--text-muted);">mlfl.yaml</code>,
+                marks <strong style="color:var(--text-primary);">{{ tuning_result.model_name }}</strong> as the production
+                model, and immediately kicks off a fresh retrain — you don't need to wait for the next scheduled cycle.
+            </p>
             <table style="border:none;border-collapse:collapse;width:100%;font-size:0.82rem;">
                 <tr style="border:none;color:var(--text-secondary);">
                     <th style="border:none;padding:0.2rem 0.5rem;text-align:left;font-weight:600;">Parameter</th>
@@ -789,6 +795,24 @@
     {% endif %}
 
     {% if deep_analysis.status == 'completed' and deep_analysis.results %}
+    <!-- One-click apply: pick the winning covariate set + retrain immediately -->
+    <div style="margin: 0.5rem 0 1.25rem 0; padding: 0.85rem 1rem; background: rgba(46,204,113,0.08); border: 1px solid rgba(46,204,113,0.25); border-radius: 0.5rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.75rem;">
+        <div style="flex: 1 1 320px; min-width: 0;">
+            <div style="color: var(--success); font-weight: 600; margin-bottom: 0.2rem;">
+                Apply best covariate configuration
+            </div>
+            <div style="color: var(--text-secondary); font-size: 0.85rem;">
+                Picks the row with the lowest average MAE across models, removes any covariates it tells you to drop, and starts an immediate retrain — no manual editing needed.
+            </div>
+        </div>
+        <button class="btn btn-success" style="padding: 0.5rem 1.1rem; font-size: 0.85rem; white-space: nowrap;"
+                id="apply-covariate-best-btn"
+                onclick="applyCovariateBest('{{ experiment.name }}', this)"
+                title="Read the latest analysis, edit mlfl.yaml accordingly, and retrain in the background.">
+            Apply Best &amp; Retrain
+        </button>
+    </div>
+
     <div class="table-container">
         <table class="metrics-table">
             <thead>
@@ -1366,21 +1390,87 @@ window.showTab = function(el) {
         });
     };
 
-    window.applyTuning = function(name) {
+    window.applyTuning = function(name, btn) {
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = 'Applying…';
+        }
         fetch(BASE + '/experiment/' + name + '/apply-tuning', {method: 'POST'})
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (data.success) {
-                mlfl.toast(data.model + ' promoted to production with tuned params', 'success');
-                setTimeout(function() { location.reload(); }, 1500);
+                var msg = data.model + ' promoted with tuned params';
+                if (data.retraining) {
+                    msg += ' — retraining started in the background';
+                }
+                mlfl.toast(msg, 'success');
+                // Switch to the Training tab so the user can watch the
+                // retrain progress live, then reload after a beat to pull
+                // the new model state into the rest of the UI.
+                if (typeof showTab === 'function') {
+                    var trainingLink = document.querySelector('a[data-tab="sec-training"]');
+                    if (trainingLink) showTab(trainingLink);
+                }
+                setTimeout(function() { location.reload(); }, 2000);
             } else {
+                if (btn) { btn.disabled = false; btn.textContent = 'Apply Tuned Params, Promote & Retrain'; }
                 mlfl.toast('Failed: ' + (data.error || 'unknown'), 'error');
             }
         })
-        .catch(function(err) { mlfl.toast('Failed: ' + err, 'error'); });
+        .catch(function(err) {
+            if (btn) { btn.disabled = false; btn.textContent = 'Apply Tuned Params, Promote & Retrain'; }
+            mlfl.toast('Failed: ' + err, 'error');
+        });
     };
 
     // ======== Deep analysis ========
+    window.applyCovariateBest = function(name, btn) {
+        var origLabel = btn ? btn.textContent : '';
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = 'Applying…';
+        }
+        fetch(BASE + '/experiment/' + name + '/apply-covariate-best', {method: 'POST'})
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.success) {
+                if (btn) { btn.disabled = false; btn.textContent = origLabel; }
+                mlfl.toast('Failed: ' + (data.error || 'unknown'), 'error');
+                return;
+            }
+            var msg;
+            if (data.action === 'no_change') {
+                msg = 'Already optimal — "' + data.best_label + '" is the winning configuration. No changes made.';
+                mlfl.toast(msg, 'info');
+                if (btn) { btn.disabled = false; btn.textContent = origLabel; }
+                return;
+            }
+            if (data.action === 'cleared') {
+                msg = 'Removed all covariates';
+            } else {
+                msg = 'Removed ' + (data.removed || []).join(', ');
+            }
+            if (data.improvement_pct !== null && data.improvement_pct !== undefined) {
+                msg += ' (' + (data.improvement_pct > 0 ? '−' : '+') +
+                       Math.abs(data.improvement_pct).toFixed(1) + '% MAE)';
+            }
+            if (data.retraining) {
+                msg += ' — retraining started';
+            }
+            mlfl.toast(msg, 'success');
+            // Jump to the Training tab so the live retrain progress is visible
+            if (typeof showTab === 'function') {
+                var trainingLink = document.querySelector('a[data-tab="sec-training"]');
+                if (trainingLink) showTab(trainingLink);
+            }
+            setTimeout(function() { location.reload(); }, 2000);
+        })
+        .catch(function(err) {
+            if (btn) { btn.disabled = false; btn.textContent = origLabel; }
+            mlfl.toast('Failed: ' + err, 'error');
+        });
+    };
+
     window.runDeepAnalysis = function(name, btn) {
         btn.disabled = true; btn.classList.add('btn-loading'); btn.textContent = 'Analysing...';
         var modelSelect = document.getElementById('deep-analysis-model');
