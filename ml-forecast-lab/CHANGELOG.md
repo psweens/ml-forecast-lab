@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.5.1
+
+### Fix
+- **Add-on crashes at startup with `ValueError: Unknown level: '5\n'`**.
+  The HA add-on base image (hassio-addons/ubuntu-base, via bashio +
+  s6-overlay) exports `LOG_LEVEL` as a *bashio* level, which can be a
+  numeric string ("5" = NOTICE), a bashio name (`TRACE`/`NOTICE`/`FATAL`)
+  that Python's `logging` module doesn't recognise, or sometimes a value
+  with a stray trailing newline from `/var/run/s6/container_environment/`.
+  Our `__main__.py` was passing the raw value straight to
+  `root_logger.setLevel`, which crashed the entire add-on at startup.
+  Replaced with a robust `_parse_log_level` helper that:
+  * strips whitespace
+  * maps bashio numeric levels (0–8) to Python equivalents
+  * maps bashio string names (TRACE/NOTICE/FATAL/OFF) to Python equivalents
+  * accepts standard Python names (DEBUG/INFO/WARNING/ERROR/CRITICAL)
+  * falls back to `INFO` on any unrecognised input rather than crashing.
+
 ## 2.5.0
 
 ### New: Daily-cumulative leaderboard metrics

@@ -12,13 +12,80 @@ import os
 import sys
 from pathlib import Path
 
+
+def _parse_log_level(raw):
+    """
+    Parse a LOG_LEVEL env var into a Python logging level.
+
+    The Home Assistant add-on base image (hassio-addons/ubuntu-base, via
+    bashio + s6-overlay) exports LOG_LEVEL as a *bashio* level which can be:
+
+    * a numeric string ("0".."8") corresponding to bashio's own levels
+      (TRACE=8, DEBUG=7, INFO=6, NOTICE=5, WARNING=4, ERROR=3, FATAL=2, OFF=0),
+    * a bashio level name (TRACE / NOTICE / FATAL) that Python's `logging`
+      module doesn't natively understand,
+    * a standard Python level name (DEBUG / INFO / WARNING / ERROR / CRITICAL),
+    * or sometimes a value with stray whitespace / newlines from however the
+      env var was written into /var/run/s6/container_environment/.
+
+    Python's `logging.setLevel` only accepts the standard names or actual
+    integer levels — passing it `'5\\n'` raises ValueError. This helper
+    normalises everything into a Python logging int and falls back to INFO
+    on any unrecognised input rather than crashing the add-on at startup.
+    """
+    if not raw:
+        return logging.INFO
+    s = str(raw).strip()
+    if not s:
+        return logging.INFO
+
+    # Bashio numeric levels (most common case from the add-on supervisor)
+    bashio_numeric = {
+        "8": logging.DEBUG,     # TRACE → DEBUG (Python has no TRACE)
+        "7": logging.DEBUG,
+        "6": logging.INFO,
+        "5": logging.INFO,      # NOTICE → INFO
+        "4": logging.WARNING,
+        "3": logging.ERROR,
+        "2": logging.CRITICAL,  # FATAL → CRITICAL
+        "1": logging.CRITICAL,
+        "0": logging.CRITICAL,  # OFF → CRITICAL (effectively silent)
+    }
+    if s in bashio_numeric:
+        return bashio_numeric[s]
+
+    # Plain integer (Python's own level numbers, e.g. "10", "20", "30")
+    try:
+        return int(s)
+    except ValueError:
+        pass
+
+    # Bashio string level names that Python doesn't recognise
+    upper = s.upper()
+    bashio_string = {
+        "TRACE": logging.DEBUG,
+        "NOTICE": logging.INFO,
+        "FATAL": logging.CRITICAL,
+        "OFF": logging.CRITICAL,
+    }
+    if upper in bashio_string:
+        return bashio_string[upper]
+
+    # Standard Python level names
+    if upper in {"DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL"}:
+        return upper
+
+    # Anything else — fall back to INFO rather than crash
+    return logging.INFO
+
+
 # Configure logging — console + rotating file
 LOG_DIR = Path("/data/ml_forecast_lab/logs")
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "mlfl.log"
 LOG_FORMAT = "%(asctime)s %(levelname)-5s %(message)s"
 LOG_FORMAT_FILE = "%(asctime)s %(levelname)-5s [%(name)s] %(message)s"
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = _parse_log_level(os.getenv("LOG_LEVEL"))
 
 # Root logger setup
 root_logger = logging.getLogger()
