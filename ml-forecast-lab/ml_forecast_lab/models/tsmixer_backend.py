@@ -192,10 +192,21 @@ class TSMixerModel(ForecastModel):
         self._seq_len = seq_len
 
         # Per-channel z-score standardisation (fitted on training data)
+        # Capture last value of target channel BEFORE normalization
+        # for residual prediction (model learns deltas, not absolute values).
+        last_values = X_seq[:, -1, 0].astype(np.float32)
+
         self._channel_mean = X_seq.mean(axis=(0, 1))  # shape (n_channels,)
         self._channel_std = X_seq.std(axis=(0, 1))     # shape (n_channels,)
         self._channel_std[self._channel_std < 1e-8] = 1.0
         X_seq = (X_seq - self._channel_mean) / self._channel_std
+
+        # Residual targets: subtract last observed value so model predicts deltas
+        if self._n_horizons > 1:
+            y_train = y_train - last_values[:, None]
+        else:
+            y_train = y_train - last_values
+        self._residual_prediction = True
 
         # Target z-score normalisation -- per-horizon when multi-output
         if self._n_horizons > 1:
@@ -343,6 +354,9 @@ class TSMixerModel(ForecastModel):
         if self._model is None:
             raise RuntimeError("No model loaded")
 
+        # Capture last value of target channel for residual reconstruction
+        last_values = X[:, -1, 0].astype(np.float32)
+
         X_seq = X.copy()
         if self._channel_mean is not None and self._channel_std is not None:
             X_seq = (X_seq - self._channel_mean) / self._channel_std
@@ -352,8 +366,16 @@ class TSMixerModel(ForecastModel):
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
 
-        # Denormalize -- broadcasting handles both scalar and array _y_mean/_y_std
+        # Denormalize predicted residuals
         predictions = predictions * self._y_std + self._y_mean
+
+        # Add last value back (residual prediction reconstruction)
+        if getattr(self, '_residual_prediction', False):
+            if predictions.ndim == 2:
+                predictions = predictions + last_values[:, None]
+            else:
+                predictions = predictions + last_values
+
         return np.clip(predictions, 0.0, None).astype(np.float32)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -363,7 +385,9 @@ class TSMixerModel(ForecastModel):
 
         X_seq = self._reshape_to_sequences(X)
 
-        # Apply same per-channel z-score standardisation as training
+        # Capture last value of target channel for residual reconstruction
+        last_values = X_seq[:, -1, 0].astype(np.float32).copy()
+
         if self._channel_mean is not None and self._channel_std is not None:
             X_seq = (X_seq - self._channel_mean) / self._channel_std
 
@@ -375,6 +399,13 @@ class TSMixerModel(ForecastModel):
 
         # Denormalize back to original target scale
         predictions = predictions * self._y_std + self._y_mean
+
+        # Add last value back (residual prediction reconstruction)
+        if getattr(self, '_residual_prediction', False):
+            if predictions.ndim == 2:
+                predictions = predictions + last_values[:, None]
+            else:
+                predictions = predictions + last_values
 
         # Multi-horizon: return only first horizon for backward compat
         if predictions.ndim == 2:
@@ -430,6 +461,7 @@ class TSMixerModel(ForecastModel):
             "channel_std": self._channel_std,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "residual_prediction": getattr(self, '_residual_prediction', False),
         }, path)
         logger.info(f"Saved TSMixer model to {path}")
 
@@ -450,6 +482,7 @@ class TSMixerModel(ForecastModel):
         else:
             self._y_mean = float(raw_y_mean)
             self._y_std = float(raw_y_std)
+        self._residual_prediction = data.get("residual_prediction", False)
 
         # Reconstruct the nn.Module and load weights
         self._input_size = data.get("input_size")
