@@ -1548,11 +1548,14 @@ class MLForecastLabApp:
         logger.info(f"Training {prod_model_name} on {len(X)} samples...")
         train_start = time.time()
 
-        # Neural models need sliding window training with multi-horizon targets
+        # Neural models need sliding window training with multi-horizon targets.
+        # Use dense horizons (1..future_periods) so the multi-head output
+        # covers every forecast step directly — no interpolation needed.
         seq_kwargs = {}
         raw_cov_cols_prod = []
         window_size_prod = None
-        horizon_steps_prod = [h // exp_cfg.interval_minutes for h in exp_cfg.horizons_minutes]
+        future_periods_pre = getattr(exp_cfg, 'future_periods', 48)
+        horizon_steps_prod = list(range(1, future_periods_pre + 1))
         if is_neural:
             from ml_forecast_lab.features import create_sliding_windows
             engineered = {
@@ -1597,26 +1600,19 @@ class MLForecastLabApp:
         future_periods = getattr(exp_cfg, 'future_periods', 48)
 
         if is_neural and 'sequence_data' in seq_kwargs:
-            # ----- Direct multi-head prediction for neural models -----
-            # Build the last window in the same format used during training
-            # and call predict_sequence() to get all horizons at once.
-            import torch
+            # ----- Dense multi-head prediction for neural models -----
+            # Model was trained with horizons [1, 2, ..., future_periods] so
+            # predict_sequence returns all steps directly — no interpolation.
             from ml_forecast_lab.features import create_sliding_windows
 
             window_size = seq_kwargs['sequence_data'].shape[1]
-
-            # Re-create a single window from the tail of the training data
-            # using the same channel construction as create_sliding_windows
-            tail_len = window_size + max(horizon_steps_prod)
-            tail_df = combined.iloc[-tail_len:].copy()
+            tail_df = combined.iloc[-(window_size + 1):].copy()
             seq_X_prod, _, _ = create_sliding_windows(
                 tail_df, 'target', window_size=window_size,
                 covariate_cols=raw_cov_cols_prod if raw_cov_cols_prod else None,
                 add_temporal=True,
-                horizon_steps=horizon_steps_prod,
+                horizon_steps=[1],  # we only need the window, not labels
             )
-
-            # Use the last window for prediction
             last_window = seq_X_prod[-1:] if len(seq_X_prod) > 0 else seq_X_prod
 
             def _predict_multihead():
@@ -1625,28 +1621,21 @@ class MLForecastLabApp:
             multi_pred = await asyncio.get_running_loop().run_in_executor(
                 None, _predict_multihead
             )
-
-            # multi_pred shape: (1, n_horizons) — one prediction per horizon step
             multi_pred = multi_pred.ravel()
 
-            # Build full forecast curve by interpolating between horizon points.
-            # horizon_steps_prod are in interval units (e.g., [4, 16, 24] for
-            # 2h, 8h, 12h at 30-min intervals).
-            if len(multi_pred) == 1:
-                # Single horizon — replicate for full curve
+            if len(multi_pred) >= future_periods:
+                y_pred = multi_pred[:future_periods].astype(np.float32)
+                logger.info(f"  Dense multi-head: {len(y_pred)} direct predictions")
+            elif len(multi_pred) == 1:
                 y_pred = np.full(future_periods, float(multi_pred[0]), dtype=np.float32)
             else:
-                # Interpolate: steps 0..future_periods from the horizon anchor points
-                horizon_x = np.array(horizon_steps_prod, dtype=np.float32)
-                pred_y = multi_pred.astype(np.float32)
+                # Legacy fallback — interpolate between sparse horizons
+                horizon_x = np.linspace(1, future_periods, len(multi_pred), dtype=np.float32)
                 all_x = np.arange(1, future_periods + 1, dtype=np.float32)
-                y_pred = np.interp(all_x, horizon_x, pred_y).astype(np.float32)
+                y_pred = np.interp(all_x, horizon_x, multi_pred.astype(np.float32)).astype(np.float32)
+                logger.info(f"  Sparse multi-head: {len(multi_pred)} → {len(y_pred)} interpolated")
 
             y_pred = np.maximum(y_pred, 0.0)
-            logger.info(
-                f"  Multi-head prediction: {len(multi_pred)} horizons → "
-                f"{len(y_pred)} interpolated points"
-            )
         else:
             # ----- Tree models: RECURSIVE multi-step forecast -----
             # Build a fresh feature row at each step using the rolling
@@ -2032,7 +2021,11 @@ class MLForecastLabApp:
             engineered.update(c for c in combined.columns if c.startswith('y_lag_'))
             raw_cov_cols = [c for c in combined.columns if c not in engineered and c != 'target']
             window_size = min(48, len(combined) // 3)
-            horizon_steps = [h // exp_cfg.interval_minutes for h in exp_cfg.horizons_minutes]
+            # Train with dense horizons (1, 2, ..., future_periods) so the
+            # multi-head output covers every forecast step directly — no
+            # interpolation or autoregression needed at inference time.
+            future_periods = getattr(exp_cfg, 'future_periods', 48)
+            horizon_steps = list(range(1, future_periods + 1))
             if window_size >= 12:
                 seq_X, seq_y, _ = create_sliding_windows(
                     combined, 'target', window_size=window_size,
@@ -2180,12 +2173,14 @@ class MLForecastLabApp:
         lag_values = y[-n_lag_values:]
         future_periods = getattr(exp_cfg, 'future_periods', 48)
 
-        # Prediction: reuse the same logic as _run_production_inference section 5
+        # Prediction: neural uses dense multi-head output, tree uses recursive
         if is_neural and 'sequence_data' in seq_kwargs:
             from ml_forecast_lab.features import create_sliding_windows
             window_size = seq_kwargs['sequence_data'].shape[1]
-            horizon_steps_prod = [h // exp_cfg.interval_minutes for h in exp_cfg.horizons_minutes]
 
+            # Build the window from the tail of the data.
+            # horizon_steps=[1] is the minimum needed for the window builder;
+            # we only care about the window itself, not the y labels here.
             engineered = {
                 'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
                 'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
@@ -2193,12 +2188,11 @@ class MLForecastLabApp:
             engineered.update(c for c in combined.columns if c.startswith('y_lag_'))
             raw_cov_cols = [c for c in combined.columns if c not in engineered and c != 'target']
 
-            tail_len = window_size + max(horizon_steps_prod)
-            tail_df = combined.iloc[-tail_len:].copy()
+            tail_df = combined.iloc[-(window_size + 1):].copy()
             seq_X_prod, _, _ = create_sliding_windows(
                 tail_df, 'target', window_size=window_size,
                 covariate_cols=raw_cov_cols if raw_cov_cols else None,
-                add_temporal=True, horizon_steps=horizon_steps_prod,
+                add_temporal=True, horizon_steps=[1],
             )
             last_window = seq_X_prod[-1:] if len(seq_X_prod) > 0 else seq_X_prod
 
@@ -2206,10 +2200,17 @@ class MLForecastLabApp:
             multi_pred = await loop.run_in_executor(None, lambda: model.predict_sequence(last_window))
             multi_pred = multi_pred.ravel()
 
-            if len(multi_pred) == 1:
+            # Neural models trained with dense horizons output all
+            # future_periods predictions directly. Older cached models
+            # may have fewer outputs — fall back to interpolation.
+            if len(multi_pred) >= future_periods:
+                y_pred = multi_pred[:future_periods].astype(np.float32)
+            elif len(multi_pred) == 1:
                 y_pred = np.full(future_periods, float(multi_pred[0]), dtype=np.float32)
             else:
-                horizon_x = np.array(horizon_steps_prod, dtype=np.float32)
+                # Legacy: sparse horizons → interpolate (will retrain into dense soon)
+                horizon_steps_legacy = [h // exp_cfg.interval_minutes for h in exp_cfg.horizons_minutes][:len(multi_pred)]
+                horizon_x = np.array(horizon_steps_legacy, dtype=np.float32)
                 all_x = np.arange(1, future_periods + 1, dtype=np.float32)
                 y_pred = np.interp(all_x, horizon_x, multi_pred.astype(np.float32)).astype(np.float32)
             y_pred = np.maximum(y_pred, 0.0)
