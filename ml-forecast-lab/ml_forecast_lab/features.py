@@ -547,9 +547,9 @@ def create_forecast_features(
     with the most recent available values. Rolling statistics are set to NaN
     (model should handle gracefully via imputation or separate output head).
     """
-    if len(lag_values) != n_lags:
+    if len(lag_values) < n_lags:
         raise ValueError(
-            f'lag_values length ({len(lag_values)}) must match n_lags ({n_lags})'
+            f'lag_values length ({len(lag_values)}) must be >= n_lags ({n_lags})'
         )
 
     forecast_timestamps = [
@@ -574,11 +574,13 @@ def create_forecast_features(
     forecast_df['dow_sin'] = np.sin(dow_rad)
     forecast_df['dow_cos'] = np.cos(dow_rad)
 
-    # Lag features (use most recent values)
-    for i, lag_val in enumerate(lag_values, start=1):
-        forecast_df[f'y_lag_{i}'] = lag_val
+    # lag_values is chronological: [oldest, ..., newest].
+    # y_lag_1 should be the MOST RECENT past value, so we index from the end.
+    # y_lag_i = lag_values[-i]
+    for i in range(1, n_lags + 1):
+        forecast_df[f'y_lag_{i}'] = float(lag_values[-i])
 
-    # Rolling statistics computed from available lag values
+    # Rolling statistics from the most recent values
     rolling_windows = [6, 24, 72]
     for window in rolling_windows:
         available = lag_values[-min(window, len(lag_values)):]
@@ -586,15 +588,22 @@ def create_forecast_features(
         forecast_df[f'y_rolling_std_{window}'] = float(np.std(available))
         forecast_df[f'y_rolling_max_{window}'] = float(np.max(available))
 
-    # Periodic lags — use value from lag array if available
+    # Periodic lags — "same time yesterday/2-days-ago"
+    # y_lag_{steps_per_day * d} = value from d days ago = lag_values[-(steps_per_day * d)]
     steps_per_day = max(1, 1440 // interval_minutes)
     for d in [1, 2]:
-        lag_idx = steps_per_day * d - 1  # 0-indexed into lag_values
-        val = float(lag_values[lag_idx]) if lag_idx < len(lag_values) else 0.0
-        forecast_df[f'y_lag_{steps_per_day * d}'] = val
+        lag_steps = steps_per_day * d
+        if lag_steps <= len(lag_values):
+            forecast_df[f'y_lag_{lag_steps}'] = float(lag_values[-lag_steps])
+        else:
+            forecast_df[f'y_lag_{lag_steps}'] = 0.0
 
-    # Rate of change — diff of lag_1 and lag_2
-    forecast_df['y_diff_1'] = float(lag_values[0] - lag_values[1]) if len(lag_values) >= 2 else 0.0
+    # Rate of change — first difference of consecutive past values
+    # y_diff_1 = target.shift(1) - target.shift(2) = lag_values[-1] - lag_values[-2]
+    if len(lag_values) >= 2:
+        forecast_df['y_diff_1'] = float(lag_values[-1] - lag_values[-2])
+    else:
+        forecast_df['y_diff_1'] = 0.0
 
     # Holiday indicator
     if country is not None:
