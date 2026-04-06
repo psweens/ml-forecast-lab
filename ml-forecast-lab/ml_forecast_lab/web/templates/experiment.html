@@ -593,7 +593,7 @@
 <!-- ====== TAB: Tuning ====== -->
 <div class="tab-section" id="sec-tuning" style="display:none;">
 <section class="section">
-    <h2>Hyperparameter Tuning <span class="info-tip">?<span class="tip-text">Bayesian optimisation (Optuna TPE) automatically searches for the best hyperparameters. Each trial trains the model with 2-fold CV and reports a composite score that averages MAE, RMSE, and MASE — each normalised against a baseline run with the model's default parameters. A composite of 1.0 matches the default; lower is better (e.g. 0.85 means a 15% average improvement across all three metrics). After tuning, click "Apply & Promote" to save the winning params and promote the model.</span></span></h2>
+    <h2>Hyperparameter Tuning <span class="info-tip">?<span class="tip-text">Bayesian optimisation (Optuna TPE) automatically searches for the best hyperparameters. Each trial trains the model with a single CV fold and reports a composite score that averages MAE, RMSE, and MASE — each normalised against a baseline run with the model's default parameters. A composite of 1.0 matches the default; lower is better (e.g. 0.85 means a 15% average improvement across all three metrics). For neural backends the tuning budget is capped at 40 epochs per trial (with early stopping at patience 8) — enough to rank hyperparameter sets without wasting compute. The final production retrain after "Apply" uses the model's full epoch budget. After tuning, click "Apply Tuned Params, Promote & Retrain" to save the winning params and kick off a full production retrain.</span></span></h2>
 
     <!-- Controls -->
     <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin-bottom:1.5rem;">

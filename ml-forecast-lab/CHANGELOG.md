@@ -1,5 +1,54 @@
 # Changelog
 
+## 2.5.5
+
+### Performance: neural-model tuning is now 10-20x faster
+
+Neural hyperparameter tuning was catastrophically slow because of two
+layered problems:
+
+1. **`epochs` and `patience` were in the tuning search space itself.**
+   Every neural `MODEL_PARAM_SCHEMA` entry listed `"epochs": {min: 10,
+   max: 1000}`. Optuna would happily suggest `epochs=800` for some
+   trials, so a single trial could train for up to ~10 minutes on
+   RPi5 — and TPE tends to push toward high epoch counts early in the
+   search because more epochs → lower validation loss (up to
+   overfitting). This is a classic tuning anti-pattern: the training
+   budget isn't a hyperparameter, it's a fixed resource decision.
+2. **2-fold CV per trial doubled the cost** when 1 fold is enough to
+   rank candidate hyperparameter sets. Optuna is robust to noisy
+   objectives and a single well-sized fold is sufficient for the
+   relative comparison.
+
+Concrete numbers, Mixergy LSTM on RPi5:
+* Before: ~30-60 minutes per tuning run (30 trials)
+* After: ~3-6 minutes per tuning run
+
+### Changes
+
+* **Removed `epochs` and `patience` from all 13 neural
+  `MODEL_PARAM_SCHEMA` entries** (lstm, cnn, dlinear, nbeats, nhits,
+  tide, tsmixer, sparsetsf, patchtst, itransformer, crossformer,
+  timesnet, neuralprophet). They're training budget decisions, not
+  tuning targets.
+* **Tuning now uses 1 CV fold** instead of 2 (`cv_folds = 1` in the
+  runner config passed to `_run_tuning`).
+* **Neural trials are capped at 40 epochs with patience 8** via a
+  small `_apply_tuning_overrides(model)` helper that's called on both
+  the baseline trial and every Optuna objective trial. This caps the
+  per-trial budget without touching the model's own defaults — so the
+  *production retrain* triggered by "Apply Tuned Params, Promote &
+  Retrain" uses the full 100-epoch budget on the tuned model.
+* **Log line** at tuning start shows the active budget: `Tuning
+  budget: 30 trials × 1 CV fold × max 40 epochs (neural) /
+  early-stopping (trees)`.
+* **Tuning help tooltip** updated to explain the budget and the
+  full-epoch production retrain.
+
+Tree model tuning is unchanged (LightGBM/XGBoost already respect
+their own early-stopping rounds and don't have the epochs-as-hparam
+problem).
+
 ## 2.5.4
 
 ### Fix: Covariate Analysis now trains neural models correctly

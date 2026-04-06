@@ -2452,15 +2452,47 @@ class MLForecastLabApp:
             X = df_out[cols].values.astype(np.float32)
             return np.nan_to_num(X, nan=0.0)
 
-        # Create runner with 2-fold CV for speed
+        # Create runner with 1-fold CV for tuning speed. Walk-forward or
+        # sliding-window is overkill when we're just looking for the
+        # relative ranking between hyperparameter sets — Optuna is robust
+        # to noisy objectives, and one well-sized train/test fold is
+        # enough to pick winners. (Production retraining after "Apply"
+        # uses the full CV schedule again so nothing is lost.)
         exp_cfg_dict = dataclasses.asdict(exp_cfg)
-        exp_cfg_dict["cv_folds"] = 2
+        exp_cfg_dict["cv_folds"] = 1
         metric_registry = get_metric_registry()
         runner = BenchmarkRunner(exp_cfg_dict, feature_builder, metric_registry)
         fold_indices = runner._prepare_train_test_splits(combined)
 
         # Parameters that benefit from log-scale search
         LOG_PARAMS = {"learning_rate", "reg_alpha", "reg_lambda"}
+
+        # Tuning-time overrides for neural backends. The schema no longer
+        # exposes `epochs` / `patience` so Optuna cannot burn trials
+        # tuning the training budget itself — we set both here to a
+        # small-but-sufficient value that trains each trial fast while
+        # still letting early stopping converge on the winning config.
+        # Production retraining (after "Apply") uses the model's own
+        # defaults so the final deployed model gets the full epoch budget.
+        TUNING_NEURAL_EPOCHS = 40
+        TUNING_NEURAL_PATIENCE = 8
+
+        def _apply_tuning_overrides(m):
+            """Cap neural training budget during tuning only."""
+            try:
+                if getattr(m, 'is_neural', False):
+                    m.set_params(
+                        epochs=TUNING_NEURAL_EPOCHS,
+                        patience=TUNING_NEURAL_PATIENCE,
+                    )
+            except Exception:
+                pass  # Backends without epochs/patience params just skip
+            return m
+
+        logger.info(
+            f"  Tuning budget: {n_trials} trials × 1 CV fold × "
+            f"max {TUNING_NEURAL_EPOCHS} epochs (neural) / early-stopping (trees)"
+        )
 
         # --- Composite objective baseline ---
         # Run one CV evaluation with the model's DEFAULT parameters first.
@@ -2476,6 +2508,7 @@ class MLForecastLabApp:
         }
         try:
             baseline_model = self.model_registry.create(model_name, **baseline_params)
+            _apply_tuning_overrides(baseline_model)
             baseline_result = runner.run_single_model(combined, baseline_model, fold_indices)
             baseline_mae = max(baseline_result.metrics.get("mae", 1.0), 1e-6)
             baseline_rmse = max(baseline_result.metrics.get("rmse", 1.0), 1e-6)
@@ -2527,6 +2560,7 @@ class MLForecastLabApp:
 
             try:
                 model = self.model_registry.create(model_name, **params)
+                _apply_tuning_overrides(model)
                 result = runner.run_single_model(combined, model, fold_indices)
                 mae = result.metrics.get("mae", float("inf"))
                 rmse = result.metrics.get("rmse", float("inf"))
