@@ -36,7 +36,7 @@
             </label>
             <label class="checkbox-label">
                 <input type="checkbox" id="chk-deep" class="checkbox-accent">
-                <span>Include Deep Analysis</span>
+                <span>Include Covariate Analysis</span>
             </label>
         </div>
         <button id="btn-run" class="btn btn-primary" onclick="startPipeline()">
@@ -160,7 +160,7 @@ var EMBEDDED_HISTORY = {{ embedded_history | tojson }};
             steps.push('ensemble');
         }
         if (document.getElementById('chk-deep').checked) {
-            steps.push('deep_analysis');
+            steps.push('covariate_analysis');
         }
 
         // Disable button

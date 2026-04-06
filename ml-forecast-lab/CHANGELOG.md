@@ -1,5 +1,57 @@
 # Changelog
 
+## 2.5.4
+
+### Fix: Covariate Analysis now trains neural models correctly
+
+Neural models in the Covariate Analysis path were being trained with
+**flat features only** — no sliding windows, no dense horizons, no
+residual prediction. That meant the LSTM / CNN / etc. metrics reported
+in the covariate analysis grid came from a crippled version of those
+models, not the production version, so the "does removing X help the
+LSTM?" comparison was basically meaningless for any backend the
+leaderboard considered competitive.
+
+The inner training loop now mirrors the CV runner and holdout chart
+for neural models:
+
+* Builds sliding windows with `create_sliding_windows` using the full
+  set of temporal and covariate channels
+* Trains with dense `horizon_steps=[1..future_periods]` so residual
+  prediction has something to optimise against
+* Predicts on the test split using `horizon_steps=[1]` for one window
+  per test row (full coverage)
+* Reduces the multi-horizon output to h=1 for metric computation
+
+Tree models keep the existing flat-features path unchanged. Both
+families still use the same 80/20 split for consistency with each
+other, so the cross-covariate comparison is fair.
+
+### Rename: `deep_analysis` → `covariate_analysis` throughout the code
+
+The UI has always called this feature "Covariate Analysis" but the
+code used the old `deep_analysis` identifier from an earlier
+iteration. Renamed all 60+ references:
+
+* Python identifiers (`covariate_analysis_results`,
+  `covariate_analysis_callback`, `_run_covariate_analysis`,
+  `_covariate_analysis_trigger`)
+* Pydantic classes (`CovariateAnalysisResult`,
+  `CovariateAnalysisCellResult`)
+* HTTP endpoints (`POST /run-covariate-analysis`,
+  `GET /covariate-analysis`)
+* Pipeline step name (`"covariate_analysis"` in the `run-pipeline`
+  steps list)
+* Template variable (`covariate_analysis`)
+* HTML element IDs (`sec-covariate-analysis`,
+  `covariate-analysis-model`, `covariate-analysis-btn`)
+* JavaScript function (`runCovariateAnalysis`)
+* Log strings, docstrings, and CSS comments
+
+No behavioural change — this is purely a rename so the internal code
+matches the user-facing name. The old endpoints no longer exist, so
+any external integrations that hit them will need updating.
+
 ## 2.5.3
 
 ### Fix

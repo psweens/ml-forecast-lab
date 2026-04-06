@@ -133,7 +133,7 @@ class LabForecastData(BaseModel):
     model_predictions: List[ModelPrediction]
 
 
-class DeepAnalysisCellResult(BaseModel):
+class CovariateAnalysisCellResult(BaseModel):
     """Result for one model × one covariate configuration."""
     mae: float
     rmse: float
@@ -143,16 +143,16 @@ class DeepAnalysisCellResult(BaseModel):
     mase_change_pct: Optional[float] = None  # MASE % change vs baseline
 
 
-class DeepAnalysisResult(BaseModel):
-    """Full deep analysis results."""
+class CovariateAnalysisResult(BaseModel):
+    """Full covariate analysis results."""
     experiment_name: str
     timestamp: str
     status: str  # 'running', 'completed', 'failed'
     baseline_label: str  # "All covariates"
     covariate_labels: List[str]  # ["No covariates", "Without charge", ...]
     model_names: List[str]
-    # results[covariate_label][model_name] = DeepAnalysisCellResult
-    results: Dict[str, Dict[str, DeepAnalysisCellResult]]
+    # results[covariate_label][model_name] = CovariateAnalysisCellResult
+    results: Dict[str, Dict[str, CovariateAnalysisCellResult]]
     recommendations: List[Dict[str, str]]  # [{"icon": "✓", "text": "...", "color": "green"}, ...]
     total_runs: int = 0
     completed_runs: int = 0
@@ -257,8 +257,8 @@ class AppState:
         self.forecast_data: Dict[str, ForecastData] = {}
         self.lab_forecast_data: Dict[str, LabForecastData] = {}
         self.feature_importances: Dict[str, List[FeatureImportanceData]] = {}
-        self.deep_analysis_results: Dict[str, DeepAnalysisResult] = {}
-        self.deep_analysis_callback = None  # Set by main app for triggering
+        self.covariate_analysis_results: Dict[str, CovariateAnalysisResult] = {}
+        self.covariate_analysis_callback = None  # Set by main app for triggering
         self.ensemble_results: Dict[str, EnsembleResultData] = {}
         self.ensemble_callback = None  # Set by main app for triggering
         self.benchmark_callback = None  # Set by main app for triggering
@@ -794,7 +794,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         forecast_data = app.state.appstate.forecast_data.get(name)
         lab_forecast = app.state.appstate.lab_forecast_data.get(name)
         feature_imps = app.state.appstate.feature_importances.get(name, [])
-        deep_analysis = app.state.appstate.deep_analysis_results.get(name)
+        covariate_analysis = app.state.appstate.covariate_analysis_results.get(name)
         ensemble_result = app.state.appstate.ensemble_results.get(name)
         is_running = app.state.appstate.is_benchmark_running(name)
 
@@ -879,7 +879,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "best_model": benchmark_result.best_model_name
                 if benchmark_result
                 else None,
-                "deep_analysis": deep_analysis,
+                "covariate_analysis": covariate_analysis,
                 "ensemble_result": ensemble_result,
                 "units": units,
                 "models_json": [m.model_dump() for m in (benchmark_result.models if benchmark_result else [])],
@@ -1035,11 +1035,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if name not in app.state.appstate.experiment_statuses:
             raise HTTPException(status_code=404, detail="Experiment not found")
 
-        result = app.state.appstate.deep_analysis_results.get(name)
+        result = app.state.appstate.covariate_analysis_results.get(name)
         if not result or result.status != "completed" or not result.results:
             return JSONResponse(
                 status_code=404,
-                content={"success": False, "error": "No completed deep analysis results"},
+                content={"success": False, "error": "No completed covariate analysis results"},
             )
 
         # Score every covariate label by its average MAE across models
@@ -1057,7 +1057,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if not label_scores:
             return JSONResponse(
                 status_code=400,
-                content={"success": False, "error": "No valid metrics in deep analysis results"},
+                content={"success": False, "error": "No valid metrics in covariate analysis results"},
             )
 
         best_label = min(label_scores, key=label_scores.get)
@@ -1204,20 +1204,20 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             }
         )
 
-    @app.post("/experiment/{name}/run-deep-analysis")
-    async def run_deep_analysis(name: str, request: Request):
+    @app.post("/experiment/{name}/run-covariate-analysis")
+    async def run_covariate_analysis(name: str, request: Request):
         """
-        Trigger a deep covariate analysis (async, returns 202 Accepted).
+        Trigger a covariate analysis (async, returns 202 Accepted).
         Body (optional): {"model": "lightgbm"} or {"model": "all"}
         """
         if name not in app.state.appstate.experiment_statuses:
             raise HTTPException(status_code=404, detail="Experiment not found")
 
-        existing = app.state.appstate.deep_analysis_results.get(name)
+        existing = app.state.appstate.covariate_analysis_results.get(name)
         if existing and existing.status == "running":
             return JSONResponse(
                 status_code=409,
-                content={"error": "Deep analysis already running"},
+                content={"error": "Covariate analysis already running"},
             )
 
         # Parse optional model selection
@@ -1230,28 +1230,28 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         # Trigger via callback if available
         import asyncio
-        if app.state.appstate.deep_analysis_callback:
-            asyncio.create_task(app.state.appstate.deep_analysis_callback(name, selected_model))
+        if app.state.appstate.covariate_analysis_callback:
+            asyncio.create_task(app.state.appstate.covariate_analysis_callback(name, selected_model))
 
         return JSONResponse(
             status_code=202,
             content={
-                "message": "Deep analysis started",
+                "message": "Covariate analysis started",
                 "experiment": name,
                 "model": selected_model,
                 "status": "running",
             },
         )
 
-    @app.get("/experiment/{name}/deep-analysis")
-    async def get_deep_analysis(name: str):
-        """Get deep analysis results as JSON."""
+    @app.get("/experiment/{name}/covariate-analysis")
+    async def get_covariate_analysis(name: str):
+        """Get covariate analysis results as JSON."""
         if name not in app.state.appstate.experiment_statuses:
             raise HTTPException(status_code=404, detail="Experiment not found")
 
-        result = app.state.appstate.deep_analysis_results.get(name)
+        result = app.state.appstate.covariate_analysis_results.get(name)
         if not result:
-            raise HTTPException(status_code=404, detail="No deep analysis results")
+            raise HTTPException(status_code=404, detail="No covariate analysis results")
         return result.model_dump()
 
     # ========== Tuning endpoints ==========
@@ -2050,8 +2050,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         Trigger the full training pipeline for an experiment.
 
         Accepts optional JSON body:
-          {"steps": ["benchmark"]}          — default: benchmark only
-          {"steps": ["benchmark", "deep_analysis"]} — benchmark then deep analysis
+          {"steps": ["benchmark"]}                     — default: benchmark only
+          {"steps": ["benchmark", "covariate_analysis"]} — benchmark then covariate analysis
 
         Returns 202 Accepted. Progress is streamed via the SSE endpoint.
         """
@@ -2091,9 +2091,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 # Ensemble step
                 if "ensemble" in steps and getattr(app.state.appstate, 'ensemble_callback', None):
                     await app.state.appstate.ensemble_callback(name)
-                # Deep analysis step
-                if "deep_analysis" in steps and app.state.appstate.deep_analysis_callback:
-                    await app.state.appstate.deep_analysis_callback(name, "all")
+                # Covariate analysis step
+                if "covariate_analysis" in steps and app.state.appstate.covariate_analysis_callback:
+                    await app.state.appstate.covariate_analysis_callback(name, "all")
             except Exception as e:
                 logger.error(f"Pipeline failed for {name}: {e}", exc_info=True)
             finally:

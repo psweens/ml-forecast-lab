@@ -533,7 +533,7 @@ select.setting-input, select.form-input { cursor: pointer; }
 }
 .checkbox-accent { accent-color: var(--accent-secondary); width: 18px; height: 18px; }
 
-/* Deep analysis / form select constrained width */
+/* Covariate analysis / form select constrained width */
 .select-narrow {
     padding: 0.4rem 0.6rem; font-size: 0.9rem; max-width: 200px;
 }
@@ -567,7 +567,7 @@ select.setting-input, select.form-input { cursor: pointer; }
 }
 .hint-banner code { color: var(--accent-secondary); }
 
-/* Deep analysis button */
+/* Covariate analysis button */
 .btn-purple { background: #9b59b6; color: white; }
 .btn-purple:hover:not(:disabled) { background: #8e44ad; }
 

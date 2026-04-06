@@ -285,8 +285,8 @@ class MLForecastLabApp:
 
             self.web_app.state.appstate.benchmark_callback = _benchmark_trigger
 
-            # Register deep analysis callback
-            async def _deep_analysis_trigger(experiment_name: str, selected_model: str = "all"):
+            # Register covariate analysis callback
+            async def _covariate_analysis_trigger(experiment_name: str, selected_model: str = "all"):
                 exp_cfg = None
                 for cfg in self.config.experiments:
                     if cfg.name == experiment_name:
@@ -294,11 +294,11 @@ class MLForecastLabApp:
                         break
                 if exp_cfg:
                     try:
-                        await self._run_deep_analysis(exp_cfg, selected_model=selected_model)
+                        await self._run_covariate_analysis(exp_cfg, selected_model=selected_model)
                     except Exception as e:
-                        logger.error(f"Deep analysis failed: {e}", exc_info=True)
+                        logger.error(f"Covariate analysis failed: {e}", exc_info=True)
 
-            self.web_app.state.appstate.deep_analysis_callback = _deep_analysis_trigger
+            self.web_app.state.appstate.covariate_analysis_callback = _covariate_analysis_trigger
 
             # Register ensemble callback
             async def _ensemble_trigger(
@@ -2660,7 +2660,7 @@ class MLForecastLabApp:
         tuning_state.status = "completed"
         logger.info(f"{'=' * 60}")
 
-    async def _run_deep_analysis(self, exp_cfg, selected_model: str = "all"):
+    async def _run_covariate_analysis(self, exp_cfg, selected_model: str = "all"):
         """
         Run deep covariate analysis: selected model(s) × all covariate combinations.
 
@@ -2679,8 +2679,8 @@ class MLForecastLabApp:
         from ml_forecast_lab.features import build_features
         from ml_forecast_lab.benchmark.metrics import get_metric_registry
         from ml_forecast_lab.web.app import (
-            DeepAnalysisResult,
-            DeepAnalysisCellResult,
+            CovariateAnalysisResult,
+            CovariateAnalysisCellResult,
         )
 
         # Determine which models to run
@@ -2704,7 +2704,7 @@ class MLForecastLabApp:
             ]
             total_runs = len(models_to_run) * len(covariate_labels)
 
-            self.web_app.state.appstate.deep_analysis_results[exp_cfg.name] = DeepAnalysisResult(
+            self.web_app.state.appstate.covariate_analysis_results[exp_cfg.name] = CovariateAnalysisResult(
                 experiment_name=exp_cfg.name,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 status="running",
@@ -2745,6 +2745,16 @@ class MLForecastLabApp:
         results = {}
         completed = 0
 
+        # Engineered feature columns to exclude when picking covariates for
+        # the neural sequence builder (these go in as separate channels via
+        # add_temporal=True or as derived features inside the network).
+        _engineered = {
+            'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
+            'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
+        }
+        future_periods = int(getattr(exp_cfg, 'future_periods', 48))
+        dense_horizons = list(range(1, future_periods + 1))
+
         for config_label, cov_cols_to_use in configs:
             results[config_label] = {}
 
@@ -2760,15 +2770,18 @@ class MLForecastLabApp:
 
                     combined = combined.dropna()
 
-                    feature_cols = [c for c in combined.columns if c != "target"]
-                    X = combined[feature_cols].values.astype(np.float32)
-                    X = np.nan_to_num(X, nan=0.0)
-                    y_all = combined["target"].values.astype(np.float32)
+                    if len(combined) < 100:
+                        # Not enough data for a meaningful split
+                        results[config_label][model_name] = CovariateAnalysisCellResult(
+                            mae=float('nan'), rmse=float('nan'), mase=float('nan'),
+                        )
+                        completed += 1
+                        continue
 
-                    # Simple train/test split (80/20)
-                    split = int(len(X) * 0.8)
-                    X_tr, X_te = X[:split], X[split:]
-                    y_tr, y_te = y_all[:split], y_all[split:]
+                    feature_cols = [c for c in combined.columns if c != "target"]
+
+                    # Split point used by both branches (80/20)
+                    split = int(len(combined) * 0.8)
 
                     # Train and evaluate
                     model = self.model_registry.create(model_name)
@@ -2777,21 +2790,115 @@ class MLForecastLabApp:
                         model.set_params(**overrides)
 
                     def _train_and_eval():
-                        model.fit(X_tr, y_tr)
-                        y_pred = model.predict(X_te)
-                        y_pred_flat = y_pred.ravel() if y_pred.ndim > 1 else y_pred
+                        if model.is_neural:
+                            # Use the SAME sliding-window + dense-horizon
+                            # pipeline as the CV runner, holdout chart, and
+                            # production training. Without this, neural
+                            # models in covariate analysis are crippled (flat
+                            # features only, no residual prediction) and
+                            # the covariate comparison becomes meaningless.
+                            from ml_forecast_lab.features import create_sliding_windows
+
+                            target_col = 'target'
+                            engineered = set(_engineered)
+                            engineered.update(
+                                c for c in combined.columns if c.startswith('y_lag_')
+                            )
+                            seq_cov_cols = [
+                                c for c in combined.columns
+                                if c not in engineered and c != target_col
+                            ]
+
+                            df_train_part = combined.iloc[:split]
+                            df_test_part = combined.iloc[split:]
+
+                            window_size = min(48, len(df_train_part) // 3)
+                            if window_size < 12:
+                                return float('nan'), float('nan'), float('nan')
+
+                            # Train: dense horizons so the model learns to
+                            # predict h=1..future_periods (matches production)
+                            seq_X_tr, seq_y_tr, channel_names = create_sliding_windows(
+                                df_train_part, target_col,
+                                window_size=window_size,
+                                covariate_cols=seq_cov_cols if seq_cov_cols else None,
+                                add_temporal=True,
+                                horizon_steps=dense_horizons,
+                            )
+                            if len(seq_y_tr) == 0:
+                                return float('nan'), float('nan'), float('nan')
+
+                            # Flat X is required by fit() signature but is
+                            # ignored when sequence_data is provided.
+                            X_tr_flat = df_train_part[feature_cols].values.astype(np.float32)
+                            X_tr_flat = np.nan_to_num(X_tr_flat, nan=0.0)
+                            X_tr_flat = X_tr_flat[-len(seq_y_tr):]
+
+                            model.fit(
+                                X_tr_flat, seq_y_tr,
+                                feature_names=feature_cols,
+                                sequence_data=seq_X_tr,
+                                channel_names=channel_names,
+                            )
+
+                            # Test: bridge train tail + test, use h=1 for
+                            # full coverage with one window per test row
+                            bridge = pd.concat([
+                                df_train_part.iloc[-window_size:],
+                                df_test_part,
+                            ])
+                            seq_X_te, _, _ = create_sliding_windows(
+                                bridge, target_col,
+                                window_size=window_size,
+                                covariate_cols=seq_cov_cols if seq_cov_cols else None,
+                                add_temporal=True,
+                                horizon_steps=[1],
+                            )
+                            y_pred_full = model.predict_sequence(seq_X_te)
+                            if y_pred_full.ndim == 2:
+                                y_pred_flat = y_pred_full[:, 0].astype(np.float32)
+                            else:
+                                y_pred_flat = y_pred_full.astype(np.float32)
+
+                            y_te = df_test_part[target_col].values.astype(np.float32)
+                            y_tr_for_naive = df_train_part[target_col].values.astype(np.float32)
+                        else:
+                            # Tree models keep the existing flat-features path
+                            X = combined[feature_cols].values.astype(np.float32)
+                            X = np.nan_to_num(X, nan=0.0)
+                            y_all = combined["target"].values.astype(np.float32)
+                            X_tr, X_te = X[:split], X[split:]
+                            y_tr_for_naive, y_te = y_all[:split], y_all[split:]
+
+                            model.fit(X_tr, y_tr_for_naive)
+                            y_pred = model.predict(X_te)
+                            y_pred_flat = y_pred.ravel() if y_pred.ndim > 1 else y_pred
+
+                        # Defensive length alignment (e.g. neural bridge can
+                        # leave a row off the end if max_horizon clips it)
+                        if len(y_pred_flat) != len(y_te):
+                            n = min(len(y_pred_flat), len(y_te))
+                            y_pred_flat = y_pred_flat[-n:]
+                            y_te = y_te[-n:]
+
+                        if len(y_te) == 0:
+                            return float('nan'), float('nan'), float('nan')
+
                         mae_val = float(np.mean(np.abs(y_te - y_pred_flat)))
                         rmse_val = float(np.sqrt(np.mean((y_te - y_pred_flat) ** 2)))
-                        # MASE: scale by naive forecast error from training set
-                        naive_err = float(np.mean(np.abs(np.diff(y_tr))))
-                        mase_val = float(np.mean(np.abs(y_te - y_pred_flat)) / naive_err) if naive_err > 0 else np.nan
+                        # MASE: scale by naive 1-step forecast error from train
+                        naive_err = float(np.mean(np.abs(np.diff(y_tr_for_naive))))
+                        mase_val = (
+                            float(np.mean(np.abs(y_te - y_pred_flat)) / naive_err)
+                            if naive_err > 0 else float('nan')
+                        )
                         return mae_val, rmse_val, mase_val
 
                     mae_val, rmse_val, mase_val = await asyncio.get_running_loop().run_in_executor(
                         None, _train_and_eval
                     )
 
-                    results[config_label][model_name] = DeepAnalysisCellResult(
+                    results[config_label][model_name] = CovariateAnalysisCellResult(
                         mae=round(mae_val, 4),
                         rmse=round(rmse_val, 4),
                         mase=round(mase_val, 3) if np.isfinite(mase_val) else float('nan'),
@@ -2805,17 +2912,17 @@ class MLForecastLabApp:
 
                     # Update progress
                     if self.web_app:
-                        da = self.web_app.state.appstate.deep_analysis_results[exp_cfg.name]
+                        da = self.web_app.state.appstate.covariate_analysis_results[exp_cfg.name]
                         da.completed_runs = completed
                         da.results = results
 
                 except Exception as e:
-                    logger.warning(f"  Deep analysis failed for {config_label} × {model_name}: {e}")
-                    results[config_label][model_name] = DeepAnalysisCellResult(mae=np.nan, rmse=np.nan, mase=float('nan'))
+                    logger.warning(f"  Covariate analysis failed for {config_label} × {model_name}: {e}")
+                    results[config_label][model_name] = CovariateAnalysisCellResult(mae=np.nan, rmse=np.nan, mase=float('nan'))
                     completed += 1
 
         # Compute % change vs baseline for all three metrics
-        _nan_cell = DeepAnalysisCellResult(mae=np.nan, rmse=np.nan, mase=float('nan'))
+        _nan_cell = CovariateAnalysisCellResult(mae=np.nan, rmse=np.nan, mase=float('nan'))
         baseline = results.get("All covariates", {})
         for config_label in results:
             for model_name in results[config_label]:
@@ -2905,14 +3012,14 @@ class MLForecastLabApp:
 
         # Store final results
         if self.web_app:
-            da = self.web_app.state.appstate.deep_analysis_results[exp_cfg.name]
+            da = self.web_app.state.appstate.covariate_analysis_results[exp_cfg.name]
             da.status = "completed"
             da.results = results
             da.recommendations = recommendations
             da.completed_runs = completed
 
         logger.info("")
-        logger.info(f"  Deep Analysis Complete")
+        logger.info(f"  Covariate Analysis Complete")
         logger.info(f"  {'─' * 50}")
         for rec in recommendations:
             logger.info(f"  {rec['icon']} {rec['text']}")

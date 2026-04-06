@@ -73,7 +73,7 @@
     {% if feature_importances %}<a data-tab="sec-features" onclick="showTab(this)">Features</a>{% endif %}
     {# Ensemble tab disabled in v2.5.0 — keep code in place for future re-enable #}
     {# <a data-tab="sec-ensemble" onclick="showTab(this)">Ensemble</a> #}
-    <a data-tab="sec-deep-analysis" onclick="showTab(this)">Covariate Analysis</a>
+    <a data-tab="sec-covariate-analysis" onclick="showTab(this)">Covariate Analysis</a>
     <a data-tab="sec-tuning" onclick="showTab(this)">Tuning</a>
     {% endif %}
 </nav>
@@ -759,8 +759,8 @@
 </div>
 
 <!-- ====== TAB: Covariate Analysis ====== -->
-{% if deep_analysis or benchmark_result %}
-<div class="tab-section" id="sec-deep-analysis" style="display:none;">
+{% if covariate_analysis or benchmark_result %}
+<div class="tab-section" id="sec-covariate-analysis" style="display:none;">
 <section class="section">
     <h2>Covariate Analysis <span class="info-tip">?<span class="tip-text">Tests every model with different covariate combinations to find which external features help and which ones hurt. The % change column shows impact relative to the "All covariates" baseline. Positive = worse, negative = better.</span></span></h2>
 
@@ -769,7 +769,7 @@
         <div>
             <label class="field-label" style="display:block;margin-bottom:0.3rem;">Model</label>
             {% set sel_model = experiment.selected_model or best_model %}
-            <select id="deep-analysis-model" class="setting-input" style="padding:0.4rem 0.6rem;font-size:0.9rem;min-width:180px;">
+            <select id="covariate-analysis-model" class="setting-input" style="padding:0.4rem 0.6rem;font-size:0.9rem;min-width:180px;">
                 {% for model in models %}
                 <option value="{{ model.name }}" {% if model.name == sel_model %}selected{% endif %}>{{ model.name }}{% if model.name == sel_model %} (selected){% endif %}</option>
                 {% endfor %}
@@ -777,24 +777,24 @@
             </select>
         </div>
         <button class="btn btn-purple"
-                id="deep-analysis-btn"
-                onclick="runDeepAnalysis('{{ experiment.name }}', this)"
-                {% if deep_analysis and deep_analysis.status == 'running' %}disabled{% endif %}>
-            {% if deep_analysis and deep_analysis.status == 'running' %}Analysing...{% else %}Run Covariate Analysis{% endif %}
+                id="covariate-analysis-btn"
+                onclick="runCovariateAnalysis('{{ experiment.name }}', this)"
+                {% if covariate_analysis and covariate_analysis.status == 'running' %}disabled{% endif %}>
+            {% if covariate_analysis and covariate_analysis.status == 'running' %}Analysing...{% else %}Run Covariate Analysis{% endif %}
         </button>
     </div>
 
-    {% if deep_analysis and deep_analysis.status == 'running' %}
+    {% if covariate_analysis and covariate_analysis.status == 'running' %}
     <div style="text-align: center; padding: 2rem; color: var(--accent-secondary);">
-        <p style="font-size: 1.2rem;">Deep analysis running...</p>
-        <p style="color: var(--text-secondary);">{{ deep_analysis.completed_runs }} / {{ deep_analysis.total_runs }} combinations tested</p>
+        <p style="font-size: 1.2rem;">Covariate analysis running...</p>
+        <p style="color: var(--text-secondary);">{{ covariate_analysis.completed_runs }} / {{ covariate_analysis.total_runs }} combinations tested</p>
         <div style="background: var(--bg-tertiary); border-radius: 0.5rem; height: 8px; margin-top: 1rem; max-width: 400px; margin-left: auto; margin-right: auto;">
-            <div style="background: var(--accent-secondary); height: 100%; border-radius: 0.5rem; width: {{ (deep_analysis.completed_runs / deep_analysis.total_runs * 100) if deep_analysis.total_runs > 0 else 0 }}%; transition: width 0.5s;"></div>
+            <div style="background: var(--accent-secondary); height: 100%; border-radius: 0.5rem; width: {{ (covariate_analysis.completed_runs / covariate_analysis.total_runs * 100) if covariate_analysis.total_runs > 0 else 0 }}%; transition: width 0.5s;"></div>
         </div>
     </div>
     {% endif %}
 
-    {% if deep_analysis.status == 'completed' and deep_analysis.results %}
+    {% if covariate_analysis.status == 'completed' and covariate_analysis.results %}
     <!-- One-click apply: pick the winning covariate set + retrain immediately -->
     <div style="margin: 0.5rem 0 1.25rem 0; padding: 0.85rem 1rem; background: rgba(46,204,113,0.08); border: 1px solid rgba(46,204,113,0.25); border-radius: 0.5rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.75rem;">
         <div style="flex: 1 1 320px; min-width: 0;">
@@ -818,19 +818,19 @@
             <thead>
                 <tr>
                     <th>Configuration</th>
-                    {% for model in deep_analysis.model_names %}
+                    {% for model in covariate_analysis.model_names %}
                     <th>{{ model }}</th>
                     {% endfor %}
                 </tr>
             </thead>
             <tbody>
-                {% for label in deep_analysis.covariate_labels %}
+                {% for label in covariate_analysis.covariate_labels %}
                 {% set is_drop = label.startswith('Without ') %}
                 {# Check if dropping this covariate improves the average MAE across models #}
                 {% if is_drop %}
                 {% set ns_avg = namespace(total=0, count=0) %}
-                {% for model in deep_analysis.model_names %}
-                {% set cell = deep_analysis.results.get(label, {}).get(model) %}
+                {% for model in covariate_analysis.model_names %}
+                {% set cell = covariate_analysis.results.get(label, {}).get(model) %}
                 {% if cell and cell.change_pct is not none %}
                 {% set ns_avg.total = ns_avg.total + cell.change_pct %}
                 {% set ns_avg.count = ns_avg.count + 1 %}
@@ -849,8 +849,8 @@
                         </button>
                         {% endif %}
                     </td>
-                    {% for model in deep_analysis.model_names %}
-                    {% set cell = deep_analysis.results.get(label, {}).get(model) %}
+                    {% for model in covariate_analysis.model_names %}
+                    {% set cell = covariate_analysis.results.get(label, {}).get(model) %}
                     <td style="padding:0.5rem 0.75rem;">
                         {% if cell %}
                         {% macro pct_color(val) %}{% if val is not none %}{% if val > 2 %}#e74c3c{% elif val < -2 %}#2ecc71{% else %}var(--text-secondary){% endif %}{% endif %}{% endmacro %}
@@ -882,10 +882,10 @@
         </table>
     </div>
 
-    {% if deep_analysis.recommendations %}
+    {% if covariate_analysis.recommendations %}
     <div style="margin-top: 1.5rem; padding: 1.5rem; background: var(--bg-tertiary); border-radius: 0.5rem;">
         <h3 style="color: var(--accent-secondary); margin-bottom: 1rem;">Recommendations</h3>
-        {% for rec in deep_analysis.recommendations %}
+        {% for rec in covariate_analysis.recommendations %}
         <p style="margin-bottom: 0.5rem; color: {{ rec.color }};">
             {{ rec.icon }} {{ rec.text }}
         </p>
@@ -1263,7 +1263,7 @@ window.showTab = function(el) {
                 // Update tuning & covariate analysis defaults
                 var tuningSelect = document.getElementById('tuning-model');
                 if (tuningSelect) tuningSelect.value = modelName;
-                var deepSelect = document.getElementById('deep-analysis-model');
+                var deepSelect = document.getElementById('covariate-analysis-model');
                 if (deepSelect) deepSelect.value = modelName;
             }
         })
@@ -1356,7 +1356,7 @@ window.showTab = function(el) {
         .catch(function(err) { mlfl.toast('Failed to start ensemble: ' + err, 'error'); btn.disabled = false; btn.textContent = 'Run Ensemble'; });
     };
 
-    // ======== Deep analysis ========
+    // ======== Covariate analysis ========
     // ======== Tuning ========
     window.runTuning = function(name, btn) {
         var modelName = document.getElementById('tuning-model').value;
@@ -1423,7 +1423,7 @@ window.showTab = function(el) {
         });
     };
 
-    // ======== Deep analysis ========
+    // ======== Covariate analysis ========
     window.applyCovariateBest = function(name, btn) {
         var origLabel = btn ? btn.textContent : '';
         if (btn) {
@@ -1471,17 +1471,17 @@ window.showTab = function(el) {
         });
     };
 
-    window.runDeepAnalysis = function(name, btn) {
+    window.runCovariateAnalysis = function(name, btn) {
         btn.disabled = true; btn.classList.add('btn-loading'); btn.textContent = 'Analysing...';
-        var modelSelect = document.getElementById('deep-analysis-model');
+        var modelSelect = document.getElementById('covariate-analysis-model');
         var selectedModel = modelSelect ? modelSelect.value : 'all';
-        fetch(BASE + '/experiment/' + name + '/run-deep-analysis', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: selectedModel }) })
+        fetch(BASE + '/experiment/' + name + '/run-covariate-analysis', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: selectedModel }) })
         .then(function(r) { return r.json(); })
         .then(function() {
             var pollId = setInterval(function() {
-                fetch(BASE + '/experiment/' + name + '/deep-analysis')
+                fetch(BASE + '/experiment/' + name + '/covariate-analysis')
                     .then(function(r) { if (r.ok) return r.json(); throw new Error('not ready'); })
-                    .then(function(result) { if (result.status === 'completed') { clearInterval(pollId); _reloadToTab('sec-deep-analysis'); } })
+                    .then(function(result) { if (result.status === 'completed') { clearInterval(pollId); _reloadToTab('sec-covariate-analysis'); } })
                     .catch(function() {});
             }, 5000);
         })
@@ -1511,7 +1511,7 @@ window.showTab = function(el) {
     window.startPipeline = function() {
         var steps = ['benchmark'];
         if (document.getElementById('chk-ensemble').value) steps.push('ensemble');
-        if (document.getElementById('chk-deep').value) steps.push('deep_analysis');
+        if (document.getElementById('chk-deep').value) steps.push('covariate_analysis');
 
         var btn = document.getElementById('btn-run');
         btn.disabled = true; btn.classList.add('btn-loading');
@@ -1767,7 +1767,7 @@ window.showTab = function(el) {
     }
 
     // ======== Initial tab selection ========
-    // URL hash takes priority (e.g. after ensemble/deep-analysis reload)
+    // URL hash takes priority (e.g. after ensemble/covariate-analysis reload)
     var _hashTab = window.location.hash.replace('#', '');
     var _hashPill = _hashTab ? document.querySelector('.section-nav a[data-tab="' + _hashTab + '"]') : null;
     if (_hashPill) {

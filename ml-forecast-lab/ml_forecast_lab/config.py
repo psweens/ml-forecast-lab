@@ -504,7 +504,7 @@ def remove_experiment_covariate(
     Remove a covariate from an experiment's config.
 
     `entity_id` can be either the full entity ID (e.g. ``sensor.current_charge``)
-    or its short suffix (``current_charge``) — the deep-analysis UI uses the
+    or its short suffix (``current_charge``) — the covariate-analysis UI uses the
     short form because that's what becomes the dataframe column name.
 
     Returns True if a covariate was removed, False if not found.
