@@ -71,7 +71,8 @@
     <a data-tab="sec-predictions" onclick="showTab(this)">Predictions</a>
     <a data-tab="sec-generalisation" onclick="showTab(this)">Generalisation</a>
     {% if feature_importances %}<a data-tab="sec-features" onclick="showTab(this)">Features</a>{% endif %}
-    <a data-tab="sec-ensemble" onclick="showTab(this)">Ensemble</a>
+    {# Ensemble tab disabled in v2.5.0 — keep code in place for future re-enable #}
+    {# <a data-tab="sec-ensemble" onclick="showTab(this)">Ensemble</a> #}
     <a data-tab="sec-deep-analysis" onclick="showTab(this)">Covariate Analysis</a>
     <a data-tab="sec-tuning" onclick="showTab(this)">Tuning</a>
     {% endif %}
@@ -176,16 +177,17 @@
 <!-- ====== TAB: Results ====== -->
 <div class="tab-section" id="sec-results" style="display:none;">
 <section class="section">
-    <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Models are ranked by composite mean rank across CV folds (Demšar 2006). Within each fold, models are ranked independently by MAE, RMSE, and MASE; those per-metric ranks are averaged to give a composite fold rank, then averaged across folds. All metrics are computed on the next-step (h=1) prediction so tree and neural models are compared on the same horizon.</span></span></h2>
+    <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Two complementary views: <strong>Per-Interval Accuracy</strong> measures the next-step (h=1) prediction error — what the model gets right at the 30-minute level. <strong>Daily Cumulative Accuracy</strong> (table below) sums each day's predictions and actuals before computing errors — better for use cases like daily energy or hot-water demand where you care about totals rather than exact timing. Both rankings use the Demšar (2006) composite over MAE, RMSE, and MASE. The Per-Interval rank still drives Promote, Tuning, and live forecasting; the Daily rank is informational so you can pick the model that matches your objective.</span></span></h2>
+    <h3 style="color: var(--text-primary); margin: 0.5rem 0 1rem 0;">Per-Interval Accuracy <span style="color: var(--text-secondary); font-size: 0.85rem; font-weight: normal;">— next-step (h=1), what the live forecast publishes</span></h3>
     <div class="table-container">
         <table class="metrics-table">
             <thead>
                 <tr>
                     <th style="width:2rem;"></th>
                     <th>Model</th>
-                    <th>MAE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Mean Absolute Error of the next-step (h=1) prediction — average magnitude of prediction errors. Lower is better. The ± value shows variation across CV folds.</span></span></th>
-                    <th>RMSE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Root Mean Square Error of the next-step (h=1) prediction — penalises large errors more heavily than MAE. Lower is better.</span></span></th>
-                    <th>MASE <span class="info-tip">?<span class="tip-text">Mean Absolute Scaled Error of the next-step (h=1) prediction — error relative to a naive forecast. Below 1.0 means the model beats naive; above 1.0 means worse. Handles near-zero values reliably unlike MAPE.</span></span></th>
+                    <th>Interval MAE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Mean Absolute Error on the next-step (h=1) prediction — average magnitude of per-interval prediction errors. Lower is better. The ± value shows variation across CV folds.</span></span></th>
+                    <th>Interval RMSE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Root Mean Square Error on the next-step (h=1) prediction — penalises large per-interval errors more heavily than MAE. Lower is better.</span></span></th>
+                    <th>Interval MASE <span class="info-tip">?<span class="tip-text">Mean Absolute Scaled Error on the next-step (h=1) prediction — error relative to a naive forecast. Below 1.0 means the model beats naive; above 1.0 means worse. Handles near-zero values reliably unlike MAPE.</span></span></th>
                     <th>Train Time <span class="info-tip">?<span class="tip-text">Average wall-clock training time per CV fold in seconds.</span></span></th>
                     <th>Mean Rank <span class="info-tip">?<span class="tip-text">Average rank across CV folds (1.0 = ranked 1st in every fold). Lower is better. A model with mean rank 1.4 was typically 1st or 2nd across folds, indicating strong generalisability.</span></span></th>
                     <th>Rank</th>
@@ -227,6 +229,60 @@
         </table>
     </div>
 
+    {% set has_daily = models | selectattr('daily_mae') | list %}
+    {% if has_daily %}
+    <h3 style="color: var(--text-primary); margin: 2rem 0 1rem 0;">
+        Daily Cumulative Accuracy
+        <span style="color: var(--text-secondary); font-size: 0.85rem; font-weight: normal;">— per-day totals, what daily-energy use cases care about</span>
+        <span class="info-tip">?<span class="tip-text">Same MAE / RMSE / MASE methodology, but computed on per-day totals (each day's predictions summed, each day's actuals summed, then compared). Rewards models that get daily totals right even when their per-interval predictions are noisy. The Daily Rank column ranks models using the same Demšar composite as above, but applied to these daily metrics. Daily Rank is informational only — it does not drive Promote, Tuning, or live forecasting.</span></span>
+    </h3>
+    <div class="table-container">
+        <table class="metrics-table">
+            <thead>
+                <tr>
+                    <th>Model</th>
+                    <th>Daily MAE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Mean Absolute Error of the daily total — how far off the model is on each day's summed total. Rewards models with zero-mean per-interval noise that still capture daily totals well.</span></span></th>
+                    <th>Daily RMSE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Root Mean Square Error of the daily total — penalises days where the model's daily total is way off, more heavily than Daily MAE.</span></span></th>
+                    <th>Daily MASE <span class="info-tip">?<span class="tip-text">Daily MAE relative to a naive day-to-day forecast (today = yesterday). Below 1.0 beats naive; above 1.0 is worse.</span></span></th>
+                    <th>Daily Mean Rank</th>
+                    <th>Daily Rank</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for model in models %}
+                {% if model.daily_mae %}
+                <tr>
+                    <td class="model-name">{{ model.name }}</td>
+                    <td>
+                        <span class="metric-value">{{ "%.3f" | format(model.daily_mae.mean) }}</span>
+                        <span class="metric-std">± {{ "%.3f" | format(model.daily_mae.std) }}</span>
+                    </td>
+                    <td>
+                        <span class="metric-value">{{ "%.3f" | format(model.daily_rmse.mean) }}</span>
+                        <span class="metric-std">± {{ "%.3f" | format(model.daily_rmse.std) }}</span>
+                    </td>
+                    <td>
+                        <span class="metric-value">{{ "%.2f" | format(model.daily_mase.mean) }}</span>
+                        <span class="metric-std">± {{ "%.2f" | format(model.daily_mase.std) }}</span>
+                    </td>
+                    <td>
+                        {% if model.daily_mean_rank is not none %}
+                        <span class="metric-value">{{ "%.1f" | format(model.daily_mean_rank) }}</span>
+                        {% else %}—{% endif %}
+                    </td>
+                    <td>
+                        {% if model.daily_rank %}
+                        <span class="rank-badge rank-{{ model.daily_rank }}">{{ model.daily_rank }}</span>
+                        {% else %}—{% endif %}
+                    </td>
+                </tr>
+                {% endif %}
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
     <details class="fold-metrics">
         <summary>Per-Fold Metrics</summary>
         <div class="fold-content">
@@ -260,22 +316,8 @@
         </div>
     </details>
 
-    {% set has_loss = models | selectattr('training_history') | list %}
-    {% if has_loss %}
-    <details class="fold-metrics" style="margin-top:1rem;">
-        <summary>Training Loss Curves (neural models)</summary>
-        <div class="fold-content" style="display:flex;flex-wrap:wrap;gap:1.5rem;padding-top:1rem;">
-            {% for model in models %}
-            {% if model.training_history %}
-            <div style="flex:1 1 400px;min-width:350px;">
-                <h4 style="color:var(--accent-secondary);margin-bottom:0.5rem;">{{ model.name }}</h4>
-                <div id="loss-curve-{{ loop.index }}" style="min-height:300px;"></div>
-            </div>
-            {% endif %}
-            {% endfor %}
-        </div>
-    </details>
-    {% endif %}
+    {# Training Loss Curves removed in v2.5.0 — use the Generalisation tab #}
+    {# instead, which shows train-vs-test gaps and per-fold stability lines. #}
 </section>
 </div>
 
@@ -324,7 +366,8 @@
     {% if has_train %}
     {% set best_test_mae = has_train | map(attribute='mae') | map(attribute='mean') | min %}
     {% set best_test_rmse = has_train | map(attribute='rmse') | map(attribute='mean') | min %}
-    <h3 style="color: var(--text-primary); margin-bottom: 1rem;">Train vs Test Error</h3>
+    <h3 style="color: var(--text-primary); margin-bottom: 0.4rem;">Train vs Test Error</h3>
+    <p style="color: var(--text-secondary); font-size: 0.85rem; margin: 0 0 1rem 0;">All values below are per-interval (h=1) errors. Daily-cumulative errors are not yet broken out into train vs test.</p>
     <div class="table-container">
         <table class="metrics-table">
             <thead>
@@ -390,7 +433,10 @@
 </div>
 {% endif %}
 
-<!-- ====== TAB: Ensemble ====== -->
+<!-- ====== TAB: Ensemble (DISABLED in v2.5.0 — not currently needed) ====== -->
+<!-- The whole section is left in place so it can be re-enabled by uncommenting -->
+<!-- the nav link at the top of the file. -->
+{% if false %}
 <div class="tab-section" id="sec-ensemble" style="display:none;">
 <section class="section">
     <h2>Ensemble <span class="info-tip">?<span class="tip-text">Combines predictions from multiple models. Select which models to include using Top-N (auto-picks best by production metric) or custom selection. You can re-run ensemble with different settings without re-training.</span></span></h2>
@@ -542,11 +588,12 @@
     {% endif %}
 </section>
 </div>
+{% endif %}{# end Ensemble disable #}
 
 <!-- ====== TAB: Tuning ====== -->
 <div class="tab-section" id="sec-tuning" style="display:none;">
 <section class="section">
-    <h2>Hyperparameter Tuning <span class="info-tip">?<span class="tip-text">Bayesian optimisation (Optuna TPE) automatically searches for the best hyperparameters. Each trial trains the model with 2-fold CV and reports MAE. After tuning, click "Apply & Promote" to save the winning params and promote the model to production.</span></span></h2>
+    <h2>Hyperparameter Tuning <span class="info-tip">?<span class="tip-text">Bayesian optimisation (Optuna TPE) automatically searches for the best hyperparameters. Each trial trains the model with 2-fold CV and reports a composite score that averages MAE, RMSE, and MASE — each normalised against a baseline run with the model's default parameters. A composite of 1.0 matches the default; lower is better (e.g. 0.85 means a 15% average improvement across all three metrics). After tuning, click "Apply & Promote" to save the winning params and promote the model.</span></span></h2>
 
     <!-- Controls -->
     <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin-bottom:1.5rem;">
@@ -585,7 +632,7 @@
         <div style="display:flex;justify-content:space-between;margin-bottom:0.25rem;">
             <span id="tuning-progress-label" style="color:var(--text-secondary);font-size:0.9rem;">
                 Trial {{ tuning_result.completed_trials }}/{{ tuning_result.n_trials }}
-                {% if tuning_result.best_score is not none %} · Best MAE: {{ "%.4f"|format(tuning_result.best_score) }}{% endif %}
+                {% if tuning_result.best_score is not none %} · Best composite: {{ "%.4f"|format(tuning_result.best_score) }}{% endif %}
             </span>
             <span style="color:var(--accent-secondary);font-weight:600;font-size:0.9rem;">
                 {{ ((tuning_result.completed_trials / tuning_result.n_trials * 100) | int) if tuning_result.n_trials > 0 else 0 }}%
@@ -608,7 +655,7 @@
         {% set defaults = param_defaults.get(tuning_result.model_name, {}) %}
         <div style="margin-bottom:1rem;padding:0.75rem 1rem;background:rgba(46,204,113,0.1);border:1px solid rgba(46,204,113,0.25);border-radius:0.5rem;">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem;">
-                <span style="color:var(--success);font-weight:600;">Best — Trial #{{ tuning_result.best_trial_id }}, MAE {{ "%.4f"|format(tuning_result.best_score) }}</span>
+                <span style="color:var(--success);font-weight:600;">Best — Trial #{{ tuning_result.best_trial_id }}, composite {{ "%.4f"|format(tuning_result.best_score) }}</span>
                 <button class="btn btn-success" style="padding:0.3rem 1rem;font-size:0.85rem;"
                         onclick="applyTuning('{{ experiment.name }}')">
                     Apply &amp; Promote
@@ -650,11 +697,12 @@
                     <span style="color:var(--text-secondary);font-size:0.85rem;">Cumulative</span>
                 </div>
             </div>
-            {% if tuning_result.default_mae is not none and tuning_result.best_score is not none %}
+            {% set best_trial = (tuning_result.trials | selectattr('trial_id', 'equalto', tuning_result.best_trial_id) | list | first) if tuning_result.best_trial_id is not none else none %}
+            {% if tuning_result.default_mae is not none and best_trial %}
             <p style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:0.5rem;">
                 MAE: <span style="color:var(--text-muted);">{{ "%.4f"|format(tuning_result.default_mae) }} (default)</span>
-                → <span style="color:var(--accent-secondary);font-weight:600;">{{ "%.4f"|format(tuning_result.best_score) }} (tuned)</span>
-                {% set imp = ((tuning_result.default_mae - tuning_result.best_score) / tuning_result.default_mae * 100) if tuning_result.default_mae > 0 else 0 %}
+                → <span style="color:var(--accent-secondary);font-weight:600;">{{ "%.4f"|format(best_trial.mae) }} (tuned)</span>
+                {% set imp = ((tuning_result.default_mae - best_trial.mae) / tuning_result.default_mae * 100) if tuning_result.default_mae > 0 else 0 %}
                 <span style="color:{% if imp > 0 %}var(--success){% else %}var(--error){% endif %};font-weight:600;">
                     ({{ "%+.1f"|format(imp) }}%)
                 </span>
@@ -999,32 +1047,10 @@ window.showTab = function(el) {
         if (window.renderHoldoutChart) window.renderHoldoutChart(checked);
     };
 
-    // ======== Loss curves (in Results tab, collapsible) ========
-    {% if benchmark_result %}
-    {% set has_loss = models | selectattr('training_history') | list %}
-    {% if has_loss %}
-    queueChart('sec-results', function() {
-        {% for model in models %}
-        {% if model.training_history %}
-        (function() {
-            var history = {{ model.training_history | tojson }};
-            var epochs = Array.from({length: history.train_loss.length}, function(_, i) { return i + 1; });
-            Plotly.newPlot('loss-curve-{{ loop.index }}', [
-                { x: epochs, y: history.train_loss, name: 'Train Loss', mode: 'lines', line: { color: '#ffd93d', width: 2 } },
-                { x: epochs, y: history.val_loss, name: 'Val Loss', mode: 'lines', line: { color: '#ff6b6b', width: 2, dash: 'dash' } }
-            ], {
-                xaxis: { title: 'Epoch', gridcolor: '#2d3561' }, yaxis: { title: 'Loss', gridcolor: '#2d3561' },
-                hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
-                font: { color: '#e0e0e0' }, legend: { orientation: 'h', y: -0.2 },
-                margin: { l: 55, r: 15, t: 10, b: 60 }
-            }, { responsive: true });
-        })();
-        {% endif %}
-        {% endfor %}
-    });
-    {% endif %}
+    {# Loss-curve renderer removed in v2.5.0 along with the Training Loss Curves panel. #}
 
     // ======== Generalisation charts (fold stability) ========
+    {% if benchmark_result %}
     {% if models and models[0].fold_results %}
     queueChart('sec-generalisation', function() {
         var modelsData = {{ models_json | tojson }};

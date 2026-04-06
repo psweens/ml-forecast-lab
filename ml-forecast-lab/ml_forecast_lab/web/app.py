@@ -50,6 +50,18 @@ class ModelResult(BaseModel):
     train_mae: Optional[MetricValue] = None
     train_rmse: Optional[MetricValue] = None
     training_history: Optional[Dict[str, List[float]]] = None
+    # Daily-cumulative metrics. Same MAE/RMSE/MASE methodology, but
+    # computed on per-day totals (each day's predictions summed, each
+    # day's actuals summed, then compared). Better for use cases where
+    # daily totals matter more than 30-minute precision (e.g. hot-water
+    # or energy demand). The Daily Rank is computed via the same Demšar
+    # composite as the primary rank but using the daily metrics; it is
+    # purely informational and does NOT drive Promote/Tuning workflows.
+    daily_mae: Optional[MetricValue] = None
+    daily_rmse: Optional[MetricValue] = None
+    daily_mase: Optional[MetricValue] = None
+    daily_rank: Optional[int] = None
+    daily_mean_rank: Optional[float] = None
 
 
 class BenchmarkResult(BaseModel):

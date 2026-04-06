@@ -14,7 +14,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -582,17 +582,30 @@ class MLForecastLabApp:
 
         return result
 
-    def _update_web_benchmark(self, exp_cfg, model_results, rankings, best_model_name, status="running"):
+    def _update_web_benchmark(
+        self, exp_cfg, model_results, rankings, best_model_name,
+        status="running", daily_rankings=None,
+    ):
         """
         Update web app state with current benchmark progress.
 
         Called after each model completes so the UI updates progressively.
+
+        Parameters
+        ----------
+        daily_rankings : dict[str, int], optional
+            Per-model daily-cumulative integer rank (Demšar composite over
+            daily metrics). When omitted (e.g. progressive intermediate
+            updates) the daily rank columns simply show "—" until the final
+            update arrives.
         """
         from ml_forecast_lab.web.app import (
             BenchmarkResult as WebBenchmarkResult,
             ModelResult as WebModelResult,
             MetricValue,
         )
+
+        daily_rankings = daily_rankings or {}
 
         web_models = []
         for model_name, runner_model_result in sorted(
@@ -601,6 +614,7 @@ class MLForecastLabApp:
         ):
             rank = rankings.get(model_name, 0)
             fold_metrics_list = runner_model_result.fold_metrics
+            daily_fold_list = getattr(runner_model_result, 'daily_fold_metrics', [])
 
             metric_means = {}
             metric_stds = {}
@@ -612,6 +626,20 @@ class MLForecastLabApp:
                 ]
                 metric_means[metric_name] = float(np.nanmean(values)) if values else 0.0
                 metric_stds[metric_name] = float(np.nanstd(values)) if len(values) > 1 else 0.0
+
+            # Daily-cumulative metric means/stds (parallel computation)
+            daily_means: Dict[str, float] = {}
+            daily_stds: Dict[str, float] = {}
+            for metric_name in exp_cfg.metrics:
+                vals = [
+                    fm.get(metric_name, np.nan)
+                    for fm in daily_fold_list
+                    if fm
+                ]
+                vals = [v for v in vals if not (isinstance(v, float) and np.isnan(v))]
+                if vals:
+                    daily_means[metric_name] = float(np.nanmean(vals))
+                    daily_stds[metric_name] = float(np.nanstd(vals)) if len(vals) > 1 else 0.0
 
             # Train metric means/stds for overfitting table
             train_metric_means = {}
@@ -625,6 +653,12 @@ class MLForecastLabApp:
                     if vals:
                         train_metric_means[mn] = float(np.nanmean(vals))
                         train_metric_stds[mn] = float(np.nanstd(vals)) if len(vals) > 1 else 0.0
+
+            daily_mean_rank = runner_model_result.metrics.get("mean_rank_daily")
+            if daily_mean_rank is not None and (
+                isinstance(daily_mean_rank, float) and np.isinf(daily_mean_rank)
+            ):
+                daily_mean_rank = None
 
             web_models.append(WebModelResult(
                 name=model_name,
@@ -652,6 +686,17 @@ class MLForecastLabApp:
                     mean=train_metric_means["rmse"], std=train_metric_stds["rmse"],
                 ) if "rmse" in train_metric_means else None,
                 training_history=runner_model_result.training_history,
+                daily_mae=MetricValue(
+                    mean=daily_means["mae"], std=daily_stds["mae"],
+                ) if "mae" in daily_means else None,
+                daily_rmse=MetricValue(
+                    mean=daily_means["rmse"], std=daily_stds["rmse"],
+                ) if "rmse" in daily_means else None,
+                daily_mase=MetricValue(
+                    mean=daily_means["mase"], std=daily_stds["mase"],
+                ) if "mase" in daily_means else None,
+                daily_rank=daily_rankings.get(model_name),
+                daily_mean_rank=daily_mean_rank,
             ))
 
         web_result = WebBenchmarkResult(
@@ -904,53 +949,41 @@ class MLForecastLabApp:
                     status="running",
                 )
 
-        # Final ranking by mean rank across folds (Demšar 2006)
-        higher_is_better = runner.production_metric in {'r_squared', 'coverage'}
-        model_names = list(completed_models.keys())
-        n_folds_actual = max(
-            len(mr.fold_metrics) for mr in completed_models.values()
-        ) if completed_models else 0
+        # Final composite ranking via the runner's shared Demšar helper.
+        # Computed twice: once on per-interval (h=1) metrics for the primary
+        # leaderboard, once on daily-cumulative metrics for the secondary
+        # leaderboard. The interval rank still drives Promote / Tuning /
+        # sensor publishing; daily_rankings is informational only.
+        interval_mean_ranks, rankings = runner._compute_composite_ranks(
+            completed_models, metric_source='fold_metrics',
+        )
+        daily_mean_ranks, daily_rankings = runner._compute_composite_ranks(
+            completed_models, metric_source='daily_fold_metrics',
+        )
+        for name in completed_models:
+            completed_models[name].metrics['mean_rank'] = interval_mean_ranks.get(name, float('inf'))
+            completed_models[name].metrics['mean_rank_daily'] = daily_mean_ranks.get(name, float('inf'))
+        mean_ranks = interval_mean_ranks  # for downstream logging
 
-        fold_ranks = {name: [] for name in model_names}
-        for fold_idx in range(n_folds_actual):
-            fold_values = {}
-            for name in model_names:
-                mr = completed_models[name]
-                if fold_idx < len(mr.fold_metrics) and mr.fold_metrics[fold_idx]:
-                    fold_values[name] = mr.fold_metrics[fold_idx].get(
-                        runner.production_metric,
-                        np.inf if not higher_is_better else -np.inf,
-                    )
-                else:
-                    fold_values[name] = np.inf if not higher_is_better else -np.inf
-            sorted_fold = sorted(fold_values.items(), key=lambda x: x[1], reverse=higher_is_better)
-            for rank, (name, _) in enumerate(sorted_fold):
-                fold_ranks[name].append(rank + 1)
-
-        mean_ranks = {
-            name: float(np.mean(ranks)) if ranks else float('inf')
-            for name, ranks in fold_ranks.items()
-        }
-        for name, mean_rank in mean_ranks.items():
-            completed_models[name].metrics['mean_rank'] = mean_rank
-
-        sorted_by_mean_rank = sorted(mean_ranks.items(), key=lambda x: x[1])
-        rankings = {name: rank + 1 for rank, (name, _) in enumerate(sorted_by_mean_rank)}
+        sorted_by_mean_rank = sorted(interval_mean_ranks.items(), key=lambda x: x[1])
         best_model_name = sorted_by_mean_rank[0][0] if sorted_by_mean_rank else None
         best_metric_value = completed_models[best_model_name].metrics.get(
             runner.production_metric, np.nan
         ) if best_model_name else np.nan
 
-        # Log final rankings with fold detail
+        # Log final rankings
         logger.info("")
-        logger.info("  Final rankings (by mean rank across folds):")
+        logger.info("  Final rankings (composite Demšar across folds):")
         for name, _ in sorted_by_mean_rank:
             mr = completed_models[name]
+            daily_str = (
+                f", daily=#{daily_rankings[name]}"
+                if daily_rankings.get(name) else ""
+            )
             logger.info(
                 f"    #{rankings[name]} {name}: "
                 f"{runner.production_metric}={mr.metrics.get(runner.production_metric, np.nan):.4f}, "
-                f"mean_rank={mean_ranks[name]:.2f}, "
-                f"fold_ranks={fold_ranks[name]}"
+                f"mean_rank={mean_ranks[name]:.2f}{daily_str}"
             )
 
         # Update web UI with final mean-rank-based rankings
@@ -959,6 +992,7 @@ class MLForecastLabApp:
                 exp_cfg, completed_models, rankings,
                 best_model_name,
                 status="completed",
+                daily_rankings=daily_rankings,
             )
 
         # Store completed models for ensemble engine
@@ -2405,6 +2439,52 @@ class MLForecastLabApp:
         # Parameters that benefit from log-scale search
         LOG_PARAMS = {"learning_rate", "reg_alpha", "reg_lambda"}
 
+        # --- Composite objective baseline ---
+        # Run one CV evaluation with the model's DEFAULT parameters first.
+        # The (mae, rmse, mase) of that run becomes the anchor used to
+        # normalise every subsequent trial's metrics. This lets Optuna
+        # optimise on a single composite scalar that weights all three
+        # metrics equally and is interpretable: composite = 1.0 means the
+        # trial matches default performance, < 1.0 means it improves.
+        baseline_params = {
+            pname: spec.get("default")
+            for pname, spec in param_schema.items()
+            if spec.get("default") is not None
+        }
+        try:
+            baseline_model = self.model_registry.create(model_name, **baseline_params)
+            baseline_result = runner.run_single_model(combined, baseline_model, fold_indices)
+            baseline_mae = max(baseline_result.metrics.get("mae", 1.0), 1e-6)
+            baseline_rmse = max(baseline_result.metrics.get("rmse", 1.0), 1e-6)
+            baseline_mase = max(baseline_result.metrics.get("mase", 1.0), 1e-6)
+            logger.info(
+                f"  Baseline (default params): "
+                f"MAE={baseline_mae:.4f}, RMSE={baseline_rmse:.4f}, MASE={baseline_mase:.3f}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"  Baseline trial failed ({e}); falling back to first-trial anchors"
+            )
+            baseline_mae = baseline_rmse = baseline_mase = None
+
+        # Mutable anchors so the first valid trial can become the baseline if
+        # the explicit baseline trial above failed.
+        anchor = {"mae": baseline_mae, "rmse": baseline_rmse, "mase": baseline_mase}
+
+        def _composite_score(mae, rmse, mase):
+            """Average of (metric / baseline) across MAE, RMSE, MASE.
+
+            Lower is better; 1.0 = matches baseline; 0.5 = half the average error.
+            Returns +inf for failed trials.
+            """
+            if not all(np.isfinite([mae, rmse, mase])):
+                return float("inf")
+            return float(np.mean([
+                mae / anchor["mae"],
+                rmse / anchor["rmse"],
+                mase / anchor["mase"],
+            ]))
+
         def objective(trial):
             t_start = _time.time()
             params = {}
@@ -2436,6 +2516,18 @@ class MLForecastLabApp:
                 mase = float("inf")
                 status = "failed"
 
+            # Lazily seed the anchor if the explicit baseline run failed
+            if anchor["mae"] is None and status == "completed":
+                anchor["mae"] = max(mae, 1e-6)
+                anchor["rmse"] = max(rmse, 1e-6)
+                anchor["mase"] = max(mase, 1e-6)
+                logger.info(
+                    f"  Anchoring composite to trial {trial.number}: "
+                    f"MAE={mae:.4f}, RMSE={rmse:.4f}, MASE={mase:.3f}"
+                )
+
+            composite = _composite_score(mae, rmse, mase) if anchor["mae"] is not None else float("inf")
+
             duration = _time.time() - t_start
 
             trial_result = TuningTrialResult(
@@ -2446,20 +2538,21 @@ class MLForecastLabApp:
             tuning_state.trials.append(trial_result)
             tuning_state.completed_trials = len(tuning_state.trials)
 
-            # Update best so far
-            if mae < (tuning_state.best_score or float("inf")):
-                tuning_state.best_score = round(mae, 6)
+            # Update best so far based on composite score
+            if composite < (tuning_state.best_score or float("inf")):
+                tuning_state.best_score = round(composite, 6)
                 tuning_state.best_params = params
                 tuning_state.best_trial_id = trial.number
 
             logger.info(
                 f"  [{tuning_state.completed_trials}/{n_trials}] "
-                f"Trial {trial.number}: MAE={mae:.4f} "
-                f"({'best' if trial.number == tuning_state.best_trial_id else ''}) "
-                f"({duration:.1f}s)"
+                f"Trial {trial.number}: composite={composite:.4f} "
+                f"(MAE={mae:.4f}, RMSE={rmse:.4f}, MASE={mase:.3f}) "
+                f"({'best ' if trial.number == tuning_state.best_trial_id else ''}"
+                f"{duration:.1f}s)"
             )
 
-            return mae
+            return composite
 
         # Create and run Optuna study
         if strategy == "tpe":

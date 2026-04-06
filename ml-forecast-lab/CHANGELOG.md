@@ -1,5 +1,63 @@
 # Changelog
 
+## 2.5.0
+
+### New: Daily-cumulative leaderboard metrics
+
+The Model Comparison section now has TWO tables:
+
+- **Per-Interval Accuracy** (top, existing): MAE / RMSE / MASE / Mean Rank
+  on the next-step (h=1) prediction. Drives Promote, Tuning, and live
+  forecasting. Column headers relabelled to make the per-interval framing
+  explicit.
+- **Daily Cumulative Accuracy** (new, below): same metrics but computed on
+  per-day totals — each day's predictions summed, each day's actuals summed,
+  then compared. Includes a separate **Daily Rank** computed via the same
+  Demšar (2006) composite as the primary rank but applied to daily metrics.
+
+Daily Rank is informational only — it doesn't drive any production
+workflow — but it lets you pick the model that matches your objective. For
+use cases like daily energy or hot-water demand where the daily total is
+what matters, this is now the leaderboard view to read.
+
+The CV runner captures per-fold timestamps and groups predictions/actuals
+by date inside each fold. The Demšar ranking helper has been factored out
+and is called twice (interval + daily), so both rankings stay in sync with
+any future ranking-logic changes.
+
+### New: Tuning optimises a composite MAE+RMSE+MASE loss
+
+Hyperparameter tuning previously asked Optuna to minimise MAE alone, then
+picked the final winner via a post-hoc rank composite. Now Optuna's search
+objective is the composite directly: each trial's score is the average of
+`(mae / mae_default + rmse / rmse_default + mase / mase_default) / 3`,
+where `_default` comes from one CV evaluation with the model's default
+parameters run before the search starts. A composite of 1.0 matches the
+default; 0.85 means a 15% average improvement across all three metrics.
+Optuna's TPE/Random search now actually optimises the composite throughout,
+not just at the very end.
+
+The tuning panel UI now shows "Best composite" instead of "Best MAE", and
+the help tooltip explains the composite scoring.
+
+### Removed: Training Loss Curves panel
+
+The collapsible "Training Loss Curves (neural models)" section in the
+Results tab has been removed — the Generalisation tab already shows the
+Train vs Test gap and Fold Stability lines, which are more useful for
+diagnosing overfitting than per-epoch loss curves were.
+
+### Disabled: Ensemble tab
+
+The Ensemble tab is hidden in the navigation. The section content is left
+in place behind a `{% if false %}` Jinja gate so it can be re-enabled by
+uncommenting one line if needed in the future.
+
+### Polish
+- Generalisation tab now has a one-line note above the Train vs Test
+  table clarifying "All values below are per-interval (h=1) errors" so
+  there's no ambiguity about which metric scope you're reading.
+
 ## 2.4.0
 
 ### Critical fix: CV runner now matches the holdout chart and production paths

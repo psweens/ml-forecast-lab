@@ -51,6 +51,12 @@ class ModelResult:
     fold_train_metrics: List[Dict[str, float]] = field(default_factory=list)
     train_metrics: Dict[str, float] = field(default_factory=dict)
     training_history: Optional[Dict[str, List[float]]] = field(default=None)
+    # Daily-cumulative metrics: same MAE/RMSE/MASE but computed on per-day
+    # totals (each day's predictions summed, each day's actuals summed,
+    # then compared). Better for use cases where the daily total matters
+    # more than per-interval precision (e.g. daily energy / hot-water demand).
+    daily_fold_metrics: List[Dict[str, float]] = field(default_factory=list)
+    daily_metrics: Dict[str, float] = field(default_factory=dict)
 
     @property
     def mean_train_time(self) -> float:
@@ -111,6 +117,11 @@ class BenchmarkResult:
     experiment_name: str
     model_results: Dict[str, ModelResult] = field(default_factory=dict)
     rankings: Dict[str, int] = field(default_factory=dict)
+    # Parallel ranking computed from daily-cumulative metrics. The primary
+    # `rankings` (per-interval, h=1) still drives Promote / Tuning / sensor
+    # publishing; `daily_rankings` is informational so users can see which
+    # model wins on each criterion.
+    daily_rankings: Dict[str, int] = field(default_factory=dict)
     best_model: str = ''
     best_metric_value: float = np.nan
     metric_used: str = ''
@@ -298,6 +309,17 @@ class BenchmarkRunner:
                 f'Processing fold {fold_idx + 1}/{len(fold_indices)} '
                 f'for model {model.name}'
             )
+
+            # Capture DatetimeIndex BEFORE the reset so we can group test
+            # predictions by date for daily-cumulative metrics. Falls back to
+            # an empty DatetimeIndex when df has no DatetimeIndex (e.g. test
+            # fixtures with RangeIndex).
+            if isinstance(df.index, pd.DatetimeIndex):
+                test_timestamps = df.index[test_idx]
+                train_timestamps = df.index[train_idx]
+            else:
+                test_timestamps = pd.DatetimeIndex([])
+                train_timestamps = pd.DatetimeIndex([])
 
             # Split data
             df_train = df.iloc[train_idx].reset_index(drop=True)
@@ -515,8 +537,48 @@ class BenchmarkRunner:
                 except Exception:
                     pass
 
+            # --- Daily-cumulative metrics ---
+            # Group test predictions and actuals by date, sum each day, then
+            # compute MAE/RMSE/MASE on the daily totals. Rewards models that
+            # capture daily totals well even when their per-interval
+            # predictions are noisy (zero-mean noise cancels out in the sum).
+            # Use case: hot-water / energy demand where the daily total is
+            # what matters more than 30-minute precision.
+            daily_fold_m = {}
+            try:
+                if len(test_timestamps) > 0 and len(train_timestamps) > 0:
+                    # Align timestamp slices to the metric arrays. The neural
+                    # bridge can leave yt_metric / yt_train_metric slightly
+                    # shorter than the raw fold (window_size rows are bridge
+                    # context, not part of the test fold itself).
+                    test_dt = pd.DatetimeIndex(test_timestamps[-len(yt_metric):])
+                    train_dt = pd.DatetimeIndex(train_timestamps[-len(yt_train_metric):])
+
+                    daily_test = pd.DataFrame(
+                        {'y_test': yt_metric, 'y_pred': yp_metric},
+                        index=test_dt,
+                    ).groupby(lambda ts: ts.date()).sum()
+
+                    daily_train = pd.DataFrame(
+                        {'y_train': yt_train_metric},
+                        index=train_dt,
+                    ).groupby(lambda ts: ts.date()).sum()
+
+                    if len(daily_test) >= 2 and len(daily_train) >= 2:
+                        daily_fold_m = self.metric_registry.compute_all(
+                            metrics_to_compute,
+                            daily_test['y_test'].values,
+                            daily_test['y_pred'].values,
+                            y_train=daily_train['y_train'].values,
+                        )
+            except Exception as e:
+                logger.debug(
+                    f'Daily metric computation failed for fold {fold_idx}: {e}'
+                )
+
             model_result.fold_metrics.append(fold_metrics)
             model_result.fold_train_metrics.append(fold_train_m)
+            model_result.daily_fold_metrics.append(daily_fold_m)
             model_result.train_times.append(train_time)
             model_result.inference_times.append(inference_time)
             model_result.fold_predictions.append(np.asarray(y_pred).copy())
@@ -545,6 +607,19 @@ class BenchmarkRunner:
                 ]
                 if values:
                     model_result.metrics[metric_name] = float(np.nanmean(values))
+
+        # Aggregate daily-cumulative metrics across folds
+        if model_result.daily_fold_metrics:
+            metrics_to_compute = list(set(self.metrics + [self.production_metric]))
+            for metric_name in metrics_to_compute:
+                values = [
+                    fm.get(metric_name, np.nan)
+                    for fm in model_result.daily_fold_metrics
+                    if fm
+                ]
+                values = [v for v in values if not np.isnan(v)]
+                if values:
+                    model_result.daily_metrics[metric_name] = float(np.nanmean(values))
 
         # Aggregate train metrics across folds
         if model_result.fold_train_metrics:
@@ -609,63 +684,26 @@ class BenchmarkRunner:
                 logger.error(f'Benchmark failed for model {model_name}: {e}')
                 result.model_results[model_name] = ModelResult(model_name=model_name)
 
-        # Composite ranking across folds (Demšar 2006)
-        # Within each fold, rank models by each of {MAE, RMSE, MASE},
-        # average the per-metric ranks to get a composite fold rank,
-        # then average composite ranks across folds.
-        _higher_better = {'r_squared', 'coverage'}
-        ranking_metrics = [m for m in self.metrics if m not in _higher_better]
-        if not ranking_metrics:
-            ranking_metrics = [self.production_metric]
+        # Composite ranking across folds (Demšar 2006). Computed twice:
+        # once on per-interval (h=1) metrics for the primary leaderboard,
+        # once on daily-cumulative metrics for the secondary leaderboard.
+        interval_mean_ranks, interval_ranks = self._compute_composite_ranks(
+            result.model_results, metric_source='fold_metrics',
+        )
+        daily_mean_ranks, daily_ranks = self._compute_composite_ranks(
+            result.model_results, metric_source='daily_fold_metrics',
+        )
 
-        model_names = list(result.model_results.keys())
-        n_folds = max(
-            len(mr.fold_metrics) for mr in result.model_results.values()
-        ) if result.model_results else 0
+        # Store both mean ranks in ModelResult.metrics for UI access
+        for name in result.model_results:
+            result.model_results[name].metrics['mean_rank'] = interval_mean_ranks.get(name, float('inf'))
+            result.model_results[name].metrics['mean_rank_daily'] = daily_mean_ranks.get(name, float('inf'))
 
-        # Compute per-fold composite ranks
-        fold_ranks = {name: [] for name in model_names}
-        for fold_idx in range(n_folds):
-            # For each ranking metric, rank models in this fold
-            per_metric_ranks = {name: [] for name in model_names}
-            for metric_name in ranking_metrics:
-                higher_is_better = metric_name in _higher_better
-                fold_values = {}
-                for name in model_names:
-                    mr = result.model_results[name]
-                    if fold_idx < len(mr.fold_metrics) and mr.fold_metrics[fold_idx]:
-                        fold_values[name] = mr.fold_metrics[fold_idx].get(
-                            metric_name, np.inf if not higher_is_better else -np.inf
-                        )
-                    else:
-                        fold_values[name] = np.inf if not higher_is_better else -np.inf
-
-                sorted_fold = sorted(
-                    fold_values.items(),
-                    key=lambda x: x[1],
-                    reverse=higher_is_better,
-                )
-                for rank, (name, _) in enumerate(sorted_fold):
-                    per_metric_ranks[name].append(rank + 1)
-
-            # Average across metrics to get composite fold rank
-            for name in model_names:
-                composite = float(np.mean(per_metric_ranks[name])) if per_metric_ranks[name] else float('inf')
-                fold_ranks[name].append(composite)
-
-        # Mean composite rank per model across folds
-        mean_ranks = {
-            name: float(np.mean(ranks)) if ranks else float('inf')
-            for name, ranks in fold_ranks.items()
-        }
-
-        # Store mean_rank in ModelResult.metrics for UI access
-        for name, mean_rank in mean_ranks.items():
-            result.model_results[name].metrics['mean_rank'] = mean_rank
-
-        # Final ranking: sort by mean rank (lower = better)
-        sorted_models = sorted(mean_ranks.items(), key=lambda x: x[1])
-        result.rankings = {name: rank + 1 for rank, (name, _) in enumerate(sorted_models)}
+        # Primary ranking still drives Promote / Tuning / sensor publishing
+        result.rankings = interval_ranks
+        result.daily_rankings = daily_ranks
+        sorted_models = sorted(interval_mean_ranks.items(), key=lambda x: x[1])
+        mean_ranks = interval_mean_ranks  # for downstream logging
 
         if sorted_models:
             result.best_model = sorted_models[0][0]
@@ -681,14 +719,107 @@ class BenchmarkRunner:
         for name in sorted_models:
             model_name = name[0]
             mr = result.model_results[model_name]
+            daily_rank_str = (
+                f', daily_rank=#{daily_ranks[model_name]}'
+                if daily_ranks.get(model_name) else ''
+            )
             logger.info(
                 f'  #{result.rankings[model_name]} {model_name}: '
                 f'{self.production_metric}={mr.metrics.get(self.production_metric, np.nan):.4f}, '
-                f'mean_rank={mean_ranks[model_name]:.2f}, '
-                f'fold_ranks={fold_ranks[model_name]}'
+                f'mean_rank={mean_ranks[model_name]:.2f}'
+                f'{daily_rank_str}'
             )
 
         return result
+
+    def _compute_composite_ranks(
+        self,
+        model_results: Dict[str, ModelResult],
+        metric_source: str,
+    ) -> Tuple[Dict[str, float], Dict[str, int]]:
+        """
+        Compute Demšar (2006) composite ranks across CV folds.
+
+        Within each fold, models are ranked independently by each ranking
+        metric (typically MAE, RMSE, MASE). Per-metric ranks are averaged
+        to give a composite fold rank, then averaged across folds to give
+        the model's mean composite rank.
+
+        Parameters
+        ----------
+        model_results : dict[str, ModelResult]
+            All model results to rank.
+        metric_source : str
+            Attribute name on `ModelResult` to read per-fold metrics from.
+            Use `'fold_metrics'` for per-interval ranking and
+            `'daily_fold_metrics'` for daily-cumulative ranking.
+
+        Returns
+        -------
+        mean_ranks : dict[str, float]
+            Model name → mean composite rank (lower = better).
+        integer_ranks : dict[str, int]
+            Model name → 1-indexed final rank derived from `mean_ranks`.
+            Models with infinite mean rank (no valid folds in this metric
+            source) are excluded.
+        """
+        _higher_better = {'r_squared', 'coverage'}
+        ranking_metrics = [m for m in self.metrics if m not in _higher_better]
+        if not ranking_metrics:
+            ranking_metrics = [self.production_metric]
+
+        model_names = list(model_results.keys())
+        if not model_names:
+            return {}, {}
+
+        n_folds = max(
+            len(getattr(mr, metric_source, [])) for mr in model_results.values()
+        )
+
+        # Compute per-fold composite ranks
+        fold_ranks: Dict[str, List[float]] = {name: [] for name in model_names}
+        for fold_idx in range(n_folds):
+            per_metric_ranks: Dict[str, List[int]] = {name: [] for name in model_names}
+            for metric_name in ranking_metrics:
+                higher_is_better = metric_name in _higher_better
+                fold_values: Dict[str, float] = {}
+                for name in model_names:
+                    mr = model_results[name]
+                    fm_list = getattr(mr, metric_source, [])
+                    if fold_idx < len(fm_list) and fm_list[fold_idx]:
+                        fold_values[name] = fm_list[fold_idx].get(
+                            metric_name,
+                            -np.inf if higher_is_better else np.inf,
+                        )
+                    else:
+                        fold_values[name] = -np.inf if higher_is_better else np.inf
+
+                # Skip this metric for this fold if NO model has a valid value
+                if all(np.isinf(v) for v in fold_values.values()):
+                    continue
+
+                sorted_fold = sorted(
+                    fold_values.items(),
+                    key=lambda x: x[1],
+                    reverse=higher_is_better,
+                )
+                for r, (name, _) in enumerate(sorted_fold):
+                    per_metric_ranks[name].append(r + 1)
+
+            for name in model_names:
+                if per_metric_ranks[name]:
+                    fold_ranks[name].append(float(np.mean(per_metric_ranks[name])))
+
+        # Mean composite rank per model across the folds with valid data
+        mean_ranks: Dict[str, float] = {}
+        for name, ranks in fold_ranks.items():
+            mean_ranks[name] = float(np.mean(ranks)) if ranks else float('inf')
+
+        # Final integer ranking: drop models with no valid folds, then sort
+        rankable = {name: mr for name, mr in mean_ranks.items() if not np.isinf(mr)}
+        sorted_models = sorted(rankable.items(), key=lambda x: x[1])
+        integer_ranks = {name: idx + 1 for idx, (name, _) in enumerate(sorted_models)}
+        return mean_ranks, integer_ranks
 
     def get_best_model(self, result: BenchmarkResult) -> str:
         """
