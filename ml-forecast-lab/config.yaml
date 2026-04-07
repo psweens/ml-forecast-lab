@@ -1,6 +1,6 @@
 ---
 name: ML Forecast Lab
-version: 2.5.5
+version: 2.5.6
 slug: ml_forecast_lab
 description: Multi-model ML forecasting and benchmarking for Home Assistant
 url: https://github.com/psweens/ml-forecast-lab
@@ -24,10 +24,6 @@ ports:
   5052/tcp: 5052
 ports_description:
   5052/tcp: ML Forecast Lab Web UI
-devices:
-  - /dev/hailo0
-privileged:
-  - SYS_RAWIO
 map:
   - addon_config:rw
   - homeassistant_config:rw

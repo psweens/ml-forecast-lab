@@ -42,7 +42,7 @@ Three core production-ready Python modules have been created for ML Forecast Lab
   - Features: country for holidays, log_transform, subtract list
 
 - `AppConfig` - Application settings
-  - update_every_minutes, timezone, hailo_enabled
+  - update_every_minutes, timezone
   - experiments list
 
 **Functions:**

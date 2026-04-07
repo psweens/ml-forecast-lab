@@ -145,7 +145,6 @@ class MLForecastLabApp:
                     cv_folds=3,
                 )
             ],
-            hailo_enabled=False,
         )
 
     async def initialise_components(self):
@@ -1985,7 +1984,7 @@ class MLForecastLabApp:
             self._update_running = False
 
     async def _retrain_and_cache(self, exp_cfg):
-        """Train a production model and cache it (with optional Hailo acceleration)."""
+        """Train a production model and cache it for fast forecast cycles."""
         from ml_forecast_lab.features import build_features
 
         logger.info(f"  Retraining {exp_cfg.name}...")
@@ -2069,34 +2068,6 @@ class MLForecastLabApp:
 
         logger.info(f"  {prod_model_name} trained on {len(X)} samples")
 
-        # Hailo acceleration: export ONNX → wrap → validate
-        is_hailo = False
-        if self.config.hailo_enabled and model.supports_hardware_accel():
-            try:
-                from ml_forecast_lab.models.hailo_runtime import HailoAcceleratedModel
-
-                onnx_path = f"/tmp/mlfl_{exp_cfg.name}_{prod_model_name}.onnx"
-                if model.export_onnx(onnx_path):
-                    wrapped = HailoAcceleratedModel(model, onnx_path)
-
-                    # Validation test: compare CPU vs Hailo on a small batch
-                    X_test_small = X[-5:]
-                    y_cpu = model.predict(X_test_small)
-                    y_hailo = wrapped.predict(X_test_small)
-
-                    if y_hailo is None:
-                        logger.warning(f"  Hailo inference returned None — falling back to CPU")
-                    elif np.mean(np.abs(y_cpu.ravel() - y_hailo.ravel())) > 0.01 * np.mean(np.abs(y_cpu)):
-                        logger.warning(f"  Hailo output diverges >1% from CPU — falling back to CPU")
-                    else:
-                        logger.info(f"  Hailo validation passed — using AI accelerator")
-                        model = wrapped
-                        is_hailo = True
-                else:
-                    logger.debug(f"  ONNX export not supported for {prod_model_name}")
-            except Exception as e:
-                logger.warning(f"  Hailo setup failed: {e} — using CPU")
-
         # Cache the trained model
         self._cached_models[exp_cfg.name] = {
             "model": model,
@@ -2105,7 +2076,6 @@ class MLForecastLabApp:
             "combined": combined,
             "exp_cfg": exp_cfg,
             "trained_at": datetime.now(timezone.utc),
-            "is_hailo": is_hailo,
             "is_neural": is_neural,
             "seq_kwargs": seq_kwargs,
         }
@@ -2120,7 +2090,6 @@ class MLForecastLabApp:
                 status.best_model = prod_model_name
                 status.last_benchmark_timestamp = datetime.now(timezone.utc).isoformat()
                 status.last_benchmark_status = "completed"
-                status.hailo_active = is_hailo
 
     async def _run_forecast_cycle(self):
         """
@@ -2334,7 +2303,6 @@ class MLForecastLabApp:
         logger.info(
             f"  Forecast {exp_cfg.name}: {len(y_pred)} points, "
             f"range [{y_pred.min():.3f}, {y_pred.max():.3f}]"
-            f"{' (Hailo)' if cache.get('is_hailo') else ''}"
         )
 
         # Publish to HA sensors (reuse the publishing section from _run_production_inference)
@@ -2357,7 +2325,6 @@ class MLForecastLabApp:
                 "forecast_periods": future_periods,
                 "interval_minutes": exp_cfg.interval_minutes,
                 "last_trained": cache.get("trained_at", datetime.now(timezone.utc)).isoformat(),
-                "hailo_accelerated": cache.get("is_hailo", False),
                 "friendly_name": f"{publish_name} Forecast",
                 "unit_of_measurement": units,
                 "icon": "mdi:chart-timeline-variant",

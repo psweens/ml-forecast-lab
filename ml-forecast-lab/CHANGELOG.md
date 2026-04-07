@@ -1,5 +1,82 @@
 # Changelog
 
+## 2.5.6
+
+### Removed: Hailo AI accelerator integration
+
+The Hailo integration has been removed entirely. After investigation we
+confirmed it could not possibly work on-device for custom-trained models:
+
+- **Hailo's Data Flow Compiler (DFC) is x86-64 Linux only**. No ARM build
+  exists and Hailo doesn't publish one. For custom-trained models this
+  rules out any on-Pi compilation path, and Hailo's own documentation
+  recommends ~32 GB RAM during quantisation — eliminating QEMU emulation
+  on an 8 GB Pi 5 as a workaround.
+- **The existing scaffolding was also broken in its own right**.
+  `_retrain_and_cache` passed the ONNX file path to
+  `HailoAcceleratedModel(model, hef_path=onnx_path)` where the class
+  expected a compiled HEF file, not ONNX. The wrapper silently fell back
+  to CPU inference while the validation check passed vacuously (both
+  sides were CPU), so `hailo_active=True` was set in the dashboard while
+  the NPU was idle. No forecasts were ever actually accelerated.
+- **`compile_onnx_to_hef` in `hailo_runtime.py` was a placeholder**
+  that logged instructions and returned `False` — it was never called
+  from anywhere in the codebase.
+
+Rather than ship a half-working integration that lied to the dashboard,
+the entire Hailo code path is gone. Users with a Hailo hat should use it
+with Frigate NVR, which works great because pre-compiled HEFs for
+YOLO-family vision models are distributed with the add-on.
+
+**What was removed**:
+- `ml_forecast_lab/models/hailo_runtime.py` (entire file)
+- `ml_forecast_lab/models/onnx_export.py` (entire file — only existed
+  to support the `export_onnx` hooks in each backend)
+- `export_onnx` and `supports_hardware_accel` methods from all 15
+  model backends and from the `ForecastModel` abstract base class
+- `hailo_enabled` config option from `AppConfig`
+- `hailo_active` field from `ExperimentStatus`
+- Hailo branch in `_retrain_and_cache`
+- `is_hailo` / `hailo_accelerated` from cached model metadata and
+  published sensor attributes
+- Hailo checkbox from the System page + matching JS
+- Hailo badge from dashboard experiment cards
+- `python3-hailort` apt install + `--system-site-packages` venv tweak
+  from the Dockerfile
+- `/dev/hailo0` device mapping + `SYS_RAWIO` privileged cap from the
+  add-on's `config.yaml`
+- `onnx>=1.14.0` from `requirements.txt` (only used by `onnx_export.py`)
+- Hailo section from `README.md` + `CONFIG_GUIDE.md` +
+  `CREATION_REPORT.md`
+
+**What you lose**: nothing functional. The Hailo code path never
+actually ran on the NPU in practice, so removing it doesn't change
+forecast correctness, training speed, or inference speed. The only
+user-visible change is that the dashboard will stop lying about Hailo
+being active and the `ONNX export failed: No module named 'onnxscript'`
+warnings will disappear from the logs.
+
+### Fix: NeuralProphet now works
+
+The `neuralprophet` backend file was in the repo but the `neuralprophet`
+pip package was missing from `requirements.txt`, so:
+
+1. Docker image never installed the package
+2. `from neuralprophet import NeuralProphet` raised `ImportError`
+3. The `_optional_backends` loop in `main.py` silently swallowed the
+   error and never registered the model
+4. Enabling `neuralprophet` in `models_enabled` produced a `KeyError`
+   from the registry
+
+Fixed by adding `neuralprophet>=0.8.0,<1.0.0` to `requirements.txt`
+(the first NeuralProphet release fully compatible with PyTorch 2.x and
+PyTorch Lightning 2.x that the add-on already uses). Also added
+`NeuralProphetModel` to the `_optional_imports` dict in
+`models/__init__.py` for parity with the other backends.
+
+Expected Docker image growth: ~50-100 MB of transitive deps
+(PyTorch Lightning, matplotlib backends). Not a concern for Pi 5.
+
 ## 2.5.5
 
 ### Performance: neural-model tuning is now 10-20x faster

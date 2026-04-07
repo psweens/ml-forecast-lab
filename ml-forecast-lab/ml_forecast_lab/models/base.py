@@ -270,32 +270,6 @@ class ForecastModel(ABC):
         return predictions
 
     @abstractmethod
-    def export_onnx(self, path: str) -> bool:
-        """
-        Export model to ONNX format for hardware deployment.
-
-        ONNX (Open Neural Network Exchange) format enables deployment
-        on specialised accelerators (e.g. Hailo NPU). Not all models
-        support this format.
-
-        Parameters
-        ----------
-        path : str
-            File path where the ONNX model will be saved.
-
-        Returns
-        -------
-        bool
-            True if export succeeded, False if not supported by this model.
-
-        Notes
-        -----
-        Unsupported models should return False without raising an exception.
-        Concrete implementations should log details about unsupported features.
-        """
-        pass
-
-    @abstractmethod
     def get_params(self) -> Dict[str, Any]:
         """
         Return all hyperparameters as a dictionary.
@@ -377,25 +351,6 @@ class ForecastModel(ABC):
         -----
         After load(), the model should be in the same state as when save()
         was called, including self._is_fitted = True.
-        """
-        pass
-
-    @abstractmethod
-    def supports_hardware_accel(self) -> bool:
-        """
-        Return whether this model supports hardware acceleration (Hailo NPU).
-
-        Returns
-        -------
-        bool
-            True if the model can be optimised for Hailo NPU deployment,
-            False otherwise.
-
-        Notes
-        -----
-        Hardware support depends on model architecture and quantisation
-        compatibility. This method provides a quick check before attempting
-        ONNX export and compilation.
         """
         pass
 

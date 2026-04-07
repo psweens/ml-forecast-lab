@@ -51,7 +51,7 @@
                 {% if exp.best_model %}
                 <div class="card-field">
                     <span class="field-label">{% if exp.mode == 'production' %}Production Model{% else %}Best Model{% endif %}</span>
-                    <span class="field-value color-accent font-bold">{{ exp.best_model }}{% if exp.hailo_active %} <span style="font-size:0.7rem;padding:0.1rem 0.3rem;border-radius:0.2rem;background:rgba(46,204,113,0.15);color:var(--success);font-weight:600;vertical-align:middle;">Hailo</span>{% endif %}</span>
+                    <span class="field-value color-accent font-bold">{{ exp.best_model }}</span>
                 </div>
                 {% endif %}
 

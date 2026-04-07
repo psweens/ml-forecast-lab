@@ -169,7 +169,6 @@ Top-level application configuration.
 - **update_every_minutes** (int, default 5): How often to run inference.
 - **timezone** (str, default 'UTC'): Timezone for temporal features.
 - **experiments** (list[ExperimentCfg]): Experiment configurations.
-- **hailo_enabled** (bool, default False): Use Hailo accelerator if available.
 
 #### Example
 
@@ -179,7 +178,6 @@ from ml_forecast_lab.config import AppConfig, ExperimentCfg
 app = AppConfig(
     update_every_minutes=5,
     timezone='Europe/London',
-    hailo_enabled=False,
     experiments=[exp1, exp2, exp3]
 )
 ```
@@ -201,7 +199,6 @@ cfg = load_config(Path('config.yaml'))
 # Application settings
 update_every_minutes: 5
 timezone: Europe/London
-hailo_enabled: false
 
 # Experiments
 experiments:

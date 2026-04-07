@@ -451,22 +451,6 @@ class CrossformerModel(ForecastModel):
 
         return np.clip(predictions, 0.0, None).astype(np.float32)
 
-    def export_onnx(self, path: str) -> bool:
-        """Export model to ONNX format."""
-        if not self.is_fitted or self._model is None:
-            return False
-        try:
-            dummy = torch.randn(1, self._seq_len or self.sequence_length or 48, self._input_size or 1)
-            torch.onnx.export(self._model, dummy, path, input_names=["input"], output_names=["output"])
-            logger.info(f"Exported Crossformer to ONNX: {path}")
-            return True
-        except Exception as e:
-            logger.warning(f"ONNX export failed: {e}")
-            return False
-
-    def supports_hardware_accel(self) -> bool:
-        return True
-
     def get_params(self) -> Dict[str, Any]:
         return deepcopy({
             "seg_len": self.seg_len, "d_model": self.d_model,

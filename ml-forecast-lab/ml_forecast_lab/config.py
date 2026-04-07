@@ -235,9 +235,6 @@ class AppConfig:
     experiments: List[ExperimentCfg] = field(default_factory=list)
     """List of experiment configurations."""
 
-    hailo_enabled: bool = False
-    """Whether to use Hailo AI accelerator for inference (if available)."""
-
     cpu_cores: int = 0
     """Number of CPU cores for model training. 0 = all available."""
 
@@ -292,7 +289,6 @@ def load_config(config_path: Path | str) -> AppConfig:
 
         update_every_minutes: 5
         timezone: Europe/London
-        hailo_enabled: false
         experiments:
           - name: solar_forecast
             target_entity: sensor.solar_generation_w

@@ -89,7 +89,6 @@ class ExperimentStatus(BaseModel):
     next_retrain_in_seconds: Optional[int] = None
     next_update_in_seconds: Optional[int] = None  # Legacy alias for forecast
     publish_entity: Optional[str] = None  # e.g. "sensor.mlfl_solar_forecast"
-    hailo_active: bool = False  # Whether inference is using Hailo AI accelerator
 
 
 class ForecastPoint(BaseModel):
@@ -1622,7 +1621,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "retrain_every_hours": 24.0,
             "update_every_minutes": 30,
             "timezone": "UTC",
-            "hailo_enabled": False,
             "cpu_cores": 0,
             "nice_priority": 10,
         }
@@ -1639,7 +1637,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "retrain_every_hours": cfg.retrain_every_hours,
                 "update_every_minutes": cfg.forecast_every_minutes,
                 "timezone": cfg.timezone,
-                "hailo_enabled": cfg.hailo_enabled,
                 "cpu_cores": cfg.cpu_cores,
                 "nice_priority": cfg.nice_priority,
             }
@@ -1705,8 +1702,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 yaml_data["retrain_every_hours"] = float(data["retrain_every_hours"])
             if "timezone" in data:
                 yaml_data["timezone"] = str(data["timezone"])
-            if "hailo_enabled" in data:
-                yaml_data["hailo_enabled"] = bool(data["hailo_enabled"])
             if "cpu_cores" in data:
                 yaml_data["cpu_cores"] = int(data["cpu_cores"])
             if "nice_priority" in data:

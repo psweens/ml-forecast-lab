@@ -18,7 +18,6 @@
 # --- Global settings --------------------------------------------------------
 timezone: "Europe/London"
 update_every_minutes: 360          # minutes between train/forecast cycles
-hailo_enabled: false               # set true if Hailo AI HAT is installed
 
 # --- Experiments ------------------------------------------------------------
 # Each experiment predicts one target sensor. You can define as many as you

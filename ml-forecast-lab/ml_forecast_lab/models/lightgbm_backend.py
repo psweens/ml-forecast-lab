@@ -315,44 +315,6 @@ class LightGBMModel(ForecastModel):
         predictions = self.model.predict(X)
         return np.array(predictions, dtype=np.float32)
 
-    def export_onnx(self, path: str) -> bool:
-        """
-        Export the model to ONNX format.
-
-        LightGBM tree-based models do not benefit from ONNX export for
-        hardware acceleration (Hailo optimisation targets neural networks).
-        Returns False to indicate export is not recommended.
-
-        Parameters
-        ----------
-        path : str
-            Path where the ONNX model should be saved.
-
-        Returns
-        -------
-        bool
-            False (ONNX export not recommended for tree models).
-        """
-        logger.info(
-            "LightGBM tree models do not benefit from ONNX export. "
-            "Consider using neural network models for hardware acceleration."
-        )
-        return False
-
-    def supports_hardware_accel(self) -> bool:
-        """
-        Check if the model supports hardware acceleration.
-
-        LightGBM tree-based models are not optimised for hardware
-        acceleration frameworks like Hailo.
-
-        Returns
-        -------
-        bool
-            False (tree models don't support hardware acceleration).
-        """
-        return False
-
     def get_params(self) -> Dict[str, Any]:
         """
         Return all hyperparameters as a dictionary.

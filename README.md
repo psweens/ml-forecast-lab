@@ -72,7 +72,6 @@ Create `/config/mlfl.yaml` (or `/addon_configs/ml_forecast_lab/mlfl.yaml`) with 
 ```yaml
 global:
   timezone: "Europe/London"
-  hailo_enabled: false        # Set true if you have a Hailo AI HAT (Raspberry Pi)
 
 experiments:
   - name: mixergy_demand
@@ -167,13 +166,13 @@ The web UI exposes a JSON API for status, benchmark results, forecasts, model se
                               └────────┬─────────┘
                                        │
                 ┌──────────────────────┼──────────────────────┐
-                ▼                      ▼                      ▼
-       ┌─────────────────┐   ┌─────────────────┐    ┌──────────────────┐
-       │ Cross-Validator │   │ Model Registry  │    │  Hailo Wrapper   │
-       │ walk-fwd or SW  │   │ 15 backends     │    │ ONNX → NPU       │
-       └────────┬────────┘   │ tree + neural   │    │ + CPU fallback   │
-                │            └─────────────────┘    └──────────────────┘
-                ▼
+                ▼                      ▼                      │
+       ┌─────────────────┐   ┌─────────────────┐               │
+       │ Cross-Validator │   │ Model Registry  │               │
+       │ walk-fwd or SW  │   │ 15 backends     │               │
+       └────────┬────────┘   │ tree + neural   │               │
+                │            └─────────────────┘               │
+                ▼                                              │
       ┌──────────────────┐         ┌──────────────────┐
       │   Benchmarker    │────────▶│  Model Cache     │
       │ Demšar ranking   │         │ (per experiment) │
@@ -213,21 +212,12 @@ experiments:
 
 Each experiment trains and evaluates models independently.
 
-## Hailo AI HAT support (optional)
-
-For Raspberry Pi users with a Hailo-8L AI HAT, ML Forecast Lab can export trained neural models to ONNX and run inference on the NPU. Training always runs on CPU; only the forecast cycle is offloaded. Supported across all 13 neural backends (LSTM, CNN, DLinear, N-BEATS, N-HiTS, TiDE, TSMixer, SparseTSF, PatchTST, iTransformer, Crossformer, TimesNet, NeuralProphet).
-
-After every retrain a CPU-vs-NPU validation test runs on a sample of the training data. If the hardware is missing or the outputs diverge from CPU by more than 1%, the add-on falls back to CPU inference and logs a warning — Hailo never silently breaks forecasts.
-
-Set `hailo_enabled: true` in the global config to enable.
-
 ## Dependencies
 
 Core: numpy, pandas, scikit-learn, scipy, FastAPI, uvicorn, Jinja2, Plotly.
 Tree models: LightGBM, XGBoost.
 Neural models: PyTorch (LSTM, CNN, DLinear, N-BEATS, N-HiTS, TiDE, TSMixer, SparseTSF, PatchTST, iTransformer, Crossformer, TimesNet), NeuralProphet.
 Hyperparameter tuning: Optuna.
-Hardware acceleration (optional): ONNX, hailort (Hailo NPU).
 
 ## Licence
 

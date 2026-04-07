@@ -195,14 +195,6 @@ class NeuralProphetModel(ForecastModel):
             return np.full(n_samples, self._train_df["y"].mean(), dtype=np.float32)
         return np.zeros(n_samples, dtype=np.float32)
 
-    def export_onnx(self, path: str) -> bool:
-        """NeuralProphet doesn't support direct ONNX export."""
-        logger.info("NeuralProphet does not support ONNX export directly")
-        return False
-
-    def supports_hardware_accel(self) -> bool:
-        return False
-
     def get_params(self) -> Dict[str, Any]:
         return deepcopy({
             "n_lags": self.n_lags, "n_forecasts": self.n_forecasts,
