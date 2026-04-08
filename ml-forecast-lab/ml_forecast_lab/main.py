@@ -1826,16 +1826,8 @@ class MLForecastLabApp:
         )
 
         ds_future = forecast_features.index
-        publish_name = exp_cfg.publish_name or exp_cfg.name
-        prefix = exp_cfg.publish_prefix
-        units = exp_cfg.units or ""
 
-        # 7. Publish main forecast sensor with full curve in attributes
-        forecast_list = [
-            {"datetime": ts.isoformat(), "value": round(float(val), 4)}
-            for ts, val in zip(ds_future, y_pred)
-        ]
-
+        # 7. Publish forecast sensors via shared helper
         # Recent actuals for context (last 24h)
         recent_n = min(int(24 * 60 / exp_cfg.interval_minutes), len(combined))
         recent_actuals = [
@@ -1846,28 +1838,17 @@ class MLForecastLabApp:
             )
         ]
 
-        base_entity = f"sensor.{prefix}{publish_name}"
-        next_val = round(float(y_pred[0]), 4)
-
-        await self.ha_interface.set_state(
-            f"{base_entity}_forecast",
-            str(next_val),
-            attributes={
-                "friendly_name": f"{publish_name} Forecast",
-                "unit_of_measurement": units,
-                "icon": "mdi:chart-timeline-variant-shimmer",
-                "device_class": "power_factor" if units == "%" else None,
-                "state_class": "measurement",
-                "model": prod_model_name,
+        await self._publish_forecast_sensors(
+            exp_cfg=exp_cfg,
+            y_pred=y_pred,
+            ds_future=ds_future,
+            model_name=prod_model_name,
+            last_trained_iso=datetime.now(timezone.utc).isoformat(),
+            extra_main_attrs={
                 "train_time_seconds": round(train_time, 1),
-                "forecast_periods": future_periods,
-                "interval_minutes": exp_cfg.interval_minutes,
-                "last_trained": datetime.now(timezone.utc).isoformat(),
-                "forecast": forecast_list,
                 "recent_actuals": recent_actuals,
             },
         )
-        logger.info(f"Published forecast curve to {base_entity}_forecast")
 
         # Update web app status
         if self.web_app:
@@ -1883,7 +1864,7 @@ class MLForecastLabApp:
         logger.info(f"  Production inference complete")
         logger.info(f"  Model: {prod_model_name}, trained in {train_time:.1f}s")
         logger.info(f"  Forecast: {len(y_pred)} points, {future_periods * exp_cfg.interval_minutes / 60:.0f}h ahead")
-        logger.info(f"  Next interval: {next_val} {units}")
+        logger.info(f"  Next interval: {round(float(y_pred[0]), 4)} {exp_cfg.units or ''}")
         logger.info(f"  {'─' * 50}")
         logger.info(f"{'=' * 60}")
         logger.info(f"")
@@ -2114,6 +2095,173 @@ class MLForecastLabApp:
         finally:
             self._forecast_running = False
 
+    async def _publish_forecast_sensors(
+        self,
+        exp_cfg,
+        y_pred: np.ndarray,
+        ds_future: pd.DatetimeIndex,
+        model_name: str,
+        last_trained_iso: str,
+        extra_main_attrs: Optional[dict] = None,
+    ) -> None:
+        """Publish forecast sensors to Home Assistant.
+
+        Always publishes ``sensor.{prefix}{name}_forecast`` (per-interval values
+        in the ``forecast`` attribute, plus metadata). Honours the experiment's
+        ``publish_interval``, ``publish_cumulative`` and ``publish_daily_cumulative``
+        flags to optionally publish:
+
+        - ``_interval``: per-interval increments (same data, dedicated sensor)
+        - ``_cumulative``: running cumsum across the whole forecast horizon
+        - ``_daily_cumulative``: cumsum that resets at local midnight, seeded
+          with the current actual value of the target sensor when applicable
+          so the curve is continuous with the cumulative source sensor.
+        """
+        if not self.ha_interface or len(y_pred) == 0:
+            return
+
+        units = exp_cfg.units or ""
+        publish_name = exp_cfg.publish_name or exp_cfg.name
+        prefix = exp_cfg.publish_prefix
+        base_entity = f"sensor.{prefix}{publish_name}"
+        future_periods = len(y_pred)
+        extra_main_attrs = extra_main_attrs or {}
+
+        # Per-interval forecast list (used by main + interval sensors)
+        forecast_list = [
+            {"datetime": ts.isoformat(), "value": round(float(val), 4)}
+            for ts, val in zip(ds_future, y_pred)
+        ]
+        next_val = round(float(y_pred[0]), 4)
+
+        # --- 1. Main forecast sensor (always published) ----------------------
+        main_attrs = {
+            "friendly_name": f"{publish_name} Forecast",
+            "unit_of_measurement": units,
+            "icon": "mdi:chart-timeline-variant-shimmer",
+            "state_class": "measurement",
+            "model": model_name,
+            "forecast_periods": future_periods,
+            "interval_minutes": exp_cfg.interval_minutes,
+            "last_trained": last_trained_iso,
+            "forecast": forecast_list,
+        }
+        main_attrs.update(extra_main_attrs)
+        try:
+            await self.ha_interface.set_state(
+                f"{base_entity}_forecast", str(next_val), main_attrs,
+            )
+            logger.info(f"  Published forecast curve to {base_entity}_forecast")
+        except Exception as e:
+            logger.warning(f"  Failed to publish {base_entity}_forecast: {e}")
+
+        # --- 2. Interval sensor ----------------------------------------------
+        if getattr(exp_cfg, "publish_interval", True):
+            interval_attrs = {
+                "friendly_name": f"{publish_name} Interval Forecast",
+                "unit_of_measurement": units,
+                "icon": "mdi:chart-bar",
+                "state_class": "measurement",
+                "model": model_name,
+                "interval_minutes": exp_cfg.interval_minutes,
+                "forecast": forecast_list,
+            }
+            try:
+                await self.ha_interface.set_state(
+                    f"{base_entity}_interval", str(next_val), interval_attrs,
+                )
+            except Exception as e:
+                logger.warning(f"  Failed to publish {base_entity}_interval: {e}")
+
+        # --- 3. Running cumulative across the whole horizon ------------------
+        if getattr(exp_cfg, "publish_cumulative", False):
+            cum_vals = np.cumsum(y_pred)
+            cum_list = [
+                {"datetime": ts.isoformat(), "value": round(float(v), 4)}
+                for ts, v in zip(ds_future, cum_vals)
+            ]
+            cum_state = round(float(cum_vals[-1]), 4)
+            cum_attrs = {
+                "friendly_name": f"{publish_name} Cumulative Forecast",
+                "unit_of_measurement": units,
+                "icon": "mdi:chart-line-stacked",
+                "state_class": "total",
+                "model": model_name,
+                "forecast": cum_list,
+            }
+            try:
+                await self.ha_interface.set_state(
+                    f"{base_entity}_cumulative", str(cum_state), cum_attrs,
+                )
+            except Exception as e:
+                logger.warning(f"  Failed to publish {base_entity}_cumulative: {e}")
+
+        # --- 4. Daily cumulative (resets at local midnight, seeded) ----------
+        if getattr(exp_cfg, "publish_daily_cumulative", False):
+            try:
+                from zoneinfo import ZoneInfo
+                tz_name = (self.config.timezone if self.config else None) or "UTC"
+                local_tz = ZoneInfo(tz_name)
+            except Exception:
+                local_tz = timezone.utc
+
+            # Seed with the current value of the cumulative source sensor so
+            # the forecast meets the actuals at the join point. Only meaningful
+            # for sources that are themselves daily-cumulative.
+            today_seed = 0.0
+            if (
+                getattr(exp_cfg, "source_is_cumulative", False)
+                and getattr(exp_cfg, "reset_daily", False)
+                and getattr(exp_cfg, "target_entity", None)
+            ):
+                try:
+                    raw = await self.ha_interface.get_state(
+                        exp_cfg.target_entity, default=None,
+                    )
+                    if raw not in (None, "", "unknown", "unavailable"):
+                        today_seed = float(raw)
+                except Exception:
+                    today_seed = 0.0
+
+            now_local_date = datetime.now(timezone.utc).astimezone(local_tz).date()
+            running_by_day: dict = {}
+            daily_cum_list = []
+            for ts, val in zip(ds_future, y_pred):
+                ts_aware = ts if ts.tzinfo is not None else ts.tz_localize("UTC")
+                local_ts = ts_aware.tz_convert(local_tz)
+                day_key = local_ts.date()
+                if day_key not in running_by_day:
+                    running_by_day[day_key] = (
+                        today_seed if day_key == now_local_date else 0.0
+                    )
+                running_by_day[day_key] += float(val)
+                daily_cum_list.append({
+                    "datetime": ts.isoformat(),
+                    "value": round(running_by_day[day_key], 4),
+                })
+
+            state = (
+                round(daily_cum_list[-1]["value"], 4)
+                if daily_cum_list else round(today_seed, 4)
+            )
+            daily_attrs = {
+                "friendly_name": f"{publish_name} Daily Cumulative Forecast",
+                "unit_of_measurement": units,
+                "icon": "mdi:chart-timeline-variant",
+                "state_class": "total_increasing",
+                "model": model_name,
+                "forecast": daily_cum_list,
+                "seeded_with": round(today_seed, 4),
+            }
+            try:
+                await self.ha_interface.set_state(
+                    f"{base_entity}_daily_cumulative", str(state), daily_attrs,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"  Failed to publish {base_entity}_daily_cumulative: {e}"
+                )
+
     async def _forecast_with_cached(self, experiment_name: str):
         """Run inference with a cached model and publish sensors.
 
@@ -2305,35 +2453,22 @@ class MLForecastLabApp:
             f"range [{y_pred.min():.3f}, {y_pred.max():.3f}]"
         )
 
-        # Publish to HA sensors (reuse the publishing section from _run_production_inference)
-        units = exp_cfg.units or ""
-        publish_name = exp_cfg.publish_name or exp_cfg.name
-        prefix = exp_cfg.publish_prefix
+        # Build the future timestamp index and publish via shared helper
+        ds_future = pd.DatetimeIndex([
+            last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes * (i + 1))
+            for i in range(len(y_pred))
+        ])
+        last_trained = cache.get("trained_at", datetime.now(timezone.utc))
+        if not isinstance(last_trained, datetime):
+            last_trained = datetime.now(timezone.utc)
 
-        if self.ha_interface:
-            # Main forecast curve sensor
-            forecast_points = []
-            for i in range(len(y_pred)):
-                ts = last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes * (i + 1))
-                forecast_points.append({"datetime": ts.isoformat(), "value": round(float(y_pred[i]), 4)})
-
-            entity_id = f"sensor.{prefix}{publish_name}_forecast"
-            state = round(float(y_pred[0]), 4)
-            attrs = {
-                "forecast": forecast_points,
-                "model": prod_model_name,
-                "forecast_periods": future_periods,
-                "interval_minutes": exp_cfg.interval_minutes,
-                "last_trained": cache.get("trained_at", datetime.now(timezone.utc)).isoformat(),
-                "friendly_name": f"{publish_name} Forecast",
-                "unit_of_measurement": units,
-                "icon": "mdi:chart-timeline-variant",
-                "state_class": "measurement",
-            }
-            try:
-                await self.ha_interface.set_state(entity_id, state, attrs)
-            except Exception as e:
-                logger.warning(f"  Failed to publish {entity_id}: {e}")
+        await self._publish_forecast_sensors(
+            exp_cfg=exp_cfg,
+            y_pred=y_pred,
+            ds_future=ds_future,
+            model_name=prod_model_name,
+            last_trained_iso=last_trained.isoformat(),
+        )
 
     async def _run_tuning(self, experiment_name: str, model_name: str,
                           n_trials: int = 30, strategy: str = "tpe",

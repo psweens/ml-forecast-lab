@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.5.7
+
+### Fix: cumulative / daily-cumulative forecast sensors are now actually published
+
+The `publish_interval`, `publish_cumulative` and `publish_daily_cumulative`
+flags in each experiment's config were silently ignored by the
+retrain-and-cache code path. Only `sensor.{prefix}{name}_forecast` (the
+per-interval forecast) was being published, which made it impossible to
+plot the forecast on the same scale as a daily-cumulative source sensor
+without writing custom JS in your dashboard `data_generator`.
+
+The new `_publish_forecast_sensors` helper consolidates all the publishing
+logic and honours the flags. With `publish_daily_cumulative: true` and
+`source_is_cumulative: true` (the typical Mixergy / energy-meter setup),
+the helper now publishes:
+
+- `sensor.{prefix}{name}_forecast` — main per-interval curve (always)
+- `sensor.{prefix}{name}_interval` — same data, dedicated sensor
+- `sensor.{prefix}{name}_cumulative` — running cumsum across the horizon
+- `sensor.{prefix}{name}_daily_cumulative` — cumsum that **resets at local
+  midnight** and is **seeded with the current value of the target sensor**
+  so the forecast meets the actuals exactly at the join point
+
+The daily-cumulative seeding uses the experiment's local timezone (from
+the global `timezone` setting) and reads the live target sensor state, so
+ApexCharts cards comparing the actuals against the mlfl forecast no longer
+need any custom `data_generator` cumsum logic.
+
+### Fix: stop labelling `%` forecasts as `power_factor`
+
+`_run_production_inference` was setting `device_class: "power_factor"` on
+the published forecast whenever `units == "%"`. Home Assistant's
+`power_factor` device class is for AC efficiency ratios (0–1 dimensionless)
+and overrides unit display, which is why the Mixergy demand forecast was
+showing as a bare number with no `%` unit. The device_class is now omitted;
+HA accepts `%` as a regular unit and displays it correctly.
+
+### Refactor: deduplicated publishing path
+
+`_run_production_inference` and `_forecast_with_cached` previously had
+two near-identical inline publishing blocks. Both now route through
+`_publish_forecast_sensors`, so future changes to the published attributes
+or sensor naming only need to be made once.
+
 ## 2.5.6
 
 ### Removed: Hailo AI accelerator integration
