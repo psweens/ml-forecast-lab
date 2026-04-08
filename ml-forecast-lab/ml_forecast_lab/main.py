@@ -2226,6 +2226,12 @@ class MLForecastLabApp:
             now_local_date = datetime.now(timezone.utc).astimezone(local_tz).date()
             running_by_day: dict = {}
             daily_cum_list = []
+            # Headline state = the projected end-of-today total (last forecast
+            # point still within today's local date). This makes the sensor's
+            # state directly comparable to sensor.<target>_today at midnight,
+            # rather than being the post-reset value at the end of the 48h
+            # horizon (which would sit mid-way through day-after-tomorrow).
+            end_of_today_value = today_seed
             for ts, val in zip(ds_future, y_pred):
                 ts_aware = ts if ts.tzinfo is not None else ts.tz_localize("UTC")
                 local_ts = ts_aware.tz_convert(local_tz)
@@ -2235,15 +2241,15 @@ class MLForecastLabApp:
                         today_seed if day_key == now_local_date else 0.0
                     )
                 running_by_day[day_key] += float(val)
+                cum_value = round(running_by_day[day_key], 4)
+                if day_key == now_local_date:
+                    end_of_today_value = cum_value
                 daily_cum_list.append({
                     "datetime": ts.isoformat(),
-                    "value": round(running_by_day[day_key], 4),
+                    "value": cum_value,
                 })
 
-            state = (
-                round(daily_cum_list[-1]["value"], 4)
-                if daily_cum_list else round(today_seed, 4)
-            )
+            state = round(end_of_today_value, 4)
             daily_attrs = {
                 "friendly_name": f"{publish_name} Daily Cumulative Forecast",
                 "unit_of_measurement": units,
@@ -2252,6 +2258,11 @@ class MLForecastLabApp:
                 "model": model_name,
                 "forecast": daily_cum_list,
                 "seeded_with": round(today_seed, 4),
+                "end_of_today_value": state,
+                "end_of_horizon_value": (
+                    round(daily_cum_list[-1]["value"], 4)
+                    if daily_cum_list else state
+                ),
             }
             try:
                 await self.ha_interface.set_state(

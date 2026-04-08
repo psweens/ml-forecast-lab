@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.5.8
+
+### Fix: `_daily_cumulative` state is now the end-of-today projection
+
+The `sensor.{prefix}{name}_daily_cumulative` state was being set to the
+last point in the forecast curve, which for a 48h horizon sits mid-way
+through day-after-tomorrow **after** two intervening midnight resets.
+That made the headline state something like 8.6% while the curve on a
+chart reached ~55% at end of today, which was confusing.
+
+The state is now set to the projected cumulative value at the **last
+forecast point still within today's local date** — i.e., "what is the
+total predicted demand for today by local midnight". This is directly
+comparable to `sensor.<target>_today` at end of day.
+
+The previous behaviour is preserved as two new sensor attributes:
+- `end_of_today_value` — the new headline state
+- `end_of_horizon_value` — the old headline state, for reference
+
+The per-interval curve in the `forecast` attribute is unchanged — it
+still resets at each local midnight throughout the whole horizon, so
+dashboards that plot the full curve (like ApexCharts) continue to work.
+
 ## 2.5.7
 
 ### Fix: cumulative / daily-cumulative forecast sensors are now actually published
