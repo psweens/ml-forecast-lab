@@ -2185,7 +2185,11 @@ class MLForecastLabApp:
                 "friendly_name": f"{publish_name} Cumulative Forecast",
                 "unit_of_measurement": units,
                 "icon": "mdi:chart-line-stacked",
-                "state_class": "total",
+                # measurement (not total) — the state is a per-cycle snapshot
+                # of the predicted end-of-horizon cumulative, not a monotonic
+                # counter. Using total_* would make HA accumulate it in
+                # long-term statistics and suggest it for the Energy dashboard.
+                "state_class": "measurement",
                 "model": model_name,
                 "forecast": cum_list,
             }
@@ -2254,7 +2258,12 @@ class MLForecastLabApp:
                 "friendly_name": f"{publish_name} Daily Cumulative Forecast",
                 "unit_of_measurement": units,
                 "icon": "mdi:chart-timeline-variant",
-                "state_class": "total_increasing",
+                # measurement (not total_increasing) — the state is a
+                # per-cycle projection of today's end total, which fluctuates
+                # as the seed grows and the remaining-forecast shrinks. It is
+                # NOT a monotonic counter and should not be processed by HA's
+                # long-term statistics engine as one.
+                "state_class": "measurement",
                 "model": model_name,
                 "forecast": daily_cum_list,
                 "seeded_with": round(today_seed, 4),

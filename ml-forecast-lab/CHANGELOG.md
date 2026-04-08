@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.5.9
+
+### Fix: `state_class` on cumulative sensors
+
+The `_cumulative` and `_daily_cumulative` sensors were being published
+with `state_class: "total"` and `"total_increasing"` respectively. Both
+were wrong: those state classes are for monotonic counters that HA's
+long-term statistics engine processes as energy-meter-style totals,
+which is not what these sensors are.
+
+These sensors publish a **per-cycle snapshot** of a forecast projection:
+
+- `_cumulative` state = predicted cumulative value at the end of the
+  forecast horizon (changes each cycle as the model is re-run)
+- `_daily_cumulative` state = predicted total demand for today at local
+  midnight (fluctuates as the seed grows and remaining-forecast shrinks)
+
+Neither is a monotonic counter. Both are now `state_class: "measurement"`,
+which is HA's convention for values that go up and down freely.
+
+**Visible effects after upgrade**:
+
+- The entity history graph in HA's more-info dialog will plot the actual
+  state values (a fairly flat line wobbling around the projected total),
+  not an accumulating curve
+- The sensors will no longer be suggested for the HA Energy dashboard
+- The dashboard chart in your existing ApexCharts cards is unchanged
+  (those use `attributes.forecast`, not the long-term statistics)
+
+The existing distorted long-term statistics from before this fix will
+fade as new correctly-tagged data comes in (~7 days). To clear them
+immediately, go to Developer Tools → Statistics → Fix issues.
+
 ## 2.5.8
 
 ### Fix: `_daily_cumulative` state is now the end-of-today projection
