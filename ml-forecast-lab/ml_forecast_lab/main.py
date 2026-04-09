@@ -1828,12 +1828,17 @@ class MLForecastLabApp:
         ds_future = forecast_features.index
 
         # 7. Publish forecast sensors via shared helper
-        # Recent actuals for context (last 24h)
+        # Recent actuals for context (last 24h). The combined index is naive
+        # UTC (the SQLite cache strips tz); localize before isoformat so the
+        # serialized strings carry "+00:00" and JS parses them correctly.
         recent_n = min(int(24 * 60 / exp_cfg.interval_minutes), len(combined))
+        recent_idx = combined.index[-recent_n:]
+        if recent_idx.tz is None:
+            recent_idx = recent_idx.tz_localize("UTC")
         recent_actuals = [
             {"datetime": ts.isoformat(), "value": round(float(val), 4)}
             for ts, val in zip(
-                combined.index[-recent_n:],
+                recent_idx,
                 combined["target"].values[-recent_n:],
             )
         ]
@@ -2127,10 +2132,23 @@ class MLForecastLabApp:
         future_periods = len(y_pred)
         extra_main_attrs = extra_main_attrs or {}
 
+        # Ensure ds_future is tz-aware UTC. The upstream pipeline strips
+        # timezones to keep the SQLite cache and pandas operations naive,
+        # but `isoformat()` on a naive Timestamp produces a string with no
+        # timezone marker (e.g. "2026-04-09T20:00:00"). JavaScript's
+        # `new Date(...)` then interprets such strings as LOCAL time, which
+        # introduces a UTC-offset shift in dashboard charts (e.g. ~1h in BST,
+        # 5h in EST). Localizing to UTC here makes `isoformat()` emit
+        # "...+00:00" so JS converts it back to local time correctly.
+        if ds_future.tz is None:
+            ds_future_aware = ds_future.tz_localize("UTC")
+        else:
+            ds_future_aware = ds_future.tz_convert("UTC")
+
         # Per-interval forecast list (used by main + interval sensors)
         forecast_list = [
             {"datetime": ts.isoformat(), "value": round(float(val), 4)}
-            for ts, val in zip(ds_future, y_pred)
+            for ts, val in zip(ds_future_aware, y_pred)
         ]
         next_val = round(float(y_pred[0]), 4)
 
@@ -2178,7 +2196,7 @@ class MLForecastLabApp:
             cum_vals = np.cumsum(y_pred)
             cum_list = [
                 {"datetime": ts.isoformat(), "value": round(float(v), 4)}
-                for ts, v in zip(ds_future, cum_vals)
+                for ts, v in zip(ds_future_aware, cum_vals)
             ]
             cum_state = round(float(cum_vals[-1]), 4)
             cum_attrs = {
@@ -2236,9 +2254,8 @@ class MLForecastLabApp:
             # rather than being the post-reset value at the end of the 48h
             # horizon (which would sit mid-way through day-after-tomorrow).
             end_of_today_value = today_seed
-            for ts, val in zip(ds_future, y_pred):
-                ts_aware = ts if ts.tzinfo is not None else ts.tz_localize("UTC")
-                local_ts = ts_aware.tz_convert(local_tz)
+            for ts, val in zip(ds_future_aware, y_pred):
+                local_ts = ts.tz_convert(local_tz)
                 day_key = local_ts.date()
                 if day_key not in running_by_day:
                     running_by_day[day_key] = (

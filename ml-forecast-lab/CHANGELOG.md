@@ -1,5 +1,40 @@
 # Changelog
 
+## 2.5.10
+
+### Fix: 1-hour timezone offset on the dashboard chart (DST-safe)
+
+The forecast curve in `attributes.forecast` (and `_cumulative`,
+`_daily_cumulative`, and `recent_actuals`) was being serialized with naive
+ISO timestamps — e.g. `"2026-04-09T20:00:00"` with no `+00:00` suffix —
+because the upstream pipeline strips timezones from the SQLite cache for
+storage. JavaScript's `new Date(...)` interprets such strings as **local
+time**, not UTC, so users in any timezone with an offset (BST = UTC+1,
+EST = UTC−5, etc.) saw the MLFL series shifted on their charts. The
+PredAI / Mixergy series came from HA's history API which always emits
+tz-aware ISO strings, so they were plotted correctly — only the MLFL
+series was offset.
+
+`_publish_forecast_sensors` now localizes `ds_future` to UTC before
+serializing, so all four sensors emit `"...+00:00"` strings that the
+browser parses as absolute instants and renders in the local timezone.
+The `recent_actuals` block in `_run_production_inference` does the same
+for the historical context window.
+
+This is fully **DST-safe** in both directions:
+
+- The published timestamps are anchored to UTC, which has no DST
+- The browser converts to local time using its own IANA tz database, so
+  the chart automatically tracks BST → GMT (last Sunday of October) and
+  GMT → BST (last Sunday of March) without any add-on changes
+- The daily-cumulative day-bucketing already uses `zoneinfo` for the
+  local-date calculation, which handles 23h/25h transition days
+
+**Visible effects after upgrade**: from the next forecast cycle, the
+MLFL series on your ApexCharts dashboard will line up exactly with the
+PredAI and Mixergy actuals — no horizontal shift. Forecasts published
+before upgrading will still show the offset until the next cycle runs.
+
 ## 2.5.9
 
 ### Fix: `state_class` on cumulative sensors
