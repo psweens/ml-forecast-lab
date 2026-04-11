@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.8.1
+
+### Bugfix
+
+- **Fix reversed colours in covariate analysis** — percentage values in
+  the drop-one table now show green for valuable covariates (removing
+  hurts the model) and red for harmful ones (removing helps). Previously
+  the colours were inverted, showing green next to Remove buttons.
+
 ## 2.8.0
 
 ### Feature: sequential training queue
