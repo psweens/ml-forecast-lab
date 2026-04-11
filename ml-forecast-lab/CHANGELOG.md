@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.7.1
+
+### Feature: publish forecast accuracy as HA sensor
+
+- **`sensor.mlfl_{name}_forecast_accuracy`** — publishes the lead-time
+  accuracy curve as a HA sensor entity after each production forecast.
+  State is the shortest-lead MAE; attributes contain `lead_hours`, `mae`,
+  `rmse`, `sample_count`, and revision improvement metrics. Enables
+  ApexCharts dashboard cards for accuracy visualisation.
+
 ## 2.7.0
 
 ### Feature: forecast evolution log & accuracy tracking

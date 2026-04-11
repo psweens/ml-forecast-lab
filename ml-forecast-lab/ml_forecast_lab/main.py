@@ -2391,6 +2391,52 @@ class MLForecastLabApp:
                     f"  Failed to publish {base_entity}_daily_cumulative: {e}"
                 )
 
+        # --- 5. Forecast accuracy sensor (lead-time curve) -------------------
+        if self.history_db and exp_cfg.mode == "production":
+            try:
+                actuals_table = self.history_db.safe_table_name(
+                    exp_cfg.target_entity
+                )
+                accuracy = self.history_db.get_forecast_accuracy(
+                    exp_cfg.name, actuals_table, max_age_days=30,
+                )
+                ltc = accuracy.get("lead_time_curve", {})
+                rev = accuracy.get("revision_improvement", {})
+                if ltc.get("lead_minutes"):
+                    lead_hours = [round(m / 60, 2) for m in ltc["lead_minutes"]]
+                    acc_state = round(ltc["mae"][0], 4) if ltc["mae"] else 0
+                    acc_attrs = {
+                        "friendly_name": f"{publish_name} Forecast Accuracy",
+                        "unit_of_measurement": units,
+                        "icon": "mdi:chart-scatter-plot",
+                        "state_class": "measurement",
+                        "lead_hours": lead_hours,
+                        "mae": ltc["mae"],
+                        "rmse": ltc["rmse"],
+                        "sample_count": ltc["sample_count"],
+                        "total_logged": accuracy.get("total_logged", 0),
+                    }
+                    if rev:
+                        acc_attrs["revision_first_mae"] = rev.get(
+                            "first_forecast_mae"
+                        )
+                        acc_attrs["revision_latest_mae"] = rev.get(
+                            "latest_forecast_mae"
+                        )
+                        acc_attrs["revision_improvement_pct"] = rev.get(
+                            "improvement_pct"
+                        )
+                    await self.ha_interface.set_state(
+                        f"{base_entity}_forecast_accuracy",
+                        str(acc_state),
+                        acc_attrs,
+                    )
+                    logger.info(
+                        f"  Published accuracy to {base_entity}_forecast_accuracy"
+                    )
+            except Exception as e:
+                logger.warning(f"  Failed to publish forecast accuracy: {e}")
+
     async def _forecast_with_cached(self, experiment_name: str):
         """Run inference with a cached model and publish sensors.
 
