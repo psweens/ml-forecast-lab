@@ -62,6 +62,7 @@
 
 <!-- Section navigation (tab-style) -->
 <nav class="section-nav" id="section-nav">
+    <a data-tab="sec-settings" onclick="showTab(this)">Settings</a>
     <a data-tab="sec-models" onclick="showTab(this)">Models</a>
     {% if is_running or embedded_history.get(experiment.name) %}
     <a data-tab="sec-training" onclick="showTab(this)">Training</a>
@@ -77,6 +78,218 @@
     <a data-tab="sec-tuning" onclick="showTab(this)">Tuning</a>
     {% endif %}
 </nav>
+
+<!-- ====== TAB: Settings ====== -->
+<div class="tab-section" id="sec-settings" style="display:none;">
+<section class="section">
+    <h2>Experiment Settings</h2>
+
+    <!-- Target -->
+    <h3 class="settings-section-heading">Target</h3>
+    <div class="exp-field-grid">
+        <div class="exp-field">
+            <label class="field-label">Entity ID</label>
+            <span class="monospace" style="color:var(--accent-secondary);font-size:0.9rem;">{{ exp_config.target_entity if exp_config else experiment.target_entity }}</span>
+        </div>
+        <div class="exp-field">
+            <label class="field-label">Cumulative source</label>
+            <label class="toggle-switch">
+                <input type="checkbox" data-field="source_is_cumulative"
+                       {% if exp_config and exp_config.source_is_cumulative %}checked{% endif %}
+                       onchange="saveSettingsToggle(this, 'source_is_cumulative')">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+        <div class="exp-field">
+            <label class="field-label">Daily reset</label>
+            <label class="toggle-switch">
+                <input type="checkbox" data-field="reset_daily"
+                       {% if exp_config and exp_config.reset_daily %}checked{% endif %}
+                       onchange="saveSettingsToggle(this, 'reset_daily')">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+        <div class="exp-field">
+            <label class="field-label">Max increment <span class="info-tip">?<span class="tip-text">Maximum allowed value change per interval. Larger jumps are treated as anomalies or resets. Leave empty for no limit.</span></span></label>
+            <input type="number" class="setting-input" data-field="max_increment" step="any" min="0"
+                   value="{{ exp_config.max_increment if exp_config and exp_config.max_increment is not none else '' }}"
+                   placeholder="No limit"
+                   onchange="saveSettingsField(this)">
+        </div>
+    </div>
+
+    <!-- Data -->
+    <h3 class="settings-section-heading">Data</h3>
+    <div class="exp-field-grid">
+        <div class="exp-field">
+            <label class="field-label">History (days)</label>
+            <input type="number" class="setting-input" data-field="days_history" min="1"
+                   value="{{ exp_config.days_history if exp_config else 14 }}"
+                   onchange="saveSettingsField(this)">
+        </div>
+        <div class="exp-field">
+            <label class="field-label">Interval (minutes)</label>
+            <input type="number" class="setting-input" data-field="interval_minutes" min="1"
+                   value="{{ exp_config.interval_minutes if exp_config else 30 }}"
+                   onchange="saveSettingsField(this)">
+        </div>
+        <div class="exp-field">
+            <label class="field-label">Log transform</label>
+            <label class="toggle-switch">
+                <input type="checkbox" data-field="log_transform"
+                       {% if exp_config and exp_config.log_transform %}checked{% endif %}
+                       onchange="saveSettingsToggle(this, 'log_transform')">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+    </div>
+
+    <!-- Horizons -->
+    <h3 class="settings-section-heading">Prediction Horizons</h3>
+    <div id="horizons-container">
+        <div class="horizon-chips" id="horizon-chips"></div>
+        <div style="display:flex;gap:0.5rem;align-items:center;margin-top:0.5rem;">
+            <input type="number" class="setting-input" id="horizon-new-input" min="1" placeholder="Minutes" style="width:120px;">
+            <button class="btn btn-secondary" onclick="addHorizon()" style="padding:0.4rem 0.75rem;font-size:0.85rem;">Add</button>
+        </div>
+    </div>
+
+    <!-- Forecast -->
+    <h3 class="settings-section-heading">Forecast</h3>
+    <div class="exp-field-grid">
+        <div class="exp-field">
+            <label class="field-label">Future periods <span class="info-tip">?<span class="tip-text">Number of intervals to forecast ahead. E.g. 96 at 30-min intervals = 48 hours.</span></span></label>
+            <input type="number" class="setting-input" data-field="future_periods" min="1"
+                   value="{{ exp_config.future_periods if exp_config else 48 }}"
+                   onchange="saveSettingsField(this)">
+        </div>
+        <div class="exp-field">
+            <label class="field-label">Forecast every (min) <span class="info-tip">?<span class="tip-text">How often to run inference. Leave empty to use global default.</span></span></label>
+            <input type="number" class="setting-input" data-field="forecast_every_minutes" min="1"
+                   value="{{ exp_config.forecast_every_minutes if exp_config and exp_config.forecast_every_minutes is not none else '' }}"
+                   placeholder="Global default"
+                   onchange="saveSettingsField(this)">
+        </div>
+        <div class="exp-field">
+            <label class="field-label">Retrain every (hours) <span class="info-tip">?<span class="tip-text">How often to retrain. Leave empty to use global default.</span></span></label>
+            <input type="number" class="setting-input" data-field="retrain_every_hours" min="0.1" step="0.1"
+                   value="{{ exp_config.retrain_every_hours if exp_config and exp_config.retrain_every_hours is not none else '' }}"
+                   placeholder="Global default"
+                   onchange="saveSettingsField(this)">
+        </div>
+    </div>
+
+    <!-- Training -->
+    <h3 class="settings-section-heading">Training</h3>
+    <div class="exp-field-grid">
+        <div class="exp-field">
+            <label class="field-label">CV strategy</label>
+            <select class="setting-input" data-field="cv_strategy" onchange="saveSettingsField(this)">
+                <option value="walk_forward" {% if exp_config and exp_config.cv_strategy == 'walk_forward' %}selected{% endif %}>Walk-forward</option>
+                <option value="sliding_window" {% if exp_config and exp_config.cv_strategy == 'sliding_window' %}selected{% endif %}>Sliding window</option>
+            </select>
+        </div>
+        <div class="exp-field">
+            <label class="field-label">CV folds</label>
+            <input type="number" class="setting-input" data-field="cv_folds" min="2" max="20"
+                   value="{{ exp_config.cv_folds if exp_config else 5 }}"
+                   onchange="saveSettingsField(this)">
+        </div>
+        <div class="exp-field">
+            <label class="field-label">Recency half-life (days) <span class="info-tip">?<span class="tip-text">Half-life for exponential recency weighting. Recent samples get higher weight. Set to 0 to disable.</span></span></label>
+            <input type="number" class="setting-input" data-field="recency_half_life_days" min="0" max="365" step="0.5"
+                   value="{{ exp_config.recency_half_life_days if exp_config else 7 }}"
+                   onchange="saveSettingsField(this)">
+        </div>
+        <div class="exp-field">
+            <label class="field-label">Production metric</label>
+            <select class="setting-input" data-field="production_metric" onchange="saveSettingsField(this)">
+                <option value="mae" {% if exp_config and exp_config.production_metric == 'mae' %}selected{% endif %}>MAE</option>
+                <option value="rmse" {% if exp_config and exp_config.production_metric == 'rmse' %}selected{% endif %}>RMSE</option>
+                <option value="mase" {% if exp_config and exp_config.production_metric == 'mase' %}selected{% endif %}>MASE</option>
+            </select>
+        </div>
+        <div class="exp-field">
+            <label class="field-label">Loss function (neural)</label>
+            <select class="setting-input" data-field="loss_fn" onchange="saveSettingsField(this)">
+                <option value="mse" {% if exp_config and exp_config.loss_fn == 'mse' %}selected{% endif %}>MSE</option>
+                <option value="mae" {% if exp_config and exp_config.loss_fn == 'mae' %}selected{% endif %}>MAE</option>
+                <option value="huber" {% if exp_config and exp_config.loss_fn == 'huber' %}selected{% endif %}>Huber</option>
+            </select>
+        </div>
+    </div>
+
+    <!-- Covariates -->
+    <h3 class="settings-section-heading">Covariates</h3>
+    <div class="covariate-list" id="covariate-list">
+        {% if exp_config and exp_config.covariates %}
+        {% for cov in exp_config.covariates %}
+        <div class="covariate-row" data-entity="{{ cov.entity }}">
+            <span class="cov-entity">{{ cov.entity }}</span>
+            <span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">{{ cov.role }}</span></span>
+            <span class="cov-meta">{{ cov.aggregation }}</span>
+            {% if cov.scale is not none %}<span class="cov-meta">scale: {{ cov.scale }}</span>{% endif %}
+            {% if cov.is_binary %}<span class="cov-meta">binary</span>{% endif %}
+            <button class="cov-remove-btn" onclick="removeCovariate('{{ cov.entity }}')" title="Remove">&times;</button>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p id="no-covariates-msg" style="color:var(--text-secondary);font-size:0.85rem;">No covariates configured.</p>
+        {% endif %}
+    </div>
+
+    <div class="add-cov-form" id="add-cov-form">
+        <div class="exp-field entity-search-wrapper">
+            <label class="field-label">Entity</label>
+            <input type="text" class="setting-input" id="cov-entity-input" placeholder="Search HA entities..."
+                   autocomplete="off" oninput="searchEntities(this)">
+            <div class="entity-search-results" id="entity-results" style="display:none;"></div>
+        </div>
+        <div class="exp-field">
+            <label class="field-label">Role</label>
+            <select class="setting-input" id="cov-role-input">
+                <option value="lagged">Lagged</option>
+                <option value="future">Future</option>
+                <option value="both">Both</option>
+            </select>
+        </div>
+        <div class="exp-field">
+            <label class="field-label">Aggregation</label>
+            <select class="setting-input" id="cov-agg-input">
+                <option value="mean">Mean</option>
+                <option value="sum">Sum</option>
+                <option value="max">Max</option>
+                <option value="min">Min</option>
+                <option value="last">Last</option>
+            </select>
+        </div>
+        <div class="exp-field">
+            <label class="field-label">Scale</label>
+            <input type="number" class="setting-input" id="cov-scale-input" step="any" placeholder="Optional">
+        </div>
+        <div class="exp-field">
+            <label class="field-label">Binary</label>
+            <label class="toggle-switch" style="margin-top:0.25rem;">
+                <input type="checkbox" id="cov-binary-input">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+        <div class="exp-field" style="align-self:end;">
+            <button class="btn btn-primary" onclick="addCovariate()" style="padding:0.4rem 0.75rem;font-size:0.85rem;">Add</button>
+        </div>
+    </div>
+
+    <!-- Training Control -->
+    {% if is_running %}
+    <h3 class="settings-section-heading">Training Control</h3>
+    <button class="btn btn-danger" id="btn-stop-training" onclick="stopTraining()">
+        Stop Training
+    </button>
+    <span class="info-tip" style="margin-left:0.5rem;">?<span class="tip-text">Cancels the running pipeline. If a neural model is mid-epoch, the stop takes effect after the current epoch completes.</span></span>
+    {% endif %}
+
+</section>
+</div>
 
 <!-- ====== TAB: Models (per-experiment selection) ====== -->
 <div class="tab-section" id="sec-models" style="display:none;">
@@ -975,6 +1188,264 @@ window.showTab = function(el) {
 (function() {
     var BASE = typeof BASE_PATH !== 'undefined' ? BASE_PATH : '';
     var EXP_NAME = {{ experiment.name | tojson }};
+
+    // ======== Settings tab ========
+
+    // --- Per-field save (scalars) ---
+    window.saveSettingsField = function(el) {
+        var field = el.getAttribute('data-field');
+        var value = el.value;
+        var intFields = ['days_history', 'interval_minutes', 'future_periods', 'forecast_every_minutes', 'cv_folds'];
+        var floatFields = ['recency_half_life_days', 'retrain_every_hours', 'max_increment'];
+        var nullableFields = ['forecast_every_minutes', 'retrain_every_hours', 'max_increment'];
+
+        if ((value === '' || value === null) && nullableFields.indexOf(field) >= 0) {
+            value = null;
+        } else if (intFields.indexOf(field) >= 0) {
+            value = parseInt(value);
+            if (isNaN(value)) { mlfl.toast('Invalid integer', 'error'); return; }
+        } else if (floatFields.indexOf(field) >= 0) {
+            value = parseFloat(value);
+            if (isNaN(value)) { mlfl.toast('Invalid number', 'error'); return; }
+        }
+
+        var data = { experiment: EXP_NAME };
+        data[field] = value;
+        el.style.borderColor = 'var(--warning)';
+
+        fetch(BASE + '/api/experiment-settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.success) {
+                el.style.borderColor = 'var(--success)';
+                setTimeout(function() { el.style.borderColor = ''; }, 2000);
+            } else {
+                el.style.borderColor = 'var(--error)';
+                mlfl.toast('Failed: ' + result.error, 'error');
+            }
+        })
+        .catch(function(err) {
+            el.style.borderColor = 'var(--error)';
+            mlfl.toast('Error: ' + err, 'error');
+        });
+    };
+
+    window.saveSettingsToggle = function(el, field) {
+        var data = { experiment: EXP_NAME };
+        data[field] = el.checked;
+        fetch(BASE + '/api/experiment-settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.success) {
+                mlfl.toast(field + ' updated', 'success');
+            } else {
+                el.checked = !el.checked;
+                mlfl.toast('Failed: ' + result.error, 'error');
+            }
+        })
+        .catch(function(err) {
+            el.checked = !el.checked;
+            mlfl.toast('Error: ' + err, 'error');
+        });
+    };
+
+    // --- Horizons chip list ---
+    var _horizons = {{ (exp_config.horizons_minutes if exp_config else [120, 480, 720]) | tojson }};
+
+    function renderHorizons() {
+        var container = document.getElementById('horizon-chips');
+        if (!container) return;
+        container.innerHTML = '';
+        _horizons.sort(function(a, b) { return a - b; });
+        _horizons.forEach(function(h) {
+            var chip = document.createElement('span');
+            chip.className = 'horizon-chip';
+            var label = h >= 60 ? (h / 60) + 'h' : h + 'm';
+            chip.innerHTML = label + ' <span class="chip-val">(' + h + ' min)</span> <span class="chip-remove" onclick="removeHorizon(' + h + ')">&times;</span>';
+            container.appendChild(chip);
+        });
+    }
+
+    function saveHorizons() {
+        fetch(BASE + '/experiment/' + EXP_NAME + '/save-horizons', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ horizons: _horizons })
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.success) {
+                _horizons = result.horizons;
+                renderHorizons();
+                mlfl.toast('Horizons updated', 'success');
+            } else {
+                mlfl.toast('Failed: ' + result.error, 'error');
+            }
+        })
+        .catch(function(err) { mlfl.toast('Error: ' + err, 'error'); });
+    }
+
+    window.addHorizon = function() {
+        var input = document.getElementById('horizon-new-input');
+        var val = parseInt(input.value);
+        if (isNaN(val) || val <= 0) { mlfl.toast('Enter a positive number', 'error'); return; }
+        if (_horizons.indexOf(val) >= 0) { mlfl.toast('Horizon already exists', 'warning'); return; }
+        _horizons.push(val);
+        input.value = '';
+        saveHorizons();
+    };
+
+    window.removeHorizon = function(val) {
+        _horizons = _horizons.filter(function(h) { return h !== val; });
+        if (_horizons.length === 0) { mlfl.toast('Must have at least one horizon', 'error'); _horizons.push(val); return; }
+        saveHorizons();
+    };
+
+    renderHorizons();
+
+    // --- Covariate management ---
+    var _entitySearchTimer = null;
+
+    window.searchEntities = function(inputEl) {
+        clearTimeout(_entitySearchTimer);
+        var q = inputEl.value.trim();
+        var resultsDiv = document.getElementById('entity-results');
+        if (q.length < 2) { resultsDiv.style.display = 'none'; return; }
+
+        _entitySearchTimer = setTimeout(function() {
+            fetch(BASE + '/api/ha/entities?q=' + encodeURIComponent(q))
+            .then(function(r) { return r.json(); })
+            .then(function(entities) {
+                resultsDiv.innerHTML = '';
+                if (!entities.length) { resultsDiv.style.display = 'none'; return; }
+                entities.forEach(function(e) {
+                    var opt = document.createElement('div');
+                    opt.className = 'entity-option';
+                    opt.innerHTML = '<span class="entity-id">' + e.entity_id + '</span>' +
+                        (e.friendly_name ? '<span class="entity-name">' + e.friendly_name + '</span>' : '');
+                    opt.onclick = function() {
+                        inputEl.value = e.entity_id;
+                        resultsDiv.style.display = 'none';
+                    };
+                    resultsDiv.appendChild(opt);
+                });
+                resultsDiv.style.display = 'block';
+            })
+            .catch(function() { resultsDiv.style.display = 'none'; });
+        }, 300);
+    };
+
+    // Close entity search on outside click
+    document.addEventListener('click', function(e) {
+        var resultsDiv = document.getElementById('entity-results');
+        if (resultsDiv && !e.target.closest('.entity-search-wrapper')) {
+            resultsDiv.style.display = 'none';
+        }
+    });
+
+    window.addCovariate = function() {
+        var entity = document.getElementById('cov-entity-input').value.trim();
+        if (!entity) { mlfl.toast('Entity is required', 'error'); return; }
+
+        var body = {
+            entity: entity,
+            role: document.getElementById('cov-role-input').value,
+            aggregation: document.getElementById('cov-agg-input').value
+        };
+        var scaleVal = document.getElementById('cov-scale-input').value;
+        if (scaleVal !== '') body.scale = parseFloat(scaleVal);
+        if (document.getElementById('cov-binary-input').checked) body.is_binary = true;
+
+        fetch(BASE + '/experiment/' + EXP_NAME + '/add-covariate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.success) {
+                mlfl.toast('Covariate added', 'success');
+                // Append row to DOM
+                var list = document.getElementById('covariate-list');
+                var noMsg = document.getElementById('no-covariates-msg');
+                if (noMsg) noMsg.remove();
+                var row = document.createElement('div');
+                row.className = 'covariate-row';
+                row.setAttribute('data-entity', entity);
+                row.innerHTML = '<span class="cov-entity">' + entity + '</span>' +
+                    '<span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">' + body.role + '</span></span>' +
+                    '<span class="cov-meta">' + body.aggregation + '</span>' +
+                    (body.scale !== undefined ? '<span class="cov-meta">scale: ' + body.scale + '</span>' : '') +
+                    (body.is_binary ? '<span class="cov-meta">binary</span>' : '') +
+                    '<button class="cov-remove-btn" onclick="removeCovariate(\'' + entity + '\')" title="Remove">&times;</button>';
+                list.appendChild(row);
+                // Clear form
+                document.getElementById('cov-entity-input').value = '';
+                document.getElementById('cov-scale-input').value = '';
+                document.getElementById('cov-binary-input').checked = false;
+            } else {
+                mlfl.toast('Failed: ' + result.error, 'error');
+            }
+        })
+        .catch(function(err) { mlfl.toast('Error: ' + err, 'error'); });
+    };
+
+    window.removeCovariate = function(entity) {
+        fetch(BASE + '/experiment/' + EXP_NAME + '/remove-covariate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ entity_id: entity })
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.success) {
+                mlfl.toast('Covariate removed', 'success');
+                var row = document.querySelector('.covariate-row[data-entity="' + entity + '"]');
+                if (row) row.remove();
+                if (!document.querySelectorAll('.covariate-row').length) {
+                    var list = document.getElementById('covariate-list');
+                    list.innerHTML = '<p id="no-covariates-msg" style="color:var(--text-secondary);font-size:0.85rem;">No covariates configured.</p>';
+                }
+            } else {
+                mlfl.toast('Failed: ' + result.error, 'error');
+            }
+        })
+        .catch(function(err) { mlfl.toast('Error: ' + err, 'error'); });
+    };
+
+    // --- Stop training ---
+    window.stopTraining = function() {
+        mlfl.confirm('Stop the running pipeline for this experiment?', function() {
+            var btn = document.getElementById('btn-stop-training');
+            if (btn) { btn.disabled = true; btn.textContent = 'Stopping...'; }
+
+            fetch(BASE + '/experiment/' + EXP_NAME + '/stop-training', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(result) {
+                if (result.success) {
+                    mlfl.toast('Training stopped', 'success');
+                } else {
+                    mlfl.toast('Failed: ' + result.error, 'error');
+                    if (btn) { btn.disabled = false; btn.textContent = 'Stop Training'; }
+                }
+            })
+            .catch(function(err) {
+                mlfl.toast('Error: ' + err, 'error');
+                if (btn) { btn.disabled = false; btn.textContent = 'Stop Training'; }
+            });
+        });
+    };
 
     // Shared high-contrast Plotly colorway used by every multi-trace chart.
     // Traces consume colours in order — no per-model lookup, no need to keep

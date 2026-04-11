@@ -27,6 +27,7 @@
                 })">
             Run All Benchmarks
         </button>
+        <button class="btn btn-success" onclick="openNewExperiment()">+ New Experiment</button>
     </div>
     <div id="status-message"></div>
 </section>
@@ -153,10 +154,54 @@
     <div class="empty-state">
         <span class="empty-state-icon">🧪</span>
         <p>No experiments configured yet.</p>
-        <p class="empty-state-hint">Add experiments to your <code class="color-accent">mlfl.yaml</code> configuration file to get started.</p>
+        <button class="btn btn-success" onclick="openNewExperiment()" style="margin-top:0.75rem;">+ Create Your First Experiment</button>
     </div>
     {% endif %}
 </section>
+
+<!-- New Experiment Modal -->
+<div id="new-exp-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-dialog" style="max-width:520px;">
+        <h3 style="color:var(--text-primary);margin:0 0 1.25rem;font-size:1.1rem;">Create New Experiment</h3>
+        <form id="new-exp-form" onsubmit="createExperiment(event)">
+            <div style="display:grid;gap:1rem;">
+                <div>
+                    <label class="field-label" style="display:block;margin-bottom:0.3rem;">Name</label>
+                    <input type="text" class="setting-input" id="new-exp-name" required
+                           placeholder="e.g. hot_water_demand" pattern="[a-z][a-z0-9_]{0,63}"
+                           title="Lowercase letters, numbers, and underscores. Must start with a letter.">
+                </div>
+                <div class="entity-search-wrapper">
+                    <label class="field-label" style="display:block;margin-bottom:0.3rem;">Target Entity</label>
+                    <input type="text" class="setting-input" id="new-exp-target" required
+                           placeholder="Search HA entities..." autocomplete="off"
+                           oninput="searchNewExpEntities(this)">
+                    <div class="entity-search-results" id="new-exp-entity-results" style="display:none;"></div>
+                </div>
+                <div style="display:flex;gap:2rem;">
+                    <div>
+                        <label class="field-label" style="display:block;margin-bottom:0.3rem;">Cumulative source</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="new-exp-cumulative">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div>
+                        <label class="field-label" style="display:block;margin-bottom:0.3rem;">Daily reset</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="new-exp-reset">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-top:1.5rem;">
+                <button type="button" class="btn btn-secondary" onclick="closeNewExperiment()">Cancel</button>
+                <button type="submit" class="btn btn-success" id="new-exp-submit">Create</button>
+            </div>
+        </form>
+    </div>
+</div>
 
 {% endblock %}
 
@@ -196,5 +241,95 @@
     // Auto-refresh dashboard (faster when training is running)
     var _refreshMs = {{ '10000' if running_experiments else '60000' }};
     setInterval(function() { location.reload(); }, _refreshMs);
+
+    // ======== New Experiment Modal ========
+    function openNewExperiment() {
+        document.getElementById('new-exp-modal').style.display = 'flex';
+        document.getElementById('new-exp-name').focus();
+    }
+    function closeNewExperiment() {
+        document.getElementById('new-exp-modal').style.display = 'none';
+        document.getElementById('new-exp-form').reset();
+        document.getElementById('new-exp-entity-results').style.display = 'none';
+    }
+    // Close modal on overlay click
+    document.getElementById('new-exp-modal').addEventListener('click', function(e) {
+        if (e.target === this) closeNewExperiment();
+    });
+
+    function createExperiment(e) {
+        e.preventDefault();
+        var name = document.getElementById('new-exp-name').value.trim();
+        var target = document.getElementById('new-exp-target').value.trim();
+        if (!name || !target) { mlfl.toast('Name and target entity are required', 'error'); return; }
+        if (!/^[a-z][a-z0-9_]{0,63}$/.test(name)) {
+            mlfl.toast('Name must be lowercase letters, numbers, underscores and start with a letter', 'error');
+            return;
+        }
+
+        var btn = document.getElementById('new-exp-submit');
+        btn.disabled = true; btn.classList.add('btn-loading');
+
+        var body = { name: name, target_entity: target };
+        if (document.getElementById('new-exp-cumulative').checked) body.source_is_cumulative = true;
+        if (document.getElementById('new-exp-reset').checked) body.reset_daily = true;
+
+        fetch(BASE_PATH + '/api/experiments/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.success) {
+                mlfl.toast('Experiment created', 'success');
+                window.location.href = BASE_PATH + result.redirect;
+            } else {
+                mlfl.toast('Failed: ' + result.error, 'error');
+                btn.disabled = false; btn.classList.remove('btn-loading');
+            }
+        })
+        .catch(function(err) {
+            mlfl.toast('Error: ' + err, 'error');
+            btn.disabled = false; btn.classList.remove('btn-loading');
+        });
+    }
+
+    // Entity search for new experiment (same debounced pattern as Settings tab)
+    var _newExpSearchTimer = null;
+    function searchNewExpEntities(inputEl) {
+        clearTimeout(_newExpSearchTimer);
+        var q = inputEl.value.trim();
+        var resultsDiv = document.getElementById('new-exp-entity-results');
+        if (q.length < 2) { resultsDiv.style.display = 'none'; return; }
+
+        _newExpSearchTimer = setTimeout(function() {
+            fetch(BASE_PATH + '/api/ha/entities?q=' + encodeURIComponent(q))
+            .then(function(r) { return r.json(); })
+            .then(function(entities) {
+                resultsDiv.innerHTML = '';
+                if (!entities.length) { resultsDiv.style.display = 'none'; return; }
+                entities.forEach(function(e) {
+                    var opt = document.createElement('div');
+                    opt.className = 'entity-option';
+                    opt.innerHTML = '<span class="entity-id">' + e.entity_id + '</span>' +
+                        (e.friendly_name ? '<span class="entity-name">' + e.friendly_name + '</span>' : '');
+                    opt.onclick = function() {
+                        inputEl.value = e.entity_id;
+                        resultsDiv.style.display = 'none';
+                    };
+                    resultsDiv.appendChild(opt);
+                });
+                resultsDiv.style.display = 'block';
+            })
+            .catch(function() { resultsDiv.style.display = 'none'; });
+        }, 300);
+    }
+
+    // Close entity search on outside click
+    document.addEventListener('click', function(e) {
+        var r = document.getElementById('new-exp-entity-results');
+        if (r && !e.target.closest('.entity-search-wrapper')) r.style.display = 'none';
+    });
 </script>
 {% endblock %}

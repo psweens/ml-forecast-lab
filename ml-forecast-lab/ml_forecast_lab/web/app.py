@@ -268,6 +268,7 @@ class AppState:
         # apply-tuning and apply-covariate-best endpoints so the user
         # doesn't have to wait for the next scheduled retrain cycle.
         self.retrain_callback = None  # Set by main app
+        self.stop_training_callback = None  # Set by main app
         self.running_benchmarks: set = set()
         self.last_update: Optional[datetime] = None
         self.next_update_seconds: Optional[int] = None
@@ -817,9 +818,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "total_epochs": _total_epochs,
             }
 
-        # Get units and per-experiment models_enabled from config
+        # Get units, per-experiment models_enabled, and full config from config
         units = ""
         exp_models_enabled: list = []
+        exp_config = None
         try:
             from ml_forecast_lab.config import load_config as _lc
             import glob as _g
@@ -832,6 +834,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                         if exp.name == name:
                             units = exp.units or ""
                             exp_models_enabled = list(exp.models_enabled)
+                            exp_config = exp
                     break
         except Exception:
             pass
@@ -862,6 +865,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "training_summary": training_summary,
                 "model_catalog": MODEL_CATALOG,
                 "exp_models_enabled": exp_models_enabled,
+                "exp_config": exp_config,
                 "tuning_result": app.state.appstate.tuning_results.get(name),
                 "param_defaults": {m: {p: s["default"] for p, s in schema.items()}
                                    for m, schema in MODEL_PARAM_SCHEMA.items()},
@@ -1145,6 +1149,214 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception as e:
             logger.error(f"Failed to remove covariate: {e}")
             return JSONResponse(content={"success": False, "error": str(e)})
+
+    @app.post("/experiment/{name}/add-covariate")
+    async def add_covariate(name: str, request: Request):
+        """Add a covariate to an experiment's config."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        entity = body.get("entity")
+        if not entity:
+            return JSONResponse(content={"success": False, "error": "entity is required"})
+
+        cov_dict = {"entity": entity}
+        for opt_field in ("role", "aggregation", "scale", "is_binary"):
+            if opt_field in body and body[opt_field] is not None:
+                cov_dict[opt_field] = body[opt_field]
+
+        from ml_forecast_lab.config import add_experiment_covariate
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+
+        try:
+            added = add_experiment_covariate(config_path, name, cov_dict)
+            if added:
+                logger.info(f"Added covariate {entity} to {name}")
+                return JSONResponse(content={"success": True, "entity": entity})
+            else:
+                return JSONResponse(content={"success": False, "error": "Covariate already exists or experiment not found"})
+        except ValueError as e:
+            return JSONResponse(content={"success": False, "error": str(e)})
+        except Exception as e:
+            logger.error(f"Failed to add covariate: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
+
+    @app.post("/experiment/{name}/save-horizons")
+    async def save_horizons_route(name: str, request: Request):
+        """Replace an experiment's prediction horizons."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        horizons = body.get("horizons")
+        if not isinstance(horizons, list) or not horizons:
+            return JSONResponse(content={"success": False, "error": "horizons must be a non-empty list"})
+
+        from ml_forecast_lab.config import save_horizons
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+
+        try:
+            save_horizons(config_path, name, horizons)
+            logger.info(f"Updated horizons for {name}: {horizons}")
+            return JSONResponse(content={"success": True, "horizons": sorted([int(h) for h in horizons])})
+        except ValueError as e:
+            return JSONResponse(content={"success": False, "error": str(e)})
+        except Exception as e:
+            logger.error(f"Failed to save horizons: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
+
+    @app.post("/experiment/{name}/stop-training")
+    async def stop_training(name: str):
+        """Stop a running training/tuning task for an experiment."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        cb = app.state.appstate.stop_training_callback
+        if not cb:
+            return JSONResponse(content={"success": False, "error": "Stop not available"})
+
+        try:
+            stopped = await cb(name)
+            if stopped:
+                logger.info(f"Stopped training for {name}")
+                return JSONResponse(content={"success": True})
+            else:
+                return JSONResponse(content={"success": False, "error": "No running task for this experiment"})
+        except Exception as e:
+            logger.error(f"Failed to stop training for {name}: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
+
+    @app.post("/api/experiments/create")
+    async def create_experiment_route(request: Request):
+        """Create a new experiment."""
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        name = body.get("name", "")
+        target_entity = body.get("target_entity", "")
+
+        if not name or not target_entity:
+            return JSONResponse(content={"success": False, "error": "name and target_entity are required"})
+
+        exp_dict = {"name": name, "target_entity": target_entity}
+        for opt in ("source_is_cumulative", "reset_daily"):
+            if opt in body:
+                exp_dict[opt] = bool(body[opt])
+
+        from ml_forecast_lab.config import create_experiment
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+
+        try:
+            create_experiment(config_path, exp_dict)
+        except ValueError as e:
+            return JSONResponse(content={"success": False, "error": str(e)})
+        except Exception as e:
+            logger.error(f"Failed to create experiment: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
+
+        # Register in-memory so it appears immediately
+        from ml_forecast_lab.web.app import ExperimentStatus
+        app.state.appstate.experiment_statuses[name] = ExperimentStatus(
+            name=name,
+            target_entity=target_entity,
+            mode="lab",
+        )
+
+        logger.info(f"Created experiment '{name}' targeting {target_entity}")
+        return JSONResponse(content={"success": True, "redirect": f"/experiment/{name}"})
+
+    @app.post("/api/experiments/{name}/delete")
+    async def delete_experiment_route(name: str):
+        """Delete an experiment."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        from ml_forecast_lab.config import delete_experiment
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+
+        try:
+            removed = delete_experiment(config_path, name)
+            if not removed:
+                return JSONResponse(content={"success": False, "error": "Experiment not found in config"})
+        except Exception as e:
+            logger.error(f"Failed to delete experiment: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
+
+        # Remove from in-memory state
+        app.state.appstate.experiment_statuses.pop(name, None)
+        app.state.appstate.benchmark_results.pop(name, None)
+        app.state.appstate.forecast_data.pop(name, None)
+        app.state.appstate.lab_forecast_data.pop(name, None)
+        app.state.appstate.feature_importances.pop(name, None)
+        app.state.appstate.covariate_analysis_results.pop(name, None)
+        app.state.appstate.tuning_results.pop(name, None)
+
+        logger.info(f"Deleted experiment '{name}'")
+        return JSONResponse(content={"success": True, "redirect": "/"})
+
+    # ---- HA entity search (cached) ----
+    _entity_cache: Dict[str, Any] = {"data": [], "ts": 0.0}
+
+    @app.get("/api/ha/entities")
+    async def ha_entities(request: Request):
+        """Search HA entities for the covariate / target entity picker."""
+        import time
+        import aiohttp as _aiohttp
+
+        q = (request.query_params.get("q") or "").lower().strip()
+        now = time.time()
+
+        # Refresh cache every 60 seconds
+        if now - _entity_cache["ts"] > 60:
+            ha_url = os.environ.get("HA_URL", "http://supervisor/core")
+            ha_token = os.environ.get("SUPERVISOR_TOKEN", "")
+            try:
+                async with _aiohttp.ClientSession() as sess:
+                    headers = {"Authorization": f"Bearer {ha_token}"}
+                    async with sess.get(f"{ha_url}/api/states", headers=headers, timeout=_aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status == 200:
+                            states = await resp.json()
+                            _entity_cache["data"] = [
+                                {
+                                    "entity_id": s["entity_id"],
+                                    "friendly_name": s.get("attributes", {}).get("friendly_name", ""),
+                                    "state": str(s.get("state", "")),
+                                }
+                                for s in states
+                                if isinstance(s, dict) and "entity_id" in s
+                            ]
+                            _entity_cache["ts"] = now
+            except Exception as e:
+                logger.debug(f"Entity cache refresh failed: {e}")
+                # Use stale cache or empty list
+
+        entities = _entity_cache["data"]
+        if q:
+            entities = [
+                e for e in entities
+                if q in e["entity_id"].lower() or q in e["friendly_name"].lower()
+            ]
+
+        return JSONResponse(content=entities[:50])
 
     @app.post("/experiment/{name}/toggle-mode")
     async def toggle_mode(name: str):
@@ -1753,10 +1965,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "retrain_every_hours": lambda v: float(v) if float(v) >= 0.1 else None,
             "production_metric": lambda v: v if v in ("mae", "rmse", "mase") else None,
             "loss_fn": lambda v: v if v in ("mse", "mae", "huber") else None,
+            "max_increment": lambda v: float(v) if float(v) > 0 else None,
         }
 
         # Fields where None/null means "use global default" (valid, not an error)
-        nullable_fields = {"forecast_every_minutes", "retrain_every_hours"}
+        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment"}
 
         updates = {}
         for field, validator in editable.items():
@@ -2070,7 +2283,18 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             finally:
                 app.state.appstate.end_benchmark(name)
 
-        _aio.create_task(_pipeline())
+        _task = _aio.create_task(_pipeline())
+        # Track for stop-training support (if the main app registered the dict)
+        if hasattr(app.state.appstate, 'stop_training_callback'):
+            # The main app tracks via _running_tasks; register so the
+            # _stop_training_trigger callback can find and cancel this task.
+            # We store on appstate as a simple dict keyed by experiment name.
+            if not hasattr(app.state.appstate, '_pipeline_tasks'):
+                app.state.appstate._pipeline_tasks = {}
+            app.state.appstate._pipeline_tasks[name] = _task
+            _task.add_done_callback(
+                lambda t, n=name: app.state.appstate._pipeline_tasks.pop(n, None)
+            )
 
         return JSONResponse(
             status_code=202,

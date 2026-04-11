@@ -102,7 +102,7 @@
 
 <!-- Experiments -->
 <section class="section">
-    <h2>Experiments <span class="info-tip">?<span class="tip-text">Each experiment targets one HA sensor for forecasting. Edit mlfl.yaml directly for advanced configuration like adding covariates or custom metrics.</span></span></h2>
+    <h2>Experiments <span class="info-tip">?<span class="tip-text">Each experiment targets one HA sensor for forecasting. Use the Settings tab on each experiment's detail page to configure all options.</span></span></h2>
 
     <!-- Quick summary table -->
     {% if experiment_statuses %}
@@ -132,7 +132,7 @@
     </div>
     {% endif %}
 
-    <!-- Detailed config cards -->
+    <!-- Experiment summary cards (settings are on each experiment's Settings tab) -->
     {% for exp in experiment_configs %}
     <details class="fold-metrics" style="margin-bottom: 1rem;">
         <summary>
@@ -140,135 +140,29 @@
             <span style="color:var(--text-secondary);font-family:monospace;font-size:0.85rem;margin-left:0.5rem;">{{ exp.target_entity }}</span>
         </summary>
         <div class="fold-content" style="padding-top:1rem;">
-
-            <!-- Data section -->
-            <h4 style="color:var(--text-primary);margin:0 0 0.75rem;font-size:0.95rem;border-bottom:1px solid var(--border);padding-bottom:0.4rem;">Data</h4>
             <div class="exp-field-grid">
                 <div class="exp-field">
-                    <label>History (days)</label>
-                    <input type="number" class="setting-input" min="1" max="3650" step="1"
-                           value="{{ exp.days_history }}"
-                           data-exp="{{ exp.name }}" data-field="days_history"
-                           onchange="saveExperimentField(this)">
+                    <label>History</label>
+                    <span class="field-value" style="padding:0.4rem 0;">{{ exp.days_history }} days</span>
                 </div>
                 <div class="exp-field">
-                    <label>Interval (minutes)</label>
-                    <input type="number" class="setting-input" min="1" max="1440" step="1"
-                           value="{{ exp.interval_minutes }}"
-                           data-exp="{{ exp.name }}" data-field="interval_minutes"
-                           onchange="saveExperimentField(this)">
+                    <label>Interval</label>
+                    <span class="field-value" style="padding:0.4rem 0;">{{ exp.interval_minutes }} min</span>
                 </div>
                 <div class="exp-field">
-                    <label>Cumulative source</label>
-                    <select class="setting-input"
-                            data-exp="{{ exp.name }}" data-field="source_is_cumulative"
-                            onchange="saveExperimentField(this)">
-                        <option value="false" {{ 'selected' if not exp.source_is_cumulative }}>No</option>
-                        <option value="true" {{ 'selected' if exp.source_is_cumulative }}>Yes</option>
-                    </select>
+                    <label>CV</label>
+                    <span class="field-value" style="padding:0.4rem 0;">{{ exp.cv_strategy | replace('_', '-') }} &times; {{ exp.cv_folds }}</span>
                 </div>
                 <div class="exp-field">
-                    <label>Daily reset</label>
-                    <select class="setting-input"
-                            data-exp="{{ exp.name }}" data-field="reset_daily"
-                            onchange="saveExperimentField(this)">
-                        <option value="false" {{ 'selected' if not exp.reset_daily }}>No</option>
-                        <option value="true" {{ 'selected' if exp.reset_daily }}>Yes</option>
-                    </select>
+                    <label>Horizons</label>
+                    <span class="field-value" style="padding:0.4rem 0;">{{ exp.horizons_minutes | join(', ') }} min</span>
                 </div>
                 <div class="exp-field">
-                    <label>Log transform <span class="info-tip">?<span class="tip-text">Apply log(1+x) transform to target. Helps with skewed distributions.</span></span></label>
-                    <select class="setting-input"
-                            data-exp="{{ exp.name }}" data-field="log_transform"
-                            onchange="saveExperimentField(this)">
-                        <option value="false" {{ 'selected' if not exp.log_transform }}>No</option>
-                        <option value="true" {{ 'selected' if exp.log_transform }}>Yes</option>
-                    </select>
-                </div>
-            </div>
-
-            <!-- Model section -->
-            <h4 style="color:var(--text-primary);margin:1.25rem 0 0.75rem;font-size:0.95rem;border-bottom:1px solid var(--border);padding-bottom:0.4rem;">Model Training</h4>
-            <div class="exp-field-grid">
-                <div class="exp-field">
-                    <label>CV strategy <span class="info-tip">?<span class="tip-text">Walk-forward (expanding): training set grows each fold. Sliding window: fixed-size windows.</span></span></label>
-                    <select class="setting-input" data-exp="{{ exp.name }}" data-field="cv_strategy"
-                            onchange="saveExperimentField(this)">
-                        <option value="walk_forward" {{ 'selected' if exp.cv_strategy == 'walk_forward' }}>Walk-forward</option>
-                        <option value="sliding_window" {{ 'selected' if exp.cv_strategy == 'sliding_window' }}>Sliding window</option>
-                    </select>
-                </div>
-                <div class="exp-field">
-                    <label>CV folds</label>
-                    <input type="number" class="setting-input" min="2" max="20" step="1"
-                           value="{{ exp.cv_folds }}"
-                           data-exp="{{ exp.name }}" data-field="cv_folds"
-                           onchange="saveExperimentField(this)">
-                </div>
-                <div class="exp-field">
-                    <label>Recency half-life (days) <span class="info-tip">?<span class="tip-text">Exponential decay. Recent samples get higher weight. 0 = equal weight.</span></span></label>
-                    <input type="number" class="setting-input" min="0" max="365" step="0.5"
-                           value="{{ exp.recency_half_life_days if exp.recency_half_life_days is defined else 7 }}"
-                           data-exp="{{ exp.name }}" data-field="recency_half_life_days"
-                           onchange="saveExperimentField(this)">
-                </div>
-                <div class="exp-field">
-                    <label>Production metric <span class="info-tip">?<span class="tip-text">Metric used to auto-select the best model after benchmark.</span></span></label>
-                    <select class="setting-input" data-exp="{{ exp.name }}" data-field="production_metric"
-                            onchange="saveExperimentField(this)">
-                        <option value="mae" {{ 'selected' if exp.production_metric == 'mae' }}>MAE</option>
-                        <option value="rmse" {{ 'selected' if exp.production_metric == 'rmse' }}>RMSE</option>
-                        <option value="mase" {{ 'selected' if exp.production_metric == 'mase' }}>MASE</option>
-                    </select>
-                </div>
-                <div class="exp-field">
-                    <label>Loss function (neural) <span class="info-tip">?<span class="tip-text">Training loss for neural models. Huber is robust to outliers.</span></span></label>
-                    <select class="setting-input" data-exp="{{ exp.name }}" data-field="loss_fn"
-                            onchange="saveExperimentField(this)">
-                        <option value="mse" {{ 'selected' if exp.loss_fn == 'mse' }}>MSE</option>
-                        <option value="mae" {{ 'selected' if exp.loss_fn == 'mae' }}>MAE</option>
-                        <option value="huber" {{ 'selected' if exp.loss_fn == 'huber' }}>Huber</option>
-                    </select>
-                </div>
-                <div class="exp-field">
-                    <label>Forecast length (steps) <span class="info-tip">?<span class="tip-text">How many future steps to forecast. Each step = interval minutes (e.g. 48 steps × 30min = 24h).</span></span></label>
-                    <input type="number" class="setting-input" min="1" max="720" step="1"
-                           value="{{ exp.future_periods }}"
-                           data-exp="{{ exp.name }}" data-field="future_periods"
-                           onchange="saveExperimentField(this)">
-                </div>
-            </div>
-
-            <!-- Scheduling section -->
-            <h4 style="color:var(--text-primary);margin:1.25rem 0 0.75rem;font-size:0.95rem;border-bottom:1px solid var(--border);padding-bottom:0.4rem;">Scheduling</h4>
-            <div class="exp-field-grid">
-                <div class="exp-field">
-                    <label>Forecast interval (minutes) <span class="info-tip">?<span class="tip-text">How often to run inference with the cached trained model and publish updated sensors. Cheap (&lt;1s on RPi5). Leave blank to use the default of 30 minutes.</span></span></label>
-                    <input type="number" class="setting-input" min="1" max="1440" step="1"
-                           value="{{ exp.forecast_every_minutes if exp.forecast_every_minutes is not none else '' }}"
-                           placeholder="30"
-                           data-exp="{{ exp.name }}" data-field="forecast_every_minutes"
-                           onchange="saveExperimentField(this)">
-                </div>
-                <div class="exp-field">
-                    <label>Retrain interval (hours) <span class="info-tip">?<span class="tip-text">How often to retrain the model from scratch and refresh the cache. Expensive (minutes on RPi5). Leave blank to use the default of 24 hours.</span></span></label>
-                    <input type="number" class="setting-input" min="0.5" max="720" step="0.5"
-                           value="{{ exp.retrain_every_hours if exp.retrain_every_hours is not none else '' }}"
-                           placeholder="24"
-                           data-exp="{{ exp.name }}" data-field="retrain_every_hours"
-                           onchange="saveExperimentField(this)">
-                </div>
-            </div>
-
-            <!-- Read-only info -->
-            <h4 style="color:var(--text-primary);margin:1.25rem 0 0.75rem;font-size:0.95rem;border-bottom:1px solid var(--border);padding-bottom:0.4rem;">Configuration</h4>
-            <div class="exp-field-grid">
-                <div class="exp-field">
-                    <label>Enabled models</label>
+                    <label>Models</label>
                     <span class="field-value" style="padding:0.4rem 0;">{{ exp.models_enabled | join(', ') or '—' }}</span>
                 </div>
-                <div class="exp-field" style="grid-column:span 2;">
-                    <label>Covariates ({{ exp.covariates | length }})</label>
+                <div class="exp-field">
+                    <label>Covariates</label>
                     <span class="field-value" style="padding:0.4rem 0;">
                         {% if exp.covariates %}
                             {% for cov in exp.covariates %}
@@ -282,9 +176,10 @@
                     </span>
                 </div>
             </div>
-            <p style="color:var(--text-secondary);font-size:0.8rem;margin-top:1rem;">
-                Models are selected per-experiment from the <a href="{{ base_path | default('') }}/experiment/{{ exp.name }}" style="color:var(--accent-secondary);">experiment detail page</a>.
-                Add/remove covariates by editing <code style="color:var(--accent-secondary);">mlfl.yaml</code> directly.
+            <p style="margin-top:1rem;">
+                <a href="{{ base_path | default('') }}/experiment/{{ exp.name }}" style="color:var(--accent-secondary);font-weight:600;text-decoration:none;">
+                    Configure &rarr;
+                </a>
             </p>
         </div>
     </details>
@@ -320,60 +215,6 @@
 
 {% block scripts %}
 <script>
-    function saveExperimentField(el) {
-        var expName = el.getAttribute('data-exp');
-        var field = el.getAttribute('data-field');
-        var value = el.value;
-
-        // Type coercion by field
-        var intFields = ['cv_folds', 'days_history', 'interval_minutes', 'forecast_every_minutes', 'future_periods'];
-        var floatFields = ['recency_half_life_days', 'retrain_every_hours'];
-        var boolFields = ['source_is_cumulative', 'reset_daily', 'log_transform'];
-
-        if (intFields.indexOf(field) >= 0) {
-            if (value === '' || value === null) {
-                value = null;  // Allow empty = use global default
-            } else {
-                value = parseInt(value);
-                if (isNaN(value)) { mlfl.toast('Invalid integer value', 'error'); return; }
-            }
-        } else if (floatFields.indexOf(field) >= 0) {
-            if (value === '' || value === null) {
-                value = null;
-            } else {
-                value = parseFloat(value);
-                if (isNaN(value)) { mlfl.toast('Invalid number', 'error'); return; }
-            }
-        } else if (boolFields.indexOf(field) >= 0) {
-            value = (value === 'true' || value === true);
-        }
-        // strings and lists pass through as-is (server will parse horizons)
-
-        var data = { experiment: expName };
-        data[field] = value;
-
-        el.style.borderColor = 'var(--warning)';
-        fetch(BASE_PATH + '/api/experiment-settings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data),
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(result) {
-            if (result.success) {
-                el.style.borderColor = 'var(--success)';
-                setTimeout(function() { el.style.borderColor = ''; }, 2000);
-            } else {
-                el.style.borderColor = 'var(--error)';
-                mlfl.toast('Failed to save: ' + (result.error || 'Unknown error'), 'error');
-            }
-        })
-        .catch(function(err) {
-            el.style.borderColor = 'var(--error)';
-            mlfl.toast('Error saving: ' + err, 'error');
-        });
-    }
-
     function saveSettings(e) {
         e.preventDefault();
         var form = document.getElementById('resource-form');

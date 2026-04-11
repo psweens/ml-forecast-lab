@@ -409,6 +409,83 @@ select.setting-input, select.form-input { cursor: pointer; }
 .form-input[type="number"] { width: 100%; }
 
 /* ============================================================
+   Settings tab — experiment page
+   ============================================================ */
+.settings-section-heading {
+    color: var(--text-primary); margin: 1.5rem 0 0.75rem; font-size: 1rem;
+    font-weight: 600; border-bottom: 1px solid var(--border); padding-bottom: 0.4rem;
+}
+.settings-section-heading:first-of-type { margin-top: 0.5rem; }
+
+/* Horizon chips */
+.horizon-chips { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.5rem; }
+.horizon-chip {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    background: rgba(0,212,255,0.1); color: var(--accent-secondary);
+    border: 1px solid rgba(0,212,255,0.25); border-radius: 1rem;
+    padding: 0.3rem 0.75rem; font-size: 0.85rem; font-weight: 600;
+}
+.horizon-chip .chip-val { font-weight: 400; color: var(--text-secondary); font-size: 0.8rem; }
+.horizon-chip .chip-remove {
+    cursor: pointer; color: var(--text-secondary); font-size: 1rem;
+    line-height: 1; transition: color 0.2s; margin-left: 0.2rem;
+}
+.horizon-chip .chip-remove:hover { color: var(--error); }
+
+/* Entity search dropdown */
+.entity-search-wrapper { position: relative; }
+.entity-search-results {
+    position: absolute; top: 100%; left: 0; right: 0; z-index: 60;
+    background: var(--bg-secondary); border: 1px solid var(--border);
+    border-radius: 0.4rem; max-height: 200px; overflow-y: auto;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+.entity-option {
+    padding: 0.5rem 0.75rem; cursor: pointer; font-size: 0.85rem;
+    border-bottom: 1px solid var(--border); transition: background 0.15s;
+}
+.entity-option:last-child { border-bottom: none; }
+.entity-option:hover { background: rgba(0,212,255,0.1); }
+.entity-option .entity-id { font-family: 'Fira Code', 'Cascadia Code', monospace; color: var(--accent-secondary); }
+.entity-option .entity-name { color: var(--text-secondary); font-size: 0.8rem; margin-left: 0.5rem; }
+
+/* Covariate list and add form */
+.covariate-list { margin-bottom: 0.75rem; }
+.covariate-row {
+    display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0;
+    border-bottom: 1px solid var(--border); flex-wrap: wrap;
+}
+.covariate-row:last-child { border-bottom: none; }
+.cov-entity {
+    font-family: 'Fira Code', 'Cascadia Code', monospace;
+    color: var(--accent-secondary); font-size: 0.85rem; flex: 1; min-width: 180px;
+}
+.cov-meta { color: var(--text-secondary); font-size: 0.8rem; }
+.cov-remove-btn {
+    background: none; border: none; color: var(--text-secondary);
+    cursor: pointer; font-size: 1.2rem; padding: 0.2rem 0.4rem;
+    line-height: 1; transition: color 0.2s;
+}
+.cov-remove-btn:hover { color: var(--error); }
+.add-cov-form {
+    display: grid; grid-template-columns: 2fr 1fr 1fr 0.8fr auto auto;
+    gap: 0.5rem; align-items: end; margin-top: 0.5rem;
+}
+@media (max-width: 768px) {
+    .add-cov-form { grid-template-columns: 1fr; }
+}
+
+/* Danger button (stop training) */
+.btn-danger {
+    background: var(--error); color: #fff; border: none;
+    padding: 0.5rem 1.5rem; border-radius: 0.5rem; cursor: pointer;
+    font-size: 0.95rem; font-weight: 600; transition: opacity 0.2s;
+    display: inline-flex; align-items: center; gap: 0.5rem;
+}
+.btn-danger:hover { opacity: 0.85; }
+.btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ============================================================
    Logs page
    ============================================================ */
 .log-filter.active { background: var(--accent-secondary); color: var(--bg-primary); }

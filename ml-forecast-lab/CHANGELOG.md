@@ -1,5 +1,60 @@
 # Changelog
 
+## 2.6.0
+
+### Feature: full UI-driven experiment configuration
+
+All experiment settings can now be managed through the web dashboard —
+no more editing `mlfl.yaml` by hand.
+
+**Settings tab** — a new first tab on every experiment page that
+consolidates all per-experiment configuration in one place:
+
+- **Target**: entity ID (read-only), cumulative source, daily reset,
+  max increment
+- **Data**: history days, interval minutes, log transform
+- **Horizons**: editable chip/tag list — add and remove prediction
+  horizons directly in the UI
+- **Forecast**: future periods, per-experiment forecast and retrain
+  intervals (nullable = use global default)
+- **Training**: CV strategy, folds, recency half-life, production
+  metric, neural loss function
+- **Covariates**: full add/remove/edit management with a searchable
+  Home Assistant entity picker (debounced, cached 60 s). Each covariate
+  shows entity, role, aggregation, scale, and binary flag. No YAML
+  editing required.
+- **Stop Training**: a red button (with confirmation) that cancels a
+  running retrain or tuning task. Cancellation takes effect after the
+  current epoch completes for neural models.
+
+**New Experiment creation** — a "+ New Experiment" button on the
+dashboard opens a modal with name, target entity (with HA search),
+cumulative source, and daily reset fields. Creates the experiment in
+YAML and redirects to the new experiment's page. Also shown in the
+empty-state when no experiments exist yet.
+
+**Delete Experiment** — experiments can be removed via the API
+(`POST /api/experiments/{name}/delete`), cleaning up both YAML and
+in-memory state.
+
+**System page simplified** — experiment cards on `/system` are now
+read-only summaries with a "Configure →" link to the experiment's
+Settings tab. Avoids two edit surfaces for the same fields.
+
+### Backend changes
+
+- `config.py`: added `add_experiment_covariate()`,
+  `save_horizons()`, `create_experiment()`, `delete_experiment()`
+- `app.py`: new routes for add-covariate, save-horizons,
+  create/delete experiment, HA entity search (`/api/ha/entities`),
+  stop-training; extended `experiment-settings` to accept
+  `max_increment` (nullable)
+- `main.py`: training tasks tracked in `_running_tasks` dict for
+  cancellation support; stop callback emits `pipeline_end` SSE event
+  so the Training tab transitions cleanly
+- `style.css`: new component styles for horizon chips, entity search
+  dropdown, covariate rows, and danger button
+
 ## 2.5.12
 
 ### Fix: neural model tuning OOM / hangs on RPi5

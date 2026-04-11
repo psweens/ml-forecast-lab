@@ -51,6 +51,8 @@ class MLForecastLabApp:
         # Cached trained models for fast forecast cycles
         # Key: experiment name → dict with model, feature_cols, combined, etc.
         self._cached_models = {}
+        # Track running asyncio tasks for stop-training support
+        self._running_tasks: Dict[str, asyncio.Task] = {}
         # Track config file mtime so we only log on real changes (the timer
         # loop reloads config every 30s; we don't want a log line each time).
         self._last_config_path: Optional[Path] = None
@@ -281,6 +283,7 @@ class MLForecastLabApp:
                         logger.error(f"Benchmark failed: {e}", exc_info=True)
                     finally:
                         self.web_app.state.appstate.end_benchmark(experiment_name)
+                        self._running_tasks.pop(experiment_name, None)
 
             self.web_app.state.appstate.benchmark_callback = _benchmark_trigger
 
@@ -357,6 +360,38 @@ class MLForecastLabApp:
                     )
 
             self.web_app.state.appstate.retrain_callback = _retrain_trigger
+
+            # Register stop-training callback
+            async def _stop_training_trigger(experiment_name: str) -> bool:
+                task = self._running_tasks.get(experiment_name)
+                # Also check pipeline tasks launched from the web UI
+                if not task or task.done():
+                    pt = getattr(self.web_app.state.appstate, '_pipeline_tasks', {})
+                    task = pt.get(experiment_name)
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        pass
+                    self.web_app.state.appstate.end_benchmark(experiment_name)
+                    # Emit pipeline_end event so the Training tab SSE stream closes
+                    try:
+                        from ml_forecast_lab.training_events import TrainingEventBus, TrainingEvent
+                        TrainingEventBus.get_instance().publish(TrainingEvent(
+                            experiment=experiment_name,
+                            event_type="pipeline_end",
+                            data={"status": "cancelled"},
+                        ))
+                    except Exception:
+                        pass
+                    logger.info(f"Cancelled training task for {experiment_name}")
+                    return True
+                return False
+
+            self.web_app.state.appstate.stop_training_callback = _stop_training_trigger
 
             # Run in a background task
             asyncio.create_task(self.server.serve())
@@ -3423,7 +3458,9 @@ class MLForecastLabApp:
                     if (now >= self._next_retrain_per_exp[exp_cfg.name]
                             and not self._update_running):
                         self._next_retrain_per_exp[exp_cfg.name] = now + timedelta(seconds=rt_hrs * 3600)
-                        asyncio.create_task(self._retrain_single(exp_cfg))
+                        _task = asyncio.create_task(self._retrain_single(exp_cfg))
+                        self._running_tasks[exp_cfg.name] = _task
+                        _task.add_done_callback(lambda t, n=exp_cfg.name: self._running_tasks.pop(n, None))
 
                     # Forecast this experiment
                     if (now >= self._next_forecast_per_exp[exp_cfg.name]

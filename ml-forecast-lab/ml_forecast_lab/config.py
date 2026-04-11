@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -558,3 +559,175 @@ def clear_experiment_covariates(
             yaml.dump(data, f, sort_keys=False, default_flow_style=False)
 
     return removed
+
+
+def add_experiment_covariate(
+    config_path: Path | str,
+    experiment_name: str,
+    covariate: Dict[str, Any],
+) -> bool:
+    """
+    Add a covariate to an experiment's config.
+
+    Parameters
+    ----------
+    config_path : Path or str
+        Path to the YAML configuration file.
+    experiment_name : str
+        Experiment name to update.
+    covariate : dict
+        Covariate fields (must include 'entity' at minimum).
+
+    Returns
+    -------
+    bool
+        True if added successfully, False if experiment not found or
+        covariate with that entity already exists.
+
+    Raises
+    ------
+    ValueError
+        If the covariate dict contains invalid fields.
+    """
+    cov_fields = {f.name for f in dataclasses.fields(CovariateCfg)}
+    unknown = set(covariate) - cov_fields
+    if unknown:
+        raise ValueError(f'Unknown covariate fields: {unknown}')
+    if 'entity' not in covariate or not covariate['entity']:
+        raise ValueError('Covariate must include a non-empty "entity" field')
+
+    # Validate by constructing (raises ValueError on bad role/aggregation/etc.)
+    CovariateCfg(**covariate)
+
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    for exp in data.get('experiments', []):
+        if exp.get('name') != experiment_name:
+            continue
+        covs = exp.setdefault('covariates', [])
+        # Reject duplicate entity
+        if any(c.get('entity') == covariate['entity'] for c in covs):
+            return False
+        # Strip None values so YAML stays clean
+        clean = {k: v for k, v in covariate.items() if v is not None}
+        covs.append(clean)
+        with open(config_path, 'w', encoding='utf-8') as f:
+            yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+        return True
+
+    return False
+
+
+def save_horizons(
+    config_path: Path | str,
+    experiment_name: str,
+    horizons: List[int],
+) -> None:
+    """
+    Replace an experiment's horizons_minutes list.
+
+    Parameters
+    ----------
+    config_path : Path or str
+        Path to the YAML configuration file.
+    experiment_name : str
+        Experiment name to update.
+    horizons : list of int
+        New horizons list. Must be non-empty with all positive values.
+
+    Raises
+    ------
+    ValueError
+        If horizons list is empty or contains non-positive values.
+    """
+    if not horizons:
+        raise ValueError('horizons must be a non-empty list')
+    horizons = [int(h) for h in horizons]
+    if not all(h > 0 for h in horizons):
+        raise ValueError('All horizon values must be positive integers')
+
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    for exp in data.get('experiments', []):
+        if exp.get('name') == experiment_name:
+            exp['horizons_minutes'] = sorted(horizons)
+            break
+
+    with open(config_path, 'w', encoding='utf-8') as f:
+        yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+
+
+_EXP_NAME_RE = re.compile(r'^[a-z][a-z0-9_]{0,63}$')
+
+
+def create_experiment(
+    config_path: Path | str,
+    experiment: Dict[str, Any],
+) -> None:
+    """
+    Create a new experiment in the YAML config.
+
+    Only ``name`` and ``target_entity`` are required; all other fields
+    get ``ExperimentCfg`` defaults on the next ``load_config()`` call.
+
+    Parameters
+    ----------
+    config_path : Path or str
+        Path to the YAML configuration file.
+    experiment : dict
+        Experiment fields. Must include 'name' and 'target_entity'.
+
+    Raises
+    ------
+    ValueError
+        If name is invalid, duplicate, or target_entity is missing.
+    """
+    name = experiment.get('name', '')
+    if not _EXP_NAME_RE.match(name):
+        raise ValueError(
+            f'Experiment name must match [a-z][a-z0-9_]{{0,63}}, got {name!r}'
+        )
+    if not experiment.get('target_entity'):
+        raise ValueError('target_entity is required')
+
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    exps = data.setdefault('experiments', [])
+    if any(e.get('name') == name for e in exps):
+        raise ValueError(f'Experiment {name!r} already exists')
+
+    exps.append(experiment)
+
+    with open(config_path, 'w', encoding='utf-8') as f:
+        yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+
+
+def delete_experiment(
+    config_path: Path | str,
+    experiment_name: str,
+) -> bool:
+    """
+    Remove an experiment from the YAML config.
+
+    Returns True if an experiment was removed, False if not found.
+    """
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    exps = data.get('experiments', [])
+    original_len = len(exps)
+    data['experiments'] = [e for e in exps if e.get('name') != experiment_name]
+
+    if len(data['experiments']) < original_len:
+        with open(config_path, 'w', encoding='utf-8') as f:
+            yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+        return True
+
+    return False
