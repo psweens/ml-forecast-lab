@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.7.2
+## 2.7.3
 
 ### Bugfixes
 
@@ -14,6 +14,9 @@
   have insufficient history (e.g. a freshly-created template sensor),
   the pipeline now raises a clear `ValueError` instead of crashing with
   an `IndexError` on an empty index.
+- **Dashboard button colours** — Stop Training is now red (`btn-danger`),
+  Publish/Publishing is now green (`btn-success`) with proper hover and
+  disabled states.
 
 ## 2.7.1
 
