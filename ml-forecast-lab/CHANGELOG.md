@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.8.5
+
+### Bugfix
+
+- **Validate restored benchmark results against current model config** —
+  on startup, persisted benchmark results are now filtered against each
+  experiment's `models_enabled` list. Models that have been disabled since
+  the last run are removed, the best model is recalculated from the
+  remaining valid models, and fully stale results (where no saved models
+  are still enabled) are discarded entirely. Fixes "Publish lightgbm"
+  showing when only LSTM is configured.
+- **Hide stale best model on dashboard during training** — the Best Model
+  row is now hidden while a benchmark is actively running.
+
 ## 2.8.4
 
 ### Bugfix

@@ -265,9 +265,40 @@ class MLForecastLabApp:
             if self.history_db:
                 from ml_forecast_lab.web.app import BenchmarkResult as WebBenchmarkResult
                 saved = self.history_db.load_all_benchmark_results()
+                # Build lookup of current model config per experiment
+                _exp_models = {
+                    c.name: set(c.models_enabled)
+                    for c in self.config.experiments
+                }
                 for exp_name, json_str in saved.items():
                     try:
                         br = WebBenchmarkResult.model_validate_json(json_str)
+                        current_models = _exp_models.get(exp_name, set())
+
+                        # Filter out models that are no longer enabled
+                        valid_models = [
+                            m for m in br.models
+                            if m.name in current_models
+                        ]
+                        if valid_models and len(valid_models) < len(br.models):
+                            br.models = valid_models
+                            # Recalculate best from remaining models
+                            br.best_model_name = min(
+                                valid_models, key=lambda m: m.rank
+                            ).name
+                            logger.info(
+                                f"  Filtered stale models from saved benchmark "
+                                f"for {exp_name} — kept {[m.name for m in valid_models]}"
+                            )
+                        elif not valid_models and br.models:
+                            # None of the saved models are still enabled — discard
+                            logger.info(
+                                f"  Discarding stale benchmark for {exp_name} — "
+                                f"none of the saved models are still enabled"
+                            )
+                            self.history_db.delete_benchmark_result(exp_name)
+                            continue
+
                         self.web_app.state.appstate.benchmark_results[exp_name] = br
                         # Restore best_model / selected_model in status
                         st = self.web_app.state.appstate.experiment_statuses.get(exp_name)
