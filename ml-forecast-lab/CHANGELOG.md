@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.8.2
+
+### Bugfix: scheduled retrains now queue sequentially
+
+- **Production retrains no longer run in parallel** — the v2.8.0 queue
+  only covered web UI "Run Pipeline" clicks. Scheduled retrains in the
+  main loop used `create_task` per experiment, so all experiments due at
+  the same time (especially on startup) would train simultaneously.
+  Now uses an `asyncio.Queue` with a single consumer that drains one
+  experiment at a time, preventing memory exhaustion on RPi.
+
 ## 2.8.1
 
 ### Bugfix

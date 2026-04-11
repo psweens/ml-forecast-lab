@@ -53,6 +53,9 @@ class MLForecastLabApp:
         self._cached_models = {}
         # Track running asyncio tasks for stop-training support
         self._running_tasks: Dict[str, asyncio.Task] = {}
+        # Sequential retrain queue — prevents parallel training
+        self._retrain_queue: asyncio.Queue = asyncio.Queue()
+        self._retrain_consumer_running = False
         # Track config file mtime so we only log on real changes (the timer
         # loop reloads config every 30s; we don't want a log line each time).
         self._last_config_path: Optional[Path] = None
@@ -2040,6 +2043,33 @@ class MLForecastLabApp:
         finally:
             self._update_running = False
 
+    async def _retrain_queue_consumer(self):
+        """Drain the retrain queue one experiment at a time."""
+        if self._retrain_consumer_running:
+            return
+        self._retrain_consumer_running = True
+        try:
+            while not self._retrain_queue.empty():
+                exp_cfg = await self._retrain_queue.get()
+                # Skip if experiment was deleted or already running
+                if exp_cfg.name in self._running_tasks:
+                    self._retrain_queue.task_done()
+                    continue
+                task = asyncio.create_task(self._retrain_single(exp_cfg))
+                self._running_tasks[exp_cfg.name] = task
+                task.add_done_callback(
+                    lambda t, n=exp_cfg.name: self._running_tasks.pop(n, None)
+                )
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.info(f"Retrain for {exp_cfg.name} was cancelled")
+                except Exception:
+                    pass
+                self._retrain_queue.task_done()
+        finally:
+            self._retrain_consumer_running = False
+
     async def _forecast_single(self, exp_cfg):
         """Run forecast for a single experiment (per-experiment timer)."""
         if exp_cfg.mode != "production":
@@ -3575,13 +3605,18 @@ class MLForecastLabApp:
                         self._next_retrain_per_exp[exp_cfg.name] = now
                         self._next_forecast_per_exp[exp_cfg.name] = now + timedelta(seconds=fc_mins * 60)
 
-                    # Retrain this experiment
+                    # Retrain this experiment (queued sequentially)
                     if (now >= self._next_retrain_per_exp[exp_cfg.name]
-                            and not self._update_running):
-                        self._next_retrain_per_exp[exp_cfg.name] = now + timedelta(seconds=rt_hrs * 3600)
-                        _task = asyncio.create_task(self._retrain_single(exp_cfg))
-                        self._running_tasks[exp_cfg.name] = _task
-                        _task.add_done_callback(lambda t, n=exp_cfg.name: self._running_tasks.pop(n, None))
+                            and exp_cfg.name not in self._running_tasks):
+                        # Check not already queued
+                        already_queued = any(
+                            q.name == exp_cfg.name
+                            for q in self._retrain_queue._queue
+                        )
+                        if not already_queued:
+                            self._next_retrain_per_exp[exp_cfg.name] = now + timedelta(seconds=rt_hrs * 3600)
+                            await self._retrain_queue.put(exp_cfg)
+                            asyncio.ensure_future(self._retrain_queue_consumer())
 
                     # Forecast this experiment
                     if (now >= self._next_forecast_per_exp[exp_cfg.name]
