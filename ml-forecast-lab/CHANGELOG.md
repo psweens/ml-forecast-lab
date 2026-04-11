@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.9.2
+
+### Bugfix
+
+- **Prevent OOM crashes during neural model tuning** — multiple layers
+  of defence against the Linux OOM killer during Optuna tuning on
+  constrained hardware (RPi5):
+  - **Batch size halved** during tuning (64 → 32) to reduce peak
+    activation memory per forward pass.
+  - **Epochs/patience reduced** (40/8 → 30/6) to shorten each trial.
+  - **Aggressive PyTorch cleanup** between trials — model parameters are
+    zeroed, gradient buffers cleared, three GC generations collected,
+    and `malloc_trim(0)` called to release freed pages back to the OS.
+  - **Memory pressure monitor** — checks `/proc/meminfo` before each
+    trial. If available RAM drops below 256 MB, tuning aborts gracefully
+    with the best result so far (instead of SIGKILL with no traceback).
+  - **Memory logging** — each trial now logs available system memory so
+    leaks are visible in the addon log.
+
 ## 2.9.1
 
 ### Bugfix

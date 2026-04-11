@@ -2637,25 +2637,51 @@ class MLForecastLabApp:
         # still letting early stopping converge on the winning config.
         # Production retraining (after "Apply") uses the model's own
         # defaults so the final deployed model gets the full epoch budget.
-        TUNING_NEURAL_EPOCHS = 40
-        TUNING_NEURAL_PATIENCE = 8
+        TUNING_NEURAL_EPOCHS = 30
+        TUNING_NEURAL_PATIENCE = 6
+        TUNING_NEURAL_BATCH_SIZE = 32  # Halved from default 64 to reduce peak memory
 
         def _apply_tuning_overrides(m):
-            """Cap neural training budget during tuning only."""
+            """Cap neural training budget and shrink batch size during tuning."""
             try:
                 if getattr(m, 'is_neural', False):
                     m.set_params(
                         epochs=TUNING_NEURAL_EPOCHS,
                         patience=TUNING_NEURAL_PATIENCE,
+                        batch_size=TUNING_NEURAL_BATCH_SIZE,
                     )
             except Exception:
                 pass  # Backends without epochs/patience params just skip
             return m
 
+        # Memory monitoring — abort tuning before OOM SIGKILL
+        def _get_rss_mb():
+            """Return current process RSS in MB (Linux/macOS)."""
+            try:
+                import resource
+                # ru_maxrss is in KB on Linux, bytes on macOS
+                import platform
+                rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                return rss / 1024 if platform.system() == 'Linux' else rss / (1024 * 1024)
+            except Exception:
+                return 0
+
+        def _get_available_mb():
+            """Return available system memory in MB."""
+            try:
+                with open('/proc/meminfo', 'r') as f:
+                    for line in f:
+                        if line.startswith('MemAvailable:'):
+                            return int(line.split()[1]) / 1024  # KB → MB
+            except Exception:
+                pass
+            return float('inf')  # Can't read → don't gate on it
+
         logger.info(
             f"  Tuning budget: {n_trials} trials × 1 CV fold × "
             f"max {TUNING_NEURAL_EPOCHS} epochs (neural) / early-stopping (trees)"
         )
+        logger.info(f"  System memory: {_get_available_mb():.0f} MB available")
 
         # --- Composite objective baseline ---
         # Run one CV evaluation with the model's DEFAULT parameters first.
@@ -2691,8 +2717,25 @@ class MLForecastLabApp:
             baseline_mae = baseline_rmse = baseline_mase = None
         finally:
             import gc as _gc
+            # Aggressively free the baseline model's PyTorch memory
+            if baseline_model is not None:
+                try:
+                    net = getattr(baseline_model, '_net', None) or getattr(baseline_model, 'model', None)
+                    if net is not None:
+                        for p in net.parameters():
+                            p.data = p.data.new_empty(0)
+                            if p.grad is not None:
+                                p.grad = None
+                except Exception:
+                    pass
             del baseline_model
-            _gc.collect()
+            _gc.collect(0); _gc.collect(1); _gc.collect(2)
+            try:
+                import ctypes
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
+            logger.info(f"  Memory after baseline: {_get_available_mb():.0f} MB free")
 
         # Mutable anchors so the first valid trial can become the baseline if
         # the explicit baseline trial above failed.
@@ -2712,9 +2755,24 @@ class MLForecastLabApp:
                 mase / anchor["mase"],
             ]))
 
+        # Memory threshold: abort tuning if available RAM drops below this.
+        # Leaves headroom for the OS, HA core, and other addon processes.
+        MEM_FLOOR_MB = 256
+
         def objective(trial):
             import gc as _gc
             t_start = _time.time()
+
+            # --- Memory pressure check BEFORE starting a new trial ---
+            avail = _get_available_mb()
+            if avail < MEM_FLOOR_MB:
+                logger.warning(
+                    f"  Trial {trial.number}: only {avail:.0f} MB free "
+                    f"(floor={MEM_FLOOR_MB} MB) — aborting tuning early"
+                )
+                trial.study.stop()
+                return float("inf")
+
             params = {}
             for pname, spec in param_schema.items():
                 ptype = spec.get("type", "float")
@@ -2731,6 +2789,7 @@ class MLForecastLabApp:
                     params[pname] = trial.suggest_categorical(pname, [True, False])
 
             model = None
+            result = None
             try:
                 model = self.model_registry.create(model_name, **params)
                 _apply_tuning_overrides(model)
@@ -2749,21 +2808,48 @@ class MLForecastLabApp:
                 mase = float("inf")
                 status = "failed"
             finally:
-                # Explicit cleanup to prevent OOM across trials.
+                # Aggressive cleanup to prevent OOM across trials.
                 # PyTorch models hold tensors, optimizer state, and gradient
-                # buffers that Python's GC may not free promptly. On an
-                # RPi5 (4–8 GB RAM), 30 trials without cleanup accumulates
-                # enough residual memory to trigger the Linux OOM killer,
-                # which sends SIGKILL — no error, no traceback, the
-                # container just restarts silently.
+                # buffers that accumulate across trials. On RPi5 (4–8 GB),
+                # the Linux OOM killer sends SIGKILL with no warning.
+
+                # 1. Delete model internals before the model object itself
+                if model is not None:
+                    try:
+                        # Clear PyTorch module parameters and buffers
+                        net = getattr(model, '_net', None) or getattr(model, 'model', None)
+                        if net is not None:
+                            net.cpu()
+                            for p in net.parameters():
+                                p.data = p.data.new_empty(0)
+                                if p.grad is not None:
+                                    p.grad = None
+                    except Exception:
+                        pass
                 del model
+                del result
+
+                # 2. Force PyTorch to release its internal caching allocator
                 try:
                     import torch as _torch
-                    # Clear any stale autograd graphs and cached allocations
                     _torch.cuda.empty_cache() if _torch.cuda.is_available() else None
+                    # On CPU: clear autograd saved tensors
+                    _torch.clear_autocast_cache() if hasattr(_torch, 'clear_autocast_cache') else None
                 except Exception:
                     pass
-                _gc.collect()
+
+                # 3. Full GC sweep (multiple generations)
+                _gc.collect(0)
+                _gc.collect(1)
+                _gc.collect(2)
+
+                # 4. Hint to the C allocator to release free pages back to OS
+                try:
+                    import ctypes
+                    libc = ctypes.CDLL("libc.so.6")
+                    libc.malloc_trim(0)
+                except Exception:
+                    pass
 
             # Lazily seed the anchor if the explicit baseline run failed
             if anchor["mae"] is None and status == "completed":
@@ -2793,12 +2879,13 @@ class MLForecastLabApp:
                 tuning_state.best_params = params
                 tuning_state.best_trial_id = trial.number
 
+            _avail_after = _get_available_mb()
             logger.info(
                 f"  [{tuning_state.completed_trials}/{n_trials}] "
                 f"Trial {trial.number}: composite={composite:.4f} "
                 f"(MAE={mae:.4f}, RMSE={rmse:.4f}, MASE={mase:.3f}) "
-                f"({'best ' if trial.number == tuning_state.best_trial_id else ''}"
-                f"{duration:.1f}s)"
+                f"{'best ' if trial.number == tuning_state.best_trial_id else ''}"
+                f"{duration:.1f}s | {_avail_after:.0f} MB free"
             )
 
             return composite
@@ -2825,14 +2912,16 @@ class MLForecastLabApp:
             ),
         )
 
-        # Update completed count in case the timeout stopped early
+        # Update completed count in case the timeout or memory pressure stopped early
         actual_trials = len(tuning_state.trials)
         if actual_trials < n_trials:
+            reason = "memory pressure" if _get_available_mb() < MEM_FLOOR_MB * 2 else f"timeout={study_timeout}s"
             logger.info(
                 f"  Tuning stopped after {actual_trials}/{n_trials} trials "
-                f"(timeout={study_timeout}s)"
+                f"({reason})"
             )
             tuning_state.completed_trials = actual_trials
+            tuning_state.n_trials = actual_trials  # Update so UI shows correct count
 
         # Finalise: select best trial by composite ranking across MAE, RMSE, MASE
         # (Optuna minimised MAE to guide the search, but the winner is picked
