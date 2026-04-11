@@ -142,12 +142,12 @@
                     Stop Training
                 </button>
                 {% elif exp.mode == 'production' %}
-                <button class="btn flex-center nowrap" style="background:var(--success);color:var(--bg-primary);font-size:0.85rem;"
+                <button class="btn btn-success flex-center nowrap" style="font-size:0.85rem;"
                         onclick="toggleMode('{{ exp.name }}', this)">
                     Publishing
                 </button>
                 {% else %}
-                <button class="btn flex-center nowrap" style="font-size:0.85rem;"
+                <button class="btn btn-success flex-center nowrap" style="font-size:0.85rem;"
                         onclick="{% if exp.best_model %}toggleMode('{{ exp.name }}', this){% else %}mlfl.toast('Run a benchmark first', 'warning'){% endif %}"
                         {% if not exp.best_model %}disabled{% endif %}>
                     Publish
