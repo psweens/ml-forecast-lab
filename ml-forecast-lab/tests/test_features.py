@@ -6,7 +6,6 @@ import pytest
 
 from ml_forecast_lab.features import (
     build_features,
-    create_forecast_features,
     create_sliding_windows,
     is_holiday,
 )
@@ -34,38 +33,6 @@ class TestBuildFeatures:
         result = build_features(synthetic_df, target_col="y", interval_minutes=30)
         rolling_cols = [c for c in result.columns if c.startswith('y_rolling_')]
         assert len(rolling_cols) >= 3
-
-
-class TestCreateForecastFeatures:
-    def test_output_shape(self):
-        last_ts = pd.Timestamp("2024-01-15 12:00:00")
-        lag_values = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        result = create_forecast_features(
-            last_ts, interval_minutes=30,
-            horizons_minutes=[30, 60, 120],
-            n_lags=5, lag_values=lag_values,
-        )
-        assert len(result) == 3  # One row per horizon
-        assert 'y_lag_1' in result.columns
-
-    def test_rolling_stats_not_nan(self):
-        """Rolling stats should be computed from lag_values, not NaN."""
-        last_ts = pd.Timestamp("2024-01-15 12:00:00")
-        lag_values = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0])
-        result = create_forecast_features(
-            last_ts, interval_minutes=30,
-            horizons_minutes=[30], n_lags=12, lag_values=lag_values,
-        )
-        rolling_cols = [c for c in result.columns if 'rolling' in c]
-        for col in rolling_cols:
-            assert not np.isnan(result[col].iloc[0]), f"{col} should not be NaN"
-
-    def test_lag_values_length_mismatch(self):
-        with pytest.raises(ValueError, match="lag_values length"):
-            create_forecast_features(
-                pd.Timestamp("2024-01-15"), interval_minutes=30,
-                horizons_minutes=[30], n_lags=5, lag_values=np.array([1.0, 2.0]),
-            )
 
 
 class TestCreateSlidingWindows:

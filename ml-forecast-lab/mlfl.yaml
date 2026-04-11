@@ -42,12 +42,7 @@ experiments:
     days_history: 60               # use last 60 days for training
     max_age: 365                   # keep up to 1 year in the SQLite cache
 
-    # -- Forecast horizon -----------------------------------------------------
-    horizons_minutes:
-      - 120                        # +2 h
-      - 480                        # +8 h
-      - 720                        # +12 h
-      - 1440                       # +24 h
+    # -- Forecast window ------------------------------------------------------
     future_periods: 96             # 48 h at 30-min cadence
 
     # -- Covariates -----------------------------------------------------------
@@ -137,7 +132,6 @@ experiments:
   #   days_history: 60
   #   max_age: 365
   #
-  #   horizons_minutes: [120, 480, 720, 1440]
   #   future_periods: 96
   #
   #   covariates:

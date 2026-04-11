@@ -142,7 +142,6 @@ class MLForecastLabApp:
                     target_entity="sensor.test_value",
                     days_history=7,
                     interval_minutes=30,
-                    horizons_minutes=[120, 480],
                     models_enabled=["lightgbm"],
                     cv_folds=3,
                 )
@@ -1595,7 +1594,7 @@ class MLForecastLabApp:
         Run production mode: train best model on full data, generate a full
         forecast curve, and publish results as HA sensor entities.
         """
-        from ml_forecast_lab.features import build_features, create_forecast_features
+        from ml_forecast_lab.features import build_features
 
         logger.info(f"")
         logger.info(f"{'=' * 60}")
@@ -2376,7 +2375,7 @@ class MLForecastLabApp:
         timestamps are current, even though the model itself is cached
         from the last retrain cycle.
         """
-        from ml_forecast_lab.features import build_features, create_forecast_features
+        from ml_forecast_lab.features import build_features
 
         cache = self._cached_models.get(experiment_name)
         if not cache:

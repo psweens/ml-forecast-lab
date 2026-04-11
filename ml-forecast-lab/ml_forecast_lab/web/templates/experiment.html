@@ -144,16 +144,6 @@
         </div>
     </div>
 
-    <!-- Horizons -->
-    <h3 class="settings-section-heading">Prediction Horizons</h3>
-    <div id="horizons-container">
-        <div class="horizon-chips" id="horizon-chips"></div>
-        <div style="display:flex;gap:0.5rem;align-items:center;margin-top:0.5rem;">
-            <input type="number" class="setting-input" id="horizon-new-input" min="1" placeholder="Minutes" style="width:120px;">
-            <button class="btn btn-secondary" onclick="addHorizon()" style="padding:0.4rem 0.75rem;font-size:0.85rem;">Add</button>
-        </div>
-    </div>
-
     <!-- Forecast -->
     <h3 class="settings-section-heading">Forecast</h3>
     <div class="exp-field-grid">
@@ -1256,60 +1246,6 @@ window.showTab = function(el) {
             mlfl.toast('Error: ' + err, 'error');
         });
     };
-
-    // --- Horizons chip list ---
-    var _horizons = {{ (exp_config.horizons_minutes if exp_config else [120, 480, 720]) | tojson }};
-
-    function renderHorizons() {
-        var container = document.getElementById('horizon-chips');
-        if (!container) return;
-        container.innerHTML = '';
-        _horizons.sort(function(a, b) { return a - b; });
-        _horizons.forEach(function(h) {
-            var chip = document.createElement('span');
-            chip.className = 'horizon-chip';
-            var label = h >= 60 ? (h / 60) + 'h' : h + 'm';
-            chip.innerHTML = label + ' <span class="chip-val">(' + h + ' min)</span> <span class="chip-remove" onclick="removeHorizon(' + h + ')">&times;</span>';
-            container.appendChild(chip);
-        });
-    }
-
-    function saveHorizons() {
-        fetch(BASE + '/experiment/' + EXP_NAME + '/save-horizons', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ horizons: _horizons })
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(result) {
-            if (result.success) {
-                _horizons = result.horizons;
-                renderHorizons();
-                mlfl.toast('Horizons updated', 'success');
-            } else {
-                mlfl.toast('Failed: ' + result.error, 'error');
-            }
-        })
-        .catch(function(err) { mlfl.toast('Error: ' + err, 'error'); });
-    }
-
-    window.addHorizon = function() {
-        var input = document.getElementById('horizon-new-input');
-        var val = parseInt(input.value);
-        if (isNaN(val) || val <= 0) { mlfl.toast('Enter a positive number', 'error'); return; }
-        if (_horizons.indexOf(val) >= 0) { mlfl.toast('Horizon already exists', 'warning'); return; }
-        _horizons.push(val);
-        input.value = '';
-        saveHorizons();
-    };
-
-    window.removeHorizon = function(val) {
-        _horizons = _horizons.filter(function(h) { return h !== val; });
-        if (_horizons.length === 0) { mlfl.toast('Must have at least one horizon', 'error'); _horizons.push(val); return; }
-        saveHorizons();
-    };
-
-    renderHorizons();
 
     // --- Covariate management ---
     var _entitySearchTimer = null;

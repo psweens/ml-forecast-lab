@@ -405,11 +405,7 @@ class BenchmarkRunner:
                         # Use DENSE horizons matching the production training and
                         # holdout-chart paths so the leaderboard, holdout chart,
                         # and live forecasts all evaluate the SAME model
-                        # architecture. Without this, neural models in CV are
-                        # trained as 4-output multi-head with horizon_steps from
-                        # the legacy `horizons_minutes` config (e.g. h=4,16,24,48)
-                        # while the holdout chart trains them as 96-output dense
-                        # — completely different models.
+                        # architecture.
                         future_periods = int(self.experiment_cfg.get('future_periods', 48))
                         horizon_steps = list(range(1, future_periods + 1))
 

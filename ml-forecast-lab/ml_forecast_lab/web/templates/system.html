@@ -154,10 +154,6 @@
                     <span class="field-value" style="padding:0.4rem 0;">{{ exp.cv_strategy | replace('_', '-') }} &times; {{ exp.cv_folds }}</span>
                 </div>
                 <div class="exp-field">
-                    <label>Horizons</label>
-                    <span class="field-value" style="padding:0.4rem 0;">{{ exp.horizons_minutes | join(', ') }} min</span>
-                </div>
-                <div class="exp-field">
                     <label>Models</label>
                     <span class="field-value" style="padding:0.4rem 0;">{{ exp.models_enabled | join(', ') or '—' }}</span>
                 </div>
@@ -185,30 +181,6 @@
     </details>
     {% endfor %}
 
-    <style>
-        .exp-field-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 0.75rem 1rem;
-        }
-        .exp-field {
-            display: flex;
-            flex-direction: column;
-            gap: 0.3rem;
-        }
-        .exp-field label {
-            color: var(--text-secondary);
-            font-size: 0.8rem;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.02em;
-        }
-        .exp-field .setting-input {
-            width: 100%;
-            padding: 0.4rem 0.6rem;
-            font-size: 0.9rem;
-        }
-    </style>
 </section>
 
 {% endblock %}

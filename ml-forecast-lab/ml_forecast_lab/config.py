@@ -82,9 +82,6 @@ class ExperimentCfg:
     interval_minutes: int = 30
     """Sampling interval in minutes."""
 
-    horizons_minutes: List[int] = field(default_factory=lambda: [120, 480, 720])
-    """Prediction horizons in minutes: [2h, 8h, 12h] by default."""
-
     source_is_cumulative: bool = False
     """Whether target sensor reports cumulative values requiring conversion to intervals."""
 
@@ -200,10 +197,6 @@ class ExperimentCfg:
             raise ValueError(
                 f'cv_embargo_periods must be >= 0, got {self.cv_embargo_periods}'
             )
-        if not self.horizons_minutes or not all(h > 0 for h in self.horizons_minutes):
-            raise ValueError(
-                f'horizons_minutes must be non-empty list of positive integers'
-            )
         if self.days_history < 1:
             raise ValueError(f'days_history must be >= 1, got {self.days_history}')
         if self.interval_minutes < 1:
@@ -297,7 +290,6 @@ def load_config(config_path: Path | str) -> AppConfig:
             reset_daily: true
             days_history: 30
             interval_minutes: 30
-            horizons_minutes: [120, 480, 1440]
             units: W
             log_transform: false
             country: GB
@@ -618,47 +610,6 @@ def add_experiment_covariate(
         return True
 
     return False
-
-
-def save_horizons(
-    config_path: Path | str,
-    experiment_name: str,
-    horizons: List[int],
-) -> None:
-    """
-    Replace an experiment's horizons_minutes list.
-
-    Parameters
-    ----------
-    config_path : Path or str
-        Path to the YAML configuration file.
-    experiment_name : str
-        Experiment name to update.
-    horizons : list of int
-        New horizons list. Must be non-empty with all positive values.
-
-    Raises
-    ------
-    ValueError
-        If horizons list is empty or contains non-positive values.
-    """
-    if not horizons:
-        raise ValueError('horizons must be a non-empty list')
-    horizons = [int(h) for h in horizons]
-    if not all(h > 0 for h in horizons):
-        raise ValueError('All horizon values must be positive integers')
-
-    config_path = Path(config_path)
-    with open(config_path, 'r', encoding='utf-8') as f:
-        data = yaml.safe_load(f) or {}
-
-    for exp in data.get('experiments', []):
-        if exp.get('name') == experiment_name:
-            exp['horizons_minutes'] = sorted(horizons)
-            break
-
-    with open(config_path, 'w', encoding='utf-8') as f:
-        yaml.dump(data, f, sort_keys=False, default_flow_style=False)
 
 
 _EXP_NAME_RE = re.compile(r'^[a-z][a-z0-9_]{0,63}$')

@@ -1188,36 +1188,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             logger.error(f"Failed to add covariate: {e}")
             return JSONResponse(content={"success": False, "error": str(e)})
 
-    @app.post("/experiment/{name}/save-horizons")
-    async def save_horizons_route(name: str, request: Request):
-        """Replace an experiment's prediction horizons."""
-        if name not in app.state.appstate.experiment_statuses:
-            raise HTTPException(status_code=404, detail="Experiment not found")
-
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
-
-        horizons = body.get("horizons")
-        if not isinstance(horizons, list) or not horizons:
-            return JSONResponse(content={"success": False, "error": "horizons must be a non-empty list"})
-
-        from ml_forecast_lab.config import save_horizons
-        config_path = _find_config_path()
-        if not config_path:
-            return JSONResponse(content={"success": False, "error": "Config file not found"})
-
-        try:
-            save_horizons(config_path, name, horizons)
-            logger.info(f"Updated horizons for {name}: {horizons}")
-            return JSONResponse(content={"success": True, "horizons": sorted([int(h) for h in horizons])})
-        except ValueError as e:
-            return JSONResponse(content={"success": False, "error": str(e)})
-        except Exception as e:
-            logger.error(f"Failed to save horizons: {e}")
-            return JSONResponse(content={"success": False, "error": str(e)})
-
     @app.post("/experiment/{name}/stop-training")
     async def stop_training(name: str):
         """Stop a running training/tuning task for an experiment."""

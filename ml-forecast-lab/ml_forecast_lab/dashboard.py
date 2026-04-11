@@ -14,7 +14,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
-def _forecast_chart(exp_name: str, prefix: str, horizons: List[int], units: str) -> dict:
+def _forecast_chart(exp_name: str, prefix: str, units: str) -> dict:
     """
     ApexCharts card: forecast curve with prediction intervals.
 
@@ -106,31 +106,6 @@ def _cumulative_chart(exp_name: str, prefix: str, units: str) -> dict:
                 ),
             },
         ],
-    }
-
-
-def _horizon_gauges(exp_name: str, prefix: str, horizons: List[int], units: str) -> dict:
-    """
-    Horizontal stack of entity cards showing scalar forecast at each horizon.
-    """
-    base = f"sensor.{prefix}{exp_name}"
-    cards = []
-    for h in horizons:
-        if h < 60:
-            label = f"+{h}m"
-        else:
-            label = f"+{h // 60}h"
-
-        cards.append({
-            "type": "entity",
-            "entity": f"{base}_horizon_{h}m" if h < 60 else f"{base}_horizon_{h // 60}h",
-            "name": label,
-            "unit": units,
-        })
-
-    return {
-        "type": "horizontal-stack",
-        "cards": cards,
     }
 
 
@@ -228,8 +203,7 @@ def generate_dashboard(experiments: list, output_path: Path) -> None:
             "content": (
                 f"### {exp.name}\n"
                 f"**Target:** `{exp.target_entity}`\n"
-                f"**Mode:** {exp.mode} | **Models:** {', '.join(exp.models_enabled)}\n"
-                f"**Horizons:** {', '.join(str(h) + 'm' for h in exp.horizons_minutes)}"
+                f"**Mode:** {exp.mode} | **Models:** {', '.join(exp.models_enabled)}"
             ),
         })
 
@@ -244,17 +218,15 @@ def generate_dashboard(experiments: list, output_path: Path) -> None:
     for exp in experiments:
         prefix = exp.publish_prefix if hasattr(exp, "publish_prefix") else "mlfl_"
         units = exp.units if hasattr(exp, "units") else ""
-        horizons = exp.horizons_minutes if hasattr(exp, "horizons_minutes") else [120, 480]
 
         cards = [
-            _forecast_chart(exp.name, prefix, horizons, units),
+            _forecast_chart(exp.name, prefix, units),
             _prediction_curve_chart(exp.name, prefix, units),
         ]
 
         if hasattr(exp, "publish_daily_cumulative") and exp.publish_daily_cumulative:
             cards.append(_cumulative_chart(exp.name, prefix, units))
 
-        cards.append(_horizon_gauges(exp.name, prefix, horizons, units))
         cards.append(_benchmark_table(exp.name))
 
         views.append({

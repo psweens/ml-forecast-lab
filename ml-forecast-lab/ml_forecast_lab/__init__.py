@@ -22,7 +22,6 @@ from .publishing import (
 from .config import AppConfig, CovariateCfg, ExperimentCfg, load_config
 from .features import (
     build_features,
-    create_forecast_features,
     prepare_train_test,
     reshape_for_sequence,
 )
@@ -39,7 +38,7 @@ from .preprocessing import (
     subtract_series,
 )
 
-__version__ = "2.6.0"
+__version__ = "2.6.1"
 
 __all__ = [
     # Legacy
@@ -75,5 +74,4 @@ __all__ = [
     "build_features",
     "prepare_train_test",
     "reshape_for_sequence",
-    "create_forecast_features",
 ]

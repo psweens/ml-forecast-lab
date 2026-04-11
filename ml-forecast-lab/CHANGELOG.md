@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.6.1
+
+### Cleanup: remove dead `horizons_minutes` config & improve Settings layout
+
+- **Removed `horizons_minutes`** — benchmarking evaluates the full forecast
+  window (`future_periods`), not specific horizon checkpoints. The field,
+  `create_forecast_features()` function, save-horizons API route, horizon
+  chip UI, dashboard horizon gauges, and all related tests have been deleted.
+- **Settings tab layout** — moved field grid styles from inline `<style>` to
+  `style.css`, removed all-caps labels, increased spacing between sections
+  and fields for better readability.
+
 ## 2.6.0
 
 ### Feature: full UI-driven experiment configuration
@@ -13,8 +25,6 @@ consolidates all per-experiment configuration in one place:
 - **Target**: entity ID (read-only), cumulative source, daily reset,
   max increment
 - **Data**: history days, interval minutes, log transform
-- **Horizons**: editable chip/tag list — add and remove prediction
-  horizons directly in the UI
 - **Forecast**: future periods, per-experiment forecast and retrain
   intervals (nullable = use global default)
 - **Training**: CV strategy, folds, recency half-life, production
