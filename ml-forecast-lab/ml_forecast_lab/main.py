@@ -621,6 +621,14 @@ class MLForecastLabApp:
 
         result = result.dropna()
 
+        if len(result) == 0:
+            raise ValueError(
+                f"No samples remaining after preprocessing. One or more "
+                f"covariates may have insufficient history — check that all "
+                f"covariate sensors have been recording for at least "
+                f"{exp_cfg.days_history} day(s)."
+            )
+
         # Rich data summary
         y = result["y"]
         logger.info(

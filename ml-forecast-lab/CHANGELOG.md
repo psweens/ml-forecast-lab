@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.7.2
+
+### Bugfixes
+
+- **Fix covariate removal from Settings tab** — two conflicting
+  `removeCovariate` JS function definitions caused the Covariate Analysis
+  tab version (3 args) to overwrite the Settings tab version (1 arg).
+  Clicking "×" on a covariate in Settings silently failed because the
+  entity ID was misrouted as the experiment name. Renamed the Covariate
+  Analysis version to `removeCovFromAnalysis` to eliminate the collision.
+- **Guard against empty DataFrame after preprocessing** — if covariates
+  have insufficient history (e.g. a freshly-created template sensor),
+  the pipeline now raises a clear `ValueError` instead of crashing with
+  an `IndexError` on an empty index.
+
 ## 2.7.1
 
 ### Feature: publish forecast accuracy as HA sensor

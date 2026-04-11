@@ -1043,7 +1043,7 @@
                         {{ label }}
                         {% if is_drop and avg_change < -1 %}
                         <button class="btn" style="padding:0.1rem 0.4rem;font-size:0.7rem;margin-left:0.5rem;background:rgba(231,76,60,0.15);color:#e74c3c;border:1px solid rgba(231,76,60,0.3);"
-                                onclick="removeCovariate('{{ experiment.name }}', '{{ label.replace('Without ', '') }}', this)">
+                                onclick="removeCovFromAnalysis('{{ experiment.name }}', '{{ label.replace('Without ', '') }}', this)">
                             Remove
                         </button>
                         {% endif %}
@@ -1774,7 +1774,7 @@ window.showTab = function(el) {
         .catch(function(err) { console.error('selectModel failed:', err); });
     };
 
-    window.removeCovariate = function(expName, entityId, btn) {
+    window.removeCovFromAnalysis = function(expName, entityId, btn) {
         mlfl.confirm('Remove covariate "' + entityId + '" from this experiment?', function() {
             btn.disabled = true; btn.textContent = '...';
             fetch(BASE + '/experiment/' + expName + '/remove-covariate', {
