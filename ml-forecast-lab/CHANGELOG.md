@@ -13,6 +13,14 @@
   page and experiment detail page. This simplifies the architecture and
   removes code that was already disabled since v2.5.0.
 
+### Bugfix
+
+- **Trigger immediate retrain on production toggle** — when an experiment
+  is switched to production mode, an immediate retrain is now triggered
+  so the production model gets cached and sensors start publishing right
+  away. Previously, sensors wouldn't appear until the next scheduled
+  retrain cycle (potentially hours after toggling).
+
 ## 2.8.5
 
 ### Bugfix

@@ -1389,6 +1389,14 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             except Exception as e:
                 logger.warning(f"Failed to persist mode toggle: {e}")
 
+        # When switching to production, trigger an immediate retrain so the
+        # model gets cached and forecasts/sensors start publishing without
+        # waiting for the next scheduled retrain cycle.
+        if new_mode == "production" and app.state.appstate.retrain_callback:
+            import asyncio as _aio
+            _aio.create_task(app.state.appstate.retrain_callback(name))
+            logger.info(f"Triggered immediate retrain for {name} after production toggle")
+
         return JSONResponse(
             content={
                 "message": f"Switched {name} to {new_mode} mode",
