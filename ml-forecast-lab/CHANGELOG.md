@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.5.12
+
+### Fix: neural model tuning OOM / hangs on RPi5
+
+Optuna-based hyperparameter tuning for neural models (LSTM, CNN, etc.)
+would frequently run out of memory or hang indefinitely on
+memory-constrained devices like the Raspberry Pi 5 (8 GB). Three
+compounding issues were identified and fixed:
+
+**1. Memory accumulation across Optuna trials.**
+Each trial instantiated a PyTorch model but never explicitly freed it.
+Over 20+ trials the heap grew until the OOM killer sent SIGKILL,
+crashing the container with no error in the logs. Every trial's
+`objective()` now wraps execution in a `try/finally` that runs
+`del model`, `torch.cuda.empty_cache()`, and `gc.collect()` — the same
+pattern is applied to the baseline trial.
+
+**2. Redundant sliding-window computation.**
+`create_sliding_windows()` was called fresh on every trial for every
+fold, rebuilding identical NumPy arrays each time. For a 90-day history
+with `seq_len=168` this was ~3 seconds per trial × 30 trials = 90 s of
+pure waste. Sliding windows are now pre-computed once before the study
+begins and passed to `run_single_model()` via a new
+`precomputed_sequences` parameter. The pre-computed arrays are freed in
+a `finally` block after the study completes.
+
+**3. No timeout for slow trials.**
+A single bad hyperparameter combination (e.g. very large hidden size
+with many layers) could train for hours without interruption. Neural
+model studies now pass `timeout=1800` (30 minutes) to
+`study.optimize()`, which gracefully stops the study and uses the best
+result found so far. A log message is emitted when the timeout fires.
+
 ## 2.5.11
 
 ### Fix: production retrain failures are now surfaced in the UI

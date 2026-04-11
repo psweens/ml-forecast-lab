@@ -284,6 +284,7 @@ class BenchmarkRunner:
         model: ForecastModel,
         fold_indices: List[Tuple[np.ndarray, np.ndarray]],
         epoch_callback: Any = None,
+        precomputed_sequences: dict = None,
     ) -> ModelResult:
         """
         Run a single model across all CV folds.
@@ -363,60 +364,82 @@ class BenchmarkRunner:
             else:
                 sample_weights = None  # Equal weighting when disabled
 
-            # Generate sliding window sequence data for neural models
+            # Generate sliding window sequence data for neural models.
+            # When `precomputed_sequences` is provided (e.g. from tuning,
+            # where the fold split is identical across all trials), skip
+            # the expensive create_sliding_windows call and reuse the
+            # pre-built arrays directly.
             sequence_kwargs = {}
             horizon_steps = None
             window_size = None
             neural_cov_cols = None
             if model.is_neural:
-                try:
-                    from ml_forecast_lab.features import create_sliding_windows
-                    target_col = 'target'
-                    engineered = {
-                        'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
-                        'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
-                    }
-                    engineered.update(c for c in df_train.columns if c.startswith('y_lag_'))
-                    neural_cov_cols = [c for c in df_train.columns if c not in engineered and c != target_col]
+                pc = precomputed_sequences or {}
+                pc_fold = pc.get(fold_idx)
+                if pc_fold:
+                    # Reuse pre-computed sliding windows
+                    sequence_kwargs['sequence_data'] = pc_fold['seq_X']
+                    sequence_kwargs['channel_names'] = pc_fold.get('channel_names', [])
+                    y_train = pc_fold['seq_y']
+                    X_train = X_train[-len(y_train):]
+                    if sample_weights is not None:
+                        sample_weights = sample_weights[-len(y_train):]
+                    window_size = pc_fold.get('window_size')
+                    neural_cov_cols = pc_fold.get('neural_cov_cols', [])
+                    horizon_steps = pc_fold.get('horizon_steps')
+                    logger.debug(
+                        f'Using precomputed sliding windows for {model.name}: '
+                        f'{pc_fold["seq_X"].shape}'
+                    )
+                else:
+                    try:
+                        from ml_forecast_lab.features import create_sliding_windows
+                        target_col = 'target'
+                        engineered = {
+                            'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
+                            'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
+                        }
+                        engineered.update(c for c in df_train.columns if c.startswith('y_lag_'))
+                        neural_cov_cols = [c for c in df_train.columns if c not in engineered and c != target_col]
 
-                    # Use DENSE horizons matching the production training and
-                    # holdout-chart paths so the leaderboard, holdout chart,
-                    # and live forecasts all evaluate the SAME model
-                    # architecture. Without this, neural models in CV are
-                    # trained as 4-output multi-head with horizon_steps from
-                    # the legacy `horizons_minutes` config (e.g. h=4,16,24,48)
-                    # while the holdout chart trains them as 96-output dense
-                    # — completely different models.
-                    future_periods = int(self.experiment_cfg.get('future_periods', 48))
-                    horizon_steps = list(range(1, future_periods + 1))
+                        # Use DENSE horizons matching the production training and
+                        # holdout-chart paths so the leaderboard, holdout chart,
+                        # and live forecasts all evaluate the SAME model
+                        # architecture. Without this, neural models in CV are
+                        # trained as 4-output multi-head with horizon_steps from
+                        # the legacy `horizons_minutes` config (e.g. h=4,16,24,48)
+                        # while the holdout chart trains them as 96-output dense
+                        # — completely different models.
+                        future_periods = int(self.experiment_cfg.get('future_periods', 48))
+                        horizon_steps = list(range(1, future_periods + 1))
 
-                    if target_col in df_train.columns:
-                        # Use original df slice (with DatetimeIndex) for temporal features
-                        df_train_raw = df.iloc[train_idx]
-                        # Match holdout/production path: cap window at 48
-                        # (24h at 30-min). Larger windows hurt small-fold CV
-                        # by reducing effective sample size.
-                        window_size = min(48, len(df_train_raw) // 3)
-                        if window_size >= 12:
-                            seq_X, seq_y, channel_names = create_sliding_windows(
-                                df_train_raw, target_col, window_size=window_size,
-                                covariate_cols=neural_cov_cols if neural_cov_cols else None,
-                                add_temporal=True,
-                                horizon_steps=horizon_steps,
-                            )
-                            sequence_kwargs['sequence_data'] = seq_X
-                            sequence_kwargs['channel_names'] = channel_names
-                            y_train = seq_y
-                            X_train = X_train[-len(seq_y):]
-                            if sample_weights is not None:
-                                sample_weights = sample_weights[-len(seq_y):]
-                            logger.debug(
-                                f'Sliding windows for {model.name}: '
-                                f'{seq_X.shape[1]} steps × {seq_X.shape[2]} channels, '
-                                f'dense horizons 1..{future_periods}: {channel_names}'
-                            )
-                except Exception as e:
-                    logger.debug(f'Sliding window creation failed: {e}')
+                        if target_col in df_train.columns:
+                            # Use original df slice (with DatetimeIndex) for temporal features
+                            df_train_raw = df.iloc[train_idx]
+                            # Match holdout/production path: cap window at 48
+                            # (24h at 30-min). Larger windows hurt small-fold CV
+                            # by reducing effective sample size.
+                            window_size = min(48, len(df_train_raw) // 3)
+                            if window_size >= 12:
+                                seq_X, seq_y, channel_names = create_sliding_windows(
+                                    df_train_raw, target_col, window_size=window_size,
+                                    covariate_cols=neural_cov_cols if neural_cov_cols else None,
+                                    add_temporal=True,
+                                    horizon_steps=horizon_steps,
+                                )
+                                sequence_kwargs['sequence_data'] = seq_X
+                                sequence_kwargs['channel_names'] = channel_names
+                                y_train = seq_y
+                                X_train = X_train[-len(seq_y):]
+                                if sample_weights is not None:
+                                    sample_weights = sample_weights[-len(seq_y):]
+                                logger.debug(
+                                    f'Sliding windows for {model.name}: '
+                                    f'{seq_X.shape[1]} steps × {seq_X.shape[2]} channels, '
+                                    f'dense horizons 1..{future_periods}: {channel_names}'
+                                )
+                    except Exception as e:
+                        logger.debug(f'Sliding window creation failed: {e}')
 
             # Train model
             train_start = time.time()

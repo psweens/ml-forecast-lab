@@ -2638,6 +2638,63 @@ class MLForecastLabApp:
         runner = BenchmarkRunner(exp_cfg_dict, feature_builder, metric_registry)
         fold_indices = runner._prepare_train_test_splits(combined)
 
+        # Pre-compute sliding windows once for neural models. The fold
+        # split is fixed across all trials (1-fold CV), so creating
+        # sliding windows inside run_single_model on every trial wastes
+        # both CPU and memory — on an RPi5, the redundant allocations
+        # compound across 30 trials and can trigger the OOM killer.
+        precomputed_sequences = None
+        _is_neural_model = False
+        try:
+            _probe = self.model_registry.create(model_name)
+            _is_neural_model = getattr(_probe, 'is_neural', False)
+            del _probe
+        except Exception:
+            pass
+
+        if _is_neural_model and fold_indices:
+            try:
+                from ml_forecast_lab.features import create_sliding_windows
+                target_col = 'target'
+                engineered = {
+                    'hour_of_day', 'day_of_week', 'is_weekend', 'month',
+                    'day_of_month', 'hour_sin', 'hour_cos', 'dow_sin',
+                    'dow_cos', 'is_holiday',
+                }
+                engineered.update(c for c in combined.columns if c.startswith('y_lag_'))
+                _neural_cov_cols = [
+                    c for c in combined.columns
+                    if c not in engineered and c != target_col
+                ]
+                future_periods_val = getattr(exp_cfg, 'future_periods', 48)
+                _horizon_steps = list(range(1, future_periods_val + 1))
+
+                precomputed_sequences = {}
+                for fi, (train_idx, _test_idx) in enumerate(fold_indices):
+                    df_train_raw = combined.iloc[train_idx]
+                    _ws = min(48, len(df_train_raw) // 3)
+                    if _ws >= 12:
+                        _sX, _sY, _cnames = create_sliding_windows(
+                            df_train_raw, target_col, window_size=_ws,
+                            covariate_cols=_neural_cov_cols if _neural_cov_cols else None,
+                            add_temporal=True, horizon_steps=_horizon_steps,
+                        )
+                        precomputed_sequences[fi] = {
+                            'seq_X': _sX, 'seq_y': _sY,
+                            'channel_names': _cnames,
+                            'window_size': _ws,
+                            'neural_cov_cols': _neural_cov_cols,
+                            'horizon_steps': _horizon_steps,
+                        }
+                        logger.info(
+                            f"  Pre-computed sliding windows: "
+                            f"{_sX.shape[0]} samples × {_sX.shape[1]} steps "
+                            f"× {_sX.shape[2]} channels"
+                        )
+            except Exception as e:
+                logger.debug(f"  Sliding window pre-computation failed: {e}")
+                precomputed_sequences = None
+
         # Parameters that benefit from log-scale search
         LOG_PARAMS = {"learning_rate", "reg_alpha", "reg_lambda"}
 
@@ -2680,10 +2737,14 @@ class MLForecastLabApp:
             for pname, spec in param_schema.items()
             if spec.get("default") is not None
         }
+        baseline_model = None
         try:
             baseline_model = self.model_registry.create(model_name, **baseline_params)
             _apply_tuning_overrides(baseline_model)
-            baseline_result = runner.run_single_model(combined, baseline_model, fold_indices)
+            baseline_result = runner.run_single_model(
+                combined, baseline_model, fold_indices,
+                precomputed_sequences=precomputed_sequences,
+            )
             baseline_mae = max(baseline_result.metrics.get("mae", 1.0), 1e-6)
             baseline_rmse = max(baseline_result.metrics.get("rmse", 1.0), 1e-6)
             baseline_mase = max(baseline_result.metrics.get("mase", 1.0), 1e-6)
@@ -2696,6 +2757,10 @@ class MLForecastLabApp:
                 f"  Baseline trial failed ({e}); falling back to first-trial anchors"
             )
             baseline_mae = baseline_rmse = baseline_mase = None
+        finally:
+            import gc as _gc
+            del baseline_model
+            _gc.collect()
 
         # Mutable anchors so the first valid trial can become the baseline if
         # the explicit baseline trial above failed.
@@ -2716,6 +2781,7 @@ class MLForecastLabApp:
             ]))
 
         def objective(trial):
+            import gc as _gc
             t_start = _time.time()
             params = {}
             for pname, spec in param_schema.items():
@@ -2732,10 +2798,14 @@ class MLForecastLabApp:
                 elif ptype == "bool":
                     params[pname] = trial.suggest_categorical(pname, [True, False])
 
+            model = None
             try:
                 model = self.model_registry.create(model_name, **params)
                 _apply_tuning_overrides(model)
-                result = runner.run_single_model(combined, model, fold_indices)
+                result = runner.run_single_model(
+                    combined, model, fold_indices,
+                    precomputed_sequences=precomputed_sequences,
+                )
                 mae = result.metrics.get("mae", float("inf"))
                 rmse = result.metrics.get("rmse", float("inf"))
                 mase = result.metrics.get("mase", float("inf"))
@@ -2746,6 +2816,22 @@ class MLForecastLabApp:
                 rmse = float("inf")
                 mase = float("inf")
                 status = "failed"
+            finally:
+                # Explicit cleanup to prevent OOM across trials.
+                # PyTorch models hold tensors, optimizer state, and gradient
+                # buffers that Python's GC may not free promptly. On an
+                # RPi5 (4–8 GB RAM), 30 trials without cleanup accumulates
+                # enough residual memory to trigger the Linux OOM killer,
+                # which sends SIGKILL — no error, no traceback, the
+                # container just restarts silently.
+                del model
+                try:
+                    import torch as _torch
+                    # Clear any stale autograd graphs and cached allocations
+                    _torch.cuda.empty_cache() if _torch.cuda.is_available() else None
+                except Exception:
+                    pass
+                _gc.collect()
 
             # Lazily seed the anchor if the explicit baseline run failed
             if anchor["mae"] is None and status == "completed":
@@ -2785,18 +2871,36 @@ class MLForecastLabApp:
 
             return composite
 
-        # Create and run Optuna study
+        # Create and run Optuna study.
+        # For neural models on constrained hardware (RPi5 etc.), cap the
+        # total wall-clock time to 30 minutes. Optuna will stop cleanly
+        # after the current trial finishes, so the best-so-far result is
+        # always available. Tree models are much faster per trial so they
+        # don't need a timeout.
         if strategy == "tpe":
             sampler = optuna.samplers.TPESampler(seed=42)
         else:
             sampler = optuna.samplers.RandomSampler(seed=42)
 
         study = optuna.create_study(direction="minimize", sampler=sampler)
+        study_timeout = 30 * 60 if _is_neural_model else None  # 30 min for neural
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            None, lambda: study.optimize(objective, n_trials=n_trials)
+            None,
+            lambda: study.optimize(
+                objective, n_trials=n_trials, timeout=study_timeout,
+            ),
         )
+
+        # Update completed count in case the timeout stopped early
+        actual_trials = len(tuning_state.trials)
+        if actual_trials < n_trials:
+            logger.info(
+                f"  Tuning stopped after {actual_trials}/{n_trials} trials "
+                f"(timeout={study_timeout}s)"
+            )
+            tuning_state.completed_trials = actual_trials
 
         # Finalise: select best trial by composite ranking across MAE, RMSE, MASE
         # (Optuna minimised MAE to guide the search, but the winner is picked
