@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.6.3
+
+### Fix: production forecast sensors never published
+
+- **Fixed undefined `forecast_features` variable** in `_run_production_inference()`
+  (line 1864). The variable was a leftover from the removed
+  `create_forecast_features()` function and caused a `NameError` on every
+  production forecast, silently preventing sensor publication. Now constructs
+  `ds_future` from `last_ts` + interval offsets, matching the working
+  `_forecast_with_cached()` implementation.
+
 ## 2.6.2
 
 ### UI: redesign Settings tab layout, move Stop Training to dashboard

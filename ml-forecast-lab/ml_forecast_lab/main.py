@@ -1861,7 +1861,10 @@ class MLForecastLabApp:
             f"range [{y_pred.min():.3f}, {y_pred.max():.3f}]"
         )
 
-        ds_future = forecast_features.index
+        ds_future = pd.DatetimeIndex([
+            last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes * (i + 1))
+            for i in range(len(y_pred))
+        ])
 
         # 7. Publish forecast sensors via shared helper
         # Recent actuals for context (last 24h). The combined index is naive
