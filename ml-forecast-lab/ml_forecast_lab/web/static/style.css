@@ -428,11 +428,37 @@ select.setting-input, select.form-input { cursor: pointer; }
     width: 100%; padding: 0.45rem 0.65rem; font-size: 0.9rem;
 }
 
-.settings-section-heading {
-    color: var(--text-primary); margin: 2rem 0 1rem; font-size: 1.05rem;
-    font-weight: 600; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem;
+/* Settings groups — card-based section containers */
+.settings-group {
+    background: var(--bg-secondary); border: 1px solid var(--border);
+    border-radius: 0.75rem; padding: 1.25rem 1.5rem 1.5rem;
+    margin-bottom: 1rem;
 }
-.settings-section-heading:first-of-type { margin-top: 0.75rem; }
+.settings-group-title {
+    color: var(--accent-secondary); font-size: 0.85rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    margin: 0 0 1rem; padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+}
+.settings-entity-display {
+    background: var(--bg-primary); border: 1px solid var(--border);
+    border-radius: 0.4rem; padding: 0.6rem 1rem; margin-bottom: 1rem;
+    color: var(--accent-secondary); font-size: 0.95rem;
+}
+.settings-row {
+    display: flex; align-items: center; gap: 2rem; flex-wrap: wrap;
+}
+.settings-toggle-field {
+    display: flex; align-items: center; gap: 0.6rem;
+}
+.settings-toggle-field .field-label {
+    color: var(--text-secondary); font-size: 0.85rem; font-weight: 600;
+}
+@media (max-width: 600px) {
+    .settings-group { padding: 1rem; }
+    .exp-field-grid { grid-template-columns: 1fr !important; }
+    .settings-row { flex-direction: column; align-items: flex-start; gap: 1rem; }
+}
 
 /* Entity search dropdown */
 .entity-search-wrapper { position: relative; }

@@ -85,198 +85,191 @@
     <h2>Experiment Settings</h2>
 
     <!-- Target -->
-    <h3 class="settings-section-heading">Target</h3>
-    <div class="exp-field-grid">
-        <div class="exp-field">
-            <label class="field-label">Entity ID</label>
-            <span class="monospace" style="color:var(--accent-secondary);font-size:0.9rem;">{{ exp_config.target_entity if exp_config else experiment.target_entity }}</span>
+    <div class="settings-group">
+        <h3 class="settings-group-title">Target</h3>
+        <div class="settings-entity-display">
+            <span class="monospace">{{ exp_config.target_entity if exp_config else experiment.target_entity }}</span>
         </div>
-        <div class="exp-field">
-            <label class="field-label">Cumulative source</label>
-            <label class="toggle-switch">
-                <input type="checkbox" data-field="source_is_cumulative"
-                       {% if exp_config and exp_config.source_is_cumulative %}checked{% endif %}
-                       onchange="saveSettingsToggle(this, 'source_is_cumulative')">
-                <span class="toggle-slider"></span>
-            </label>
-        </div>
-        <div class="exp-field">
-            <label class="field-label">Daily reset</label>
-            <label class="toggle-switch">
-                <input type="checkbox" data-field="reset_daily"
-                       {% if exp_config and exp_config.reset_daily %}checked{% endif %}
-                       onchange="saveSettingsToggle(this, 'reset_daily')">
-                <span class="toggle-slider"></span>
-            </label>
-        </div>
-        <div class="exp-field">
-            <label class="field-label">Max increment <span class="info-tip">?<span class="tip-text">Maximum allowed value change per interval. Larger jumps are treated as anomalies or resets. Leave empty for no limit.</span></span></label>
-            <input type="number" class="setting-input" data-field="max_increment" step="any" min="0"
-                   value="{{ exp_config.max_increment if exp_config and exp_config.max_increment is not none else '' }}"
-                   placeholder="No limit"
-                   onchange="saveSettingsField(this)">
-        </div>
-    </div>
-
-    <!-- Data -->
-    <h3 class="settings-section-heading">Data</h3>
-    <div class="exp-field-grid">
-        <div class="exp-field">
-            <label class="field-label">History (days)</label>
-            <input type="number" class="setting-input" data-field="days_history" min="1"
-                   value="{{ exp_config.days_history if exp_config else 14 }}"
-                   onchange="saveSettingsField(this)">
-        </div>
-        <div class="exp-field">
-            <label class="field-label">Interval (minutes)</label>
-            <input type="number" class="setting-input" data-field="interval_minutes" min="1"
-                   value="{{ exp_config.interval_minutes if exp_config else 30 }}"
-                   onchange="saveSettingsField(this)">
-        </div>
-        <div class="exp-field">
-            <label class="field-label">Log transform</label>
-            <label class="toggle-switch">
-                <input type="checkbox" data-field="log_transform"
-                       {% if exp_config and exp_config.log_transform %}checked{% endif %}
-                       onchange="saveSettingsToggle(this, 'log_transform')">
-                <span class="toggle-slider"></span>
-            </label>
+        <div class="settings-row">
+            <div class="settings-toggle-field">
+                <label class="toggle-switch">
+                    <input type="checkbox" data-field="source_is_cumulative"
+                           {% if exp_config and exp_config.source_is_cumulative %}checked{% endif %}
+                           onchange="saveSettingsToggle(this, 'source_is_cumulative')">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span class="field-label">Cumulative source</span>
+            </div>
+            <div class="settings-toggle-field">
+                <label class="toggle-switch">
+                    <input type="checkbox" data-field="reset_daily"
+                           {% if exp_config and exp_config.reset_daily %}checked{% endif %}
+                           onchange="saveSettingsToggle(this, 'reset_daily')">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span class="field-label">Daily reset</span>
+            </div>
+            <div class="exp-field" style="max-width:180px;">
+                <label class="field-label">Max increment <span class="info-tip">?<span class="tip-text">Maximum allowed value change per interval. Larger jumps are treated as anomalies or resets. Leave empty for no limit.</span></span></label>
+                <input type="number" class="setting-input" data-field="max_increment" step="any" min="0"
+                       value="{{ exp_config.max_increment if exp_config and exp_config.max_increment is not none else '' }}"
+                       placeholder="No limit"
+                       onchange="saveSettingsField(this)">
+            </div>
         </div>
     </div>
 
-    <!-- Forecast -->
-    <h3 class="settings-section-heading">Forecast</h3>
-    <div class="exp-field-grid">
-        <div class="exp-field">
-            <label class="field-label">Future periods <span class="info-tip">?<span class="tip-text">Number of intervals to forecast ahead. E.g. 96 at 30-min intervals = 48 hours.</span></span></label>
-            <input type="number" class="setting-input" data-field="future_periods" min="1"
-                   value="{{ exp_config.future_periods if exp_config else 48 }}"
-                   onchange="saveSettingsField(this)">
-        </div>
-        <div class="exp-field">
-            <label class="field-label">Forecast every (min) <span class="info-tip">?<span class="tip-text">How often to run inference. Leave empty to use global default.</span></span></label>
-            <input type="number" class="setting-input" data-field="forecast_every_minutes" min="1"
-                   value="{{ exp_config.forecast_every_minutes if exp_config and exp_config.forecast_every_minutes is not none else '' }}"
-                   placeholder="Global default"
-                   onchange="saveSettingsField(this)">
-        </div>
-        <div class="exp-field">
-            <label class="field-label">Retrain every (hours) <span class="info-tip">?<span class="tip-text">How often to retrain. Leave empty to use global default.</span></span></label>
-            <input type="number" class="setting-input" data-field="retrain_every_hours" min="0.1" step="0.1"
-                   value="{{ exp_config.retrain_every_hours if exp_config and exp_config.retrain_every_hours is not none else '' }}"
-                   placeholder="Global default"
-                   onchange="saveSettingsField(this)">
+    <!-- Data & Forecast -->
+    <div class="settings-group">
+        <h3 class="settings-group-title">Data &amp; Forecast</h3>
+        <div class="exp-field-grid" style="grid-template-columns:repeat(3, 1fr);">
+            <div class="exp-field">
+                <label class="field-label">History (days)</label>
+                <input type="number" class="setting-input" data-field="days_history" min="1"
+                       value="{{ exp_config.days_history if exp_config else 14 }}"
+                       onchange="saveSettingsField(this)">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Interval (minutes)</label>
+                <input type="number" class="setting-input" data-field="interval_minutes" min="1"
+                       value="{{ exp_config.interval_minutes if exp_config else 30 }}"
+                       onchange="saveSettingsField(this)">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Future periods <span class="info-tip">?<span class="tip-text">Number of intervals to forecast ahead. E.g. 96 at 30-min intervals = 48 hours.</span></span></label>
+                <input type="number" class="setting-input" data-field="future_periods" min="1"
+                       value="{{ exp_config.future_periods if exp_config else 48 }}"
+                       onchange="saveSettingsField(this)">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Forecast every (min) <span class="info-tip">?<span class="tip-text">How often to run inference. Leave empty to use global default.</span></span></label>
+                <input type="number" class="setting-input" data-field="forecast_every_minutes" min="1"
+                       value="{{ exp_config.forecast_every_minutes if exp_config and exp_config.forecast_every_minutes is not none else '' }}"
+                       placeholder="Global default"
+                       onchange="saveSettingsField(this)">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Retrain every (hours) <span class="info-tip">?<span class="tip-text">How often to retrain. Leave empty to use global default.</span></span></label>
+                <input type="number" class="setting-input" data-field="retrain_every_hours" min="0.1" step="0.1"
+                       value="{{ exp_config.retrain_every_hours if exp_config and exp_config.retrain_every_hours is not none else '' }}"
+                       placeholder="Global default"
+                       onchange="saveSettingsField(this)">
+            </div>
+            <div class="settings-toggle-field" style="align-self:end;padding-bottom:0.45rem;">
+                <label class="toggle-switch">
+                    <input type="checkbox" data-field="log_transform"
+                           {% if exp_config and exp_config.log_transform %}checked{% endif %}
+                           onchange="saveSettingsToggle(this, 'log_transform')">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span class="field-label">Log transform</span>
+            </div>
         </div>
     </div>
 
     <!-- Training -->
-    <h3 class="settings-section-heading">Training</h3>
-    <div class="exp-field-grid">
-        <div class="exp-field">
-            <label class="field-label">CV strategy</label>
-            <select class="setting-input" data-field="cv_strategy" onchange="saveSettingsField(this)">
-                <option value="walk_forward" {% if exp_config and exp_config.cv_strategy == 'walk_forward' %}selected{% endif %}>Walk-forward</option>
-                <option value="sliding_window" {% if exp_config and exp_config.cv_strategy == 'sliding_window' %}selected{% endif %}>Sliding window</option>
-            </select>
-        </div>
-        <div class="exp-field">
-            <label class="field-label">CV folds</label>
-            <input type="number" class="setting-input" data-field="cv_folds" min="2" max="20"
-                   value="{{ exp_config.cv_folds if exp_config else 5 }}"
-                   onchange="saveSettingsField(this)">
-        </div>
-        <div class="exp-field">
-            <label class="field-label">Recency half-life (days) <span class="info-tip">?<span class="tip-text">Half-life for exponential recency weighting. Recent samples get higher weight. Set to 0 to disable.</span></span></label>
-            <input type="number" class="setting-input" data-field="recency_half_life_days" min="0" max="365" step="0.5"
-                   value="{{ exp_config.recency_half_life_days if exp_config else 7 }}"
-                   onchange="saveSettingsField(this)">
-        </div>
-        <div class="exp-field">
-            <label class="field-label">Production metric</label>
-            <select class="setting-input" data-field="production_metric" onchange="saveSettingsField(this)">
-                <option value="mae" {% if exp_config and exp_config.production_metric == 'mae' %}selected{% endif %}>MAE</option>
-                <option value="rmse" {% if exp_config and exp_config.production_metric == 'rmse' %}selected{% endif %}>RMSE</option>
-                <option value="mase" {% if exp_config and exp_config.production_metric == 'mase' %}selected{% endif %}>MASE</option>
-            </select>
-        </div>
-        <div class="exp-field">
-            <label class="field-label">Loss function (neural)</label>
-            <select class="setting-input" data-field="loss_fn" onchange="saveSettingsField(this)">
-                <option value="mse" {% if exp_config and exp_config.loss_fn == 'mse' %}selected{% endif %}>MSE</option>
-                <option value="mae" {% if exp_config and exp_config.loss_fn == 'mae' %}selected{% endif %}>MAE</option>
-                <option value="huber" {% if exp_config and exp_config.loss_fn == 'huber' %}selected{% endif %}>Huber</option>
-            </select>
+    <div class="settings-group">
+        <h3 class="settings-group-title">Training</h3>
+        <div class="exp-field-grid" style="grid-template-columns:repeat(3, 1fr);">
+            <div class="exp-field">
+                <label class="field-label">CV strategy</label>
+                <select class="setting-input" data-field="cv_strategy" onchange="saveSettingsField(this)">
+                    <option value="walk_forward" {% if exp_config and exp_config.cv_strategy == 'walk_forward' %}selected{% endif %}>Walk-forward</option>
+                    <option value="sliding_window" {% if exp_config and exp_config.cv_strategy == 'sliding_window' %}selected{% endif %}>Sliding window</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">CV folds</label>
+                <input type="number" class="setting-input" data-field="cv_folds" min="2" max="20"
+                       value="{{ exp_config.cv_folds if exp_config else 5 }}"
+                       onchange="saveSettingsField(this)">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Recency half-life (days) <span class="info-tip">?<span class="tip-text">Half-life for exponential recency weighting. Recent samples get higher weight. Set to 0 to disable.</span></span></label>
+                <input type="number" class="setting-input" data-field="recency_half_life_days" min="0" max="365" step="0.5"
+                       value="{{ exp_config.recency_half_life_days if exp_config else 7 }}"
+                       onchange="saveSettingsField(this)">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Production metric</label>
+                <select class="setting-input" data-field="production_metric" onchange="saveSettingsField(this)">
+                    <option value="mae" {% if exp_config and exp_config.production_metric == 'mae' %}selected{% endif %}>MAE</option>
+                    <option value="rmse" {% if exp_config and exp_config.production_metric == 'rmse' %}selected{% endif %}>RMSE</option>
+                    <option value="mase" {% if exp_config and exp_config.production_metric == 'mase' %}selected{% endif %}>MASE</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Loss function (neural)</label>
+                <select class="setting-input" data-field="loss_fn" onchange="saveSettingsField(this)">
+                    <option value="mse" {% if exp_config and exp_config.loss_fn == 'mse' %}selected{% endif %}>MSE</option>
+                    <option value="mae" {% if exp_config and exp_config.loss_fn == 'mae' %}selected{% endif %}>MAE</option>
+                    <option value="huber" {% if exp_config and exp_config.loss_fn == 'huber' %}selected{% endif %}>Huber</option>
+                </select>
+            </div>
         </div>
     </div>
 
     <!-- Covariates -->
-    <h3 class="settings-section-heading">Covariates</h3>
-    <div class="covariate-list" id="covariate-list">
-        {% if exp_config and exp_config.covariates %}
-        {% for cov in exp_config.covariates %}
-        <div class="covariate-row" data-entity="{{ cov.entity }}">
-            <span class="cov-entity">{{ cov.entity }}</span>
-            <span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">{{ cov.role }}</span></span>
-            <span class="cov-meta">{{ cov.aggregation }}</span>
-            {% if cov.scale is not none %}<span class="cov-meta">scale: {{ cov.scale }}</span>{% endif %}
-            {% if cov.is_binary %}<span class="cov-meta">binary</span>{% endif %}
-            <button class="cov-remove-btn" onclick="removeCovariate('{{ cov.entity }}')" title="Remove">&times;</button>
+    <div class="settings-group">
+        <h3 class="settings-group-title">Covariates</h3>
+        <div class="covariate-list" id="covariate-list">
+            {% if exp_config and exp_config.covariates %}
+            {% for cov in exp_config.covariates %}
+            <div class="covariate-row" data-entity="{{ cov.entity }}">
+                <span class="cov-entity">{{ cov.entity }}</span>
+                <span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">{{ cov.role }}</span></span>
+                <span class="cov-meta">{{ cov.aggregation }}</span>
+                {% if cov.scale is not none %}<span class="cov-meta">scale: {{ cov.scale }}</span>{% endif %}
+                {% if cov.is_binary %}<span class="cov-meta">binary</span>{% endif %}
+                <button class="cov-remove-btn" onclick="removeCovariate('{{ cov.entity }}')" title="Remove">&times;</button>
+            </div>
+            {% endfor %}
+            {% else %}
+            <p id="no-covariates-msg" style="color:var(--text-secondary);font-size:0.85rem;">No covariates configured.</p>
+            {% endif %}
         </div>
-        {% endfor %}
-        {% else %}
-        <p id="no-covariates-msg" style="color:var(--text-secondary);font-size:0.85rem;">No covariates configured.</p>
-        {% endif %}
-    </div>
 
-    <div class="add-cov-form" id="add-cov-form">
-        <div class="exp-field entity-search-wrapper">
-            <label class="field-label">Entity</label>
-            <input type="text" class="setting-input" id="cov-entity-input" placeholder="Search HA entities..."
-                   autocomplete="off" oninput="searchEntities(this)">
-            <div class="entity-search-results" id="entity-results" style="display:none;"></div>
-        </div>
-        <div class="exp-field">
-            <label class="field-label">Role</label>
-            <select class="setting-input" id="cov-role-input">
-                <option value="lagged">Lagged</option>
-                <option value="future">Future</option>
-                <option value="both">Both</option>
-            </select>
-        </div>
-        <div class="exp-field">
-            <label class="field-label">Aggregation</label>
-            <select class="setting-input" id="cov-agg-input">
-                <option value="mean">Mean</option>
-                <option value="sum">Sum</option>
-                <option value="max">Max</option>
-                <option value="min">Min</option>
-                <option value="last">Last</option>
-            </select>
-        </div>
-        <div class="exp-field">
-            <label class="field-label">Scale</label>
-            <input type="number" class="setting-input" id="cov-scale-input" step="any" placeholder="Optional">
-        </div>
-        <div class="exp-field">
-            <label class="field-label">Binary</label>
-            <label class="toggle-switch" style="margin-top:0.25rem;">
-                <input type="checkbox" id="cov-binary-input">
-                <span class="toggle-slider"></span>
-            </label>
-        </div>
-        <div class="exp-field" style="align-self:end;">
-            <button class="btn btn-primary" onclick="addCovariate()" style="padding:0.4rem 0.75rem;font-size:0.85rem;">Add</button>
+        <div class="add-cov-form" id="add-cov-form">
+            <div class="exp-field entity-search-wrapper">
+                <label class="field-label">Entity</label>
+                <input type="text" class="setting-input" id="cov-entity-input" placeholder="Search HA entities..."
+                       autocomplete="off" oninput="searchEntities(this)">
+                <div class="entity-search-results" id="entity-results" style="display:none;"></div>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Role</label>
+                <select class="setting-input" id="cov-role-input">
+                    <option value="lagged">Lagged</option>
+                    <option value="future">Future</option>
+                    <option value="both">Both</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Aggregation</label>
+                <select class="setting-input" id="cov-agg-input">
+                    <option value="mean">Mean</option>
+                    <option value="sum">Sum</option>
+                    <option value="max">Max</option>
+                    <option value="min">Min</option>
+                    <option value="last">Last</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Scale</label>
+                <input type="number" class="setting-input" id="cov-scale-input" step="any" placeholder="Optional">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Binary</label>
+                <label class="toggle-switch" style="margin-top:0.25rem;">
+                    <input type="checkbox" id="cov-binary-input">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div class="exp-field" style="align-self:end;">
+                <button class="btn btn-primary" onclick="addCovariate()" style="padding:0.4rem 0.75rem;font-size:0.85rem;">Add</button>
+            </div>
         </div>
     </div>
-
-    <!-- Training Control -->
-    {% if is_running %}
-    <h3 class="settings-section-heading">Training Control</h3>
-    <button class="btn btn-danger" id="btn-stop-training" onclick="stopTraining()">
-        Stop Training
-    </button>
-    <span class="info-tip" style="margin-left:0.5rem;">?<span class="tip-text">Cancels the running pipeline. If a neural model is mid-epoch, the stop takes effect after the current epoch completes.</span></span>
-    {% endif %}
 
 </section>
 </div>
@@ -1355,32 +1348,6 @@ window.showTab = function(el) {
             }
         })
         .catch(function(err) { mlfl.toast('Error: ' + err, 'error'); });
-    };
-
-    // --- Stop training ---
-    window.stopTraining = function() {
-        mlfl.confirm('Stop the running pipeline for this experiment?', function() {
-            var btn = document.getElementById('btn-stop-training');
-            if (btn) { btn.disabled = true; btn.textContent = 'Stopping...'; }
-
-            fetch(BASE + '/experiment/' + EXP_NAME + '/stop-training', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' }
-            })
-            .then(function(r) { return r.json(); })
-            .then(function(result) {
-                if (result.success) {
-                    mlfl.toast('Training stopped', 'success');
-                } else {
-                    mlfl.toast('Failed: ' + result.error, 'error');
-                    if (btn) { btn.disabled = false; btn.textContent = 'Stop Training'; }
-                }
-            })
-            .catch(function(err) {
-                mlfl.toast('Error: ' + err, 'error');
-                if (btn) { btn.disabled = false; btn.textContent = 'Stop Training'; }
-            });
-        });
     };
 
     // Shared high-contrast Plotly colorway used by every multi-trace chart.

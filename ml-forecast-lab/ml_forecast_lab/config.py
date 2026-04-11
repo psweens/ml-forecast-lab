@@ -326,11 +326,19 @@ def load_config(config_path: Path | str) -> AppConfig:
     cov_fields = {f.name for f in dataclasses.fields(CovariateCfg)}
     app_fields = {f.name for f in dataclasses.fields(AppConfig)} - {'experiments'}
 
+    # Track whether we need to rewrite the YAML to clean deprecated fields
+    _needs_migrate = False
+
     for exp_data in experiments_data:
         if not isinstance(exp_data, dict):
             raise ValueError(
                 f'Each experiment must be a dictionary, got {type(exp_data)}'
             )
+
+        # Migration: silently remove deprecated fields
+        if 'horizons_minutes' in exp_data:
+            exp_data.pop('horizons_minutes')
+            _needs_migrate = True
 
         # Parse covariates
         covariates_data = exp_data.pop('covariates', [])
@@ -369,6 +377,21 @@ def load_config(config_path: Path | str) -> AppConfig:
     logger.debug(
         f'Configuration loaded: {len(app_config.experiments)} experiment(s)'
     )
+
+    # Auto-migrate: rewrite YAML to strip deprecated fields
+    if _needs_migrate:
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                raw = yaml.safe_load(f)
+            for exp in raw.get('experiments', []):
+                if isinstance(exp, dict):
+                    exp.pop('horizons_minutes', None)
+            with open(config_path, 'w', encoding='utf-8') as f:
+                yaml.dump(raw, f, default_flow_style=False, sort_keys=False)
+            logger.info('Migrated config: removed deprecated horizons_minutes')
+        except Exception as e:
+            logger.warning(f'Config migration failed (non-fatal): {e}')
+
     return app_config
 
 

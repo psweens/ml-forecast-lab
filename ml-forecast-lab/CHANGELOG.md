@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.6.2
+
+### UI: redesign Settings tab layout, move Stop Training to dashboard
+
+- **Settings tab** — replaced flat field list with grouped card panels
+  (Target, Data & Forecast, Training, Covariates). Toggles are now inline
+  with labels, fields use an explicit 3-column grid, and each section has
+  a bordered card background for visual separation.
+- **Stop Training on dashboard** — the stop button now appears directly in
+  the experiment card footer when training is running, replacing the
+  Publish button. Removed from the Settings tab.
+- **Auto-migrate config** — `load_config()` silently strips the deprecated
+  `horizons_minutes` field from the YAML on first load, preventing the
+  repeated "Ignoring unknown experiment fields" warning.
+
 ## 2.6.1
 
 ### Cleanup: remove dead `horizons_minutes` config & improve Settings layout

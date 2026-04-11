@@ -135,7 +135,13 @@
                 <a href="{{ base_path | default('') }}/experiment/{{ exp.name }}" class="btn btn-secondary flex-center">
                     View Details
                 </a>
-                {% if exp.mode == 'production' %}
+                {% if exp.name in running_experiments %}
+                <button class="btn btn-danger flex-center nowrap" style="font-size:0.85rem;padding:0.4rem 1rem;"
+                        onclick="stopTraining('{{ exp.name }}', this)"
+                        title="Stops after current epoch completes">
+                    Stop Training
+                </button>
+                {% elif exp.mode == 'production' %}
                 <button class="btn flex-center nowrap" style="background:var(--success);color:var(--bg-primary);font-size:0.85rem;"
                         onclick="toggleMode('{{ exp.name }}', this)">
                     Publishing
@@ -237,6 +243,31 @@
             else el.textContent = s + 's';
         }, 1000);
     });
+
+    // Stop training
+    function stopTraining(name, btn) {
+        mlfl.confirm('Stop the running pipeline for ' + name + '?', function() {
+            btn.disabled = true; btn.textContent = 'Stopping...';
+            fetch(BASE_PATH + '/experiment/' + name + '/stop-training', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(result) {
+                if (result.success) {
+                    mlfl.toast('Training stopped', 'success');
+                    setTimeout(function() { location.reload(); }, 1500);
+                } else {
+                    mlfl.toast('Failed: ' + result.error, 'error');
+                    btn.disabled = false; btn.textContent = 'Stop Training';
+                }
+            })
+            .catch(function(err) {
+                mlfl.toast('Error: ' + err, 'error');
+                btn.disabled = false; btn.textContent = 'Stop Training';
+            });
+        });
+    }
 
     // Auto-refresh dashboard (faster when training is running)
     var _refreshMs = {{ '10000' if running_experiments else '60000' }};
