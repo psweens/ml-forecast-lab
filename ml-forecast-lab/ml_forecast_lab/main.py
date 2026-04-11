@@ -56,6 +56,9 @@ class MLForecastLabApp:
         # Sequential retrain queue — prevents parallel training
         self._retrain_queue: asyncio.Queue = asyncio.Queue()
         self._retrain_consumer_running = False
+        # Global training lock — ensures only one training operation
+        # (benchmark OR retrain) runs at a time across all code paths.
+        self._training_lock: asyncio.Lock = asyncio.Lock()
         # Track config file mtime so we only log on real changes (the timer
         # loop reloads config every 30s; we don't want a log line each time).
         self._last_config_path: Optional[Path] = None
@@ -288,26 +291,25 @@ class MLForecastLabApp:
 
             # Register benchmark callback (triggered from Training tab)
             async def _benchmark_trigger(experiment_name: str):
-                # Reload config so UI-edited overrides are picked up
-                await self.load_config()
-                exp_cfg = None
-                for cfg in self.config.experiments:
-                    if cfg.name == experiment_name:
-                        exp_cfg = cfg
-                        break
-                if exp_cfg:
-                    try:
-                        self.web_app.state.appstate.start_benchmark(experiment_name)
-                        await self._run_benchmark(exp_cfg)
-                        # Ensemble auto-run disabled in v2.5.0 along with the
-                        # Ensemble tab. The user can still trigger it manually
-                        # via the registered ensemble_callback if the tab is
-                        # ever re-enabled.
-                    except Exception as e:
-                        logger.error(f"Benchmark failed: {e}", exc_info=True)
-                    finally:
-                        self.web_app.state.appstate.end_benchmark(experiment_name)
-                        self._running_tasks.pop(experiment_name, None)
+                # Acquire global training lock so benchmarks and scheduled
+                # retrains never overlap.
+                async with self._training_lock:
+                    # Reload config so UI-edited overrides are picked up
+                    await self.load_config()
+                    exp_cfg = None
+                    for cfg in self.config.experiments:
+                        if cfg.name == experiment_name:
+                            exp_cfg = cfg
+                            break
+                    if exp_cfg:
+                        try:
+                            self.web_app.state.appstate.start_benchmark(experiment_name)
+                            await self._run_benchmark(exp_cfg)
+                        except Exception as e:
+                            logger.error(f"Benchmark failed: {e}", exc_info=True)
+                        finally:
+                            self.web_app.state.appstate.end_benchmark(experiment_name)
+                            self._running_tasks.pop(experiment_name, None)
 
             self.web_app.state.appstate.benchmark_callback = _benchmark_trigger
 
@@ -375,13 +377,14 @@ class MLForecastLabApp:
                         f"Retrain trigger: experiment '{experiment_name}' not found in config"
                     )
                     return
-                try:
-                    await self._retrain_single(exp_cfg)
-                except Exception as e:
-                    logger.error(
-                        f"Retrain trigger failed for {experiment_name}: {e}",
-                        exc_info=True,
-                    )
+                async with self._training_lock:
+                    try:
+                        await self._retrain_single(exp_cfg)
+                    except Exception as e:
+                        logger.error(
+                            f"Retrain trigger failed for {experiment_name}: {e}",
+                            exc_info=True,
+                        )
 
             self.web_app.state.appstate.retrain_callback = _retrain_trigger
 
@@ -2055,17 +2058,19 @@ class MLForecastLabApp:
                 if exp_cfg.name in self._running_tasks:
                     self._retrain_queue.task_done()
                     continue
-                task = asyncio.create_task(self._retrain_single(exp_cfg))
-                self._running_tasks[exp_cfg.name] = task
-                task.add_done_callback(
-                    lambda t, n=exp_cfg.name: self._running_tasks.pop(n, None)
-                )
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    logger.info(f"Retrain for {exp_cfg.name} was cancelled")
-                except Exception:
-                    pass
+                # Acquire global lock so retrains and benchmarks never overlap
+                async with self._training_lock:
+                    task = asyncio.create_task(self._retrain_single(exp_cfg))
+                    self._running_tasks[exp_cfg.name] = task
+                    task.add_done_callback(
+                        lambda t, n=exp_cfg.name: self._running_tasks.pop(n, None)
+                    )
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        logger.info(f"Retrain for {exp_cfg.name} was cancelled")
+                    except Exception:
+                        pass
                 self._retrain_queue.task_done()
         finally:
             self._retrain_consumer_running = False

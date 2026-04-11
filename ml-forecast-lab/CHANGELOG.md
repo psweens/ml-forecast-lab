@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.8.4
+
+### Bugfix
+
+- **Global training lock prevents all concurrent training** — a single
+  `asyncio.Lock` now serialises benchmarks (web UI), scheduled retrains,
+  and manual retrain triggers. Previously these three code paths had
+  independent queues that could overlap (e.g. a scheduled retrain
+  starting while a benchmark was running).
+
 ## 2.8.3
 
 ### Improvement
