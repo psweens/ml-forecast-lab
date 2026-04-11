@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.8.3
+
+### Improvement
+
+- **No automatic retrain on restart/update** — production experiments
+  no longer force an immediate retrain when the add-on starts. The
+  first retrain waits for the normal `retrain_every` schedule.
+  Benchmark results are restored from SQLite, and forecasts gracefully
+  skip until a cached model is available. Users can still trigger a
+  manual retrain from the web UI at any time.
+
 ## 2.8.2
 
 ### Bugfix: scheduled retrains now queue sequentially
