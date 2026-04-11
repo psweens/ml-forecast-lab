@@ -49,7 +49,7 @@
                     <span class="field-value monospace">{{ exp.target_entity }}</span>
                 </div>
 
-                {% if exp.best_model %}
+                {% if exp.best_model and exp.name not in running_experiments %}
                 <div class="card-field">
                     <span class="field-label">{% if exp.mode == 'production' %}Production Model{% else %}Best Model{% endif %}</span>
                     <span class="field-value color-accent font-bold">{{ exp.best_model }}</span>
