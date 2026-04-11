@@ -141,6 +141,12 @@
                         title="Stops after current epoch completes">
                     Stop Training
                 </button>
+                {% elif queued_experiments.get(exp.name) %}
+                <button class="btn flex-center nowrap" style="font-size:0.85rem;background:var(--warning);color:var(--bg-primary);"
+                        onclick="stopTraining('{{ exp.name }}', this)"
+                        title="Remove from queue">
+                    Queued (#{{ queued_experiments[exp.name] }})
+                </button>
                 {% elif exp.mode == 'production' %}
                 <button class="btn btn-success flex-center nowrap" style="font-size:0.85rem;"
                         onclick="toggleMode('{{ exp.name }}', this)">

@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.8.0
+
+### Feature: sequential training queue
+
+- **Experiments now queue instead of running in parallel** — clicking
+  Run Pipeline on multiple experiments queues them and runs one at a
+  time, preventing memory exhaustion on constrained hardware (e.g. RPi).
+- **Dashboard shows queue position** — queued experiments display an
+  amber "Queued (#N)" button. Clicking it removes the experiment from
+  the queue.
+- **Stop Training handles queued experiments** — removes from queue
+  if not yet started, or cancels the running task if in progress.
+
 ## 2.7.6
 
 ### Bugfix: Stop Training leaves UI stuck in loading state

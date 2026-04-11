@@ -270,6 +270,9 @@ class AppState:
         self.retrain_callback = None  # Set by main app
         self.stop_training_callback = None  # Set by main app
         self.running_benchmarks: set = set()
+        self.training_queue: List[Dict] = []  # Queue of pending pipeline requests
+        self._queue_processing: bool = False
+        self._pipeline_tasks: Dict[str, Any] = {}
         self.history_db = None  # Set by main app for forecast accuracy queries
         self.last_update: Optional[datetime] = None
         self.next_update_seconds: Optional[int] = None
@@ -285,6 +288,21 @@ class AppState:
     def is_benchmark_running(self, experiment_name: str) -> bool:
         """Check if benchmark is running."""
         return experiment_name in self.running_benchmarks
+
+    def get_queue_position(self, experiment_name: str) -> int:
+        """Get 1-based position in queue, or 0 if not queued."""
+        for i, item in enumerate(self.training_queue):
+            if item["name"] == experiment_name:
+                return i + 1
+        return 0
+
+    def remove_from_queue(self, experiment_name: str) -> bool:
+        """Remove experiment from queue. Returns True if it was queued."""
+        for i, item in enumerate(self.training_queue):
+            if item["name"] == experiment_name:
+                self.training_queue.pop(i)
+                return True
+        return False
 
 
 def create_app(config_path: Optional[Path] = None) -> FastAPI:
@@ -555,6 +573,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 ),
                 "training_summaries": training_summaries,
                 "running_experiments": app.state.appstate.running_benchmarks,
+                "queued_experiments": {
+                    item["name"]: i + 1
+                    for i, item in enumerate(app.state.appstate.training_queue)
+                },
             },
         )
 
@@ -1191,9 +1213,14 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     @app.post("/experiment/{name}/stop-training")
     async def stop_training(name: str):
-        """Stop a running training/tuning task for an experiment."""
+        """Stop a running training/tuning task, or remove from queue."""
         if name not in app.state.appstate.experiment_statuses:
             raise HTTPException(status_code=404, detail="Experiment not found")
+
+        # Check if experiment is queued (not yet started)
+        if app.state.appstate.remove_from_queue(name):
+            logger.info(f"Removed {name} from training queue")
+            return JSONResponse(content={"success": True, "was_queued": True})
 
         cb = app.state.appstate.stop_training_callback
         if not cb:
@@ -2248,15 +2275,24 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
           {"steps": ["benchmark"]}                     — default: benchmark only
           {"steps": ["benchmark", "covariate_analysis"]} — benchmark then covariate analysis
 
+        Experiments are queued and run one at a time to avoid memory
+        exhaustion on constrained hardware (e.g. RPi).
         Returns 202 Accepted. Progress is streamed via the SSE endpoint.
         """
         if name not in app.state.appstate.experiment_statuses:
             raise HTTPException(status_code=404, detail="Experiment not found")
 
-        if app.state.appstate.is_benchmark_running(name):
+        appstate = app.state.appstate
+
+        if appstate.is_benchmark_running(name):
             return JSONResponse(
                 status_code=409,
                 content={"error": "Pipeline already running for this experiment"},
+            )
+        if appstate.get_queue_position(name) > 0:
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Experiment is already queued"},
             )
 
         steps = ["benchmark"]
@@ -2266,56 +2302,79 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception:
             pass
 
-        import asyncio as _aio
-
-        if not getattr(app.state.appstate, 'benchmark_callback', None):
+        if not getattr(appstate, 'benchmark_callback', None):
             raise HTTPException(status_code=501, detail="Benchmark callback not registered")
 
-        # Clear stale event history and mark as running so the UI can
-        # detect an active pipeline when the Training tab is re-opened.
-        from ml_forecast_lab.training_events import TrainingEventBus
-        TrainingEventBus.get_instance().clear_history(name)
-        app.state.appstate.start_benchmark(name)
+        # Add to queue
+        appstate.training_queue.append({"name": name, "steps": steps})
+        position = appstate.get_queue_position(name)
+        logger.info(f"Queued pipeline for {name} (position {position})")
 
-        # Run the full pipeline as a background task
-        async def _pipeline():
-            try:
-                # Benchmark step
-                if "benchmark" in steps:
-                    await app.state.appstate.benchmark_callback(name)
-                # Ensemble step
-                if "ensemble" in steps and getattr(app.state.appstate, 'ensemble_callback', None):
-                    await app.state.appstate.ensemble_callback(name)
-                # Covariate analysis step
-                if "covariate_analysis" in steps and app.state.appstate.covariate_analysis_callback:
-                    await app.state.appstate.covariate_analysis_callback(name, "all")
-            except Exception as e:
-                logger.error(f"Pipeline failed for {name}: {e}", exc_info=True)
-            finally:
-                app.state.appstate.end_benchmark(name)
-
-        _task = _aio.create_task(_pipeline())
-        # Track for stop-training support (if the main app registered the dict)
-        if hasattr(app.state.appstate, 'stop_training_callback'):
-            # The main app tracks via _running_tasks; register so the
-            # _stop_training_trigger callback can find and cancel this task.
-            # We store on appstate as a simple dict keyed by experiment name.
-            if not hasattr(app.state.appstate, '_pipeline_tasks'):
-                app.state.appstate._pipeline_tasks = {}
-            app.state.appstate._pipeline_tasks[name] = _task
-            _task.add_done_callback(
-                lambda t, n=name: app.state.appstate._pipeline_tasks.pop(n, None)
-            )
+        # Kick the queue processor
+        import asyncio as _aio
+        _aio.ensure_future(_process_training_queue(app))
 
         return JSONResponse(
             status_code=202,
             content={
-                "message": "Pipeline started",
+                "message": "Pipeline queued" if position > 1 else "Pipeline started",
                 "experiment": name,
                 "steps": steps,
-                "status": "running",
+                "queue_position": position,
+                "status": "queued" if position > 1 else "running",
             },
         )
+
+    async def _process_training_queue(app):
+        """Process the training queue one experiment at a time."""
+        appstate = app.state.appstate
+        if appstate._queue_processing:
+            return  # Another processor is already running
+        appstate._queue_processing = True
+        try:
+            while appstate.training_queue:
+                item = appstate.training_queue.pop(0)
+                name = item["name"]
+                steps = item["steps"]
+
+                # Skip if experiment was deleted while queued
+                if name not in appstate.experiment_statuses:
+                    continue
+
+                from ml_forecast_lab.training_events import TrainingEventBus
+                TrainingEventBus.get_instance().clear_history(name)
+                appstate.start_benchmark(name)
+
+                import asyncio as _aio
+
+                async def _run_pipeline(exp_name, exp_steps):
+                    try:
+                        if "benchmark" in exp_steps:
+                            await appstate.benchmark_callback(exp_name)
+                        if "ensemble" in exp_steps and getattr(appstate, 'ensemble_callback', None):
+                            await appstate.ensemble_callback(exp_name)
+                        if "covariate_analysis" in exp_steps and appstate.covariate_analysis_callback:
+                            await appstate.covariate_analysis_callback(exp_name, "all")
+                    except Exception as e:
+                        logger.error(f"Pipeline failed for {exp_name}: {e}", exc_info=True)
+                    finally:
+                        appstate.end_benchmark(exp_name)
+
+                task = _aio.create_task(_run_pipeline(name, steps))
+                appstate._pipeline_tasks[name] = task
+                task.add_done_callback(
+                    lambda t, n=name: appstate._pipeline_tasks.pop(n, None)
+                )
+
+                # Wait for this pipeline to finish before starting the next
+                try:
+                    await task
+                except _aio.CancelledError:
+                    logger.info(f"Pipeline for {name} was cancelled, moving to next in queue")
+                except Exception:
+                    pass
+        finally:
+            appstate._queue_processing = False
 
     @app.get("/api/training/history/{name}")
     async def training_history(name: str):
