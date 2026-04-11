@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.7.5
+
+### Feature: persist benchmark results across restarts
+
+- **Benchmark results now survive add-on updates and restarts** — results
+  are serialised to SQLite (`benchmark_results` table) as JSON after each
+  benchmark run. On startup, stored results are restored into memory along
+  with `best_model`, `selected_model`, and `last_benchmark_status`.
+- Benchmark data is cleaned up when an experiment is deleted.
+
 ## 2.7.4
 
 ### Improvement

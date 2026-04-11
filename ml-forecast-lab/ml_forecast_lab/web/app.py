@@ -1281,11 +1281,12 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         app.state.appstate.covariate_analysis_results.pop(name, None)
         app.state.appstate.tuning_results.pop(name, None)
 
-        # Clean up forecast log
+        # Clean up persistent data
         db = app.state.appstate.history_db
         if db:
             try:
                 db.delete_forecast_log(name)
+                db.delete_benchmark_result(name)
             except Exception:
                 pass
 

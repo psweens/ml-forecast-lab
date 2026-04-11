@@ -169,6 +169,7 @@ class MLForecastLabApp:
             db_path = Path("/data/ml_forecast_lab/history.db")
             self.history_db = HistoryDB(db_path)
             self.history_db.ensure_forecast_log_table()
+            self.history_db.ensure_benchmark_table()
             logger.info(f"HistoryDB initialised at {db_path}")
 
             # Initialise CovariateResolver
@@ -253,6 +254,26 @@ class MLForecastLabApp:
                 self.web_app.state.appstate.experiment_statuses[exp_cfg.name] = (
                     status
                 )
+
+            # Restore benchmark results from SQLite
+            if self.history_db:
+                from ml_forecast_lab.web.app import BenchmarkResult as WebBenchmarkResult
+                saved = self.history_db.load_all_benchmark_results()
+                for exp_name, json_str in saved.items():
+                    try:
+                        br = WebBenchmarkResult.model_validate_json(json_str)
+                        self.web_app.state.appstate.benchmark_results[exp_name] = br
+                        # Restore best_model / selected_model in status
+                        st = self.web_app.state.appstate.experiment_statuses.get(exp_name)
+                        if st and br.best_model_name:
+                            st.best_model = br.best_model_name
+                            if not st.selected_model:
+                                st.selected_model = br.best_model_name
+                            st.last_benchmark_status = br.status
+                            st.last_benchmark_timestamp = br.timestamp
+                        logger.info(f"  Restored benchmark results for {exp_name}")
+                    except Exception as e:
+                        logger.warning(f"  Failed to restore benchmark for {exp_name}: {e}")
 
             config = uvicorn.Config(
                 app=self.web_app,
@@ -777,6 +798,15 @@ class MLForecastLabApp:
         )
 
         self.web_app.state.appstate.benchmark_results[exp_cfg.name] = web_result
+
+        # Persist to SQLite so results survive restarts
+        if self.history_db:
+            try:
+                self.history_db.save_benchmark_result(
+                    exp_cfg.name, web_result.model_dump_json()
+                )
+            except Exception as e:
+                logger.warning(f"Failed to persist benchmark result: {e}")
 
         # Update experiment status with best model; default selected_model
         # to rank-1 if the user hasn't manually chosen one yet.

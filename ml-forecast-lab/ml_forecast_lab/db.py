@@ -438,6 +438,78 @@ class HistoryDB:
             self.conn.rollback()
             return 0
 
+    # ------------------------------------------------------------------
+    # Benchmark results persistence
+    # ------------------------------------------------------------------
+
+    def ensure_benchmark_table(self) -> None:
+        """Create the benchmark_results table if it doesn't exist."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS benchmark_results (
+                experiment TEXT PRIMARY KEY,
+                data       TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        self.conn.commit()
+        logger.debug("Ensured benchmark_results table")
+
+    def save_benchmark_result(self, experiment: str, json_data: str) -> None:
+        """
+        Upsert a benchmark result as a JSON blob.
+
+        Parameters
+        ----------
+        experiment : str
+            Experiment name (primary key).
+        json_data : str
+            JSON-serialised BenchmarkResult.
+        """
+        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                "INSERT OR REPLACE INTO benchmark_results "
+                "(experiment, data, updated_at) VALUES (?, ?, ?)",
+                (experiment, json_data, now_str),
+            )
+            self.conn.commit()
+            logger.debug(f"Saved benchmark result for {experiment}")
+        except sqlite3.Error as e:
+            logger.error(f"Error saving benchmark result for {experiment}: {e}")
+            self.conn.rollback()
+
+    def load_all_benchmark_results(self) -> dict:
+        """
+        Load all stored benchmark results.
+
+        Returns
+        -------
+        dict
+            Mapping of experiment name → JSON string.
+        """
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("SELECT experiment, data FROM benchmark_results")
+            return {row[0]: row[1] for row in cursor.fetchall()}
+        except sqlite3.Error as e:
+            logger.error(f"Error loading benchmark results: {e}")
+            return {}
+
+    def delete_benchmark_result(self, experiment: str) -> None:
+        """Delete stored benchmark result for an experiment."""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                "DELETE FROM benchmark_results WHERE experiment = ?",
+                (experiment,),
+            )
+            self.conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"Error deleting benchmark result for {experiment}: {e}")
+            self.conn.rollback()
+
     def close(self) -> None:
         """Close database connection."""
         if self.conn:
