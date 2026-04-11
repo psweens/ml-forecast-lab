@@ -2233,12 +2233,17 @@ window.showTab = function(el) {
             }
         });
 
-        if (!hasEnd) {
-            pipelineRunning = true;
+        if (!hasEnd && pipelineRunning) {
+            // Only show loading state if the server also says it's running.
+            // Prevents stuck spinner when stop-training cleared the running
+            // flag but the event history is missing the pipeline_end event.
             var btn = document.getElementById('btn-run');
             btn.disabled = true; btn.classList.add('btn-loading');
             document.getElementById('btn-run-text').textContent = 'Running...';
             connectSSE(expName, true);
+        } else if (!hasEnd && !pipelineRunning) {
+            // History is stale (e.g. stop-training bug) — reset cleanly
+            pipelineRunning = false;
         }
     }
 

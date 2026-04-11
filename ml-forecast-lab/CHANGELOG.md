@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.7.6
+
+### Bugfix: Stop Training leaves UI stuck in loading state
+
+- **Fixed wrong keyword argument in stop-training callback** — the
+  `pipeline_end` event was constructed with `experiment=` instead of
+  `experiment_name=`, causing a silent `TypeError`. The event was never
+  stored in the training event history, so on page reload the JS
+  replayed a `pipeline_start` with no matching `pipeline_end` and
+  locked the Run Pipeline button in a permanent loading spinner.
+- **Added server-side guard in replay logic** — the JS now checks the
+  server's `is_running` flag before entering loading state. Even if the
+  event history is stale, the UI won't show a stuck spinner when the
+  server knows training has stopped.
+
 ## 2.7.5
 
 ### Feature: persist benchmark results across restarts

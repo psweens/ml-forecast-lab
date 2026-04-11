@@ -402,9 +402,9 @@ class MLForecastLabApp:
                     try:
                         from ml_forecast_lab.training_events import TrainingEventBus, TrainingEvent
                         TrainingEventBus.get_instance().publish(TrainingEvent(
-                            experiment=experiment_name,
                             event_type="pipeline_end",
-                            data={"status": "cancelled"},
+                            experiment_name=experiment_name,
+                            message="Training cancelled by user",
                         ))
                     except Exception:
                         pass
