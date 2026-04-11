@@ -1052,7 +1052,7 @@
                     {% set cell = covariate_analysis.results.get(label, {}).get(model) %}
                     <td style="padding:0.5rem 0.75rem;">
                         {% if cell %}
-                        {% macro pct_color(val) %}{% if val is not none %}{% if val > 2 %}#e74c3c{% elif val < -2 %}#2ecc71{% else %}var(--text-secondary){% endif %}{% endif %}{% endmacro %}
+                        {% macro pct_color(val) %}{% if val is not none %}{% if val > 2 %}#2ecc71{% elif val < -2 %}#e74c3c{% else %}var(--text-secondary){% endif %}{% endif %}{% endmacro %}
                         <table style="border:none;border-collapse:collapse;width:100%;font-size:0.82rem;">
                             <tr style="border:none;">
                                 <td style="border:none;padding:0.1rem 0;color:var(--text-secondary);width:3rem;">MAE</td>
