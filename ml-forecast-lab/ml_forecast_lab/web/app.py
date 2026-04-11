@@ -270,6 +270,7 @@ class AppState:
         self.retrain_callback = None  # Set by main app
         self.stop_training_callback = None  # Set by main app
         self.running_benchmarks: set = set()
+        self.history_db = None  # Set by main app for forecast accuracy queries
         self.last_update: Optional[datetime] = None
         self.next_update_seconds: Optional[int] = None
 
@@ -1280,6 +1281,14 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         app.state.appstate.covariate_analysis_results.pop(name, None)
         app.state.appstate.tuning_results.pop(name, None)
 
+        # Clean up forecast log
+        db = app.state.appstate.history_db
+        if db:
+            try:
+                db.delete_forecast_log(name)
+            except Exception:
+                pass
+
         logger.info(f"Deleted experiment '{name}'")
         return JSONResponse(content={"success": True, "redirect": "/"})
 
@@ -1327,6 +1336,37 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             ]
 
         return JSONResponse(content=entities[:50])
+
+    # ---- Forecast accuracy (evolution log) ----
+
+    @app.get("/experiment/{name}/forecast-accuracy")
+    async def forecast_accuracy(name: str, request: Request):
+        """Return forecast accuracy data grouped by lead time."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        db = app.state.appstate.history_db
+        if not db:
+            return JSONResponse(content={"error": "Database not available"}, status_code=503)
+
+        # Find the experiment config to get the target entity table name
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"error": "Config not found"}, status_code=503)
+
+        from ml_forecast_lab.config import load_config
+        try:
+            cfg = load_config(config_path)
+            exp_cfg = next((e for e in cfg.experiments if e.name == name), None)
+            if not exp_cfg:
+                return JSONResponse(content={"error": "Experiment not in config"}, status_code=404)
+            actuals_table = db.safe_table_name(exp_cfg.target_entity)
+        except Exception as e:
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+        days = int(request.query_params.get("days", "30"))
+        result = db.get_forecast_accuracy(name, actuals_table, max_age_days=days)
+        return JSONResponse(content=result)
 
     @app.post("/experiment/{name}/toggle-mode")
     async def toggle_mode(name: str):

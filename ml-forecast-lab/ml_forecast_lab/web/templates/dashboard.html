@@ -174,8 +174,7 @@
                 <div>
                     <label class="field-label" style="display:block;margin-bottom:0.3rem;">Name</label>
                     <input type="text" class="setting-input" id="new-exp-name" required
-                           placeholder="e.g. hot_water_demand" pattern="[a-z][a-z0-9_]{0,63}"
-                           title="Lowercase letters, numbers, and underscores. Must start with a letter.">
+                           placeholder="e.g. Hot Water Demand">
                 </div>
                 <div class="entity-search-wrapper">
                     <label class="field-label" style="display:block;margin-bottom:0.3rem;">Target Entity</label>
@@ -288,13 +287,22 @@
         if (e.target === this) closeNewExperiment();
     });
 
+    function slugify(s) {
+        return s.toLowerCase().trim()
+            .replace(/[\s\-]+/g, '_')       // spaces/hyphens → underscores
+            .replace(/[^a-z0-9_]/g, '')     // strip invalid chars
+            .replace(/^[0-9_]+/, '')         // must start with a letter
+            .slice(0, 64);
+    }
+
     function createExperiment(e) {
         e.preventDefault();
-        var name = document.getElementById('new-exp-name').value.trim();
+        var rawName = document.getElementById('new-exp-name').value.trim();
+        var name = slugify(rawName);
         var target = document.getElementById('new-exp-target').value.trim();
         if (!name || !target) { mlfl.toast('Name and target entity are required', 'error'); return; }
         if (!/^[a-z][a-z0-9_]{0,63}$/.test(name)) {
-            mlfl.toast('Name must be lowercase letters, numbers, underscores and start with a letter', 'error');
+            mlfl.toast('Could not create a valid name from "' + rawName + '"', 'error');
             return;
         }
 

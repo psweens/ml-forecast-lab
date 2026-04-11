@@ -176,6 +176,268 @@ class HistoryDB:
             self.conn.rollback()
             return 0
 
+    # ------------------------------------------------------------------
+    # Forecast evolution log
+    # ------------------------------------------------------------------
+
+    def ensure_forecast_log_table(self) -> None:
+        """Create the forecast_log table if it doesn't exist."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS forecast_log (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                experiment   TEXT    NOT NULL,
+                model_name   TEXT    NOT NULL,
+                issued_at    TEXT    NOT NULL,
+                target_dt    TEXT    NOT NULL,
+                lead_minutes INTEGER NOT NULL,
+                predicted    REAL    NOT NULL,
+                forecast_type TEXT   NOT NULL DEFAULT 'cached'
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_flog_exp_target "
+            "ON forecast_log(experiment, target_dt)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_flog_exp_issued "
+            "ON forecast_log(experiment, issued_at)"
+        )
+        self.conn.commit()
+        logger.debug("Ensured forecast_log table")
+
+    def log_forecast(
+        self,
+        experiment: str,
+        issued_at: datetime,
+        targets: list,
+        predictions: list,
+        model_name: str,
+        forecast_type: str = "cached",
+    ) -> int:
+        """
+        Bulk-insert a forecast snapshot into the log.
+
+        Parameters
+        ----------
+        experiment : str
+            Experiment name.
+        issued_at : datetime
+            Wall-clock UTC time the forecast was produced.
+        targets : list of datetime or Timestamp
+            Future timestamps being predicted.
+        predictions : list of float
+            Predicted values (same length as targets).
+        model_name : str
+            Name of the model that produced the forecast.
+        forecast_type : str
+            'retrain' or 'cached'.
+
+        Returns
+        -------
+        int
+            Number of rows inserted.
+        """
+        issued_str = issued_at.strftime("%Y-%m-%d %H:%M:%S")
+        rows = []
+        for ts, val in zip(targets, predictions):
+            target_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+            lead_min = int((ts - issued_at).total_seconds() / 60)
+            rows.append((
+                experiment, model_name, issued_str, target_str,
+                lead_min, float(val), forecast_type,
+            ))
+        cursor = self.conn.cursor()
+        try:
+            cursor.executemany(
+                "INSERT INTO forecast_log "
+                "(experiment, model_name, issued_at, target_dt, lead_minutes, predicted, forecast_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            self.conn.commit()
+            return cursor.rowcount
+        except sqlite3.Error as e:
+            logger.error(f"Error logging forecast for {experiment}: {e}")
+            self.conn.rollback()
+            return 0
+
+    def get_forecast_accuracy(
+        self,
+        experiment: str,
+        actuals_table: str,
+        max_age_days: int = 30,
+    ) -> dict:
+        """
+        Compute forecast accuracy by lead time.
+
+        Joins forecast_log predictions against the actuals table and
+        returns MAE/RMSE grouped by lead-time buckets, plus revision
+        improvement data (first vs last forecast for each target).
+
+        Parameters
+        ----------
+        experiment : str
+            Experiment name.
+        actuals_table : str
+            SQL-safe table name for the actuals.
+        max_age_days : int
+            Only consider forecasts issued in the last N days.
+
+        Returns
+        -------
+        dict with keys: lead_time_curve, revision_improvement,
+              total_logged, actuals_matched, date_range
+        """
+        cursor = self.conn.cursor()
+        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        cutoff_str = (
+            datetime.utcnow() - pd.Timedelta(days=max_age_days)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Check actuals table exists
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (actuals_table,),
+        )
+        if not cursor.fetchone():
+            return {"error": "No actuals data available yet"}
+
+        # --- Lead-time accuracy curve ---
+        # Bucket lead_minutes into 30-min bins for cleaner charts
+        try:
+            cursor.execute(f"""
+                SELECT
+                    CAST((fl.lead_minutes / 30) * 30 AS INTEGER) AS lead_bucket,
+                    AVG(ABS(fl.predicted - a.value)) AS mae,
+                    SQRT(AVG((fl.predicted - a.value) * (fl.predicted - a.value))) AS rmse,
+                    COUNT(*) AS n
+                FROM forecast_log fl
+                INNER JOIN {actuals_table} a
+                    ON SUBSTR(a.ds, 1, 19) = fl.target_dt
+                WHERE fl.experiment = ?
+                  AND fl.target_dt <= ?
+                  AND fl.issued_at >= ?
+                GROUP BY lead_bucket
+                ORDER BY lead_bucket
+            """, (experiment, now_str, cutoff_str))
+            lead_rows = cursor.fetchall()
+        except sqlite3.Error as e:
+            logger.error(f"Forecast accuracy query failed: {e}")
+            return {"error": str(e)}
+
+        lead_time_curve = {
+            "lead_minutes": [r[0] for r in lead_rows],
+            "mae": [round(r[1], 4) for r in lead_rows],
+            "rmse": [round(r[2], 4) for r in lead_rows],
+            "sample_count": [r[3] for r in lead_rows],
+        }
+
+        # --- Revision improvement ---
+        # Compare the FIRST forecast for each target_dt vs the LAST
+        try:
+            cursor.execute(f"""
+                WITH ranked AS (
+                    SELECT
+                        fl.target_dt,
+                        fl.lead_minutes,
+                        fl.predicted,
+                        a.value AS actual,
+                        ROW_NUMBER() OVER (PARTITION BY fl.target_dt ORDER BY fl.issued_at ASC) AS rn_first,
+                        ROW_NUMBER() OVER (PARTITION BY fl.target_dt ORDER BY fl.issued_at DESC) AS rn_last
+                    FROM forecast_log fl
+                    INNER JOIN {actuals_table} a
+                        ON SUBSTR(a.ds, 1, 19) = fl.target_dt
+                    WHERE fl.experiment = ?
+                      AND fl.target_dt <= ?
+                      AND fl.issued_at >= ?
+                ),
+                first_last AS (
+                    SELECT target_dt,
+                           MAX(CASE WHEN rn_first = 1 THEN predicted END) AS first_pred,
+                           MAX(CASE WHEN rn_last  = 1 THEN predicted END) AS last_pred,
+                           MAX(actual) AS actual
+                    FROM ranked
+                    WHERE rn_first = 1 OR rn_last = 1
+                    GROUP BY target_dt
+                    HAVING first_pred IS NOT NULL AND last_pred IS NOT NULL
+                       AND first_pred != last_pred
+                )
+                SELECT
+                    AVG(ABS(first_pred - actual)) AS first_mae,
+                    AVG(ABS(last_pred  - actual)) AS last_mae,
+                    COUNT(*) AS n
+                FROM first_last
+            """, (experiment, now_str, cutoff_str))
+            rev_row = cursor.fetchone()
+        except sqlite3.Error as e:
+            logger.warning(f"Revision improvement query failed: {e}")
+            rev_row = None
+
+        revision = {}
+        if rev_row and rev_row[2] > 0:
+            first_mae = round(rev_row[0], 4)
+            last_mae = round(rev_row[1], 4)
+            improvement = round((1 - last_mae / first_mae) * 100, 1) if first_mae > 0 else 0
+            revision = {
+                "first_forecast_mae": first_mae,
+                "latest_forecast_mae": last_mae,
+                "improvement_pct": improvement,
+                "sample_count": rev_row[2],
+            }
+
+        # --- Summary stats ---
+        cursor.execute(
+            "SELECT COUNT(*), MIN(issued_at), MAX(issued_at) "
+            "FROM forecast_log WHERE experiment = ? AND issued_at >= ?",
+            (experiment, cutoff_str),
+        )
+        stats_row = cursor.fetchone()
+
+        return {
+            "experiment": experiment,
+            "lead_time_curve": lead_time_curve,
+            "revision_improvement": revision,
+            "total_logged": stats_row[0] if stats_row else 0,
+            "date_range": {
+                "from": stats_row[1] if stats_row else None,
+                "to": stats_row[2] if stats_row else None,
+            },
+        }
+
+    def cleanup_forecast_log(self, experiment: str, oldest_datetime: datetime) -> int:
+        """Delete forecast log entries older than the specified datetime."""
+        oldest_str = oldest_datetime.strftime("%Y-%m-%d %H:%M:%S")
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                "DELETE FROM forecast_log WHERE experiment = ? AND issued_at < ?",
+                (experiment, oldest_str),
+            )
+            self.conn.commit()
+            deleted = cursor.rowcount
+            if deleted:
+                logger.info(f"Pruned {deleted} old forecast_log rows for {experiment}")
+            return deleted
+        except sqlite3.Error as e:
+            logger.error(f"Error pruning forecast_log for {experiment}: {e}")
+            self.conn.rollback()
+            return 0
+
+    def delete_forecast_log(self, experiment: str) -> int:
+        """Delete all forecast log entries for an experiment."""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                "DELETE FROM forecast_log WHERE experiment = ?", (experiment,)
+            )
+            self.conn.commit()
+            return cursor.rowcount
+        except sqlite3.Error as e:
+            logger.error(f"Error deleting forecast_log for {experiment}: {e}")
+            self.conn.rollback()
+            return 0
+
     def close(self) -> None:
         """Close database connection."""
         if self.conn:

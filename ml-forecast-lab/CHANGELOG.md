@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.7.0
+
+### Feature: forecast evolution log & accuracy tracking
+
+- **Forecast evolution log** — every production forecast is now logged to
+  SQLite (`forecast_log` table) with the wall-clock issue time, each
+  predicted target timestamp, lead time in minutes, model name, and whether
+  it was a retrain or cached-model forecast.
+- **Forecast Accuracy tab** — new tab on production experiment pages showing:
+  - Lead-time vs MAE/RMSE chart (how accuracy degrades with longer horizons)
+  - Revision improvement card (does re-forecasting via `forecast_every`
+    actually improve accuracy?)
+  - Total logged points and date range
+- **Auto-slugify experiment names** — the Create Experiment modal now accepts
+  human-readable names (e.g. "Optimised Solar") and auto-converts to valid
+  slugs (`optimised_solar`). Removed the strict browser pattern validation.
+- **Removed uppercase labels** — `.field-label` no longer forces uppercase
+  text-transform across the UI.
+- Forecast log is pruned alongside history cleanup and deleted when an
+  experiment is removed.
+
 ## 2.6.3
 
 ### Fix: production forecast sensors never published

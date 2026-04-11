@@ -168,6 +168,7 @@ class MLForecastLabApp:
 
             db_path = Path("/data/ml_forecast_lab/history.db")
             self.history_db = HistoryDB(db_path)
+            self.history_db.ensure_forecast_log_table()
             logger.info(f"HistoryDB initialised at {db_path}")
 
             # Initialise CovariateResolver
@@ -391,6 +392,7 @@ class MLForecastLabApp:
                 return False
 
             self.web_app.state.appstate.stop_training_callback = _stop_training_trigger
+            self.web_app.state.appstate.history_db = self.history_db
 
             # Run in a background task
             asyncio.create_task(self.server.serve())
@@ -2223,6 +2225,24 @@ class MLForecastLabApp:
             for ts, val in zip(ds_future_aware, y_pred)
         ]
         next_val = round(float(y_pred[0]), 4)
+
+        # --- Log forecast evolution (non-blocking) ---------------------------
+        if self.history_db and exp_cfg.mode == "production":
+            try:
+                forecast_type = (
+                    "retrain" if extra_main_attrs.get("train_time_seconds")
+                    else "cached"
+                )
+                self.history_db.log_forecast(
+                    experiment=exp_cfg.name,
+                    issued_at=datetime.now(timezone.utc),
+                    targets=ds_future_aware.tolist(),
+                    predictions=y_pred.tolist(),
+                    model_name=model_name,
+                    forecast_type=forecast_type,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to log forecast evolution: {e}")
 
         # --- 1. Main forecast sensor (always published) ----------------------
         main_attrs = {

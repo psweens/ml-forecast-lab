@@ -169,7 +169,7 @@ main { flex: 1; }
     margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border);
 }
 .card-field:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
-.field-label { font-size: 0.9rem; color: var(--text-secondary); font-weight: 600; text-transform: uppercase; }
+.field-label { font-size: 0.9rem; color: var(--text-secondary); font-weight: 600; }
 .field-value { color: var(--text-primary); text-align: right; flex: 1; margin-left: 1rem; }
 .monospace { font-family: 'Courier New', monospace; font-size: 0.85rem; word-break: break-all; }
 .card-footer { padding: 1.5rem; border-top: 1px solid var(--border); }

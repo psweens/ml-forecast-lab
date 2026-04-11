@@ -77,6 +77,9 @@
     <a data-tab="sec-covariate-analysis" onclick="showTab(this)">Covariate Analysis</a>
     <a data-tab="sec-tuning" onclick="showTab(this)">Tuning</a>
     {% endif %}
+    {% if experiment.mode == 'production' %}
+    <a data-tab="sec-forecast-accuracy" onclick="showTab(this)">Forecast Accuracy</a>
+    {% endif %}
 </nav>
 
 <!-- ====== TAB: Settings ====== -->
@@ -1104,6 +1107,63 @@
 </section>
 {% endif %}
 
+<!-- ====== TAB: Forecast Accuracy ====== -->
+{% if experiment.mode == 'production' %}
+<div class="tab-section" id="sec-forecast-accuracy" style="display:none;">
+<section class="section">
+    <h2>Forecast Accuracy</h2>
+    <p style="color:var(--text-secondary);margin-bottom:1rem;">
+        How prediction accuracy changes with lead time, and whether re-forecasting improves results.
+    </p>
+
+    <!-- Revision summary card -->
+    <div id="accuracy-revision-card" style="display:none;margin-bottom:1.5rem;">
+        <div class="settings-group" style="display:flex;gap:2rem;flex-wrap:wrap;align-items:center;">
+            <div style="text-align:center;flex:1;min-width:140px;">
+                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">First forecast MAE</div>
+                <div id="rev-first-mae" style="font-size:1.5rem;font-weight:700;color:var(--text-primary);">—</div>
+            </div>
+            <div style="font-size:1.5rem;color:var(--text-secondary);">→</div>
+            <div style="text-align:center;flex:1;min-width:140px;">
+                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Latest forecast MAE</div>
+                <div id="rev-last-mae" style="font-size:1.5rem;font-weight:700;color:var(--text-primary);">—</div>
+            </div>
+            <div style="text-align:center;flex:1;min-width:140px;">
+                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Improvement</div>
+                <div id="rev-improvement" style="font-size:1.5rem;font-weight:700;">—</div>
+            </div>
+            <div style="text-align:center;flex:1;min-width:100px;">
+                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Samples</div>
+                <div id="rev-samples" style="font-size:1.5rem;font-weight:700;color:var(--text-secondary);">—</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Lead-time vs accuracy chart -->
+    <div class="settings-group">
+        <h3 class="settings-group-title">Accuracy by lead time</h3>
+        <div id="accuracy-lead-chart" style="width:100%;height:380px;"></div>
+    </div>
+
+    <!-- Info / empty state -->
+    <div id="accuracy-empty" style="display:none;">
+        <div class="empty-state">
+            <span class="empty-state-icon">📊</span>
+            <p>No forecast accuracy data yet.</p>
+            <p class="empty-state-hint">Data accumulates automatically each time a production forecast runs.</p>
+        </div>
+    </div>
+
+    <div id="accuracy-stats" style="display:none;margin-top:1rem;">
+        <p style="color:var(--text-secondary);font-size:0.85rem;">
+            <span id="accuracy-total-logged">0</span> forecast points logged
+            <span id="accuracy-date-range"></span>
+        </p>
+    </div>
+</section>
+</div>
+{% endif %}
+
 {% endblock %}
 
 {% block scripts %}
@@ -1526,6 +1586,76 @@ window.showTab = function(el) {
     };
 
     queueChart('sec-tuning', function() { window.renderTuningHoldout(false); });
+    {% endif %}
+
+    // ======== Forecast accuracy chart ========
+    {% if experiment.mode == 'production' %}
+    queueChart('sec-forecast-accuracy', function() {
+        fetch(BASE + '/experiment/' + EXP_NAME + '/forecast-accuracy')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error || !data.lead_time_curve || !data.lead_time_curve.lead_minutes.length) {
+                document.getElementById('accuracy-empty').style.display = 'block';
+                return;
+            }
+
+            // Lead-time vs accuracy chart
+            var ltc = data.lead_time_curve;
+            var xHours = ltc.lead_minutes.map(function(m) { return m / 60; });
+            var traces = [
+                {
+                    x: xHours, y: ltc.mae, name: 'MAE',
+                    type: 'scatter', mode: 'lines+markers',
+                    line: { color: '#ff6b6b', width: 2 },
+                    marker: { size: 4 },
+                    hovertemplate: '%{y:.3f} (n=%{customdata})<extra>MAE</extra>',
+                    customdata: ltc.sample_count,
+                },
+                {
+                    x: xHours, y: ltc.rmse, name: 'RMSE',
+                    type: 'scatter', mode: 'lines+markers',
+                    line: { color: '#4d96ff', width: 2, dash: 'dot' },
+                    marker: { size: 4 },
+                    hovertemplate: '%{y:.3f}<extra>RMSE</extra>',
+                },
+            ];
+            var layout = {
+                xaxis: { title: 'Lead time (hours)', color: '#b0b0b0', gridcolor: '#2d3561' },
+                yaxis: { title: 'Error{{ " (" + units + ")" if units else "" }}', color: '#b0b0b0', gridcolor: '#2d3561' },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#e0e0e0' },
+                legend: { x: 0.02, y: 0.98 },
+                margin: { t: 20, r: 30 },
+                colorway: PLOT_COLORWAY,
+            };
+            Plotly.newPlot('accuracy-lead-chart', traces, layout, { responsive: true });
+
+            // Revision improvement card
+            var rev = data.revision_improvement;
+            if (rev && rev.sample_count > 0) {
+                document.getElementById('accuracy-revision-card').style.display = 'block';
+                document.getElementById('rev-first-mae').textContent = rev.first_forecast_mae.toFixed(3);
+                document.getElementById('rev-last-mae').textContent = rev.latest_forecast_mae.toFixed(3);
+                var impEl = document.getElementById('rev-improvement');
+                impEl.textContent = (rev.improvement_pct > 0 ? '+' : '') + rev.improvement_pct.toFixed(1) + '%';
+                impEl.style.color = rev.improvement_pct > 0 ? 'var(--success)' : 'var(--error)';
+                document.getElementById('rev-samples').textContent = rev.sample_count.toLocaleString();
+            }
+
+            // Stats
+            document.getElementById('accuracy-stats').style.display = 'block';
+            document.getElementById('accuracy-total-logged').textContent = (data.total_logged || 0).toLocaleString();
+            if (data.date_range && data.date_range.from) {
+                document.getElementById('accuracy-date-range').textContent =
+                    ' · ' + data.date_range.from.slice(0, 10) + ' to ' + data.date_range.to.slice(0, 10);
+            }
+        })
+        .catch(function(err) {
+            console.error('Forecast accuracy load failed:', err);
+            document.getElementById('accuracy-empty').style.display = 'block';
+        });
+    });
     {% endif %}
 
     // ======== Feature importance charts ========
