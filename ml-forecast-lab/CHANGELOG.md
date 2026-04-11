@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.5.11
+
+### Fix: production retrain failures are now surfaced in the UI
+
+Three issues that made retrain/model-change failures hard to diagnose:
+
+**1. FAILED status was never set on the production retrain path.**
+`_retrain_single` caught exceptions and logged them, but never updated
+`last_benchmark_status` to `"failed"`. The dashboard badge stayed at its
+previous value (usually `"completed"`) even when the retrain crashed.
+Both `_retrain_single` and `_forecast_single` now set `"failed"` and
+store the error message on the `ExperimentStatus`.
+
+**2. The error message was invisible in the UI.**
+Added a `last_error` field to `ExperimentStatus` and an **Error** row
+on the dashboard card that appears whenever the status is `"failed"`.
+The next successful cycle clears it automatically. No more digging
+through log files to find out what went wrong.
+
+**3. Stale model cache when `production_model` changes.**
+When you changed `production_model` in the YAML (e.g. `lstm` → `cnn`),
+the old cached model stayed in memory until the next retrain replaced it.
+Intermediate forecast cycles would use the stale cache (with the old
+model's `feature_cols`, `seq_kwargs`, `exp_cfg`), which could produce
+wrong predictions or crash with a shape mismatch. `_retrain_single` now
+detects when the configured production model differs from the cached one
+and invalidates the cache before starting the retrain.
+
 ## 2.5.10
 
 ### Fix: 1-hour timezone offset on the dashboard chart (DST-safe)

@@ -69,6 +69,13 @@
                     </span>
                 </div>
 
+                {% if exp.last_error and exp.last_benchmark_status == 'failed' %}
+                <div class="card-field">
+                    <span class="field-label">Error</span>
+                    <span class="field-value" style="color:var(--color-error, #f44);font-size:0.85rem;word-break:break-word;">{{ exp.last_error }}</span>
+                </div>
+                {% endif %}
+
                 {% if exp.name in running_experiments and training_summaries.get(exp.name) %}
                 {% set ts = training_summaries[exp.name] %}
                 <div class="card-field">

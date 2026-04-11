@@ -405,6 +405,7 @@ class MLForecastLabApp:
                 if status:
                     status.last_benchmark_timestamp = datetime.now(timezone.utc).isoformat()
                     status.last_benchmark_status = "completed"
+                    status.last_error = None  # Clear any previous error
                     self.web_app.state.appstate.end_benchmark(experiment_name)
 
         except Exception as e:
@@ -418,6 +419,7 @@ class MLForecastLabApp:
                 )
                 if status:
                     status.last_benchmark_status = "failed"
+                    status.last_error = str(e)
                     self.web_app.state.appstate.end_benchmark(experiment_name)
 
     async def _fetch_and_preprocess(self, exp_cfg) -> pd.DataFrame:
@@ -1921,6 +1923,22 @@ class MLForecastLabApp:
         """Retrain a single experiment (per-experiment timer)."""
         self._update_running = True
         try:
+            # Invalidate stale cache when the production model changes.
+            # Without this, intermediate forecast cycles between config
+            # reload and the next retrain would use the old model's cache
+            # (with its old exp_cfg, feature_cols, seq_kwargs), which can
+            # silently produce wrong predictions or crash.
+            cached = self._cached_models.get(exp_cfg.name)
+            if cached and exp_cfg.mode == "production":
+                cached_model = cached.get("model_name", "")
+                wanted_model = exp_cfg.production_model or ""
+                if wanted_model and cached_model != wanted_model:
+                    logger.info(
+                        f"  Production model changed ({cached_model} → {wanted_model})"
+                        f" — clearing stale cache for {exp_cfg.name}"
+                    )
+                    del self._cached_models[exp_cfg.name]
+
             if exp_cfg.mode == "lab":
                 await self.update_experiment(exp_cfg.name, is_lab_mode=True)
             else:
@@ -1928,6 +1946,15 @@ class MLForecastLabApp:
             await self.publish_heartbeat()
         except Exception as e:
             logger.error(f"Retrain failed for {exp_cfg.name}: {e}", exc_info=True)
+            # Surface the error in the web UI so the user doesn't have to
+            # dig through log files to find out what went wrong.
+            if self.web_app:
+                status = self.web_app.state.appstate.experiment_statuses.get(
+                    exp_cfg.name
+                )
+                if status:
+                    status.last_benchmark_status = "failed"
+                    status.last_error = str(e)
         finally:
             self._update_running = False
 
@@ -1943,6 +1970,13 @@ class MLForecastLabApp:
             await self._forecast_with_cached(exp_cfg.name)
         except Exception as e:
             logger.error(f"Forecast failed for {exp_cfg.name}: {e}", exc_info=True)
+            if self.web_app:
+                status = self.web_app.state.appstate.experiment_statuses.get(
+                    exp_cfg.name
+                )
+                if status:
+                    status.last_benchmark_status = "failed"
+                    status.last_error = f"Forecast: {e}"
         finally:
             self._forecast_running = False
 
@@ -2076,6 +2110,7 @@ class MLForecastLabApp:
                 status.best_model = prod_model_name
                 status.last_benchmark_timestamp = datetime.now(timezone.utc).isoformat()
                 status.last_benchmark_status = "completed"
+                status.last_error = None  # Clear any previous error
 
     async def _run_forecast_cycle(self):
         """

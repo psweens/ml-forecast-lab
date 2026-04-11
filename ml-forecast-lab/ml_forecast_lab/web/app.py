@@ -85,6 +85,7 @@ class ExperimentStatus(BaseModel):
     selected_model: Optional[str] = None  # User's chosen model (defaults to best)
     last_benchmark_timestamp: Optional[str] = None
     last_benchmark_status: str = "pending"
+    last_error: Optional[str] = None  # Human-readable error from last failed cycle
     next_forecast_in_seconds: Optional[int] = None
     next_retrain_in_seconds: Optional[int] = None
     next_update_in_seconds: Optional[int] = None  # Legacy alias for forecast
