@@ -458,7 +458,7 @@ class MLForecastLabApp:
                     status.last_error = str(e)
                     self.web_app.state.appstate.end_benchmark(experiment_name)
 
-    async def _fetch_and_preprocess(self, exp_cfg) -> pd.DataFrame:
+    async def _fetch_and_preprocess(self, exp_cfg) -> Optional[pd.DataFrame]:
         """
         Fetch history and preprocess for an experiment.
 
@@ -622,12 +622,13 @@ class MLForecastLabApp:
         result = result.dropna()
 
         if len(result) == 0:
-            raise ValueError(
-                f"No samples remaining after preprocessing. One or more "
-                f"covariates may have insufficient history — check that all "
-                f"covariate sensors have been recording for at least "
-                f"{exp_cfg.days_history} day(s)."
+            logger.warning(
+                f"  ⚠ No samples remaining after preprocessing for "
+                f"{exp_cfg.name} — one or more covariates may have "
+                f"insufficient history (need ≥{exp_cfg.days_history} day(s)). "
+                f"Skipping this cycle."
             )
+            return None
 
         # Rich data summary
         y = result["y"]
@@ -814,6 +815,8 @@ class MLForecastLabApp:
 
         # 1. Fetch and preprocess data
         df = await self._fetch_and_preprocess(exp_cfg)
+        if df is None:
+            return
 
         if len(df) < exp_cfg.cv_folds * 10:
             raise ValueError(
@@ -1614,6 +1617,8 @@ class MLForecastLabApp:
 
         # 1. Fetch and preprocess
         df = await self._fetch_and_preprocess(exp_cfg)
+        if df is None:
+            return
 
         # 2. Build features + covariates
         features_df = build_features(
@@ -2058,6 +2063,8 @@ class MLForecastLabApp:
 
         # Fetch and prepare data
         df = await self._fetch_and_preprocess(exp_cfg)
+        if df is None:
+            return
         features_df = build_features(
             df, target_col="y",
             interval_minutes=exp_cfg.interval_minutes,
@@ -2468,6 +2475,9 @@ class MLForecastLabApp:
         # Fetch FRESH data so lag features and last_ts are current
         try:
             df_fresh = await self._fetch_and_preprocess(exp_cfg)
+            if df_fresh is None:
+                logger.warning(f"  Skipping forecast cycle for {exp_cfg.name} — insufficient data")
+                return
             features_fresh = build_features(
                 df_fresh, target_col="y",
                 interval_minutes=exp_cfg.interval_minutes,
@@ -2705,6 +2715,9 @@ class MLForecastLabApp:
 
         # Prepare data (same as _run_benchmark)
         df = await self._fetch_and_preprocess(exp_cfg)
+        if df is None:
+            return
+
         features_df = build_features(
             df, target_col="y",
             interval_minutes=exp_cfg.interval_minutes,
@@ -3142,6 +3155,8 @@ class MLForecastLabApp:
 
         # Fetch and preprocess with all covariates
         df_full = await self._fetch_and_preprocess(exp_cfg)
+        if df_full is None:
+            return
         covariate_cols = [c for c in df_full.columns if c != "y"]
 
         # Build base features

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.7.4
+
+### Improvement
+
+- **Graceful skip on insufficient covariate history** — when covariates
+  don't have enough data, the pipeline now logs a warning and skips the
+  cycle instead of failing with an error on the dashboard. The next
+  scheduled cycle will retry automatically once sensors have accumulated
+  enough history.
+
 ## 2.7.3
 
 ### Bugfixes
