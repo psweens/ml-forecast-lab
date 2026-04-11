@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -17,6 +19,32 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 logger = logging.getLogger(__name__)
+
+
+def _atomic_yaml_write(config_path: Path, data: dict) -> None:
+    """Write *data* to *config_path* atomically via write-to-temp + rename.
+
+    ``open('w')`` truncates a file **immediately**, so if the process is
+    killed before ``yaml.dump()`` completes (e.g. OOM SIGKILL during
+    tuning), the config file is left empty or corrupt.  Writing to a
+    temporary file in the **same directory** and then calling
+    ``os.replace()`` is an atomic operation on POSIX — the file either
+    contains the old data or the new data, never a half-written state.
+    """
+    config_path = Path(config_path)
+    dir_ = config_path.parent
+    try:
+        fd, tmp = tempfile.mkstemp(dir=dir_, suffix='.tmp', prefix='.mlfl_')
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+        os.replace(tmp, config_path)
+    except BaseException:
+        # Clean up the temp file if something goes wrong before rename
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 @dataclass
@@ -386,8 +414,7 @@ def load_config(config_path: Path | str) -> AppConfig:
             for exp in raw.get('experiments', []):
                 if isinstance(exp, dict):
                     exp.pop('horizons_minutes', None)
-            with open(config_path, 'w', encoding='utf-8') as f:
-                yaml.dump(raw, f, default_flow_style=False, sort_keys=False)
+            _atomic_yaml_write(config_path, raw)
             logger.info('Migrated config: removed deprecated horizons_minutes')
         except Exception as e:
             logger.warning(f'Config migration failed (non-fatal): {e}')
@@ -427,8 +454,7 @@ def save_model_overrides(
     if not mo:
         data.pop('model_overrides', None)
 
-    with open(config_path, 'w', encoding='utf-8') as f:
-        yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+    _atomic_yaml_write(config_path, data)
 
 
 def save_experiment_model_params(
@@ -470,8 +496,7 @@ def save_experiment_model_params(
             exp.pop('model_params', None)
         break
 
-    with open(config_path, 'w', encoding='utf-8') as f:
-        yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+    _atomic_yaml_write(config_path, data)
 
 
 def save_experiment_field(
@@ -503,8 +528,7 @@ def save_experiment_field(
             exp[field] = value
             break
 
-    with open(config_path, 'w', encoding='utf-8') as f:
-        yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+    _atomic_yaml_write(config_path, data)
 
 
 def remove_experiment_covariate(
@@ -542,8 +566,7 @@ def remove_experiment_covariate(
         break
 
     if removed:
-        with open(config_path, 'w', encoding='utf-8') as f:
-            yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+        _atomic_yaml_write(config_path, data)
 
     return removed
 
@@ -570,8 +593,7 @@ def clear_experiment_covariates(
         break
 
     if removed > 0:
-        with open(config_path, 'w', encoding='utf-8') as f:
-            yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+        _atomic_yaml_write(config_path, data)
 
     return removed
 
@@ -628,8 +650,7 @@ def add_experiment_covariate(
         # Strip None values so YAML stays clean
         clean = {k: v for k, v in covariate.items() if v is not None}
         covs.append(clean)
-        with open(config_path, 'w', encoding='utf-8') as f:
-            yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+        _atomic_yaml_write(config_path, data)
         return True
 
     return False
@@ -678,8 +699,7 @@ def create_experiment(
 
     exps.append(experiment)
 
-    with open(config_path, 'w', encoding='utf-8') as f:
-        yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+    _atomic_yaml_write(config_path, data)
 
 
 def delete_experiment(
@@ -700,8 +720,7 @@ def delete_experiment(
     data['experiments'] = [e for e in exps if e.get('name') != experiment_name]
 
     if len(data['experiments']) < original_len:
-        with open(config_path, 'w', encoding='utf-8') as f:
-            yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+        _atomic_yaml_write(config_path, data)
         return True
 
     return False

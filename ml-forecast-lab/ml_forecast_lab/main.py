@@ -107,7 +107,7 @@ class MLForecastLabApp:
             try:
                 from ml_forecast_lab.config import load_config
 
-                self.config = load_config(found_path)
+                new_config = load_config(found_path)
                 # Only log at INFO when the config actually changes (first load
                 # or mtime change). The timer loop calls load_config() every
                 # 30 seconds to pick up UI edits — logging every reload would
@@ -131,9 +131,20 @@ class MLForecastLabApp:
 
                 self._last_config_path = found_path
                 self._last_config_mtime = current_mtime
+                self.config = new_config
             except Exception as e:
-                logger.error(f"Failed to load configuration: {e}", exc_info=True)
-                self.config = self._create_stub_config()
+                if self.config is not None:
+                    # Periodic reload failed — keep the existing good config
+                    # instead of replacing with stub (which would make all
+                    # experiments disappear). This can happen if the YAML is
+                    # briefly unreadable during a concurrent write.
+                    logger.warning(
+                        f"Failed to reload configuration (keeping current): {e}"
+                    )
+                else:
+                    # First load — no config to fall back to
+                    logger.error(f"Failed to load configuration: {e}", exc_info=True)
+                    self.config = self._create_stub_config()
 
     def _create_stub_config(self):
         """Create a minimal stub configuration for testing."""

@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.9.1
+
+### Bugfix
+
+- **Atomic YAML writes prevent config corruption on crash** — all config
+  save operations now write to a temporary file and use `os.replace()` to
+  atomically swap it into place. Previously, `open('w')` truncated the
+  config file immediately, so an OOM SIGKILL during tuning (while a
+  concurrent UI settings save was in-flight) could leave the YAML empty
+  or half-written, causing all experiments to disappear on restart.
+- **Periodic config reload no longer replaces config with stub on
+  failure** — if the 30-second config reload encounters a parse error
+  (e.g. briefly unreadable file), the existing good config is kept
+  instead of falling back to a stub config with no experiments. The stub
+  fallback is now only used on the very first load.
+
 ## 2.9.0
 
 ### Breaking
