@@ -237,7 +237,7 @@ class ForecastModel(ABC):
         Notes
         -----
         The recursive approach accumulates forecast error. For critical
-        applications, consider direct multi-output models or ensembles.
+        applications, consider direct multi-output models.
         """
         if not self.is_fitted:
             raise RuntimeError(f'{self.name} model must be fitted before prediction')

@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.9.0
+
+### Breaking
+
+- **Remove ensemble functionality entirely** — the ensemble engine, all
+  ensemble API routes, ensemble UI sections, and ensemble event handlers
+  have been deleted from the codebase. The `ensemble/` module directory,
+  `EnsembleEngine`, `EnsembleResultData`, and `EnsembleMethodResult`
+  classes are gone. Pipeline steps no longer include an "ensemble" stage.
+  The "Include Ensemble" checkbox has been removed from both the Training
+  page and experiment detail page. This simplifies the architecture and
+  removes code that was already disabled since v2.5.0.
+
 ## 2.8.5
 
 ### Bugfix

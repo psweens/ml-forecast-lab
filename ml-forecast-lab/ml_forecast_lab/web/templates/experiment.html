@@ -54,8 +54,7 @@
             {% endif %}
         {% endif %}
     </div>
-    <!-- Hidden checkboxes for pipeline steps (defaults: ensemble on, deep off) -->
-    <input type="hidden" id="chk-ensemble" value="1">
+    <!-- Hidden checkbox for pipeline steps -->
     <input type="hidden" id="chk-deep" value="">
     <div id="promote-message"></div>
 </div>
@@ -72,8 +71,6 @@
     <a data-tab="sec-predictions" onclick="showTab(this)">Predictions</a>
     <a data-tab="sec-generalisation" onclick="showTab(this)">Generalisation</a>
     {% if feature_importances %}<a data-tab="sec-features" onclick="showTab(this)">Features</a>{% endif %}
-    {# Ensemble tab disabled in v2.5.0 — keep code in place for future re-enable #}
-    {# <a data-tab="sec-ensemble" onclick="showTab(this)">Ensemble</a> #}
     <a data-tab="sec-covariate-analysis" onclick="showTab(this)">Covariate Analysis</a>
     <a data-tab="sec-tuning" onclick="showTab(this)">Tuning</a>
     {% endif %}
@@ -631,163 +628,6 @@
 </section>
 </div>
 {% endif %}
-
-<!-- ====== TAB: Ensemble (DISABLED in v2.5.0 — not currently needed) ====== -->
-<!-- The whole section is left in place so it can be re-enabled by uncommenting -->
-<!-- the nav link at the top of the file. -->
-{% if false %}
-<div class="tab-section" id="sec-ensemble" style="display:none;">
-<section class="section">
-    <h2>Ensemble <span class="info-tip">?<span class="tip-text">Combines predictions from multiple models. Select which models to include using Top-N (auto-picks best by production metric) or custom selection. You can re-run ensemble with different settings without re-training.</span></span></h2>
-
-    <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin-bottom:1rem;">
-        <div>
-            <label class="field-label" style="display:block;margin-bottom:0.3rem;">Model Selection</label>
-            <select id="ensemble-top-n" class="setting-input" style="padding:0.4rem 0.6rem;font-size:0.9rem;min-width:180px;"
-                    onchange="toggleEnsembleCustom(this.value)">
-                <option value="all">All models</option>
-                {% for i in range(2, models|length + 1) %}
-                <option value="{{ i }}">Top {{ i }} by metric</option>
-                {% endfor %}
-                <option value="custom">Custom selection</option>
-            </select>
-        </div>
-        <div>
-            <label class="field-label" style="display:block;margin-bottom:0.3rem;">Strategies</label>
-            <div style="display:flex;gap:1rem;align-items:center;">
-                <label style="display:flex;align-items:center;gap:0.3rem;color:var(--text-secondary);cursor:pointer;">
-                    <input type="checkbox" class="ensemble-strategy" value="simple_average" checked
-                           style="accent-color:var(--accent-secondary);"> Simple Avg
-                </label>
-                <label style="display:flex;align-items:center;gap:0.3rem;color:var(--text-secondary);cursor:pointer;">
-                    <input type="checkbox" class="ensemble-strategy" value="weighted_average" checked
-                           style="accent-color:var(--accent-secondary);"> Weighted
-                </label>
-                <label style="display:flex;align-items:center;gap:0.3rem;color:var(--text-secondary);cursor:pointer;">
-                    <input type="checkbox" class="ensemble-strategy" value="stacking" checked
-                           style="accent-color:var(--accent-secondary);"> Stacking
-                </label>
-            </div>
-        </div>
-        <button class="btn" style="background:#e67e22;color:white;" id="run-ensemble-btn"
-                onclick="runEnsemble('{{ experiment.name }}', this)">
-            Run Ensemble
-        </button>
-    </div>
-
-    <div id="ensemble-custom-panel" style="display:none;margin-top:0.5rem;padding:1rem;background:var(--bg-tertiary);border-radius:0.5rem;">
-        <label class="field-label" style="display:block;margin-bottom:0.5rem;">Select models to include:</label>
-        <div style="display:flex;flex-wrap:wrap;gap:0.5rem;">
-            {% for model in models %}
-            <label style="display:flex;align-items:center;gap:0.3rem;padding:0.3rem 0.6rem;border-radius:0.4rem;background:var(--bg-primary);border:1px solid var(--border);cursor:pointer;font-size:0.9rem;color:var(--text-secondary);">
-                <input type="checkbox" class="ensemble-model-cb" value="{{ model.name }}" checked
-                       style="accent-color:var(--accent-secondary);">
-                {{ model.name }}
-                <span style="color:var(--accent-secondary);font-size:0.8rem;margin-left:0.3rem;">({{ "%.3f"|format(model.mae.mean) }})</span>
-            </label>
-            {% endfor %}
-        </div>
-    </div>
-
-    {% if ensemble_result and ensemble_result.status == 'completed' %}
-    <div style="margin-top:1.5rem;">
-    <div class="table-container">
-        <table class="metrics-table">
-            <thead>
-                <tr>
-                    <th>Strategy</th>
-                    <th>MAE{{ " (" + units + ")" if units else "" }}</th>
-                    <th>RMSE{{ " (" + units + ")" if units else "" }}</th>
-                    <th>MASE</th>
-                    <th>Member Models</th>
-                    <th>Weights</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% if ensemble_result.best_individual_model %}
-                <tr {% if ensemble_result.best_strategy == "best_individual" %}class="best-model"{% else %}style="opacity: 0.7;"{% endif %}>
-                    <td>
-                        <span class="model-name">Best Individual ({{ ensemble_result.best_individual_model }})</span>
-                        {% if ensemble_result.best_strategy == "best_individual" %}
-                        <span class="badge badge-success" style="margin-left: 0.5rem;">Best</span>
-                        {% endif %}
-                    </td>
-                    <td>{{ "%.4f"|format(ensemble_result.best_individual_mae) }}</td>
-                    <td>{{ "%.4f"|format(ensemble_result.best_individual_rmse) }}</td>
-                    <td>{{ "%.3f"|format(ensemble_result.best_individual_mase) }}</td>
-                    <td>—</td>
-                    <td>—</td>
-                </tr>
-                {% endif %}
-                {% for method in ensemble_result.methods %}
-                <tr {% if method.strategy == ensemble_result.best_strategy %}class="best-model"{% endif %}>
-                    <td>
-                        <span class="model-name">{{ method.display_name }}</span>
-                        {% if method.strategy == ensemble_result.best_strategy %}
-                        <span class="badge badge-success" style="margin-left: 0.5rem;">Best</span>
-                        {% endif %}
-                    </td>
-                    <td><span class="metric-value">{{ "%.4f"|format(method.mae) }}</span></td>
-                    <td><span class="metric-value">{{ "%.4f"|format(method.rmse) }}</span></td>
-                    <td><span class="metric-value">{{ "%.3f"|format(method.mase) }}</span></td>
-                    <td style="font-size: 0.85rem; color: var(--text-secondary);">{{ method.member_models | length }} models</td>
-                    <td style="font-size: 0.82rem;">
-                        {% if method.weights %}
-                        {% for m, w in method.weights.items() %}
-                        <span style="display:inline-block;margin:0.1rem 0.2rem;padding:0.15rem 0.4rem;border-radius:0.25rem;background:rgba(0,212,255,0.1);color:var(--accent-secondary);">{{ m }}: {{ "%.1f"|format(w * 100) }}%</span>
-                        {% endfor %}
-                        {% else %}—{% endif %}
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-
-    {% if ensemble_result.improvement_pct is not none %}
-    <div style="margin-top: 1rem; padding: 1rem; border-radius: 0.5rem; text-align: center;
-        {% if ensemble_result.improvement_pct > 0 %}background: rgba(46,204,113,0.15); border: 1px solid rgba(46,204,113,0.3);{% else %}background: rgba(243,156,18,0.15); border: 1px solid rgba(243,156,18,0.3);{% endif %}">
-        {% if ensemble_result.improvement_pct > 0 %}
-        <span style="color: var(--success); font-weight: 600;">
-            Ensemble improves on best individual model by {{ "%.1f"|format(ensemble_result.improvement_pct) }}%
-        </span>
-        {% else %}
-        <span style="color: var(--warning); font-weight: 600;">
-            Best individual model outperforms ensemble by {{ "%.1f"|format(ensemble_result.improvement_pct | abs) }}%
-        </span>
-        {% endif %}
-    </div>
-    {% endif %}
-
-    {% if lab_forecast and lab_forecast.model_predictions %}
-    {% set ns = namespace(has_ensemble=false) %}
-    {% for mp in lab_forecast.model_predictions %}{% if mp.model_name.startswith('Ensemble:') %}{% set ns.has_ensemble = true %}{% endif %}{% endfor %}
-    {% if ns.has_ensemble %}
-    <div style="margin-top: 1.5rem;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-            <h3 style="margin: 0;">Ensemble Predictions on Holdout Data</h3>
-            <div style="display: flex; align-items: center; gap: 0.5rem;">
-                <span style="color: var(--text-secondary); font-size: 0.85rem;">Interval</span>
-                <label style="position: relative; display: inline-block; width: 44px; height: 24px; cursor: pointer;">
-                    <input type="checkbox" id="ensemble-cumulative-toggle" onchange="toggleEnsembleCumulative(this.checked)"
-                           style="opacity: 0; width: 0; height: 0;">
-                    <span style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: var(--bg-tertiary);
-                        border-radius: 12px; border: 1px solid var(--border); transition: all 0.3s;"></span>
-                    <span id="ensemble-toggle-knob" style="position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
-                        background: var(--text-secondary); border-radius: 50%; transition: all 0.3s;"></span>
-                </label>
-                <span style="color: var(--text-secondary); font-size: 0.85rem;">Cumulative</span>
-            </div>
-        </div>
-        <div id="ensemble-chart" style="min-height: 500px;"></div>
-    </div>
-    {% endif %}
-    {% endif %}
-    </div>
-    {% endif %}
-</section>
-</div>
-{% endif %}{# end Ensemble disable #}
 
 <!-- ====== TAB: Tuning ====== -->
 <div class="tab-section" id="sec-tuning" style="display:none;">
@@ -1446,7 +1286,6 @@ window.showTab = function(el) {
             line: { color: '#ffffff', width: 2.5, dash: 'dot' }
         });
         labData.model_predictions.forEach(function(mp) {
-            if (mp.model_name.startsWith('Ensemble:')) return;
             traces.push({
                 x: mp.timestamps,
                 y: cumulative ? cumsum(mp.predictions, mp.timestamps) : mp.predictions,
@@ -1469,7 +1308,6 @@ window.showTab = function(el) {
     function renderResidualChart() {
         var traces = [];
         labData.model_predictions.forEach(function(mp) {
-            if (mp.model_name.startsWith('Ensemble:')) return;
             traces.push({
                 x: mp.timestamps,
                 y: mp.actuals.map(function(a, i) { return (a !== null && a !== undefined) ? a - mp.predictions[i] : null; }),
@@ -1679,58 +1517,6 @@ window.showTab = function(el) {
     });
     {% endif %}
 
-    // ======== Ensemble charts ========
-    {% if ensemble_result and ensemble_result.status == 'completed' and lab_forecast and lab_forecast.model_predictions %}
-    queueChart('sec-ensemble', function() {
-        var eLabData = window._holdoutData || {{ lab_forecast.model_dump() | tojson }};
-        function ecumsum(arr, timestamps) {
-            var result = [], sum = 0, lastDate = '';
-            for (var i = 0; i < arr.length; i++) {
-                var thisDate = timestamps[i].split('T')[0];
-                if (thisDate !== lastDate) { sum = 0; lastDate = thisDate; }
-                sum += (arr[i] !== null && arr[i] !== undefined) ? arr[i] : 0;
-                result.push(sum);
-            }
-            return result;
-        }
-        window.renderEnsembleChart = function(cumulative) {
-            var traces = [];
-            var actualSource = eLabData.model_predictions.find(function(mp) { return !mp.model_name.startsWith('Ensemble:'); });
-            if (actualSource) {
-                traces.push({ x: actualSource.timestamps,
-                    y: cumulative ? ecumsum(actualSource.actuals, actualSource.timestamps) : actualSource.actuals,
-                    name: 'Actual', mode: 'lines', line: { color: '#ffffff', width: 2.5, dash: 'dot' } });
-            }
-            eLabData.model_predictions.forEach(function(mp) {
-                if (!mp.model_name.startsWith('Ensemble:')) return;
-                traces.push({ x: mp.timestamps,
-                    y: cumulative ? ecumsum(mp.predictions, mp.timestamps) : mp.predictions,
-                    name: mp.model_name, mode: 'lines', line: { width: 2 } });
-            });
-            Plotly.newPlot('ensemble-chart', traces, {
-                title: (cumulative ? 'Daily Cumulative ' : '') + 'Ensemble Comparison on Holdout (' +
-                       eLabData.holdout_start.split('T')[0] + ' to ' + eLabData.holdout_end.split('T')[0] + ')',
-                xaxis: { title: 'Time', gridcolor: '#2d3561' },
-                yaxis: { title: cumulative ? 'Daily Cumulative{{ " (" + units + ")" if units else "" }}' : 'Value{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
-                hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
-                font: { color: '#e0e0e0' }, legend: { orientation: 'h', y: -0.15 },
-                colorway: PLOT_COLORWAY,
-                margin: { l: 60, r: 20, t: 50, b: 80 }
-            }, { responsive: true });
-        };
-        window.renderEnsembleChart(false);
-    });
-    {% endif %}
-
-    window.toggleEnsembleCumulative = function(checked) {
-        var knob = document.getElementById('ensemble-toggle-knob');
-        if (knob) {
-            knob.style.left = checked ? '22px' : '2px';
-            knob.style.background = checked ? 'var(--accent-secondary)' : 'var(--text-secondary)';
-        }
-        if (window.renderEnsembleChart) window.renderEnsembleChart(checked);
-    };
-
     // ======== Timestamp humanization ========
     var tsEl = document.getElementById('benchmark-timestamp');
     if (tsEl && tsEl.dataset.iso) {
@@ -1744,7 +1530,6 @@ window.showTab = function(el) {
         tsEl.textContent = tsEl.textContent + ' (' + relative + ')';
     }
 
-    // ======== Ensemble configuration ========
     // ======== Per-experiment model toggle ========
     // ======== Model selection (Results tab) ========
     window.selectModel = function(expName, modelName) {
@@ -1828,36 +1613,6 @@ window.showTab = function(el) {
             el.checked = !el.checked;
             mlfl.toast('Failed to toggle model: ' + err, 'error');
         });
-    };
-
-    window.toggleEnsembleCustom = function(value) {
-        var panel = document.getElementById('ensemble-custom-panel');
-        if (panel) panel.style.display = (value === 'custom') ? 'block' : 'none';
-    };
-
-    window.runEnsemble = function(name, btn) {
-        btn.disabled = true; btn.classList.add('btn-loading'); btn.textContent = 'Running...';
-        var strategies = Array.from(document.querySelectorAll('.ensemble-strategy:checked')).map(function(cb) { return cb.value; });
-        if (strategies.length === 0) { mlfl.toast('Select at least one ensemble strategy', 'warning'); btn.disabled = false; btn.textContent = 'Run Ensemble'; return; }
-        var body = { strategies: strategies };
-        var topNSelect = document.getElementById('ensemble-top-n');
-        if (topNSelect.value === 'custom') {
-            var selected = Array.from(document.querySelectorAll('.ensemble-model-cb:checked')).map(function(cb) { return cb.value; });
-            if (selected.length < 2) { mlfl.toast('Select at least 2 models for ensemble', 'warning'); btn.disabled = false; btn.textContent = 'Run Ensemble'; return; }
-            body.selected_models = selected;
-        } else if (topNSelect.value !== 'all') { body.top_n = parseInt(topNSelect.value, 10); }
-
-        fetch(BASE + '/experiment/' + name + '/run-ensemble', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-        .then(function(r) { return r.json(); })
-        .then(function() {
-            var pollId = setInterval(function() {
-                fetch(BASE + '/experiment/' + name + '/ensemble')
-                    .then(function(r) { if (r.ok) return r.json(); throw new Error('not ready'); })
-                    .then(function(result) { if (result.status === 'completed') { clearInterval(pollId); _reloadToTab('sec-ensemble'); } })
-                    .catch(function() {});
-            }, 2000);
-        })
-        .catch(function(err) { mlfl.toast('Failed to start ensemble: ' + err, 'error'); btn.disabled = false; btn.textContent = 'Run Ensemble'; });
     };
 
     // ======== Covariate analysis ========
@@ -2014,7 +1769,6 @@ window.showTab = function(el) {
 
     window.startPipeline = function() {
         var steps = ['benchmark'];
-        if (document.getElementById('chk-ensemble').value) steps.push('ensemble');
         if (document.getElementById('chk-deep').value) steps.push('covariate_analysis');
 
         var btn = document.getElementById('btn-run');
@@ -2113,8 +1867,6 @@ window.showTab = function(el) {
                 logEvent('success', 'Completed: ' + ev.model_name);
                 if (!isReplaying && ev.model_name === displayModel) renderChartForModel(displayModel);
                 break;
-            case 'ensemble_start': logEvent('info', ev.message || 'Ensemble started'); break;
-            case 'ensemble_end': logEvent('success', ev.message || 'Ensemble complete'); break;
             case 'pipeline_end':
                 logEvent('success', ev.message || 'Pipeline finished');
                 document.getElementById('progress-bar').style.width = '100%';
@@ -2276,7 +2028,7 @@ window.showTab = function(el) {
     }
 
     // ======== Initial tab selection ========
-    // URL hash takes priority (e.g. after ensemble/covariate-analysis reload)
+    // URL hash takes priority (e.g. after covariate-analysis reload)
     var _hashTab = window.location.hash.replace('#', '');
     var _hashPill = _hashTab ? document.querySelector('.section-nav a[data-tab="' + _hashTab + '"]') : null;
     if (_hashPill) {

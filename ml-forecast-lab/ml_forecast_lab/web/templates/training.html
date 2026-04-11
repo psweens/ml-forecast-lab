@@ -31,10 +31,6 @@
         </div>
         <div class="flex-row gap-lg">
             <label class="checkbox-label">
-                <input type="checkbox" id="chk-ensemble" checked class="checkbox-accent">
-                <span>Include Ensemble</span>
-            </label>
-            <label class="checkbox-label">
                 <input type="checkbox" id="chk-deep" class="checkbox-accent">
                 <span>Include Covariate Analysis</span>
             </label>
@@ -156,9 +152,6 @@ var EMBEDDED_HISTORY = {{ embedded_history | tojson }};
         sessionStorage.setItem('mlfl-training-experiment', expName);
 
         const steps = ['benchmark'];
-        if (document.getElementById('chk-ensemble').checked) {
-            steps.push('ensemble');
-        }
         if (document.getElementById('chk-deep').checked) {
             steps.push('covariate_analysis');
         }
@@ -288,14 +281,6 @@ var EMBEDDED_HISTORY = {{ embedded_history | tojson }};
                 if (!isReplaying && ev.model_name === displayModel) {
                     renderChartForModel(displayModel);
                 }
-                break;
-
-            case 'ensemble_start':
-                logEvent('info', ev.message || 'Ensemble started');
-                break;
-
-            case 'ensemble_end':
-                logEvent('success', ev.message || 'Ensemble complete');
                 break;
 
             case 'pipeline_end':

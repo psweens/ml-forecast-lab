@@ -172,8 +172,8 @@ class ModelRegistry:
         """
         Create multiple models at once.
 
-        Useful for creating an ensemble or comparing multiple architectures
-        with the same hyperparameters.
+        Useful for comparing multiple architectures with the same
+        hyperparameters.
 
         Parameters
         ----------
