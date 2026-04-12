@@ -66,11 +66,12 @@ class _LSTMNet(nn.Module):
             dropout=dropout if num_layers > 1 else 0.0,
         )
         self.attention = _TemporalAttention(hidden_size)
+        head_hidden = max(hidden_size, n_horizons)
         self.head = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
+            nn.Linear(hidden_size, head_hidden),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_size // 2, n_horizons),
+            nn.Linear(head_hidden, n_horizons),
         )
 
     def forward(self, x):

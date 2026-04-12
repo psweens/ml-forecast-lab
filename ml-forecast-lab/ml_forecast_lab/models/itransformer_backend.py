@@ -67,11 +67,12 @@ class _iTransformerNet(nn.Module):
         self.layer_norm = nn.LayerNorm(d_model)
 
         # Flatten (batch, n_channels, d_model) -> (batch, n_channels*d_model) -> head
+        head_hidden = max(d_model, n_horizons)
         self.head = nn.Sequential(
-            nn.Linear(n_channels * d_model, d_model),
+            nn.Linear(n_channels * d_model, head_hidden),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model, n_horizons),
+            nn.Linear(head_hidden, n_horizons),
         )
 
     def forward(self, x):

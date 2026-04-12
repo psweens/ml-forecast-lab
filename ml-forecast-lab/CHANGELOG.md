@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.9.8
+
+### Bugfix
+
+- **Fix flat multi-horizon forecasts in LSTM, iTransformer, and
+  Crossformer** — same head bottleneck as the CNN: hidden layer narrower
+  than `n_horizons` (48), forcing all horizon predictions to collapse to
+  near-identical values. Hidden size is now `max(dim, n_horizons)` in
+  all four backends.
+- **Tighten N-BEATS tuning ranges** — worst-case combination
+  (hidden_size=512, 8 stacks × 8 blocks × 8 FC layers) could allocate
+  ~2.5 GB. Reduced maximums: hidden_size 512→256, stacks 8→4,
+  blocks_per_stack 8→4, FC layers 8→6. Worst case now ~600 MB.
+
 ## 2.9.7
 
 ### Bugfix
