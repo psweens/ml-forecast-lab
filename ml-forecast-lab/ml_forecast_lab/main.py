@@ -2639,7 +2639,7 @@ class MLForecastLabApp:
         # defaults so the final deployed model gets the full epoch budget.
         TUNING_NEURAL_EPOCHS = 30
         TUNING_NEURAL_PATIENCE = 6
-        TUNING_NEURAL_BATCH_SIZE = 32  # Halved from default 64 to reduce peak memory
+        TUNING_NEURAL_BATCH_SIZE = 16  # Halved from default 64 to reduce peak memory
 
         def _apply_tuning_overrides(m):
             """Cap neural training budget and shrink batch size during tuning."""
@@ -2654,20 +2654,58 @@ class MLForecastLabApp:
                 pass  # Backends without epochs/patience params just skip
             return m
 
-        # Memory monitoring — abort tuning before OOM SIGKILL
+        # Memory monitoring — abort tuning before OOM SIGKILL.
+        # The addon runs inside a Docker container with cgroup memory
+        # limits.  /proc/meminfo shows the HOST's free RAM, which is
+        # misleading — the OOM killer enforces the cgroup ceiling.
         def _get_rss_mb():
-            """Return current process RSS in MB (Linux/macOS)."""
+            """Return current process RSS in MB via /proc/self/status."""
             try:
-                import resource
-                # ru_maxrss is in KB on Linux, bytes on macOS
-                import platform
+                with open('/proc/self/status', 'r') as f:
+                    for line in f:
+                        if line.startswith('VmRSS:'):
+                            return int(line.split()[1]) / 1024  # KB → MB
+            except Exception:
+                pass
+            try:
+                import resource, platform
                 rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                 return rss / 1024 if platform.system() == 'Linux' else rss / (1024 * 1024)
             except Exception:
                 return 0
 
+        def _get_cgroup_memory():
+            """Return (usage_mb, limit_mb) from cgroup v2 or v1."""
+            usage, limit = None, None
+            # cgroup v2
+            try:
+                with open('/sys/fs/cgroup/memory.current', 'r') as f:
+                    usage = int(f.read().strip()) / (1024 * 1024)
+                with open('/sys/fs/cgroup/memory.max', 'r') as f:
+                    val = f.read().strip()
+                    limit = float('inf') if val == 'max' else int(val) / (1024 * 1024)
+                return usage, limit
+            except Exception:
+                pass
+            # cgroup v1
+            try:
+                with open('/sys/fs/cgroup/memory/memory.usage_in_bytes', 'r') as f:
+                    usage = int(f.read().strip()) / (1024 * 1024)
+                with open('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'r') as f:
+                    val = int(f.read().strip())
+                    # Kernel uses a huge value for "no limit"
+                    limit = float('inf') if val > 2**60 else val / (1024 * 1024)
+                return usage, limit
+            except Exception:
+                pass
+            return None, None
+
         def _get_available_mb():
-            """Return available system memory in MB."""
+            """Return available memory in MB (cgroup-aware)."""
+            usage, limit = _get_cgroup_memory()
+            if usage is not None and limit is not None and limit != float('inf'):
+                return limit - usage
+            # Fallback: host-level /proc/meminfo
             try:
                 with open('/proc/meminfo', 'r') as f:
                     for line in f:
@@ -2677,11 +2715,23 @@ class MLForecastLabApp:
                 pass
             return float('inf')  # Can't read → don't gate on it
 
+        # Log detailed memory picture
+        cg_usage, cg_limit = _get_cgroup_memory()
+        rss = _get_rss_mb()
         logger.info(
             f"  Tuning budget: {n_trials} trials × 1 CV fold × "
             f"max {TUNING_NEURAL_EPOCHS} epochs (neural) / early-stopping (trees)"
         )
-        logger.info(f"  System memory: {_get_available_mb():.0f} MB available")
+        if cg_limit is not None and cg_limit != float('inf'):
+            logger.info(
+                f"  Container memory: {cg_usage:.0f} / {cg_limit:.0f} MB "
+                f"({cg_limit - cg_usage:.0f} MB free) | Process RSS: {rss:.0f} MB"
+            )
+        else:
+            logger.info(
+                f"  Memory: {_get_available_mb():.0f} MB available (host) | "
+                f"Process RSS: {rss:.0f} MB | No cgroup limit detected"
+            )
 
         # --- Composite objective baseline ---
         # Run one CV evaluation with the model's DEFAULT parameters first.
@@ -2717,25 +2767,12 @@ class MLForecastLabApp:
             baseline_mae = baseline_rmse = baseline_mase = None
         finally:
             import gc as _gc
-            # Aggressively free the baseline model's PyTorch memory
-            if baseline_model is not None:
-                try:
-                    net = getattr(baseline_model, '_net', None) or getattr(baseline_model, 'model', None)
-                    if net is not None:
-                        for p in net.parameters():
-                            p.data = p.data.new_empty(0)
-                            if p.grad is not None:
-                                p.grad = None
-                except Exception:
-                    pass
             del baseline_model
             _gc.collect(0); _gc.collect(1); _gc.collect(2)
-            try:
-                import ctypes
-                ctypes.CDLL("libc.so.6").malloc_trim(0)
-            except Exception:
-                pass
-            logger.info(f"  Memory after baseline: {_get_available_mb():.0f} MB free")
+            logger.info(
+                f"  Memory after baseline: {_get_available_mb():.0f} MB free "
+                f"| RSS: {_get_rss_mb():.0f} MB"
+            )
 
         # Mutable anchors so the first valid trial can become the baseline if
         # the explicit baseline trial above failed.
@@ -2808,48 +2845,9 @@ class MLForecastLabApp:
                 mase = float("inf")
                 status = "failed"
             finally:
-                # Aggressive cleanup to prevent OOM across trials.
-                # PyTorch models hold tensors, optimizer state, and gradient
-                # buffers that accumulate across trials. On RPi5 (4–8 GB),
-                # the Linux OOM killer sends SIGKILL with no warning.
-
-                # 1. Delete model internals before the model object itself
-                if model is not None:
-                    try:
-                        # Clear PyTorch module parameters and buffers
-                        net = getattr(model, '_net', None) or getattr(model, 'model', None)
-                        if net is not None:
-                            net.cpu()
-                            for p in net.parameters():
-                                p.data = p.data.new_empty(0)
-                                if p.grad is not None:
-                                    p.grad = None
-                    except Exception:
-                        pass
                 del model
                 del result
-
-                # 2. Force PyTorch to release its internal caching allocator
-                try:
-                    import torch as _torch
-                    _torch.cuda.empty_cache() if _torch.cuda.is_available() else None
-                    # On CPU: clear autograd saved tensors
-                    _torch.clear_autocast_cache() if hasattr(_torch, 'clear_autocast_cache') else None
-                except Exception:
-                    pass
-
-                # 3. Full GC sweep (multiple generations)
-                _gc.collect(0)
-                _gc.collect(1)
-                _gc.collect(2)
-
-                # 4. Hint to the C allocator to release free pages back to OS
-                try:
-                    import ctypes
-                    libc = ctypes.CDLL("libc.so.6")
-                    libc.malloc_trim(0)
-                except Exception:
-                    pass
+                _gc.collect(0); _gc.collect(1); _gc.collect(2)
 
             # Lazily seed the anchor if the explicit baseline run failed
             if anchor["mae"] is None and status == "completed":
@@ -2880,12 +2878,13 @@ class MLForecastLabApp:
                 tuning_state.best_trial_id = trial.number
 
             _avail_after = _get_available_mb()
+            _rss_after = _get_rss_mb()
             logger.info(
                 f"  [{tuning_state.completed_trials}/{n_trials}] "
                 f"Trial {trial.number}: composite={composite:.4f} "
                 f"(MAE={mae:.4f}, RMSE={rmse:.4f}, MASE={mase:.3f}) "
                 f"{'best ' if trial.number == tuning_state.best_trial_id else ''}"
-                f"{duration:.1f}s | {_avail_after:.0f} MB free"
+                f"{duration:.1f}s | avail={_avail_after:.0f} MB, RSS={_rss_after:.0f} MB"
             )
 
             return composite

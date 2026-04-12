@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.9.3
+
+### Bugfix
+
+- **Fix OOM detection in Docker containers** — memory monitoring now reads
+  cgroup v2/v1 limits instead of `/proc/meminfo`, which shows host RAM
+  and is meaningless inside the addon's container. The pre-trial memory
+  check, available-MB logging, and abort threshold now all reflect the
+  container's actual memory budget. This should prevent the OOM crash
+  during CNN tuning on RPi5.
+- **Reduced tuning batch size** (32 → 16) to halve peak memory per trial.
+- **Removed unsafe cleanup code** — `ctypes.CDLL("libc.so.6").malloc_trim`
+  (glibc-specific, unsafe on Alpine/musl) and parameter tensor zeroing
+  removed. Standard GC is sufficient.
+- **Better memory diagnostics** — logs now show container usage/limit,
+  process RSS, and per-trial memory after each trial to make memory
+  leaks visible.
+
 ## 2.9.2
 
 ### Bugfix
