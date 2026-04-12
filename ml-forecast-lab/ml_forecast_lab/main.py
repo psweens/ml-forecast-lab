@@ -2963,31 +2963,91 @@ class MLForecastLabApp:
             y_tr_h, y_te_h = y_all[:split_80], y_all[split_80:]
             holdout_ts = [t.isoformat() for t in combined.index[split_80:]]
 
+            # For neural models, build proper sliding-window inputs.
+            # The flat-feature path (m.fit(X, y) + m.predict(X)) produces
+            # garbage for CNNs/LSTMs because _reshape_to_sequences() can't
+            # reconstruct the temporal structure the model needs.
+            _ho_seq_train = None
+            _ho_seq_test = None
+            _ho_window_size = None
+            if _is_neural_model:
+                try:
+                    from ml_forecast_lab.features import create_sliding_windows
+                    pc_fold = (precomputed_sequences or {}).get(0, {})
+                    _ho_window_size = pc_fold.get('window_size', min(48, split_80 // 3))
+                    _ho_cov_cols = pc_fold.get('neural_cov_cols', [])
+                    _ho_horizon_steps = pc_fold.get('horizon_steps', list(range(1, int(getattr(exp_cfg, 'future_periods', 48)) + 1)))
+                    if _ho_window_size >= 12:
+                        df_train_ho = combined.iloc[:split_80]
+                        sX, sY, ch = create_sliding_windows(
+                            df_train_ho, 'target', window_size=_ho_window_size,
+                            covariate_cols=_ho_cov_cols if _ho_cov_cols else None,
+                            add_temporal=True, horizon_steps=_ho_horizon_steps,
+                        )
+                        _ho_seq_train = {'seq_X': sX, 'seq_y': sY, 'channel_names': ch}
+                        # Test windows: bridge across train/test boundary for context
+                        n_bridge = min(_ho_window_size, split_80)
+                        df_test_ho = combined.iloc[split_80 - n_bridge:]
+                        tX, _, _ = create_sliding_windows(
+                            df_test_ho, 'target', window_size=_ho_window_size,
+                            covariate_cols=_ho_cov_cols if _ho_cov_cols else None,
+                            add_temporal=True, horizon_steps=[1],
+                        )
+                        _ho_seq_test = tX
+                        logger.info(
+                            f"  Holdout sliding windows: train={sX.shape}, test={tX.shape}"
+                        )
+                except Exception as e:
+                    logger.debug(f"  Holdout sliding window build failed: {e}")
+                    _ho_seq_train = None
+
             def _run_holdout(params):
+                import gc as _gc
                 m = self.model_registry.create(model_name, **params)
-                m.fit(X_tr_h, y_tr_h)
-                p = m.predict(X_te_h)
-                return (p.ravel() if p.ndim > 1 else p).tolist()
+                if _ho_seq_train is not None:
+                    # Neural path: proper sliding windows
+                    m.fit(
+                        X_tr_h[-len(_ho_seq_train['seq_y']):],
+                        _ho_seq_train['seq_y'],
+                        sequence_data=_ho_seq_train['seq_X'],
+                        channel_names=_ho_seq_train['channel_names'],
+                    )
+                    p = m.predict_sequence(_ho_seq_test)
+                    if p.ndim == 2:
+                        p = p[:, 0]  # h=1 predictions
+                    # Align to test actuals
+                    n_test = len(y_te_h)
+                    p = p[-n_test:] if len(p) >= n_test else np.concatenate([np.full(n_test - len(p), np.nan), p])
+                else:
+                    # Tree path: flat features
+                    m.fit(X_tr_h, y_tr_h)
+                    p = m.predict(X_te_h)
+                    p = p.ravel() if p.ndim > 1 else p
+                del m
+                _gc.collect()
+                return p.tolist()
 
             # Default params holdout
             default_overrides = dict(self.config.model_overrides.get(model_name, {}))
             preds_default = await loop.run_in_executor(None, lambda: _run_holdout(default_overrides))
-            default_mae = float(np.mean(np.abs(y_te_h - np.array(preds_default))))
+            default_mae = float(np.nanmean(np.abs(y_te_h - np.array(preds_default))))
 
             # Tuned params holdout
             best_params = tuning_state.best_params or dict(study.best_params)
             preds_tuned = await loop.run_in_executor(None, lambda: _run_holdout(best_params))
+            tuned_mae = float(np.nanmean(np.abs(y_te_h - np.array(preds_tuned))))
 
             tuning_state.holdout_timestamps = holdout_ts
             tuning_state.holdout_actuals = [float(v) for v in y_te_h]
             tuning_state.holdout_default = [float(v) for v in preds_default]
             tuning_state.holdout_tuned = [float(v) for v in preds_tuned]
             tuning_state.default_mae = round(default_mae, 6)
+            tuning_state.tuned_mae = round(tuned_mae, 6)
+            tuning_state.best_score = round(tuned_mae, 6)
 
-            tuned_mae = tuning_state.best_score or study.best_value
             logger.info(f"  Holdout: default MAE={default_mae:.4f}, tuned MAE={tuned_mae:.4f}")
         except Exception as e:
-            logger.warning(f"  Holdout comparison failed: {e}")
+            logger.warning(f"  Holdout comparison failed: {e}", exc_info=True)
 
         tuning_state.status = "completed"
         logger.info(f"{'=' * 60}")

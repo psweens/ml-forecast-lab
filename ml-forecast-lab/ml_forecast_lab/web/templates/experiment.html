@@ -743,11 +743,12 @@
                 </div>
             </div>
             {% set best_trial = (tuning_result.trials | selectattr('trial_id', 'equalto', tuning_result.best_trial_id) | list | first) if tuning_result.best_trial_id is not none else none %}
-            {% if tuning_result.default_mae is not none and best_trial %}
+            {% set _tuned_mae = tuning_result.tuned_mae if tuning_result.tuned_mae is not none else (best_trial.mae if best_trial else none) %}
+            {% if tuning_result.default_mae is not none and _tuned_mae is not none %}
             <p style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:0.5rem;">
                 MAE: <span style="color:var(--text-muted);">{{ "%.4f"|format(tuning_result.default_mae) }} (default)</span>
-                → <span style="color:var(--accent-secondary);font-weight:600;">{{ "%.4f"|format(best_trial.mae) }} (tuned)</span>
-                {% set imp = ((tuning_result.default_mae - best_trial.mae) / tuning_result.default_mae * 100) if tuning_result.default_mae > 0 else 0 %}
+                → <span style="color:var(--accent-secondary);font-weight:600;">{{ "%.4f"|format(_tuned_mae) }} (tuned)</span>
+                {% set imp = ((tuning_result.default_mae - _tuned_mae) / tuning_result.default_mae * 100) if tuning_result.default_mae > 0 else 0 %}
                 <span style="color:{% if imp > 0 %}var(--success){% else %}var(--error){% endif %};font-weight:600;">
                     ({{ "%+.1f"|format(imp) }}%)
                 </span>

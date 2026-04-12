@@ -189,6 +189,7 @@ class TuningResult(BaseModel):
     holdout_default: Optional[List[Optional[float]]] = None  # predictions with default params
     holdout_tuned: Optional[List[Optional[float]]] = None    # predictions with best tuned params
     default_mae: Optional[float] = None
+    tuned_mae: Optional[float] = None
 
 
 class FeatureImportanceData(BaseModel):

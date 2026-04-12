@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.9.6
+
+### Bugfix
+
+- **Fix wrong tuning holdout predictions for neural models** — the
+  holdout comparison trained CNNs/LSTMs on flat feature vectors instead
+  of proper sliding-window sequences, producing garbage predictions.
+  Now builds correct temporal windows for both training and test
+  portions, matching the benchmark runner's pipeline.
+- **Fix misleading tuned MAE in holdout chart** — the displayed MAE was
+  taken from the tuning CV trial, not the holdout evaluation. The chart
+  now shows the actual holdout MAE for both default and tuned models.
+
 ## 2.9.5
 
 ### Bugfix
