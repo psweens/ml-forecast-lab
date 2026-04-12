@@ -3412,18 +3412,24 @@ class MLForecastLabApp:
         for exp_cfg in self.config.experiments:
             fc_mins = exp_cfg.forecast_every_minutes or self.config.forecast_every_minutes
             rt_hrs = exp_cfg.retrain_every_hours or self.config.retrain_every_hours
-            # Wait for the normal retrain schedule — no need to retrain on
-            # every restart/update.  Benchmark results are persisted to
-            # SQLite, and forecasts gracefully skip until a cached model
-            # is available.
-            self._next_retrain_per_exp[exp_cfg.name] = now + timedelta(
-                seconds=rt_hrs * 3600
-            )
+            if exp_cfg.mode == "production":
+                # Production experiments retrain immediately on startup so
+                # cached models exist and forecast sensors get published
+                # right away — not after waiting hours for the schedule.
+                self._next_retrain_per_exp[exp_cfg.name] = now
+                logger.info(
+                    f"Timers for {exp_cfg.name}: forecast every {fc_mins}m, "
+                    f"retrain IMMEDIATELY (production, no cached model)"
+                )
+            else:
+                self._next_retrain_per_exp[exp_cfg.name] = now + timedelta(
+                    seconds=rt_hrs * 3600
+                )
+                logger.info(
+                    f"Timers for {exp_cfg.name}: forecast every {fc_mins}m, "
+                    f"retrain in {rt_hrs}h"
+                )
             self._next_forecast_per_exp[exp_cfg.name] = now + timedelta(seconds=fc_mins * 60)
-            logger.info(
-                f"Timers for {exp_cfg.name}: forecast every {fc_mins}m, "
-                f"retrain in {rt_hrs}h"
-            )
 
         while self.running:
             try:

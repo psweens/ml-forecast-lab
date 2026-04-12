@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.9.5
+
+### Bugfix
+
+- **Production sensors appear immediately after addon restart** —
+  production experiments now retrain on startup instead of waiting for
+  the next scheduled retrain (up to 24h away). After a restart or
+  update, there were no cached models in memory, forecast cycles
+  skipped, and sensors never got published until the retrain timer
+  fired. Lab-mode experiments still defer to the normal schedule.
+
 ## 2.9.4
 
 ### Bugfix
