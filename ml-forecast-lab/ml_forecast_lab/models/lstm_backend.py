@@ -182,12 +182,15 @@ class LSTMModel(ForecastModel):
         self._channel_std[self._channel_std < 1e-8] = 1.0  # Avoid division by zero
         X_seq = (X_seq - self._channel_mean) / self._channel_std
 
-        # Residual targets: subtract the last observed value so the model
-        # predicts deltas from "now" rather than absolute values.
-        if self._n_horizons > 1:
-            y_train = y_train - last_values[:, None]  # broadcast over horizons
-        else:
+        # Residual targets: only for single-horizon (1-step-ahead) models.
+        # Multi-horizon models use absolute targets so the network must learn
+        # horizon-specific temporal patterns rather than converging to zero-
+        # residual predictions which produce flat forecasts at the last value.
+        if self._n_horizons == 1:
             y_train = y_train - last_values
+            self._residual_prediction = True
+        else:
+            self._residual_prediction = False
 
         # Target z-score normalisation — per-horizon when multi-output
         if self._n_horizons > 1:
@@ -200,9 +203,6 @@ class LSTMModel(ForecastModel):
             if self._y_std < 1e-8:
                 self._y_std = 1.0
         y_train = (y_train - self._y_mean) / self._y_std
-
-        # Mark that this model uses residual prediction (for save/load)
-        self._residual_prediction = True
 
         # Extract sample weights
         sample_weight = kwargs.get("sample_weight")

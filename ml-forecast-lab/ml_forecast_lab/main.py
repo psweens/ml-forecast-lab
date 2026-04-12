@@ -2049,6 +2049,15 @@ class MLForecastLabApp:
         ]
         next_val = round(float(y_pred[0]), 4)
 
+        if forecast_list:
+            vals = [p["value"] for p in forecast_list]
+            logger.debug(
+                f"  Forecast attribute: {len(forecast_list)} points, "
+                f"dt[0]={forecast_list[0]['datetime']}, "
+                f"dt[-1]={forecast_list[-1]['datetime']}, "
+                f"val range=[{min(vals):.4f}, {max(vals):.4f}]"
+            )
+
         # --- Log forecast evolution (non-blocking) ---------------------------
         if self.history_db and exp_cfg.mode == "production":
             try:
