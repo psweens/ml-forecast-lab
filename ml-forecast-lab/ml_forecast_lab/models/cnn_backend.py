@@ -77,7 +77,11 @@ class _CNNNet(nn.Module):
         layers = []
         for i in range(n_layers):
             in_ch = input_size if i == 0 else n_filters
-            dilation = dilation_base ** i
+            # Cap dilation at seq_len — beyond that the kernel sees at
+            # most one timestep, and the causal padding tensor grows
+            # exponentially (dilation_base^layer × kernel_size), which
+            # can cause multi-GB allocations and instant OOM SIGKILL.
+            dilation = min(dilation_base ** i, seq_len)
             layers.append(_WaveNetBlock(in_ch, n_filters, kernel_size, dilation, dropout))
         self.blocks = nn.Sequential(*layers)
 

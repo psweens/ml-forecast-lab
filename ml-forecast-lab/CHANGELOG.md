@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.9.4
+
+### Bugfix
+
+- **Fix CNN tuning crash caused by exponential causal padding** — the
+  WaveNet-style CNN uses `dilation = dilation_base^layer`. When Optuna
+  suggested extreme combinations (e.g. `dilation_base=4, n_layers=10,
+  kernel_size=15`), the last layer's causal padding was
+  `14 × 4^9 = 3.6 million`, creating multi-GB tensors in a single
+  `F.pad()` call that triggered an instant SIGKILL from the OOM killer
+  with no Python traceback. Fixed by capping dilation at `seq_len` (48)
+  in the CNN model — beyond that the kernel can only see one timestep
+  anyway, so the cap has no accuracy cost.
+- **Tightened CNN tuning search space** — reduced `n_filters` max
+  256→128, `kernel_size` max 15→7, `n_layers` max 10→8,
+  `dilation_base` max 4→3 to keep Optuna in architecturally sensible
+  ranges for 48-step sequences.
+
 ## 2.9.3
 
 ### Bugfix
