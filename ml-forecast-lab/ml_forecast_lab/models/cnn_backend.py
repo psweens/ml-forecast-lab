@@ -88,11 +88,15 @@ class _CNNNet(nn.Module):
         # Learnable positional pooling weights
         self.pool_weights = nn.Parameter(torch.zeros(seq_len))
 
+        # Head hidden size must be >= n_horizons, otherwise multi-horizon
+        # output gets bottlenecked and the model can only predict near-
+        # constant values across all horizons (flat forecast).
+        head_hidden = max(n_filters, n_horizons)
         self.head = nn.Sequential(
-            nn.Linear(n_filters, n_filters // 2),
+            nn.Linear(n_filters, head_hidden),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(n_filters // 2, n_horizons),
+            nn.Linear(head_hidden, n_horizons),
         )
 
     def forward(self, x):

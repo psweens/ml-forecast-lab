@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.9.7
+
+### Bugfix
+
+- **Fix flat CNN multi-horizon forecasts** — the CNN's prediction head
+  had a `n_filters // 2` hidden layer (16 neurons at default settings)
+  producing 48 horizon outputs. This severe bottleneck forced the model
+  to predict near-identical values for every future step, producing a
+  flat line instead of a solar curve. The head hidden size is now
+  `max(n_filters, n_horizons)` so each horizon can be predicted
+  independently.
+
 ## 2.9.6
 
 ### Bugfix
