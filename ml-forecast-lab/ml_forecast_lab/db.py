@@ -267,6 +267,7 @@ class HistoryDB:
         experiment: str,
         actuals_table: str,
         max_age_days: int = 30,
+        interval_minutes: int = 30,
     ) -> dict:
         """
         Compute forecast accuracy by lead time.
@@ -283,6 +284,10 @@ class HistoryDB:
             SQL-safe table name for the actuals.
         max_age_days : int
             Only consider forecasts issued in the last N days.
+        interval_minutes : int
+            Resampling grid interval in minutes. Raw actuals are snapped
+            to the nearest grid boundary before joining against forecast
+            targets (which are already grid-aligned).
 
         Returns
         -------
@@ -303,24 +308,38 @@ class HistoryDB:
         if not cursor.fetchone():
             return {"error": "No actuals data available yet"}
 
+        interval_sec = interval_minutes * 60
+
         # --- Lead-time accuracy curve ---
-        # Bucket lead_minutes into 30-min bins for cleaner charts
+        # Bucket lead_minutes into 30-min bins for cleaner charts.
+        # Actuals are stored with raw irregular HA timestamps, while
+        # forecast targets are grid-aligned. Snap actuals to the grid
+        # (floor to nearest interval boundary) and average before joining.
         try:
             cursor.execute(f"""
+                WITH actuals_grid AS (
+                    SELECT
+                        strftime('%Y-%m-%d %H:%M:%S',
+                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                            'unixepoch') AS grid_dt,
+                        AVG(value) AS value
+                    FROM {actuals_table}
+                    GROUP BY grid_dt
+                )
                 SELECT
                     CAST((fl.lead_minutes / 30) * 30 AS INTEGER) AS lead_bucket,
-                    AVG(ABS(fl.predicted - a.value)) AS mae,
-                    SQRT(AVG((fl.predicted - a.value) * (fl.predicted - a.value))) AS rmse,
+                    AVG(ABS(fl.predicted - ag.value)) AS mae,
+                    SQRT(AVG((fl.predicted - ag.value) * (fl.predicted - ag.value))) AS rmse,
                     COUNT(*) AS n
                 FROM forecast_log fl
-                INNER JOIN {actuals_table} a
-                    ON SUBSTR(a.ds, 1, 19) = fl.target_dt
+                INNER JOIN actuals_grid ag
+                    ON ag.grid_dt = fl.target_dt
                 WHERE fl.experiment = ?
                   AND fl.target_dt <= ?
                   AND fl.issued_at >= ?
                 GROUP BY lead_bucket
                 ORDER BY lead_bucket
-            """, (experiment, now_str, cutoff_str))
+            """, (interval_sec, interval_sec, experiment, now_str, cutoff_str))
             lead_rows = cursor.fetchall()
         except sqlite3.Error as e:
             logger.error(f"Forecast accuracy query failed: {e}")
@@ -337,17 +356,26 @@ class HistoryDB:
         # Compare the FIRST forecast for each target_dt vs the LAST
         try:
             cursor.execute(f"""
-                WITH ranked AS (
+                WITH actuals_grid AS (
+                    SELECT
+                        strftime('%Y-%m-%d %H:%M:%S',
+                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                            'unixepoch') AS grid_dt,
+                        AVG(value) AS value
+                    FROM {actuals_table}
+                    GROUP BY grid_dt
+                ),
+                ranked AS (
                     SELECT
                         fl.target_dt,
                         fl.lead_minutes,
                         fl.predicted,
-                        a.value AS actual,
+                        ag.value AS actual,
                         ROW_NUMBER() OVER (PARTITION BY fl.target_dt ORDER BY fl.issued_at ASC) AS rn_first,
                         ROW_NUMBER() OVER (PARTITION BY fl.target_dt ORDER BY fl.issued_at DESC) AS rn_last
                     FROM forecast_log fl
-                    INNER JOIN {actuals_table} a
-                        ON SUBSTR(a.ds, 1, 19) = fl.target_dt
+                    INNER JOIN actuals_grid ag
+                        ON ag.grid_dt = fl.target_dt
                     WHERE fl.experiment = ?
                       AND fl.target_dt <= ?
                       AND fl.issued_at >= ?
@@ -368,7 +396,7 @@ class HistoryDB:
                     AVG(ABS(last_pred  - actual)) AS last_mae,
                     COUNT(*) AS n
                 FROM first_last
-            """, (experiment, now_str, cutoff_str))
+            """, (interval_sec, interval_sec, experiment, now_str, cutoff_str))
             rev_row = cursor.fetchone()
         except sqlite3.Error as e:
             logger.warning(f"Revision improvement query failed: {e}")

@@ -2231,6 +2231,7 @@ class MLForecastLabApp:
                 )
                 accuracy = self.history_db.get_forecast_accuracy(
                     exp_cfg.name, actuals_table, max_age_days=30,
+                    interval_minutes=exp_cfg.interval_minutes,
                 )
                 ltc = accuracy.get("lead_time_curve", {})
                 rev = accuracy.get("revision_improvement", {})

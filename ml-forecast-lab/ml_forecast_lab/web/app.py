@@ -1362,7 +1362,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"error": str(e)}, status_code=500)
 
         days = int(request.query_params.get("days", "30"))
-        result = db.get_forecast_accuracy(name, actuals_table, max_age_days=days)
+        result = db.get_forecast_accuracy(
+            name, actuals_table, max_age_days=days,
+            interval_minutes=exp_cfg.interval_minutes,
+        )
         return JSONResponse(content=result)
 
     @app.post("/experiment/{name}/toggle-mode")
