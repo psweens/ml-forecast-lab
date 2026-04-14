@@ -1135,7 +1135,18 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             removed = remove_experiment_covariate(config_path, name, entity_id)
             if removed:
                 logger.info(f"Removed covariate {entity_id} from {name}")
-                return JSONResponse(content={"success": True, "entity_id": entity_id})
+                # Covariate list changes the feature schema — retrain so the
+                # cached model stops feeding stale columns into predictions.
+                retrain_scheduled = False
+                if app.state.appstate.retrain_callback:
+                    import asyncio as _aio
+                    _aio.create_task(app.state.appstate.retrain_callback(name))
+                    retrain_scheduled = True
+                return JSONResponse(content={
+                    "success": True,
+                    "entity_id": entity_id,
+                    "retrain_scheduled": retrain_scheduled,
+                })
             else:
                 return JSONResponse(content={"success": False, "error": "Covariate not found"})
         except Exception as e:
@@ -1171,7 +1182,19 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             added = add_experiment_covariate(config_path, name, cov_dict)
             if added:
                 logger.info(f"Added covariate {entity} to {name}")
-                return JSONResponse(content={"success": True, "entity": entity})
+                # New covariate = new feature column. The cached model has no
+                # weights/splits for it, so a retrain is required for it to
+                # actually influence predictions.
+                retrain_scheduled = False
+                if app.state.appstate.retrain_callback:
+                    import asyncio as _aio
+                    _aio.create_task(app.state.appstate.retrain_callback(name))
+                    retrain_scheduled = True
+                return JSONResponse(content={
+                    "success": True,
+                    "entity": entity,
+                    "retrain_scheduled": retrain_scheduled,
+                })
             else:
                 return JSONResponse(content={"success": False, "error": "Covariate already exists or experiment not found"})
         except ValueError as e:
@@ -2064,7 +2087,36 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 pass  # Config will reload on next training run
 
             logger.info(f"Experiment '{exp_name}' settings updated: {updates}")
-            return JSONResponse(content={"success": True})
+
+            # Fields that change the trained model's feature schema or the
+            # preprocessed target — a cached model trained before the change
+            # cannot act on the new setting, so trigger an immediate retrain.
+            # Fields NOT listed here (forecast_every_minutes, retrain_every_hours,
+            # max_increment) are applied live without retraining.
+            schema_affecting = {
+                "include_sun_elevation", "include_clear_sky_irradiance",
+                "days_history", "interval_minutes", "future_periods",
+                "log_transform", "source_is_cumulative", "reset_daily",
+                "cv_strategy", "cv_folds", "recency_half_life_days",
+                "loss_fn", "production_metric",
+            }
+            retrain_scheduled = False
+            if (
+                any(k in schema_affecting for k in updates)
+                and app.state.appstate.retrain_callback
+            ):
+                import asyncio as _aio
+                _aio.create_task(app.state.appstate.retrain_callback(exp_name))
+                retrain_scheduled = True
+                logger.info(
+                    f"Scheduled immediate retrain for '{exp_name}' "
+                    f"(schema-affecting settings changed)"
+                )
+
+            return JSONResponse(content={
+                "success": True,
+                "retrain_scheduled": retrain_scheduled,
+            })
 
         except Exception as e:
             logger.error(f"Failed to save experiment settings: {e}")
