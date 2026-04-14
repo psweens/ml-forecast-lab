@@ -253,8 +253,8 @@ var EMBEDDED_HISTORY = {{ embedded_history | tojson }};
 
             case 'epoch':
                 updateEpochStats(ev);
-                accumulateEpochData(ev);
-                if (!isReplaying) {
+                const _added = accumulateEpochData(ev);
+                if (!isReplaying && _added) {
                     // During live, only render if this model is displayed
                     if (ev.model_name === displayModel) {
                         liveUpdateChart(ev);
@@ -345,7 +345,10 @@ var EMBEDDED_HISTORY = {{ embedded_history | tojson }};
         sel.appendChild(opt);
     }
 
-    // Accumulate epoch data into allLossData (works for both live and replay)
+    // Accumulate epoch data into allLossData (works for both live and replay).
+    // Returns true if the event was added, false if deduplicated. SSE auto-
+    // reconnects replay history, so we drop events whose epoch is not strictly
+    // greater than the last recorded epoch for this (model, fold).
     function accumulateEpochData(ev) {
         if (!allLossData[ev.model_name]) allLossData[ev.model_name] = {};
         const foldKey = `F${ev.fold}`;
@@ -357,6 +360,10 @@ var EMBEDDED_HISTORY = {{ embedded_history | tojson }};
             };
         }
         const fd = allLossData[ev.model_name][foldKey];
+        const lastEpoch = fd.epochs.length > 0 ? fd.epochs[fd.epochs.length - 1] : 0;
+        if (ev.epoch <= lastEpoch) {
+            return false;  // duplicate / out-of-order (SSE reconnect replay)
+        }
         fd.epochs.push(ev.epoch);
         fd.train.push(ev.train_loss);
         fd.val.push(ev.val_loss);
@@ -366,6 +373,7 @@ var EMBEDDED_HISTORY = {{ embedded_history | tojson }};
             fd.lastPatienceLimit = ev.patience_limit;
         }
         if (ev.best_val_loss > 0) fd.bestValLoss = ev.best_val_loss;
+        return true;
     }
 
     // Record an explicit early_stop event

@@ -316,15 +316,14 @@ class TimesNetModel(ForecastModel):
         # Extract sample weights
         sample_weight = kwargs.get("sample_weight")
 
-        # Middle-out validation split -- val from centre so model trains on recent data
+        # Tail validation split -- val is the most recent slice; a purge gap
+        # equal to the forecast horizon keeps train target windows from
+        # overlapping val inputs, preventing temporal leakage.
         n_total = len(X_seq)
         val_split = kwargs.get("validation_split", 0.2)
-        n_val = int(n_total * val_split)
-        val_start = (n_total - n_val) // 2
-
-        val_mask = np.zeros(n_total, dtype=bool)
-        val_mask[val_start:val_start + n_val] = True
-        train_mask = ~val_mask
+        train_mask, val_mask = self._tail_val_split(
+            n_total, val_split, gap=self._n_horizons,
+        )
 
         X_tr, X_val = X_seq[train_mask], X_seq[val_mask]
         y_tr, y_val = y_train[train_mask], y_train[val_mask]
@@ -374,17 +373,16 @@ class TimesNetModel(ForecastModel):
                 loss_per_sample = criterion(y_pred, y_batch)
                 if w_tr_t is not None:
                     w_batch = w_tr_t[batch_idx]
-                    if loss_per_sample.ndim > 1:
-                        loss = (loss_per_sample * w_batch.unsqueeze(-1)).mean()
-                    else:
-                        loss = (loss_per_sample * w_batch).mean()
+                    loss = self._weighted_mean_loss(loss_per_sample, w_batch)
                 else:
                     loss = loss_per_sample.mean()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self._model.parameters(), max_norm=5.0)
                 optimiser.step()
 
-                epoch_loss += loss.item()
+                # Report unweighted per-sample MSE so train and val are on
+                # the same scale (weighted `loss` above is used for backprop).
+                epoch_loss += loss_per_sample.mean().item()
                 n_batches += 1
 
             scheduler.step()

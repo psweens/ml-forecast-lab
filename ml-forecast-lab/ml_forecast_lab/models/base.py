@@ -362,6 +362,48 @@ class ForecastModel(ABC):
             except Exception:
                 pass  # Never let callback errors break training
 
+    @staticmethod
+    def _tail_val_split(n_total: int, val_split: float, gap: int = 0):
+        """
+        Tail validation split with a purge gap.
+
+        Val is the last `val_split` fraction of samples; train is everything
+        before, minus a `gap` of samples immediately preceding val to prevent
+        target leakage from train windows whose forecast horizon overlaps
+        val inputs.
+
+        Returns
+        -------
+        (train_mask, val_mask) : tuple[np.ndarray, np.ndarray]
+            Boolean masks of length n_total.
+        """
+        n_val = max(1, int(n_total * val_split))
+        val_start = n_total - n_val
+        train_end = max(0, val_start - int(gap))
+        val_mask = np.zeros(n_total, dtype=bool)
+        val_mask[val_start:] = True
+        train_mask = np.zeros(n_total, dtype=bool)
+        train_mask[:train_end] = True
+        return train_mask, val_mask
+
+    @staticmethod
+    def _weighted_mean_loss(loss_per_sample: "torch.Tensor",
+                            w_batch: "torch.Tensor") -> "torch.Tensor":
+        """
+        Proper sample-weighted mean: sum(loss_i * w_i) / sum(w_i).
+
+        Handles both single-horizon (1-D) and multi-horizon (2-D) loss
+        tensors. For multi-horizon, averages over horizons per sample first
+        so the scalar weighted mean is on the same scale as the unweighted
+        mean (average per-sample MSE).
+        """
+        if loss_per_sample.ndim > 1:
+            per_sample = loss_per_sample.mean(dim=tuple(range(1, loss_per_sample.ndim)))
+        else:
+            per_sample = loss_per_sample
+        w_sum = w_batch.sum().clamp_min(1e-8)
+        return (per_sample * w_batch).sum() / w_sum
+
     def _validate_fitted(self) -> None:
         """
         Raise RuntimeError if model is not fitted.

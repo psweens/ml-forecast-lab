@@ -1878,8 +1878,9 @@ window.showTab = function(el) {
                 if (!isReplaying) renderChartForModel(displayModel);
                 break;
             case 'epoch':
-                updateEpochStats(ev); accumulateEpochData(ev);
-                if (!isReplaying && ev.model_name === displayModel) liveUpdateChart(ev);
+                updateEpochStats(ev);
+                var _added = accumulateEpochData(ev);
+                if (!isReplaying && _added && ev.model_name === displayModel) liveUpdateChart(ev);
                 break;
             case 'early_stop':
                 logEvent('warn', ev.model_name + ': Early stop at epoch ' + ev.epoch);
@@ -1920,6 +1921,9 @@ window.showTab = function(el) {
         document.getElementById('stat-patience').textContent = ev.patience_limit > 0 ? ev.patience_counter + '/' + ev.patience_limit : '—';
     }
 
+    // Returns true if the event was added, false if deduplicated.
+    // SSE auto-reconnects replay history, so drop events whose epoch is
+    // not strictly greater than the last recorded epoch for (model, fold).
     function accumulateEpochData(ev) {
         if (!allLossData[ev.model_name]) allLossData[ev.model_name] = {};
         var foldKey = 'F' + ev.fold;
@@ -1927,10 +1931,13 @@ window.showTab = function(el) {
             allLossData[ev.model_name][foldKey] = { epochs: [], train: [], val: [], totalEpochs: 0, lastPatienceCounter: 0, lastPatienceLimit: 0, bestValLoss: Infinity };
         }
         var fd = allLossData[ev.model_name][foldKey];
+        var lastEpoch = fd.epochs.length > 0 ? fd.epochs[fd.epochs.length - 1] : 0;
+        if (ev.epoch <= lastEpoch) return false;
         fd.epochs.push(ev.epoch); fd.train.push(ev.train_loss); fd.val.push(ev.val_loss);
         if (ev.total_epochs > 0) fd.totalEpochs = ev.total_epochs;
         if (ev.patience_limit > 0) { fd.lastPatienceCounter = ev.patience_counter; fd.lastPatienceLimit = ev.patience_limit; }
         if (ev.best_val_loss > 0) fd.bestValLoss = ev.best_val_loss;
+        return true;
     }
 
     function addModelToDropdown(modelName) {
