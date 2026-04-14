@@ -63,6 +63,9 @@ class MLForecastLabApp:
         # loop reloads config every 30s; we don't want a log line each time).
         self._last_config_path: Optional[Path] = None
         self._last_config_mtime: Optional[float] = None
+        # Cached site location (lat, lon) from HA's /api/config — used for
+        # deterministic solar physics covariates. Fetched lazily on first use.
+        self._site_location: Optional[tuple[float, float]] = None
 
     async def load_config(self, config_path: Optional[Path] = None):
         """
@@ -510,6 +513,38 @@ class MLForecastLabApp:
                     status.last_error = str(e)
                     self.web_app.state.appstate.end_benchmark(experiment_name)
 
+    async def _get_site_location(self) -> Optional[tuple[float, float]]:
+        """
+        Return cached (latitude, longitude) from HA's /api/config.
+
+        Fetched once on first call and cached for the lifetime of the app.
+        Returns None if the HA interface is unavailable or the config doesn't
+        expose coordinates.
+        """
+        if self._site_location is not None:
+            return self._site_location
+        if self.ha_interface is None:
+            return None
+        try:
+            ha_cfg = await self.ha_interface.get_config()
+        except Exception as e:
+            logger.warning(f"Could not fetch HA config for site location: {e}")
+            return None
+        lat = ha_cfg.get("latitude")
+        lon = ha_cfg.get("longitude")
+        if lat is None or lon is None:
+            logger.warning("HA config does not expose latitude/longitude")
+            return None
+        try:
+            self._site_location = (float(lat), float(lon))
+            logger.info(
+                f"Site location: lat={self._site_location[0]:.4f}, "
+                f"lon={self._site_location[1]:.4f}"
+            )
+        except (TypeError, ValueError):
+            return None
+        return self._site_location
+
     async def _fetch_and_preprocess(self, exp_cfg) -> Optional[pd.DataFrame]:
         """
         Fetch history and preprocess for an experiment.
@@ -670,6 +705,36 @@ class MLForecastLabApp:
 
                 except Exception as e:
                     logger.warning(f"    ✗ Failed to fetch {cov_cfg.entity}: {e}")
+
+        # --- Compute deterministic solar physics features ---
+        if (
+            getattr(exp_cfg, "include_sun_elevation", False)
+            or getattr(exp_cfg, "include_clear_sky_irradiance", False)
+        ):
+            loc = await self._get_site_location()
+            if loc is not None:
+                lat, lon = loc
+                try:
+                    from ml_forecast_lab.solar_physics import compute_solar_features
+                    solar_df = compute_solar_features(
+                        result.index,
+                        latitude=lat,
+                        longitude=lon,
+                        include_elevation=exp_cfg.include_sun_elevation,
+                        include_clear_sky=exp_cfg.include_clear_sky_irradiance,
+                    )
+                    for col in solar_df.columns:
+                        result[col] = solar_df[col].values
+                    if len(solar_df.columns) > 0:
+                        logger.info(
+                            f"  ✓ Added solar physics features: {list(solar_df.columns)}"
+                        )
+                except Exception as e:
+                    logger.warning(f"  ✗ Solar physics computation failed: {e}")
+            else:
+                logger.warning(
+                    "  Solar physics requested but site location unavailable"
+                )
 
         result = result.dropna()
 
@@ -2393,6 +2458,36 @@ class MLForecastLabApp:
                 for c in raw_cov_cols
             }
 
+            # Pre-compute deterministic solar features for future timestamps.
+            # Unlike other covariates, sun elevation and clear-sky irradiance
+            # are exactly known for any future time given (lat, lon), so we
+            # should NOT carry forward the last value — that would leave the
+            # recursive forecast stuck in a single point of the day.
+            future_solar = None
+            solar_cols = [
+                c for c in ("sun_elevation", "clear_sky_ghi")
+                if c in raw_cov_cols
+            ]
+            if solar_cols:
+                loc = await self._get_site_location()
+                if loc is not None:
+                    lat, lon = loc
+                    future_idx = pd.DatetimeIndex([
+                        last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes * (i + 1))
+                        for i in range(future_periods)
+                    ])
+                    try:
+                        from ml_forecast_lab.solar_physics import compute_solar_features
+                        future_solar = compute_solar_features(
+                            future_idx,
+                            latitude=lat,
+                            longitude=lon,
+                            include_elevation="sun_elevation" in solar_cols,
+                            include_clear_sky="clear_sky_ghi" in solar_cols,
+                        )
+                    except Exception as e:
+                        logger.debug(f"Future solar pre-compute failed: {e}")
+
             def _build_feature_row(ts: pd.Timestamp, buf: list) -> dict:
                 """Construct a single feature row matching the training schema."""
                 row = {}
@@ -2429,13 +2524,22 @@ class MLForecastLabApp:
                         row[f'y_rolling_max_{w}'] = 0.0
                 # Rate of change
                 row['y_diff_1'] = float(buf[-1] - buf[-2]) if len(buf) >= 2 else 0.0
-                # Covariates (carried forward)
+                # Covariates (carried forward, except solar which has
+                # deterministic future values from pvlib)
                 for c, v in last_cov_vals.items():
-                    row[c] = v
-                # Interaction features
+                    if (
+                        future_solar is not None
+                        and c in future_solar.columns
+                        and ts in future_solar.index
+                    ):
+                        row[c] = float(future_solar.loc[ts, c])
+                    else:
+                        row[c] = v
+                # Interaction features — use row[c] so solar interactions
+                # reflect the true future covariate value, not the carried one.
                 for c in raw_cov_cols:
-                    row[f'{c}_x_hour_sin'] = last_cov_vals.get(c, 0.0) * row['hour_sin']
-                    row[f'{c}_x_hour_cos'] = last_cov_vals.get(c, 0.0) * row['hour_cos']
+                    row[f'{c}_x_hour_sin'] = row.get(c, 0.0) * row['hour_sin']
+                    row[f'{c}_x_hour_cos'] = row.get(c, 0.0) * row['hour_cos']
                 return row
 
             def _run_recursive_forecast():

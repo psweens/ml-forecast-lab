@@ -1984,6 +1984,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "production_metric": lambda v: v if v in ("mae", "rmse", "mase") else None,
             "loss_fn": lambda v: v if v in ("mse", "mae", "huber") else None,
             "max_increment": lambda v: float(v) if float(v) > 0 else None,
+            "include_sun_elevation": lambda v: bool(v),
+            "include_clear_sky_irradiance": lambda v: bool(v),
         }
 
         # Fields where None/null means "use global default" (valid, not an error)

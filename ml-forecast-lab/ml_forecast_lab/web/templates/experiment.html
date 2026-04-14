@@ -209,6 +209,31 @@
         </div>
     </div>
 
+    <!-- Solar Physics -->
+    <div class="settings-group">
+        <h3 class="settings-group-title">Solar Physics</h3>
+        <div class="settings-row">
+            <div class="settings-toggle-field">
+                <label class="toggle-switch">
+                    <input type="checkbox" data-field="include_sun_elevation"
+                           {% if exp_config and exp_config.include_sun_elevation %}checked{% endif %}
+                           onchange="saveSettingsToggle(this, 'include_sun_elevation')">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span class="field-label">Sun elevation <span class="info-tip">?<span class="tip-text">Degrees above horizon; negative at night. Deterministic from lat/lon — a strong signal for diurnal patterns (solar PV, daytime load).</span></span></span>
+            </div>
+            <div class="settings-toggle-field">
+                <label class="toggle-switch">
+                    <input type="checkbox" data-field="include_clear_sky_irradiance"
+                           {% if exp_config and exp_config.include_clear_sky_irradiance %}checked{% endif %}
+                           onchange="saveSettingsToggle(this, 'include_clear_sky_irradiance')">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span class="field-label">Clear-sky irradiance <span class="info-tip">?<span class="tip-text">Theoretical maximum solar GHI (W/m²) under perfect clear-sky conditions via pvlib Ineichen model. Zero at night, peak at solar noon — ideal for solar PV forecasting.</span></span></span>
+            </div>
+        </div>
+    </div>
+
     <!-- Covariates -->
     <div class="settings-group">
         <h3 class="settings-group-title">Covariates</h3>

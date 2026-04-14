@@ -207,6 +207,20 @@ class ExperimentCfg:
     higher weight during training so models prioritise current patterns.
     Set to 0 to disable recency weighting (all samples weighted equally)."""
 
+    include_sun_elevation: bool = False
+    """Include sun elevation angle (degrees above horizon) as a computed covariate.
+    Deterministic from (lat, lon, timestamp); requires no external data source and
+    is available for both training history and forecast horizon. Negative at night
+    — a strong physical signal for diurnal patterns (solar PV, outdoor lighting,
+    daytime load)."""
+
+    include_clear_sky_irradiance: bool = False
+    """Include clear-sky global horizontal irradiance (W/m²) as a computed covariate.
+    Theoretical maximum solar energy under perfect clear-sky conditions, computed via
+    pvlib's Ineichen model. Zero at night, peak at solar noon. Ideal for solar PV
+    forecasting — turns the problem into predicting cloud-cover-driven attenuation
+    rather than raw generation."""
+
     def __post_init__(self) -> None:
         """Validate configuration."""
         valid_modes = {'lab', 'production'}

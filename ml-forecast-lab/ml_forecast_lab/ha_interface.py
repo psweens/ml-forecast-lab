@@ -343,6 +343,23 @@ class HAInterface:
             logger.error(f"Failed to set state {entity_id}: {e}")
             return False
 
+    async def get_config(self) -> dict:
+        """
+        Fetch HA's configuration (includes latitude, longitude, elevation,
+        time_zone, unit_system, etc.) from /api/config.
+
+        Returns:
+            Config dict; empty dict on failure.
+        """
+        try:
+            result = await self.api_call("GET", "/api/config")
+            if isinstance(result, dict):
+                return result
+            return {}
+        except RuntimeError as e:
+            logger.warning(f"Failed to fetch HA config: {e}")
+            return {}
+
     async def close(self) -> None:
         """Close HTTP session if we own it."""
         if self._owns_session and self.session and not self.session.closed:
