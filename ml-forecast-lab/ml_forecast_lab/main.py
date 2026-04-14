@@ -2014,6 +2014,29 @@ class MLForecastLabApp:
             await loop.run_in_executor(None, model.fit, X, y)
 
         logger.info(f"  {prod_model_name} trained on {len(X)} samples")
+        # Surface the feature set the model was actually trained with, so a
+        # user who enabled a covariate or solar toggle and then retrained can
+        # verify that the new column actually made it into the trained model.
+        solar_in_features = [
+            c for c in feature_cols if c in ("sun_elevation", "clear_sky_ghi")
+        ]
+        cov_in_features = [
+            c for c in feature_cols
+            if c not in ("target",)
+            and not c.startswith("y_")
+            and not c.endswith("_x_hour_sin")
+            and not c.endswith("_x_hour_cos")
+            and c not in (
+                "hour_of_day", "day_of_week", "is_weekend", "month",
+                "day_of_month", "hour_sin", "hour_cos", "dow_sin",
+                "dow_cos", "is_holiday",
+            )
+        ]
+        logger.info(
+            f"  {exp_cfg.name} feature set: {len(feature_cols)} cols, "
+            f"{len(cov_in_features)} raw covariates {cov_in_features}, "
+            f"solar={solar_in_features or 'none'}"
+        )
 
         # Cache the trained model
         self._cached_models[exp_cfg.name] = {

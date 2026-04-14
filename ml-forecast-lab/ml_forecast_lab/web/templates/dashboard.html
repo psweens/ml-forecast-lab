@@ -147,7 +147,15 @@
                         title="Remove from queue">
                     Queued (#{{ queued_experiments[exp.name] }})
                 </button>
-                {% elif exp.mode == 'production' %}
+                {% else %}
+                {% if exp.best_model %}
+                <button class="btn btn-secondary flex-center nowrap" style="font-size:0.85rem;"
+                        onclick="retrainExperiment('{{ exp.name }}', this)"
+                        title="Retrain to apply new settings (covariates, solar toggles, etc.)">
+                    Retrain
+                </button>
+                {% endif %}
+                {% if exp.mode == 'production' %}
                 <button class="btn btn-success flex-center nowrap" style="font-size:0.85rem;"
                         onclick="toggleMode('{{ exp.name }}', this)">
                     Publishing
@@ -158,6 +166,7 @@
                         {% if not exp.best_model %}disabled{% endif %}>
                     Publish
                 </button>
+                {% endif %}
                 {% endif %}
             </div>
         </div>
@@ -248,6 +257,33 @@
             else el.textContent = s + 's';
         }, 1000);
     });
+
+    // Retrain the production model for one experiment
+    function retrainExperiment(name, btn) {
+        mlfl.confirm('Retrain ' + name + '? This may take a few minutes.', function() {
+            btn.disabled = true;
+            var orig = btn.textContent;
+            btn.textContent = 'Retraining...';
+            fetch(BASE_PATH + '/experiment/' + name + '/retrain', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(result) {
+                if (result.success) {
+                    mlfl.toast('Retrain started for ' + name, 'success');
+                    setTimeout(function() { location.reload(); }, 1500);
+                } else {
+                    mlfl.toast('Failed: ' + result.error, 'error');
+                    btn.disabled = false; btn.textContent = orig;
+                }
+            })
+            .catch(function(err) {
+                mlfl.toast('Error: ' + err, 'error');
+                btn.disabled = false; btn.textContent = orig;
+            });
+        });
+    }
 
     // Stop training
     function stopTraining(name, btn) {

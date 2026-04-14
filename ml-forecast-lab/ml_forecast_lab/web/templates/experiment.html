@@ -1132,9 +1132,6 @@ window.showTab = function(el) {
             if (result.success) {
                 el.style.borderColor = 'var(--success)';
                 setTimeout(function() { el.style.borderColor = ''; }, 2000);
-                if (result.retrain_scheduled) {
-                    mlfl.toast(field + ' saved — retraining to apply', 'success');
-                }
             } else {
                 el.style.borderColor = 'var(--error)';
                 mlfl.toast('Failed: ' + result.error, 'error');
@@ -1157,11 +1154,7 @@ window.showTab = function(el) {
         .then(function(r) { return r.json(); })
         .then(function(result) {
             if (result.success) {
-                var msg = field + ' updated';
-                if (result.retrain_scheduled) {
-                    msg += ' — retraining to apply';
-                }
-                mlfl.toast(msg, 'success');
+                mlfl.toast(field + ' updated', 'success');
             } else {
                 el.checked = !el.checked;
                 mlfl.toast('Failed: ' + result.error, 'error');
@@ -1234,12 +1227,7 @@ window.showTab = function(el) {
         .then(function(r) { return r.json(); })
         .then(function(result) {
             if (result.success) {
-                mlfl.toast(
-                    result.retrain_scheduled
-                        ? 'Covariate added — retraining to apply'
-                        : 'Covariate added',
-                    'success'
-                );
+                mlfl.toast('Covariate added', 'success');
                 // Append row to DOM
                 var list = document.getElementById('covariate-list');
                 var noMsg = document.getElementById('no-covariates-msg');
@@ -1274,12 +1262,7 @@ window.showTab = function(el) {
         .then(function(r) { return r.json(); })
         .then(function(result) {
             if (result.success) {
-                mlfl.toast(
-                    result.retrain_scheduled
-                        ? 'Covariate removed — retraining to apply'
-                        : 'Covariate removed',
-                    'success'
-                );
+                mlfl.toast('Covariate removed', 'success');
                 var row = document.querySelector('.covariate-row[data-entity="' + entity + '"]');
                 if (row) row.remove();
                 if (!document.querySelectorAll('.covariate-row').length) {
