@@ -148,14 +148,12 @@
                     Queued (#{{ queued_experiments[exp.name] }})
                 </button>
                 {% else %}
-                {% if exp.best_model %}
+                {% if exp.mode == 'production' %}
                 <button class="btn btn-secondary flex-center nowrap" style="font-size:0.85rem;"
                         onclick="retrainExperiment('{{ exp.name }}', this)"
-                        title="Retrain to apply new settings (covariates, solar toggles, etc.)">
+                        title="Retrain the production model to apply new settings (covariates, solar toggles, etc.)">
                     Retrain
                 </button>
-                {% endif %}
-                {% if exp.mode == 'production' %}
                 <button class="btn btn-success flex-center nowrap" style="font-size:0.85rem;"
                         onclick="toggleMode('{{ exp.name }}', this)">
                     Publishing

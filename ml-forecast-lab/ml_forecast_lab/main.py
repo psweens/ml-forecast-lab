@@ -390,10 +390,12 @@ class MLForecastLabApp:
 
             self.web_app.state.appstate.tuning_callback = _tuning_trigger
 
-            # Register retrain callback so the apply-tuning and
-            # apply-covariate-best endpoints can trigger a fresh retrain
-            # immediately after they save config changes, instead of making
-            # the user wait for the next scheduled retrain cycle.
+            # Register retrain callback. All user-initiated retrains
+            # (dashboard button, apply-tuning, apply-covariate-best,
+            # toggle-mode→production) want to retrain the chosen/production
+            # model only, never to kick off a full benchmark — so we go
+            # straight to _retrain_and_cache rather than _retrain_single
+            # (which also has a lab-mode branch that runs a benchmark).
             async def _retrain_trigger(experiment_name: str):
                 # Re-read config so any YAML edits applied just before this
                 # call are picked up before the retrain runs.
@@ -409,7 +411,8 @@ class MLForecastLabApp:
                     return
                 async with self._training_lock:
                     try:
-                        await self._retrain_single(exp_cfg)
+                        await self._retrain_and_cache(exp_cfg)
+                        await self.publish_heartbeat()
                     except Exception as e:
                         logger.error(
                             f"Retrain trigger failed for {experiment_name}: {e}",
