@@ -1055,6 +1055,52 @@
         <div id="accuracy-evolution-chart" style="width:100%;height:420px;"></div>
     </div>
 
+    <!-- Model stability -->
+    <div class="settings-group" id="accuracy-stability-wrapper" style="display:none;">
+        <h3 class="settings-group-title">
+            Model stability
+            <span class="info-tip">?<span class="tip-text">Self-consistency across forecast cycles — distinct from accuracy. A stable model produces similar predictions for the same future target each time it runs; an unstable one swings wildly between issuances even when the target hasn't changed.</span></span>
+        </h3>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
+            How much do forecasts for the same future target disagree across cycles? Lower is better. High values mean the model's predictions depend heavily on when it was run.
+        </p>
+
+        <!-- Summary cards -->
+        <div style="display:flex;gap:2rem;flex-wrap:wrap;align-items:center;margin-bottom:1rem;">
+            <div style="text-align:center;flex:1;min-width:140px;">
+                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Median step CV</div>
+                <div id="stability-step-cv" style="font-size:1.5rem;font-weight:700;color:var(--text-primary);">—</div>
+                <div style="font-size:0.7rem;color:var(--text-secondary);">per-timestep spread</div>
+            </div>
+            {% if exp_config and exp_config.source_is_cumulative %}
+            <div style="text-align:center;flex:1;min-width:140px;">
+                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Median daily CV</div>
+                <div id="stability-daily-cv" style="font-size:1.5rem;font-weight:700;color:var(--text-primary);">—</div>
+                <div style="font-size:0.7rem;color:var(--text-secondary);">daily-total spread</div>
+            </div>
+            {% endif %}
+            <div style="text-align:center;flex:1;min-width:120px;">
+                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Cycles</div>
+                <div id="stability-total-cycles" style="font-size:1.5rem;font-weight:700;color:var(--text-secondary);">—</div>
+            </div>
+            <div style="text-align:center;flex:1;min-width:120px;">
+                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Timesteps analysed</div>
+                <div id="stability-steps" style="font-size:1.5rem;font-weight:700;color:var(--text-secondary);">—</div>
+            </div>
+        </div>
+
+        <!-- Per-timestep std chart -->
+        <div id="stability-std-chart" style="width:100%;height:360px;"></div>
+
+        {% if exp_config and exp_config.source_is_cumulative %}
+        <!-- Daily-total CV chart (cumulative-source only) -->
+        <h4 style="color:var(--text-secondary);font-size:0.9rem;margin-top:1.25rem;margin-bottom:0.5rem;">
+            Daily-total disagreement by day
+        </h4>
+        <div id="stability-daily-chart" style="width:100%;height:240px;"></div>
+        {% endif %}
+    </div>
+
     <!-- Info / empty state -->
     <div id="accuracy-empty" style="display:none;">
         <div class="empty-state">
@@ -1566,6 +1612,7 @@ window.showTab = function(el) {
 
         // Render evolution overlay alongside the lead-time chart.
         loadForecastEvolution();
+        loadForecastStability();
     });
 
     // Config flags exposed from Jinja so the JS can decide whether
@@ -1738,6 +1785,131 @@ window.showTab = function(el) {
 
     window.reloadForecastEvolution = function() {
         window.loadForecastEvolution();
+    };
+
+    // Model stability — cross-cycle std of predictions for the same
+    // future target. Complements the accuracy view: even a biased
+    // model can be stable, and a well-calibrated model can be unstable.
+    window.loadForecastStability = function() {
+        fetch(BASE + '/experiment/' + EXP_NAME + '/forecast-stability?days=30')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var wrap = document.getElementById('accuracy-stability-wrapper');
+            if (data.error || !data.per_timestep || !data.per_timestep.target_dt.length) {
+                if (wrap) wrap.style.display = 'none';
+                return;
+            }
+            if (wrap) wrap.style.display = '';
+
+            var s = data.summary || {};
+
+            // Colour-code the CV headline values: green <10%, amber
+            // <25%, red otherwise. Matches the conventions a DS would
+            // use when eyeballing a stability report.
+            function cvColor(cv) {
+                if (cv === null || cv === undefined) return 'var(--text-secondary)';
+                if (cv < 10) return 'var(--success, #6ee7b7)';
+                if (cv < 25) return '#f0b429';
+                return 'var(--error, #ff6b6b)';
+            }
+            var stepCv = s.median_step_cv_pct;
+            var dailyCv = s.median_daily_cv_pct;
+            var stepEl = document.getElementById('stability-step-cv');
+            if (stepEl) {
+                stepEl.textContent = stepCv.toFixed(1) + '%';
+                stepEl.style.color = cvColor(stepCv);
+            }
+            var dailyEl = document.getElementById('stability-daily-cv');
+            if (dailyEl) {
+                dailyEl.textContent = (dailyCv === null ? '—' : dailyCv.toFixed(1) + '%');
+                dailyEl.style.color = cvColor(dailyCv);
+            }
+            var cyclesEl = document.getElementById('stability-total-cycles');
+            if (cyclesEl) cyclesEl.textContent = (s.total_cycles || 0).toLocaleString();
+            var stepsEl = document.getElementById('stability-steps');
+            if (stepsEl) stepsEl.textContent = (s.steps_analysed || 0).toLocaleString();
+
+            // Per-timestep cross-cycle std chart
+            var pt = data.per_timestep;
+            var traces = [{
+                x: pt.target_dt,
+                y: pt.std,
+                type: 'scatter', mode: 'lines',
+                line: { color: '#f0b429', width: 2 },
+                fill: 'tozeroy', fillcolor: 'rgba(240,180,41,0.15)',
+                customdata: pt.target_dt.map(function(_, i) {
+                    return [pt.mean[i], pt.cv_pct[i], pt.n_cycles[i]];
+                }),
+                hovertemplate: '<b>%{x}</b>'
+                             + '<br>std across cycles: %{y:.3f}'
+                             + '<br>mean prediction: %{customdata[0]:.3f}'
+                             + '<br>CV: %{customdata[1]:.1f}%'
+                             + '<br>n cycles: %{customdata[2]}'
+                             + '<extra></extra>',
+                name: 'Cross-cycle std',
+            }];
+            var layout = {
+                xaxis: {
+                    title: { text: 'Target time', font: { size: 12 } },
+                    color: '#b0b0b0', gridcolor: '#2d3561', type: 'date',
+                },
+                yaxis: {
+                    title: { text: 'Std of predictions across cycles', font: { size: 12 } },
+                    color: '#b0b0b0', gridcolor: '#2d3561',
+                    rangemode: 'tozero',
+                },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#e0e0e0' },
+                showlegend: false,
+                margin: { t: 20, r: 30, l: 70, b: 50 },
+                hovermode: 'closest',
+            };
+            Plotly.newPlot('stability-std-chart', traces, layout, { responsive: true });
+
+            // Daily-total CV bar chart (cumulative-source experiments only)
+            var dailyChart = document.getElementById('stability-daily-chart');
+            if (dailyChart && data.daily_totals && data.daily_totals.length) {
+                var days = data.daily_totals.map(function(d) { return d.day; });
+                var cvs  = data.daily_totals.map(function(d) { return d.cv_pct; });
+                var means = data.daily_totals.map(function(d) { return d.mean_total; });
+                var stdsT = data.daily_totals.map(function(d) { return d.std_total; });
+                var nCycs = data.daily_totals.map(function(d) { return d.n_cycles; });
+                var colors = cvs.map(cvColor);
+                var barTrace = [{
+                    x: days, y: cvs,
+                    type: 'bar',
+                    marker: { color: colors },
+                    customdata: days.map(function(_, i) {
+                        return [means[i], stdsT[i], nCycs[i]];
+                    }),
+                    hovertemplate: '<b>%{x}</b>'
+                                 + '<br>CV: %{y:.1f}%'
+                                 + '<br>mean daily total: %{customdata[0]:.2f}'
+                                 + '<br>std: %{customdata[1]:.2f}'
+                                 + '<br>n cycles: %{customdata[2]}'
+                                 + '<extra></extra>',
+                }];
+                var barLayout = {
+                    xaxis: { title: { text: 'Day', font: { size: 11 } },
+                             color: '#b0b0b0', gridcolor: '#2d3561', type: 'category' },
+                    yaxis: { title: { text: 'CV % of daily total', font: { size: 11 } },
+                             color: '#b0b0b0', gridcolor: '#2d3561', rangemode: 'tozero' },
+                    plot_bgcolor: 'rgba(0,0,0,0)',
+                    paper_bgcolor: 'rgba(0,0,0,0)',
+                    font: { color: '#e0e0e0' },
+                    showlegend: false,
+                    margin: { t: 10, r: 30, l: 70, b: 60 },
+                    bargap: 0.3,
+                };
+                Plotly.newPlot('stability-daily-chart', barTrace, barLayout, { responsive: true });
+            }
+        })
+        .catch(function(err) {
+            console.error('Forecast stability load failed:', err);
+            var wrap = document.getElementById('accuracy-stability-wrapper');
+            if (wrap) wrap.style.display = 'none';
+        });
     };
     {% endif %}
 

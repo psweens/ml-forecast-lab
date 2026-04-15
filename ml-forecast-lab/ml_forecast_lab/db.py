@@ -583,6 +583,185 @@ class HistoryDB:
             "time_range": {"from": min_target, "to": max_target},
         }
 
+    def get_forecast_stability(
+        self,
+        experiment: str,
+        max_age_days: int = 30,
+        source_is_cumulative: bool = False,
+    ) -> dict:
+        """
+        Return self-consistency metrics across forecast issuances.
+
+        Stability is the complement of accuracy: accuracy asks "how
+        close is the prediction to reality?", stability asks "how much
+        does the prediction for the same future target swing from one
+        issuance to the next?" A stable model produces similar
+        forecasts each cycle; an unstable one oscillates wildly
+        issuance-to-issuance even when the target doesn't move.
+
+        Parameters
+        ----------
+        experiment : str
+            Experiment name.
+        max_age_days : int
+            Only consider forecasts issued in the last N days.
+        source_is_cumulative : bool
+            When True, also compute per-day-total stability by summing
+            per-interval deltas within each cycle × calendar-day pair.
+            For instantaneous sources this doesn't make physical sense.
+
+        Returns
+        -------
+        dict with keys:
+            ``per_timestep``: per target_dt, across-cycle mean / std /
+                cv_pct / n_cycles (only target_dts with >=2 cycles)
+            ``daily_totals``: when source_is_cumulative, per
+                calendar-day summary of across-cycle daily-total
+                stability
+            ``summary``: median CVs + total cycles analysed + date range
+        """
+        cursor = self.conn.cursor()
+        cutoff_str = (
+            datetime.utcnow() - pd.Timedelta(days=max_age_days)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        # --- Per-timestep cross-cycle stability ---
+        # SQLite has no STDDEV; compute it via the sum-of-squares
+        # identity: Var(X) = E[X^2] - E[X]^2. The subtraction can go
+        # very slightly negative on perfectly-constant columns due to
+        # float rounding, so clamp before SQRT.
+        try:
+            cursor.execute(
+                """
+                WITH per_target AS (
+                    SELECT
+                        target_dt,
+                        AVG(predicted)              AS mean_p,
+                        AVG(predicted * predicted) AS mean_pp,
+                        COUNT(DISTINCT issued_at)  AS n_cycles
+                    FROM forecast_log
+                    WHERE experiment = ?
+                      AND issued_at >= ?
+                    GROUP BY target_dt
+                    HAVING n_cycles >= 2
+                )
+                SELECT
+                    target_dt,
+                    mean_p,
+                    CASE WHEN mean_pp - mean_p * mean_p > 0
+                         THEN SQRT(mean_pp - mean_p * mean_p)
+                         ELSE 0 END AS std_p,
+                    n_cycles
+                FROM per_target
+                ORDER BY target_dt ASC
+                """,
+                (experiment, cutoff_str),
+            )
+            rows = cursor.fetchall()
+        except sqlite3.Error as e:
+            logger.warning(f"Forecast stability per-timestep query failed: {e}")
+            return {"error": str(e)}
+
+        target_dts: list = []
+        means: list = []
+        stds: list = []
+        cv_pcts: list = []
+        n_cycles_list: list = []
+        for target_dt, mean_p, std_p, n_cycles in rows:
+            mean_p = float(mean_p or 0)
+            std_p = float(std_p or 0)
+            cv = (100.0 * std_p / abs(mean_p)) if abs(mean_p) > 1e-9 else 0.0
+            target_dts.append(target_dt)
+            means.append(round(mean_p, 4))
+            stds.append(round(std_p, 4))
+            cv_pcts.append(round(cv, 2))
+            n_cycles_list.append(int(n_cycles))
+
+        import statistics as _st
+        median_step_cv = round(_st.median(cv_pcts), 2) if cv_pcts else 0.0
+
+        # --- Daily-total stability (cumulative-source experiments only) ---
+        daily_totals: list = []
+        if source_is_cumulative:
+            try:
+                cursor.execute(
+                    """
+                    WITH per_cycle_day AS (
+                        SELECT
+                            issued_at,
+                            SUBSTR(target_dt, 1, 10)  AS day,
+                            SUM(predicted)            AS daily_total,
+                            COUNT(*)                  AS n_bins
+                        FROM forecast_log
+                        WHERE experiment = ?
+                          AND issued_at >= ?
+                        GROUP BY issued_at, day
+                    )
+                    SELECT
+                        day,
+                        AVG(daily_total)                  AS mean_total,
+                        AVG(daily_total * daily_total)   AS mean_tt,
+                        COUNT(DISTINCT issued_at)         AS n_cycles,
+                        MAX(n_bins)                       AS max_bins_in_day
+                    FROM per_cycle_day
+                    GROUP BY day
+                    HAVING n_cycles >= 2
+                    ORDER BY day ASC
+                    """,
+                    (experiment, cutoff_str),
+                )
+                for day, mean_total, mean_tt, n_cycles, max_bins in cursor.fetchall():
+                    mean_total = float(mean_total or 0)
+                    var = float(mean_tt or 0) - mean_total * mean_total
+                    std_total = (var ** 0.5) if var > 0 else 0.0
+                    cv_day = (100.0 * std_total / abs(mean_total)) if abs(mean_total) > 1e-9 else 0.0
+                    daily_totals.append({
+                        "day": day,
+                        "mean_total": round(mean_total, 3),
+                        "std_total": round(std_total, 3),
+                        "cv_pct": round(cv_day, 2),
+                        "n_cycles": int(n_cycles),
+                        "max_bins_in_day": int(max_bins),
+                    })
+            except sqlite3.Error as e:
+                logger.warning(f"Forecast stability daily-total query failed: {e}")
+
+        daily_cvs = [d["cv_pct"] for d in daily_totals]
+        median_daily_cv = round(_st.median(daily_cvs), 2) if daily_cvs else None
+
+        # --- Summary / cycle count ---
+        try:
+            cursor.execute(
+                "SELECT COUNT(DISTINCT issued_at), MIN(issued_at), MAX(issued_at) "
+                "FROM forecast_log WHERE experiment = ? AND issued_at >= ?",
+                (experiment, cutoff_str),
+            )
+            cyc_row = cursor.fetchone()
+        except sqlite3.Error:
+            cyc_row = (0, None, None)
+
+        return {
+            "experiment": experiment,
+            "per_timestep": {
+                "target_dt": target_dts,
+                "mean": means,
+                "std": stds,
+                "cv_pct": cv_pcts,
+                "n_cycles": n_cycles_list,
+            },
+            "daily_totals": daily_totals,
+            "summary": {
+                "median_step_cv_pct": median_step_cv,
+                "median_daily_cv_pct": median_daily_cv,
+                "total_cycles": int(cyc_row[0]) if cyc_row else 0,
+                "steps_analysed": len(target_dts),
+                "date_range": {
+                    "from": cyc_row[1] if cyc_row else None,
+                    "to": cyc_row[2] if cyc_row else None,
+                },
+            },
+        }
+
     def cleanup_forecast_log(self, experiment: str, oldest_datetime: datetime) -> int:
         """Delete forecast log entries older than the specified datetime."""
         oldest_str = oldest_datetime.strftime("%Y-%m-%d %H:%M:%S")

@@ -1440,6 +1440,49 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         )
         return JSONResponse(content=result)
 
+    @app.get("/experiment/{name}/forecast-stability")
+    async def forecast_stability(name: str, request: Request):
+        """
+        Return cross-cycle self-consistency metrics for the model.
+
+        Unlike forecast-accuracy (prediction vs actual), this measures
+        how much predictions for the same future target swing from one
+        issuance to the next — i.e. model stability, independent of
+        whether predictions are correct.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        db = app.state.appstate.history_db
+        if not db:
+            return JSONResponse(content={"error": "Database not available"}, status_code=503)
+
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"error": "Config not found"}, status_code=503)
+
+        from ml_forecast_lab.config import load_config
+        try:
+            cfg = load_config(config_path)
+            exp_cfg = next((e for e in cfg.experiments if e.name == name), None)
+            if not exp_cfg:
+                return JSONResponse(content={"error": "Experiment not in config"}, status_code=404)
+        except Exception as e:
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+        try:
+            days = int(request.query_params.get("days", "30"))
+        except (TypeError, ValueError):
+            days = 30
+        days = max(1, min(90, days))
+
+        result = db.get_forecast_stability(
+            name,
+            max_age_days=days,
+            source_is_cumulative=bool(exp_cfg.source_is_cumulative),
+        )
+        return JSONResponse(content=result)
+
     @app.post("/experiment/{name}/toggle-mode")
     async def toggle_mode(name: str):
         """

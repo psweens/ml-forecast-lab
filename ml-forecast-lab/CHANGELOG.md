@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.12.0
+
+### Feature
+
+- **Model stability panel on the Forecast Accuracy tab** — new
+  section that measures *self-consistency* of the model's predictions
+  across forecast issuances, distinct from accuracy (which compares
+  predictions against actuals). Useful for diagnosing an unstable
+  model whose forecasts swing wildly issuance-to-issuance even when
+  the target isn't changing.
+  - **Median step CV%** scorecard: across-cycle coefficient of
+    variation of predictions for the same future timestamp.
+    Colour-coded green <10%, amber <25%, red ≥25%.
+  - **Median daily CV%** scorecard (cumulative-source experiments
+    only): across-cycle CV of predicted daily totals.
+  - **Per-timestep std chart**: x = target time, y = std of
+    predictions across all cycles that forecast that target. Peaks
+    highlight when the model disagrees with itself most. Hover shows
+    mean prediction, CV%, and n cycles.
+  - **Daily-total CV bar chart** (cumulative-source only): one bar
+    per calendar day showing CV of predicted daily total across
+    cycles. Colour-coded the same as the scorecards.
+- **`get_forecast_stability()` on `HistoryDB`** — SQLite-native
+  cross-cycle variance via the sum-of-squares identity (SQLite has no
+  STDDEV): per-target-dt `sqrt(avg(p²) − avg(p)²)` clamped at zero to
+  handle float rounding on constant columns. Filters to target_dts
+  with ≥2 cycles.
+- **`/experiment/{name}/forecast-stability` endpoint** — returns
+  `per_timestep`, `daily_totals` (when `source_is_cumulative`),
+  `summary`. Accepts `?days=N` (1-90, default 30).
+
 ## 2.11.6
 
 ### Feature
