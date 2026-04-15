@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.11.2
+
+### Bugfix
+
+- **Cache-bust static assets on version bump** — `style.css` and
+  `icon.png` are now requested with a `?v={{ app_version }}` query
+  string, so browsers automatically fetch fresh copies after an addon
+  update instead of serving stale cached files.
+- **Constrain logo render at HTML parse time** — nav-bar `<img>` now
+  carries `width="32" height="32"` HTML attributes so the browser
+  knows the intended size before CSS loads, preventing a
+  flash-of-giant-logo if `style.css` arrives late or from cache.
+- **Belt-and-suspenders sizing on `.brand-logo`** — added
+  `!important`, `max-width`, `max-height`, and `flex-shrink: 0` so the
+  2rem constraint wins against any later rule or flex-growth.
+
 ## 2.11.1
 
 ### Branding

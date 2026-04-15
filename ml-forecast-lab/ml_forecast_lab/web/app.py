@@ -310,6 +310,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     templates = Jinja2Templates(directory=str(template_dir))
 
+    # Template globals — available in every rendered template without
+    # threading through each TemplateResponse context dict. Used by
+    # base.html to cache-bust static assets on version bumps.
+    templates.env.globals["app_version"] = APP_VERSION
+
     # Custom Jinja filters
     def _humanise_name(value: str) -> str:
         """Convert snake_case experiment names to Title Case for display."""

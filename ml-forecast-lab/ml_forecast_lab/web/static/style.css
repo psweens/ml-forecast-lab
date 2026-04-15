@@ -42,7 +42,7 @@ main { flex: 1; }
     display: flex; align-items: center; gap: 1rem;
     color: var(--accent-secondary); font-weight: bold; font-size: 1.2rem;
 }
-.brand-logo { height: 2rem; width: 2rem; object-fit: contain; display: block; }
+.brand-logo { height: 2rem !important; width: 2rem !important; max-height: 2rem; max-width: 2rem; object-fit: contain; display: block; flex-shrink: 0; }
 .navbar-menu { display: flex; list-style: none; gap: 2rem; }
 .nav-link {
     color: var(--text-primary); text-decoration: none;

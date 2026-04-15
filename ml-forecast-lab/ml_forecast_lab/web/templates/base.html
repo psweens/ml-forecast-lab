@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}ML Forecast Lab{% endblock %}</title>
-    <link rel="icon" type="image/png" href="{{ base_path | default('') }}/static/icon.png">
-    <link rel="stylesheet" href="{{ base_path | default('') }}/static/style.css">
+    <link rel="icon" type="image/png" href="{{ base_path | default('') }}/static/icon.png?v={{ app_version | default('dev') }}">
+    <link rel="stylesheet" href="{{ base_path | default('') }}/static/style.css?v={{ app_version | default('dev') }}">
     <script src="{{ base_path | default('') }}/static/htmx.min.js"></script>
     {% block head_scripts %}{% endblock %}
     <script>var BASE_PATH = "{{ base_path | default('') }}";</script>
@@ -14,7 +14,7 @@
     <nav class="navbar">
         <div class="navbar-container">
             <div class="navbar-brand">
-                <img class="brand-logo" src="{{ base_path | default('') }}/static/icon.png" alt="ML Forecast Lab">
+                <img class="brand-logo" src="{{ base_path | default('') }}/static/icon.png?v={{ app_version | default('dev') }}" alt="ML Forecast Lab" width="32" height="32">
                 <span class="brand-text">ML Forecast Lab</span>
             </div>
             <button class="hamburger" onclick="this.classList.toggle('open');document.getElementById('nav-menu').classList.toggle('nav-open');" aria-label="Menu">
