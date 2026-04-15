@@ -131,6 +131,11 @@ class LSTMModel(ForecastModel):
         self._channel_mean: Optional[np.ndarray] = None
         self._channel_std: Optional[np.ndarray] = None
         self._sigmoid_scale: float = 1.0
+        # Target z-score stats (only populated when output_activation == 'zscore').
+        # Scalar for single-horizon, per-horizon ndarray for multi-horizon.
+        # Defaults (0.0, 1.0) are identity — safe no-op for non-zscore paths.
+        self._y_mean: Any = 0.0
+        self._y_std: Any = 1.0
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -183,6 +188,33 @@ class LSTMModel(ForecastModel):
         # a 10% buffer so the network can reach observed extrema.
         if self.output_activation == 'sigmoid':
             self._sigmoid_scale = _resolve_sigmoid_scale(y_train)
+
+        # Target z-score normalisation (output_activation == 'zscore'):
+        # compute per-horizon (mean, std) from training targets and transform
+        # y into z-space before training. The network predicts in z-space
+        # through a linear head, and predictions are denormalised back to
+        # physical units at inference time. Keeps gradient magnitudes O(1)
+        # regardless of target scale, which is important for multi-horizon
+        # MSE/Huber losses on raw targets with wide dynamic ranges.
+        if self.output_activation == 'zscore':
+            if y_train.ndim == 2 and self._n_horizons > 1:
+                y_mean = y_train.mean(axis=0)
+                y_std = y_train.std(axis=0)
+                # Guard constant-target horizons from div-by-zero
+                y_std = np.where(y_std < 1e-8, 1.0, y_std)
+                self._y_mean = y_mean.astype(np.float32)
+                self._y_std = y_std.astype(np.float32)
+            else:
+                self._y_mean = float(y_train.mean())
+                self._y_std = float(y_train.std())
+                if self._y_std < 1e-8:
+                    self._y_std = 1.0
+            y_train = (y_train - self._y_mean) / self._y_std
+            logger.info(
+                f"[zscore] target normalised: "
+                f"mean={np.asarray(self._y_mean).mean():.4f}, "
+                f"std={np.asarray(self._y_std).mean():.4f}"
+            )
 
         # Extract sample weights
         sample_weight = kwargs.get("sample_weight")
@@ -327,6 +359,13 @@ class LSTMModel(ForecastModel):
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
 
+        # Denormalise z-space predictions back to physical units. For
+        # multi-horizon the stats are (n_horizons,) and broadcast across rows;
+        # for single-horizon they're scalars. No floor is applied — the user
+        # wants to see the raw distribution.
+        if self.output_activation == 'zscore':
+            predictions = predictions * self._y_std + self._y_mean
+
         return predictions.astype(np.float32)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -344,6 +383,11 @@ class LSTMModel(ForecastModel):
         self._model.eval()
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
+
+        # Denormalise z-space predictions *before* slicing to horizon-0, so
+        # the per-horizon stats align with each column of the prediction array.
+        if self.output_activation == 'zscore':
+            predictions = predictions * self._y_std + self._y_mean
 
         # Multi-horizon: return only first horizon for backward compat
         if predictions.ndim == 2:
@@ -383,6 +427,11 @@ class LSTMModel(ForecastModel):
             "channel_mean": self._channel_mean,
             "channel_std": self._channel_std,
             "sigmoid_scale": self._sigmoid_scale,
+            # Target z-score stats (only meaningful when output_activation == 'zscore',
+            # otherwise kept as identity defaults). Written unconditionally so old
+            # checkpoints re-saved from a zscore run round-trip cleanly.
+            "y_mean": self._y_mean,
+            "y_std": self._y_std,
         }, path)
         logger.info(f"Saved LSTM model to {path}")
 
@@ -394,6 +443,10 @@ class LSTMModel(ForecastModel):
         self._channel_std = data.get("channel_std")
         self._n_horizons = data.get("n_horizons", 1)
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
+        # Restore target z-score stats; fall back to identity (0, 1) for
+        # checkpoints saved before this field existed.
+        self._y_mean = data.get("y_mean", 0.0)
+        self._y_std = data.get("y_std", 1.0)
 
         # Reconstruct the nn.Module and load weights
         self._input_size = data.get("input_size")

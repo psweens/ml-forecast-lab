@@ -172,7 +172,8 @@ class ExperimentCfg:
     output_activation: str = 'auto'
     """Output-layer activation for neural models. One of:
 
-    - ``auto``: softplus when ``source_is_cumulative`` else linear (default)
+    - ``auto`` (default): LSTM → ``zscore``; other neural backends →
+      ``softplus`` when ``source_is_cumulative`` else ``linear``
     - ``linear``: unbounded output, suitable for signed targets (temperature, deltas)
     - ``softplus``: smooth non-negative output in (0, ∞), suitable for energy / power / count
     - ``relu``: hard non-negative output in [0, ∞); can produce dead units if many
@@ -182,6 +183,11 @@ class ExperimentCfg:
     - ``sigmoid``: bounded output in (0, s) where s is a learned buffer scaled from
       training-data maximum; use for quantities with a hard physical ceiling
       (battery state-of-charge, humidity percent)
+    - ``zscore``: target z-score normalisation during training with linear output head;
+      stats computed per-horizon from training data, denormalised at inference. Keeps
+      gradients O(1) regardless of target magnitude and lets the network learn signed
+      residuals without activation saturation. Currently honoured by the LSTM backend
+      only; other backends treat it as ``linear``.
 
     Tree-based models (lightgbm/xgboost) ignore this field."""
 
@@ -266,7 +272,7 @@ class ExperimentCfg:
                 f'recency_half_life_days must be >= 0, got {self.recency_half_life_days}'
             )
         valid_activations = {
-            'auto', 'linear', 'softplus', 'relu', 'exp', 'sigmoid',
+            'auto', 'linear', 'softplus', 'relu', 'exp', 'sigmoid', 'zscore',
         }
         if self.output_activation not in valid_activations:
             raise ValueError(

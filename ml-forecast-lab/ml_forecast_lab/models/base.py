@@ -38,9 +38,11 @@ def _build_activation(name: str, scale: float = 1.0):
     Parameters
     ----------
     name : str
-        One of ``'linear'``, ``'softplus'``, ``'relu'``, ``'exp'``, ``'sigmoid'``.
-        ``'auto'`` must be resolved by the caller before reaching this function
-        (it's a config-level alias, not a concrete activation).
+        One of ``'linear'``, ``'softplus'``, ``'relu'``, ``'exp'``, ``'sigmoid'``,
+        ``'zscore'``. ``'auto'`` must be resolved by the caller before reaching
+        this function (it's a config-level alias, not a concrete activation).
+        ``'zscore'`` uses an identity head because the z-scoring happens at the
+        target-transform layer in the backend, not at the output activation.
     scale : float
         Only used for ``'sigmoid'``: upper bound of the sigmoid output range
         (``sigmoid(x) * scale``). Typically set from training-data maximum × a
@@ -49,8 +51,8 @@ def _build_activation(name: str, scale: float = 1.0):
     Returns
     -------
     torch.nn.Module
-        Stateless for linear/softplus/relu/exp. Sigmoid stores ``scale`` as a
-        non-trainable buffer so it survives ``state_dict`` round-trips.
+        Stateless for linear/softplus/relu/exp/zscore. Sigmoid stores ``scale``
+        as a non-trainable buffer so it survives ``state_dict`` round-trips.
 
     Raises
     ------
@@ -67,7 +69,10 @@ def _build_activation(name: str, scale: float = 1.0):
             'PyTorch is required to build output activations but is not installed'
         ) from e
 
-    if name == 'linear':
+    if name == 'linear' or name == 'zscore':
+        # zscore: the network predicts in z-space with a linear head; the
+        # backend denormalises predictions using the stored (mean, std) at
+        # inference time. Identity here is correct.
         return nn.Identity()
     if name == 'softplus':
         # Smooth approximation of ReLU with non-zero gradient near zero,
@@ -83,7 +88,7 @@ def _build_activation(name: str, scale: float = 1.0):
         return _ScaledSigmoid(float(scale))
     raise ValueError(
         f"Unknown output_activation: {name!r} "
-        f"(expected linear|softplus|relu|exp|sigmoid)"
+        f"(expected linear|softplus|relu|exp|sigmoid|zscore)"
     )
 
 

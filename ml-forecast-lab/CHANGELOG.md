@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.13.0
+
+### Feature
+
+- **New `output_activation: zscore` option (LSTM target normalisation
+  restored)** — when the LSTM is configured with `output_activation:
+  zscore`, training targets are z-score normalised per-horizon (mean
+  subtracted, divided by std computed on training data), the network
+  predicts in z-space with a linear head, and predictions are
+  denormalised back to physical units at inference time. This keeps
+  loss-landscape curvature bounded regardless of raw target magnitude
+  — making the LSTM work well out-of-the-box on targets ranging from
+  small fractions to large cumulative values. No post-hoc clipping
+  is applied; predictions are returned exactly as the model emits
+  them (signed, potentially slightly negative near zero).
+- **`output_activation: auto` now resolves to `zscore` for the LSTM
+  backend** — previously `auto` meant `softplus` for cumulative
+  sources and `linear` for instantaneous. Other neural backends
+  (TiDE, iTransformer, PatchTST, NHiTS, N-BEATS, CNN, DLinear,
+  TSMixer, SparseTSF, TimesNet, Crossformer) keep the physics-based
+  `softplus` / `linear` default. The LSTM-specific change is
+  motivated by empirical evidence that un-normalised targets cause
+  the recurrent encoder to produce a flat vs. wavy bi-modal forecast
+  pattern on high-amplitude cumulative targets (observed on Mixergy
+  `demand_today`).
+- **Checkpoint format: LSTM checkpoints now include `y_mean` / `y_std`
+  keys** — pre-v2.13.0 checkpoints load with identity defaults
+  (`y_mean=0`, `y_std=1`) so backward-compat is preserved; new
+  zscore-trained models persist their per-horizon stats alongside
+  the existing `channel_mean` / `channel_std` input-scaling stats
+  and `sigmoid_scale` buffer.
+
+### Notes
+
+- Tree backends (LightGBM, XGBoost) continue to ignore
+  `output_activation` entirely. Non-LSTM neural backends accept
+  `zscore` but treat it as `linear` (linear head, no target
+  normalisation) — a no-op fallback rather than an error.
+
 ## 2.12.1
 
 ### Bugfix

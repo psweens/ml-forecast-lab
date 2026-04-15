@@ -25,21 +25,31 @@ from ml_forecast_lab.training_events import TrainingEvent, TrainingEventBus
 logger = logging.getLogger(__name__)
 
 
-def _resolve_output_activation(exp_cfg) -> str:
+def _resolve_output_activation(exp_cfg, model_name: str = '') -> str:
     """
     Resolve ``ExperimentCfg.output_activation`` to a concrete activation.
 
-    The ``'auto'`` alias picks a sensible default based on the target's
-    physical nature:
+    The ``'auto'`` alias picks a sensible default based on the model backend
+    and target's physical nature:
 
-    - ``source_is_cumulative=True``  → ``'softplus'`` (non-negative, smooth
-      gradient near zero — ideal for energy / rainfall / counts that reset
-      to zero overnight)
-    - ``source_is_cumulative=False`` → ``'linear'`` (unbounded signed output
-      suitable for temperature, net grid flow, deltas)
+    - LSTM                            → ``'zscore'`` (target z-score
+      normalisation with linear head, denormalised at inference; conditions
+      gradients across widely-varying target scales and is the best general
+      default for recurrent backends)
+    - Other neural, ``source_is_cumulative=True``  → ``'softplus'``
+      (non-negative, smooth gradient near zero — ideal for energy / rainfall
+      / counts that reset to zero overnight)
+    - Other neural, ``source_is_cumulative=False`` → ``'linear'`` (unbounded
+      signed output suitable for temperature, net grid flow, deltas)
     """
     act = getattr(exp_cfg, 'output_activation', 'auto')
     if act == 'auto':
+        # LSTM's encoder state is highly sensitive to target scale; z-scoring
+        # the target keeps loss-landscape curvature bounded regardless of the
+        # raw target magnitude. Makes the LSTM work well out-of-the-box on
+        # targets ranging from small fractions to large cumulative values.
+        if model_name == 'lstm':
+            return 'zscore'
         return 'softplus' if getattr(exp_cfg, 'source_is_cumulative', False) else 'linear'
     return act
 
@@ -55,7 +65,9 @@ def _apply_output_activation(model, exp_cfg) -> None:
     if not getattr(model, 'is_neural', False):
         return
     try:
-        model.set_params(output_activation=_resolve_output_activation(exp_cfg))
+        model.set_params(output_activation=_resolve_output_activation(
+            exp_cfg, getattr(model, 'name', '')
+        ))
     except (ValueError, TypeError):
         # Backend doesn't support output_activation (older checkpoint being
         # loaded pre-v2.11.0, or a neural backend not yet migrated).
