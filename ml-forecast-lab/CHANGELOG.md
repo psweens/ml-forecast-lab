@@ -1,5 +1,55 @@
 # Changelog
 
+## 2.11.1
+
+### Branding
+
+- **Add addon icon and logo** — `icon.png` and `logo.png` now live both at
+  the repo root (for the HA add-on store listing) and inside the addon
+  directory (for the supervisor tile / detail page).
+- **Replace navbar emoji placeholder** — the 📈 emoji in the web UI nav
+  bar is now the actual addon icon, served from `/static/icon.png`.
+  Added `<link rel="icon">` so the browser tab favicon also picks it up.
+
+## 2.11.0
+
+### Feature
+
+- **Per-experiment output activation** — neural models now apply a
+  configurable activation (`auto` / `linear` / `softplus` / `relu` /
+  `exp` / `sigmoid`) to the final Linear head, constraining predictions
+  to the target's physical range **inside** the network rather than
+  clipping post-hoc. `auto` resolves to softplus when
+  `source_is_cumulative=true`, else linear. Settable per experiment from
+  the Settings → Training dropdown.
+- **Sigmoid scale auto-derived** — when `output_activation=sigmoid` is
+  selected, the upper bound is derived from training data as
+  `max(|y_train|) × 1.1` and persisted in the checkpoint as a registered
+  buffer, so sigmoid can reach observed extrema without clipping.
+
+### Removal
+
+- **Drop post-hoc `np.clip(predictions, 0.0, None)`** across all 12
+  neural backends — the activation layer now enforces the valid range
+  directly, so the ad-hoc clamp is redundant. `expm1` drift guards
+  inside `log_transform` branches are kept (they protect against
+  floating-point inversion drift, not network output).
+- **Drop target z-score normalization** (`self._y_mean` / `self._y_std`)
+  — the activation operates on original-scale targets, so z-scoring the
+  target would invalidate the activation's physical-range constraint.
+  AdamW + internal LayerNorm converge fine without input/output
+  symmetry. Removes ~260 lines of normalize/denormalize plumbing across
+  backends.
+- **Drop residual-prediction code path** — only fired for
+  `n_horizons==1`, which never occurs in production (always
+  multi-horizon). Dead code removed from all neural backends.
+
+### Compatibility
+
+- Checkpoints from v2.10.x with `y_mean`/`y_std`/`residual_prediction`
+  keys will fail to load; affected experiments retrain automatically on
+  startup.
+
 ## 2.9.8
 
 ### Bugfix
