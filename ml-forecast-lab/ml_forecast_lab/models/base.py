@@ -18,6 +18,142 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Output activation modules (neural backends)
+# ---------------------------------------------------------------------------
+#
+# Each neural backend's forward() ends with one of these applied to the linear
+# head's output, so predictions are emitted directly on the correct physical
+# range — no post-hoc clipping required. The choice is driven by the
+# experiment's ``output_activation`` setting (see ExperimentCfg).
+#
+# Torch is imported lazily so the base module stays importable in environments
+# without PyTorch (e.g. tree-model-only deployments).
+
+
+def _build_activation(name: str, scale: float = 1.0):
+    """
+    Return an ``nn.Module`` implementing the requested output activation.
+
+    Parameters
+    ----------
+    name : str
+        One of ``'linear'``, ``'softplus'``, ``'relu'``, ``'exp'``, ``'sigmoid'``.
+        ``'auto'`` must be resolved by the caller before reaching this function
+        (it's a config-level alias, not a concrete activation).
+    scale : float
+        Only used for ``'sigmoid'``: upper bound of the sigmoid output range
+        (``sigmoid(x) * scale``). Typically set from training-data maximum × a
+        small buffer so the network can reach observed extrema.
+
+    Returns
+    -------
+    torch.nn.Module
+        Stateless for linear/softplus/relu/exp. Sigmoid stores ``scale`` as a
+        non-trainable buffer so it survives ``state_dict`` round-trips.
+
+    Raises
+    ------
+    ValueError
+        If ``name`` is not a recognised activation.
+    RuntimeError
+        If PyTorch is not installed.
+    """
+    try:
+        import torch
+        import torch.nn as nn
+    except ImportError as e:
+        raise RuntimeError(
+            'PyTorch is required to build output activations but is not installed'
+        ) from e
+
+    if name == 'linear':
+        return nn.Identity()
+    if name == 'softplus':
+        # Smooth approximation of ReLU with non-zero gradient near zero,
+        # range (0, ∞). Default beta=1.
+        return nn.Softplus()
+    if name == 'relu':
+        # Hard non-negative output. Can produce dead units if many training
+        # targets are exactly zero (e.g. overnight PV generation).
+        return nn.ReLU()
+    if name == 'exp':
+        return _ExpActivation()
+    if name == 'sigmoid':
+        return _ScaledSigmoid(float(scale))
+    raise ValueError(
+        f"Unknown output_activation: {name!r} "
+        f"(expected linear|softplus|relu|exp|sigmoid)"
+    )
+
+
+def _exp_activation_cls():
+    """Lazy-define _ExpActivation so torch is only imported when needed."""
+    global _ExpActivation, _ScaledSigmoid
+    return _ExpActivation
+
+
+try:
+    import torch as _torch
+    import torch.nn as _nn
+
+    class _ExpActivation(_nn.Module):
+        """
+        Exponential output activation, torch.exp(x.clamp(max=20)).
+
+        Useful for strictly-positive targets that vary by orders of magnitude
+        (e.g. power with low overnight baseline + high midday peak). The
+        ``clamp(max=20)`` prevents overflow to ``inf`` if the pre-activation
+        drifts during early training (exp(20) ≈ 4.85e8 which is already far
+        above any physically plausible forecast).
+        """
+
+        def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+            return _torch.exp(x.clamp(max=20.0))
+
+    class _ScaledSigmoid(_nn.Module):
+        """
+        Sigmoid output with a learned-at-fit-time scale buffer.
+
+        Output is ``sigmoid(x) * scale`` — bounded in (0, scale). The scale
+        is stored as a non-trainable buffer so it's captured by
+        ``state_dict()``, persisted by ``torch.save()``, and restored on
+        load without needing to track it separately.
+
+        Used for quantities with a hard physical ceiling (battery SoC,
+        humidity percent, normalised capacity).
+        """
+
+        def __init__(self, scale: float = 1.0) -> None:
+            super().__init__()
+            self.register_buffer('scale', _torch.tensor(float(scale)))
+
+        def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+            return _torch.sigmoid(x) * self.scale
+
+except ImportError:
+    # Torch not installed — activation factory will raise at call time.
+    _ExpActivation = None  # type: ignore[assignment]
+    _ScaledSigmoid = None  # type: ignore[assignment]
+
+
+def _resolve_sigmoid_scale(y: np.ndarray, buffer: float = 1.1) -> float:
+    """
+    Compute the sigmoid upper bound from training targets.
+
+    Uses ``max(|y|) * buffer`` so the network can reach observed extrema with a
+    little headroom (sigmoid asymptotically approaches its bound but never
+    touches it). Falls back to ``1.0`` for degenerate arrays (empty or all-zero)
+    so the activation remains well-defined.
+    """
+    if y.size == 0:
+        return 1.0
+    y_max = float(np.max(np.abs(y)))
+    if not np.isfinite(y_max) or y_max <= 0.0:
+        return 1.0
+    return y_max * float(buffer)
+
+
 @dataclass
 class ModelResult:
     """

@@ -25,6 +25,43 @@ from ml_forecast_lab.training_events import TrainingEvent, TrainingEventBus
 logger = logging.getLogger(__name__)
 
 
+def _resolve_output_activation(exp_cfg) -> str:
+    """
+    Resolve ``ExperimentCfg.output_activation`` to a concrete activation.
+
+    The ``'auto'`` alias picks a sensible default based on the target's
+    physical nature:
+
+    - ``source_is_cumulative=True``  → ``'softplus'`` (non-negative, smooth
+      gradient near zero — ideal for energy / rainfall / counts that reset
+      to zero overnight)
+    - ``source_is_cumulative=False`` → ``'linear'`` (unbounded signed output
+      suitable for temperature, net grid flow, deltas)
+    """
+    act = getattr(exp_cfg, 'output_activation', 'auto')
+    if act == 'auto':
+        return 'softplus' if getattr(exp_cfg, 'source_is_cumulative', False) else 'linear'
+    return act
+
+
+def _apply_output_activation(model, exp_cfg) -> None:
+    """
+    Apply the experiment's ``output_activation`` to a freshly-created model.
+
+    Silently no-ops for tree backends (lightgbm/xgboost) that don't expose
+    the parameter — ``set_params`` raises ``ValueError`` for unknown kwargs
+    and we treat that as "not a neural model, skip".
+    """
+    if not getattr(model, 'is_neural', False):
+        return
+    try:
+        model.set_params(output_activation=_resolve_output_activation(exp_cfg))
+    except (ValueError, TypeError):
+        # Backend doesn't support output_activation (older checkpoint being
+        # loaded pre-v2.11.0, or a neural backend not yet migrated).
+        pass
+
+
 class MLForecastLabApp:
     """
     Main application controller for ML Forecast Lab.
@@ -1050,6 +1087,11 @@ class MLForecastLabApp:
                     m.set_params(**overrides)
                     logger.info(f"Applied {len(overrides)} override(s) for {model_name}"
                                 + (" (inc. experiment-level)" if exp_params else ""))
+                # Output activation (applied last so experiment-level setting
+                # wins over any stray override — activation is a model-
+                # architecture choice tied to the target, not a hyperparam).
+                if 'output_activation' not in overrides:
+                    _apply_output_activation(m, exp_cfg)
                 models[model_name] = m
             except Exception as e:
                 logger.warning(
@@ -1253,6 +1295,8 @@ class MLForecastLabApp:
                         m.set_params(loss_fn=exp_cfg.loss_fn)
                     if overrides:
                         m.set_params(**overrides)
+                    if 'output_activation' not in overrides:
+                        _apply_output_activation(m, exp_cfg)
 
                     # Neural models need sliding window data
                     hold_seq_kwargs = {}
@@ -1522,6 +1566,8 @@ class MLForecastLabApp:
         if overrides:
             model.set_params(**overrides)
             logger.info(f"Applied {len(overrides)} override(s) for {prod_model_name}")
+        if 'output_activation' not in overrides:
+            _apply_output_activation(model, exp_cfg)
         is_neural = model.is_neural
         logger.info(f"Training {prod_model_name} on {len(X)} samples...")
         train_start = time.time()
@@ -1613,7 +1659,10 @@ class MLForecastLabApp:
                 y_pred = np.interp(all_x, horizon_x, multi_pred.astype(np.float32)).astype(np.float32)
                 logger.info(f"  Sparse multi-head: {len(multi_pred)} → {len(y_pred)} interpolated")
 
-            y_pred = np.maximum(y_pred, 0.0)
+            # No post-hoc clipping — the model's output_activation (softplus,
+            # relu, sigmoid, etc.) already constrains predictions to the
+            # correct physical range. Clipping here would mask poor activation
+            # choices rather than surface them.
         else:
             # ----- Tree models: RECURSIVE multi-step forecast -----
             # Build a fresh feature row at each step using the rolling
@@ -1995,6 +2044,8 @@ class MLForecastLabApp:
             model.set_params(loss_fn=exp_cfg.loss_fn)
         if overrides:
             model.set_params(**overrides)
+        if 'output_activation' not in overrides:
+            _apply_output_activation(model, exp_cfg)
 
         # Train
         is_neural = model.is_neural
@@ -2470,7 +2521,8 @@ class MLForecastLabApp:
                     np.full(future_periods - len(multi_pred),
                             float(multi_pred[-1]), dtype=np.float32),
                 ])
-            y_pred = np.maximum(y_pred, 0.0)
+            # No post-hoc clipping — see _run_production_inference. The
+            # model's output_activation handles range constraints.
         else:
             # Tree models: RECURSIVE multi-step forecast.
             # At each step, we build a single feature row using the most recent
@@ -2816,6 +2868,10 @@ class MLForecastLabApp:
                     )
             except Exception:
                 pass  # Backends without epochs/patience params just skip
+            # Tuning inherits the experiment's output_activation — the target's
+            # physical range doesn't change with hyperparameter search, so the
+            # activation must stay consistent to get comparable metrics.
+            _apply_output_activation(m, exp_cfg)
             return m
 
         # Memory monitoring — abort tuning before OOM SIGKILL.
@@ -3168,6 +3224,7 @@ class MLForecastLabApp:
             def _run_holdout(params):
                 import gc as _gc
                 m = self.model_registry.create(model_name, **params)
+                _apply_output_activation(m, exp_cfg)
                 if _ho_seq_train is not None:
                     # Neural path: proper sliding windows
                     m.fit(
@@ -3346,6 +3403,8 @@ class MLForecastLabApp:
                     overrides = self.config.model_overrides.get(model_name, {})
                     if overrides:
                         model.set_params(**overrides)
+                    if 'output_activation' not in overrides:
+                        _apply_output_activation(model, exp_cfg)
 
                     def _train_and_eval():
                         if model.is_neural:

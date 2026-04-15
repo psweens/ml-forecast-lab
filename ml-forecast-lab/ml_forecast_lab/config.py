@@ -169,6 +169,22 @@ class ExperimentCfg:
     log_transform: bool = False
     """Whether to apply log transform to target before modelling."""
 
+    output_activation: str = 'auto'
+    """Output-layer activation for neural models. One of:
+
+    - ``auto``: softplus when ``source_is_cumulative`` else linear (default)
+    - ``linear``: unbounded output, suitable for signed targets (temperature, deltas)
+    - ``softplus``: smooth non-negative output in (0, ∞), suitable for energy / power / count
+    - ``relu``: hard non-negative output in [0, ∞); can produce dead units if many
+      training targets are exactly zero
+    - ``exp``: positive output in (0, ∞) for strictly-positive quantities that vary by
+      orders of magnitude; applies ``torch.exp`` with a clamp to prevent overflow
+    - ``sigmoid``: bounded output in (0, s) where s is a learned buffer scaled from
+      training-data maximum; use for quantities with a hard physical ceiling
+      (battery state-of-charge, humidity percent)
+
+    Tree-based models (lightgbm/xgboost) ignore this field."""
+
     subtract: List[str] = field(default_factory=list)
     """Entity IDs to subtract from target (e.g. solar generation from grid import)."""
 
@@ -248,6 +264,14 @@ class ExperimentCfg:
         if self.recency_half_life_days < 0:
             raise ValueError(
                 f'recency_half_life_days must be >= 0, got {self.recency_half_life_days}'
+            )
+        valid_activations = {
+            'auto', 'linear', 'softplus', 'relu', 'exp', 'sigmoid',
+        }
+        if self.output_activation not in valid_activations:
+            raise ValueError(
+                f'output_activation must be one of {sorted(valid_activations)}, '
+                f'got {self.output_activation!r}'
             )
 
 

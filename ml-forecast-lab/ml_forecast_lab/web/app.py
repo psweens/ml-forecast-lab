@@ -2014,6 +2014,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "max_increment": lambda v: float(v) if float(v) > 0 else None,
             "include_sun_elevation": lambda v: bool(v),
             "include_clear_sky_irradiance": lambda v: bool(v),
+            "output_activation": lambda v: v if v in (
+                "auto", "linear", "softplus", "relu", "exp", "sigmoid"
+            ) else None,
         }
 
         # Fields where None/null means "use global default" (valid, not an error)

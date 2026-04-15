@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from .base import ForecastModel
+from .base import ForecastModel, _build_activation, _resolve_sigmoid_scale
 
 logger = logging.getLogger(__name__)
 
@@ -39,17 +39,20 @@ class _DLinearNet(nn.Module):
     """DLinear: decompose into trend + seasonal, one Linear each."""
 
     def __init__(self, seq_len: int, n_channels: int, kernel_size: int,
-                 n_horizons: int = 1):
+                 n_horizons: int = 1, output_activation: str = 'linear',
+                 sigmoid_scale: float = 1.0):
         super().__init__()
         self.seq_len = seq_len
         self.kernel_size = kernel_size
         self.n_horizons = n_horizons
+        self.output_activation = output_activation
         pad = kernel_size // 2
         # AvgPool1d along time for trend extraction
         self.avg_pool = nn.AvgPool1d(kernel_size, stride=1, padding=pad, count_include_pad=False)
         flat = seq_len * n_channels
         self.trend_linear = nn.Linear(flat, n_horizons)
         self.seasonal_linear = nn.Linear(flat, n_horizons)
+        self.activation = _build_activation(output_activation, scale=sigmoid_scale)
 
     def forward(self, x: "torch.Tensor") -> "torch.Tensor":
         # x: (batch, seq_len, n_channels)
@@ -59,6 +62,7 @@ class _DLinearNet(nn.Module):
         trend_flat = trend.reshape(trend.shape[0], -1)
         seasonal_flat = seasonal.reshape(seasonal.shape[0], -1)
         out = self.trend_linear(trend_flat) + self.seasonal_linear(seasonal_flat)
+        out = self.activation(out)
         if self.n_horizons == 1:
             return out.squeeze(-1)  # (batch,) backward compat
         return out
@@ -82,6 +86,7 @@ class DLinearModel(ForecastModel):
         sequence_length: Optional[int] = None,
         loss_fn: str = 'mse',
         patience: int = 20,
+        output_activation: str = 'linear',
     ) -> None:
         super().__init__()
         if not TORCH_AVAILABLE:
@@ -93,6 +98,7 @@ class DLinearModel(ForecastModel):
         self.sequence_length = sequence_length
         self.loss_fn = loss_fn
         self.patience = patience
+        self.output_activation = output_activation
 
         self._model: Optional[_DLinearNet] = None
         self._seq_len: Optional[int] = None
@@ -100,8 +106,7 @@ class DLinearModel(ForecastModel):
         self._n_horizons: int = 1
         self._channel_mean: Optional[np.ndarray] = None
         self._channel_std: Optional[np.ndarray] = None
-        self._y_mean = 0.0   # float or ndarray(n_horizons,)
-        self._y_std = 1.0    # float or ndarray(n_horizons,)
+        self._sigmoid_scale: float = 1.0
 
     @property
     def name(self) -> str:
@@ -119,8 +124,12 @@ class DLinearModel(ForecastModel):
 
     def _build_model(self, seq_len: int, n_channels: int,
                      n_horizons: int = 1) -> "_DLinearNet":
-        return _DLinearNet(seq_len, n_channels, self.kernel_size,
-                           n_horizons=n_horizons)
+        return _DLinearNet(
+            seq_len, n_channels, self.kernel_size,
+            n_horizons=n_horizons,
+            output_activation=self.output_activation,
+            sigmoid_scale=self._sigmoid_scale,
+        )
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray, **kwargs: Any) -> Dict[str, Any]:
         """Train DLinear model."""
@@ -145,36 +154,17 @@ class DLinearModel(ForecastModel):
         self._seq_len = seq_len
         self._n_channels = n_channels
 
-        # Capture last value of target channel BEFORE normalization
-        # for residual prediction (model learns deltas, not absolute values).
-        last_values = X_seq[:, -1, 0].astype(np.float32)
-
         self._channel_mean = X_seq.mean(axis=(0, 1))
         self._channel_std = X_seq.std(axis=(0, 1))
         self._channel_std[self._channel_std < 1e-8] = 1.0
         X_seq = (X_seq - self._channel_mean) / self._channel_std
 
-        # Residual targets: only for single-horizon (1-step-ahead) models.
-        # Multi-horizon models use absolute targets so the network must learn
-        # horizon-specific temporal patterns rather than converging to zero-
-        # residual predictions which produce flat forecasts at the last value.
-        if self._n_horizons == 1:
-            y_train = y_train - last_values
-            self._residual_prediction = True
-        else:
-            self._residual_prediction = False
-
-        # Target z-score normalisation -- per-horizon when multi-output
-        if self._n_horizons > 1:
-            self._y_mean = y_train.mean(axis=0)   # (n_horizons,)
-            self._y_std = y_train.std(axis=0)     # (n_horizons,)
-            self._y_std[self._y_std < 1e-8] = 1.0
-        else:
-            self._y_mean = float(y_train.mean())
-            self._y_std = float(y_train.std())
-            if self._y_std < 1e-8:
-                self._y_std = 1.0
-        y_train = (y_train - self._y_mean) / self._y_std
+        # Sigmoid activation needs a ceiling: use training-data maximum with
+        # a 10% buffer so the network can reach observed extrema. Other
+        # activations leave the default scale (1.0) which _build_activation
+        # ignores for non-sigmoid cases.
+        if self.output_activation == 'sigmoid':
+            self._sigmoid_scale = _resolve_sigmoid_scale(y_train)
 
         # Extract sample weights
         sample_weight = kwargs.get("sample_weight")
@@ -290,9 +280,6 @@ class DLinearModel(ForecastModel):
         if self._model is None:
             raise RuntimeError("No model loaded")
 
-        # Capture last value of target channel for residual reconstruction
-        last_values = X[:, -1, 0].astype(np.float32)
-
         X_seq = X.copy()
         if self._channel_mean is not None and self._channel_std is not None:
             X_seq = (X_seq - self._channel_mean) / self._channel_std
@@ -302,26 +289,13 @@ class DLinearModel(ForecastModel):
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
 
-        # Denormalize predicted residuals
-        predictions = predictions * self._y_std + self._y_mean
-
-        # Add last value back (residual prediction reconstruction)
-        if getattr(self, '_residual_prediction', False):
-            if predictions.ndim == 2:
-                predictions = predictions + last_values[:, None]
-            else:
-                predictions = predictions + last_values
-
-        return np.clip(predictions, 0.0, None).astype(np.float32)
+        return predictions.astype(np.float32)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Generate predictions (returns horizon-0 for multi-horizon models)."""
         self._validate_fitted()
         self._validate_X(X)
         X_seq = self._reshape_to_sequences(X)
-
-        # Capture last value of target channel for residual reconstruction
-        last_values = X_seq[:, -1, 0].astype(np.float32).copy()
 
         if self._channel_mean is not None and self._channel_std is not None:
             X_seq = (X_seq - self._channel_mean) / self._channel_std
@@ -330,21 +304,11 @@ class DLinearModel(ForecastModel):
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
 
-        # Denormalize back to original target scale
-        predictions = predictions * self._y_std + self._y_mean
-
-        # Add last value back (residual prediction reconstruction)
-        if getattr(self, '_residual_prediction', False):
-            if predictions.ndim == 2:
-                predictions = predictions + last_values[:, None]
-            else:
-                predictions = predictions + last_values
-
         # Multi-horizon: return only first horizon for backward compat
         if predictions.ndim == 2:
             predictions = predictions[:, 0]
 
-        return np.clip(predictions, 0.0, None).astype(np.float32)
+        return predictions.astype(np.float32)
 
     def get_params(self) -> Dict[str, Any]:
         return deepcopy({
@@ -352,11 +316,13 @@ class DLinearModel(ForecastModel):
             "epochs": self.epochs, "batch_size": self.batch_size,
             "sequence_length": self.sequence_length, "loss_fn": self.loss_fn,
             "patience": self.patience,
+            "output_activation": self.output_activation,
         })
 
     def set_params(self, **kwargs: Any) -> None:
         valid = {"kernel_size", "learning_rate", "epochs", "batch_size",
-                 "sequence_length", "loss_fn", "patience"}
+                 "sequence_length", "loss_fn", "patience",
+                 "output_activation"}
         for k, v in kwargs.items():
             if k not in valid:
                 raise ValueError(f"Unknown parameter: {k}")
@@ -373,9 +339,7 @@ class DLinearModel(ForecastModel):
             "n_horizons": self._n_horizons,
             "channel_mean": self._channel_mean,
             "channel_std": self._channel_std,
-            "y_mean": self._y_mean,
-            "y_std": self._y_std,
-            "residual_prediction": getattr(self, '_residual_prediction', False),
+            "sigmoid_scale": self._sigmoid_scale,
         }, path)
         logger.info(f"Saved DLinear model to {path}")
 
@@ -386,18 +350,8 @@ class DLinearModel(ForecastModel):
         self._n_channels = data.get("n_channels")
         self._channel_mean = data.get("channel_mean")
         self._channel_std = data.get("channel_std")
-
-        # Backward compat: old checkpoints store scalar y_mean/y_std, no n_horizons
         self._n_horizons = data.get("n_horizons", 1)
-        raw_y_mean = data.get("y_mean", 0.0)
-        raw_y_std = data.get("y_std", 1.0)
-        if isinstance(raw_y_mean, np.ndarray):
-            self._y_mean = raw_y_mean
-            self._y_std = raw_y_std
-        else:
-            self._y_mean = float(raw_y_mean)
-            self._y_std = float(raw_y_std)
-        self._residual_prediction = data.get("residual_prediction", False)
+        self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
 
         if self._seq_len is not None and self._n_channels is not None:
             self._model = self._build_model(self._seq_len, self._n_channels,

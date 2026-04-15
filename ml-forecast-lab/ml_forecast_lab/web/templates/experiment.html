@@ -206,6 +206,17 @@
                     <option value="huber" {% if exp_config and exp_config.loss_fn == 'huber' %}selected{% endif %}>Huber</option>
                 </select>
             </div>
+            <div class="exp-field">
+                <label class="field-label">Output activation (neural) <span class="info-tip">?<span class="tip-text">Activation applied to the final linear head of neural models, constraining output to a physical range. <b>Auto</b>: softplus if target is cumulative, else linear. <b>Linear</b>: unbounded, signed (temperature, deltas). <b>Softplus</b>: smooth non-negative (0, ∞) for energy / power / counts. <b>ReLU</b>: hard non-negative; may produce dead units if many zero targets. <b>Exp</b>: strictly positive, for orders-of-magnitude variance. <b>Sigmoid</b>: bounded (0, s) where s is learned from training max — for quantities with a physical ceiling (SoC, humidity).</span></span></label>
+                <select class="setting-input" data-field="output_activation" onchange="saveSettingsField(this)">
+                    <option value="auto" {% if not exp_config or exp_config.output_activation == 'auto' %}selected{% endif %}>Auto</option>
+                    <option value="linear" {% if exp_config and exp_config.output_activation == 'linear' %}selected{% endif %}>Linear</option>
+                    <option value="softplus" {% if exp_config and exp_config.output_activation == 'softplus' %}selected{% endif %}>Softplus (≥ 0, smooth)</option>
+                    <option value="relu" {% if exp_config and exp_config.output_activation == 'relu' %}selected{% endif %}>ReLU (≥ 0, hard)</option>
+                    <option value="exp" {% if exp_config and exp_config.output_activation == 'exp' %}selected{% endif %}>Exp (> 0)</option>
+                    <option value="sigmoid" {% if exp_config and exp_config.output_activation == 'sigmoid' %}selected{% endif %}>Sigmoid (bounded)</option>
+                </select>
+            </div>
         </div>
     </div>
 

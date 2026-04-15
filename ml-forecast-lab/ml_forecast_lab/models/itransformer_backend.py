@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
-from .base import ForecastModel
+from .base import ForecastModel, _build_activation, _resolve_sigmoid_scale
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,8 @@ class _iTransformerNet(nn.Module):
     def __init__(self, seq_len: int, n_channels: int, d_model: int = 32,
                  n_heads: int = 4, n_encoder_layers: int = 2,
                  dim_feedforward: int = 64, dropout: float = 0.2,
-                 n_horizons: int = 1):
+                 n_horizons: int = 1,
+                 output_activation: str = 'linear', sigmoid_scale: float = 1.0):
         super().__init__()
         self.n_horizons = n_horizons
         self.seq_len = seq_len
@@ -74,6 +75,7 @@ class _iTransformerNet(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(head_hidden, n_horizons),
         )
+        self.activation = _build_activation(output_activation, scale=sigmoid_scale)
 
     def forward(self, x):
         # x: (batch, seq_len, n_channels)
@@ -93,6 +95,7 @@ class _iTransformerNet(nn.Module):
         # Flatten and project to output
         x = x.reshape(x.size(0), -1)  # (batch, n_channels * d_model)
         out = self.head(x)  # (batch, n_horizons)
+        out = self.activation(out)
 
         if self.n_horizons == 1:
             return out.squeeze(-1)  # (batch,) backward compat
@@ -122,6 +125,7 @@ class iTransformerModel(ForecastModel):
         sequence_length: Optional[int] = None,
         loss_fn: str = 'mse',
         patience: int = 20,
+        output_activation: str = 'linear',
     ) -> None:
         super().__init__()
         if not TORCH_AVAILABLE:
@@ -138,6 +142,7 @@ class iTransformerModel(ForecastModel):
         self.sequence_length = sequence_length
         self.loss_fn = loss_fn
         self.patience = patience
+        self.output_activation = output_activation
 
         self._model: Optional[_iTransformerNet] = None
         self._input_size: Optional[int] = None
@@ -145,8 +150,7 @@ class iTransformerModel(ForecastModel):
         self._n_horizons: int = 1
         self._channel_mean: Optional[np.ndarray] = None
         self._channel_std: Optional[np.ndarray] = None
-        self._y_mean = 0.0   # float or ndarray(n_horizons,)
-        self._y_std = 1.0    # float or ndarray(n_horizons,)
+        self._sigmoid_scale: float = 1.0
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -191,36 +195,15 @@ class iTransformerModel(ForecastModel):
         self._seq_len = seq_len
 
         # Per-channel z-score standardisation (fitted on training data)
-        # Capture last value of target channel BEFORE normalization
-        # for residual prediction (model learns deltas, not absolute values).
-        last_values = X_seq[:, -1, 0].astype(np.float32)
-
         self._channel_mean = X_seq.mean(axis=(0, 1))  # shape (n_channels,)
         self._channel_std = X_seq.std(axis=(0, 1))     # shape (n_channels,)
         self._channel_std[self._channel_std < 1e-8] = 1.0
         X_seq = (X_seq - self._channel_mean) / self._channel_std
 
-        # Residual targets: only for single-horizon (1-step-ahead) models.
-        # Multi-horizon models use absolute targets so the network must learn
-        # horizon-specific temporal patterns rather than converging to zero-
-        # residual predictions which produce flat forecasts at the last value.
-        if self._n_horizons == 1:
-            y_train = y_train - last_values
-            self._residual_prediction = True
-        else:
-            self._residual_prediction = False
-
-        # Target z-score normalisation -- per-horizon when multi-output
-        if self._n_horizons > 1:
-            self._y_mean = y_train.mean(axis=0)   # (n_horizons,)
-            self._y_std = y_train.std(axis=0)     # (n_horizons,)
-            self._y_std[self._y_std < 1e-8] = 1.0
-        else:
-            self._y_mean = float(y_train.mean())
-            self._y_std = float(y_train.std())
-            if self._y_std < 1e-8:
-                self._y_std = 1.0
-        y_train = (y_train - self._y_mean) / self._y_std
+        # Sigmoid activation needs a ceiling: use training-data maximum with
+        # a 10% buffer so the network can reach observed extrema.
+        if self.output_activation == 'sigmoid':
+            self._sigmoid_scale = _resolve_sigmoid_scale(y_train)
 
         # Extract sample weights
         sample_weight = kwargs.get("sample_weight")
@@ -255,6 +238,8 @@ class iTransformerModel(ForecastModel):
             dim_feedforward=self.dim_feedforward,
             dropout=self.dropout,
             n_horizons=self._n_horizons,
+            output_activation=self.output_activation,
+            sigmoid_scale=self._sigmoid_scale,
         )
         optimiser = torch.optim.AdamW(self._model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=self.epochs, eta_min=1e-6)
@@ -360,9 +345,6 @@ class iTransformerModel(ForecastModel):
         if self._model is None:
             raise RuntimeError("No model loaded")
 
-        # Capture last value of target channel for residual reconstruction
-        last_values = X[:, -1, 0].astype(np.float32)
-
         X_seq = X.copy()
         if self._channel_mean is not None and self._channel_std is not None:
             X_seq = (X_seq - self._channel_mean) / self._channel_std
@@ -372,17 +354,7 @@ class iTransformerModel(ForecastModel):
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
 
-        # Denormalize predicted residuals
-        predictions = predictions * self._y_std + self._y_mean
-
-        # Add last value back (residual prediction reconstruction)
-        if getattr(self, '_residual_prediction', False):
-            if predictions.ndim == 2:
-                predictions = predictions + last_values[:, None]
-            else:
-                predictions = predictions + last_values
-
-        return np.clip(predictions, 0.0, None).astype(np.float32)
+        return predictions.astype(np.float32)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Generate predictions (returns horizon-0 for multi-horizon models)."""
@@ -390,9 +362,6 @@ class iTransformerModel(ForecastModel):
         self._validate_X(X)
 
         X_seq = self._reshape_to_sequences(X)
-
-        # Capture last value of target channel for residual reconstruction
-        last_values = X_seq[:, -1, 0].astype(np.float32).copy()
 
         if self._channel_mean is not None and self._channel_std is not None:
             X_seq = (X_seq - self._channel_mean) / self._channel_std
@@ -403,21 +372,11 @@ class iTransformerModel(ForecastModel):
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
 
-        # Denormalize back to original target scale
-        predictions = predictions * self._y_std + self._y_mean
-
-        # Add last value back (residual prediction reconstruction)
-        if getattr(self, '_residual_prediction', False):
-            if predictions.ndim == 2:
-                predictions = predictions + last_values[:, None]
-            else:
-                predictions = predictions + last_values
-
         # Multi-horizon: return only first horizon for backward compat
         if predictions.ndim == 2:
             predictions = predictions[:, 0]
 
-        return np.clip(predictions, 0.0, None).astype(np.float32)
+        return predictions.astype(np.float32)
 
     def get_params(self) -> Dict[str, Any]:
         return deepcopy({
@@ -428,12 +387,14 @@ class iTransformerModel(ForecastModel):
             "epochs": self.epochs, "batch_size": self.batch_size,
             "sequence_length": self.sequence_length, "loss_fn": self.loss_fn,
             "patience": self.patience,
+            "output_activation": self.output_activation,
         })
 
     def set_params(self, **kwargs: Any) -> None:
         valid = {"d_model", "n_heads", "n_encoder_layers", "dim_feedforward",
                  "dropout", "learning_rate", "epochs", "batch_size",
-                 "sequence_length", "loss_fn", "patience"}
+                 "sequence_length", "loss_fn", "patience",
+                 "output_activation"}
         for k, v in kwargs.items():
             if k not in valid:
                 raise ValueError(f"Unknown parameter: {k}")
@@ -451,9 +412,7 @@ class iTransformerModel(ForecastModel):
             "n_horizons": self._n_horizons,
             "channel_mean": self._channel_mean,
             "channel_std": self._channel_std,
-            "y_mean": self._y_mean,
-            "y_std": self._y_std,
-            "residual_prediction": getattr(self, '_residual_prediction', False),
+            "sigmoid_scale": self._sigmoid_scale,
         }, path)
         logger.info(f"Saved iTransformer model to {path}")
 
@@ -463,18 +422,8 @@ class iTransformerModel(ForecastModel):
         self.set_params(**data["params"])
         self._channel_mean = data.get("channel_mean")
         self._channel_std = data.get("channel_std")
-
-        # Backward compat: old checkpoints store scalar y_mean/y_std, no n_horizons
         self._n_horizons = data.get("n_horizons", 1)
-        raw_y_mean = data.get("y_mean", 0.0)
-        raw_y_std = data.get("y_std", 1.0)
-        if isinstance(raw_y_mean, np.ndarray):
-            self._y_mean = raw_y_mean
-            self._y_std = raw_y_std
-        else:
-            self._y_mean = float(raw_y_mean)
-            self._y_std = float(raw_y_std)
-        self._residual_prediction = data.get("residual_prediction", False)
+        self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
 
         # Reconstruct the nn.Module and load weights
         self._input_size = data.get("input_size")
@@ -490,6 +439,8 @@ class iTransformerModel(ForecastModel):
                 dim_feedforward=self.dim_feedforward,
                 dropout=self.dropout,
                 n_horizons=self._n_horizons,
+                output_activation=self.output_activation,
+                sigmoid_scale=self._sigmoid_scale,
             )
             self._model.load_state_dict(state_dict)
             self._model.eval()
