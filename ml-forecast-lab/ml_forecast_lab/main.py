@@ -1346,6 +1346,14 @@ class MLForecastLabApp:
                         if y_p_display.ndim > 1:
                             y_p_display = y_p_display.ravel()
 
+                    # Invert log-transform for display — both actuals and
+                    # predictions live in log(y+1) space while training.
+                    if exp_cfg.log_transform:
+                        _y_holdout_display = np.maximum(
+                            np.expm1(_y_holdout_display), 0.0,
+                        )
+                        y_p_display = np.maximum(np.expm1(y_p_display), 0.0)
+
                     _model_predictions.append(ModelPrediction(
                         model_name=m_name,
                         timestamps=_holdout_ts,
@@ -1717,6 +1725,14 @@ class MLForecastLabApp:
         if y_pred.ndim > 1:
             y_pred = y_pred.ravel()
 
+        # Invert log-transform if active. Training ran on log(y+1) space,
+        # so predictions come back there too; lag buffers / recursion state
+        # stay in log space (the model expects it) — only the final array
+        # is converted back to original units before publishing.
+        if exp_cfg.log_transform:
+            y_pred = np.expm1(y_pred).astype(np.float32)
+            y_pred = np.maximum(y_pred, 0.0)
+
         logger.info(
             f"Forecast curve: {len(y_pred)} points over "
             f"{future_periods * exp_cfg.interval_minutes / 60:.0f}h, "
@@ -1736,12 +1752,15 @@ class MLForecastLabApp:
         recent_idx = combined.index[-recent_n:]
         if recent_idx.tz is None:
             recent_idx = recent_idx.tz_localize("UTC")
+        # Recent actuals live in log(y+1) space when log_transform is on
+        # (combined["target"] was fed through apply_log_transform upstream).
+        # Invert for display so the dashboard shows original units.
+        recent_actuals_y = combined["target"].values[-recent_n:]
+        if exp_cfg.log_transform:
+            recent_actuals_y = np.maximum(np.expm1(recent_actuals_y), 0.0)
         recent_actuals = [
             {"datetime": ts.isoformat(), "value": round(float(val), 4)}
-            for ts, val in zip(
-                recent_idx,
-                combined["target"].values[-recent_n:],
-            )
+            for ts, val in zip(recent_idx, recent_actuals_y)
         ]
 
         await self._publish_forecast_sensors(
@@ -2588,6 +2607,11 @@ class MLForecastLabApp:
 
         if y_pred.ndim > 1:
             y_pred = y_pred.ravel()
+
+        # Invert log-transform if active (see _run_production_inference).
+        if exp_cfg.log_transform:
+            y_pred = np.expm1(y_pred).astype(np.float32)
+            y_pred = np.maximum(y_pred, 0.0)
 
         logger.info(
             f"  Forecast {exp_cfg.name}: {len(y_pred)} points, "
