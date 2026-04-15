@@ -311,10 +311,15 @@ class HistoryDB:
         interval_sec = interval_minutes * 60
 
         # --- Lead-time accuracy curve ---
-        # Bucket lead_minutes into 30-min bins for cleaner charts.
+        # Bucket lead_minutes into `interval_minutes`-sized bins so the
+        # chart resolution matches the forecast grid. Hardcoding a 30-min
+        # bucket loses resolution on fine-grained experiments (e.g. 5-min
+        # interval with a 1h horizon collapses to only 3 buckets, which
+        # also drives MAE→RMSE convergence within each large bucket).
         # Actuals are stored with raw irregular HA timestamps, while
         # forecast targets are grid-aligned. Snap actuals to the grid
         # (floor to nearest interval boundary) and average before joining.
+        bucket_min = max(1, int(interval_minutes))
         try:
             cursor.execute(f"""
                 WITH actuals_grid AS (
@@ -327,7 +332,7 @@ class HistoryDB:
                     GROUP BY grid_dt
                 )
                 SELECT
-                    CAST((fl.lead_minutes / 30) * 30 AS INTEGER) AS lead_bucket,
+                    CAST((fl.lead_minutes / ?) * ? AS INTEGER) AS lead_bucket,
                     AVG(ABS(fl.predicted - ag.value)) AS mae,
                     SQRT(AVG((fl.predicted - ag.value) * (fl.predicted - ag.value))) AS rmse,
                     COUNT(*) AS n
@@ -339,7 +344,11 @@ class HistoryDB:
                   AND fl.issued_at >= ?
                 GROUP BY lead_bucket
                 ORDER BY lead_bucket
-            """, (interval_sec, interval_sec, experiment, now_str, cutoff_str))
+            """, (
+                interval_sec, interval_sec,
+                bucket_min, bucket_min,
+                experiment, now_str, cutoff_str,
+            ))
             lead_rows = cursor.fetchall()
         except sqlite3.Error as e:
             logger.error(f"Forecast accuracy query failed: {e}")
@@ -353,7 +362,15 @@ class HistoryDB:
         }
 
         # --- Revision improvement ---
-        # Compare the FIRST forecast for each target_dt vs the LAST
+        # Compare the FIRST forecast for each target_dt vs the LAST.
+        # Only include targets that were actually re-forecast (>= 2
+        # distinct issuances). Previously this used `first_pred != last_pred`
+        # which wrongly excluded targets whose re-forecasts happened to
+        # produce numerically identical predictions (legitimate case),
+        # while INCLUDING no-op single-forecast targets only when the
+        # CASE-aggregation happened to line up — the practical effect was
+        # that Samples collapsed to a tiny fraction of actual re-forecast
+        # targets. The explicit COUNT-based filter is correct.
         try:
             cursor.execute(f"""
                 WITH actuals_grid AS (
@@ -372,7 +389,8 @@ class HistoryDB:
                         fl.predicted,
                         ag.value AS actual,
                         ROW_NUMBER() OVER (PARTITION BY fl.target_dt ORDER BY fl.issued_at ASC) AS rn_first,
-                        ROW_NUMBER() OVER (PARTITION BY fl.target_dt ORDER BY fl.issued_at DESC) AS rn_last
+                        ROW_NUMBER() OVER (PARTITION BY fl.target_dt ORDER BY fl.issued_at DESC) AS rn_last,
+                        COUNT(*) OVER (PARTITION BY fl.target_dt) AS n_forecasts
                     FROM forecast_log fl
                     INNER JOIN actuals_grid ag
                         ON ag.grid_dt = fl.target_dt
@@ -384,12 +402,12 @@ class HistoryDB:
                     SELECT target_dt,
                            MAX(CASE WHEN rn_first = 1 THEN predicted END) AS first_pred,
                            MAX(CASE WHEN rn_last  = 1 THEN predicted END) AS last_pred,
-                           MAX(actual) AS actual
+                           MAX(actual) AS actual,
+                           MAX(n_forecasts) AS n_forecasts
                     FROM ranked
                     WHERE rn_first = 1 OR rn_last = 1
                     GROUP BY target_dt
-                    HAVING first_pred IS NOT NULL AND last_pred IS NOT NULL
-                       AND first_pred != last_pred
+                    HAVING n_forecasts >= 2
                 )
                 SELECT
                     AVG(ABS(first_pred - actual)) AS first_mae,
@@ -431,6 +449,138 @@ class HistoryDB:
                 "from": stats_row[1] if stats_row else None,
                 "to": stats_row[2] if stats_row else None,
             },
+        }
+
+    def get_forecast_evolution(
+        self,
+        experiment: str,
+        actuals_table: str,
+        n_cycles: int = 12,
+        interval_minutes: int = 30,
+    ) -> dict:
+        """
+        Return the last ``n_cycles`` forecast snapshots plus actuals.
+
+        Each cycle is one forecast issuance — a series of (target_dt,
+        predicted) pairs emitted together at the same ``issued_at``.
+        The chart overlays them against the resampled actual curve so
+        the user can see how predictions evolve as lead time shrinks.
+
+        Parameters
+        ----------
+        experiment : str
+            Experiment name.
+        actuals_table : str
+            SQL-safe table name for the actuals.
+        n_cycles : int
+            Number of most-recent forecast issuances to return.
+        interval_minutes : int
+            Grid interval used to snap actuals to regular bins before
+            returning.
+
+        Returns
+        -------
+        dict with keys:
+            ``cycles``: list of {issued_at, targets: [iso], predictions: [float]}
+            ``actuals``: {targets: [iso], values: [float]}
+            ``time_range``: {from, to} (ISO strings, bounding window)
+        """
+        cursor = self.conn.cursor()
+        interval_sec = max(60, int(interval_minutes) * 60)
+
+        # Check actuals table exists
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (actuals_table,),
+        )
+        if not cursor.fetchone():
+            return {"error": "No actuals data available yet"}
+
+        # Find the last N distinct issuance timestamps for this experiment
+        try:
+            cursor.execute(
+                "SELECT DISTINCT issued_at FROM forecast_log "
+                "WHERE experiment = ? "
+                "ORDER BY issued_at DESC LIMIT ?",
+                (experiment, int(n_cycles)),
+            )
+            issued_ats = [r[0] for r in cursor.fetchall()]
+        except sqlite3.Error as e:
+            logger.warning(f"Forecast evolution issuance query failed: {e}")
+            return {"error": str(e)}
+
+        if not issued_ats:
+            return {
+                "cycles": [],
+                "actuals": {"targets": [], "values": []},
+                "time_range": {"from": None, "to": None},
+            }
+
+        # Fetch all rows for those issuances in one query
+        placeholders = ",".join("?" * len(issued_ats))
+        try:
+            cursor.execute(
+                f"SELECT issued_at, target_dt, predicted "
+                f"FROM forecast_log "
+                f"WHERE experiment = ? AND issued_at IN ({placeholders}) "
+                f"ORDER BY issued_at ASC, target_dt ASC",
+                (experiment, *issued_ats),
+            )
+            rows = cursor.fetchall()
+        except sqlite3.Error as e:
+            logger.warning(f"Forecast evolution rows query failed: {e}")
+            return {"error": str(e)}
+
+        cycles_map: dict = {}
+        min_target = None
+        max_target = None
+        for issued_at, target_dt, predicted in rows:
+            cycle = cycles_map.setdefault(
+                issued_at, {"issued_at": issued_at, "targets": [], "predictions": []}
+            )
+            cycle["targets"].append(target_dt)
+            cycle["predictions"].append(float(predicted))
+            if min_target is None or target_dt < min_target:
+                min_target = target_dt
+            if max_target is None or target_dt > max_target:
+                max_target = target_dt
+
+        # Pull actuals covering the same time window, snapped to the grid
+        actuals_targets: list = []
+        actuals_values: list = []
+        if min_target and max_target:
+            try:
+                cursor.execute(
+                    f"""
+                    SELECT
+                        strftime('%Y-%m-%d %H:%M:%S',
+                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                            'unixepoch') AS grid_dt,
+                        AVG(value) AS value
+                    FROM {actuals_table}
+                    WHERE SUBSTR(ds, 1, 19) >= ?
+                      AND SUBSTR(ds, 1, 19) <= ?
+                    GROUP BY grid_dt
+                    ORDER BY grid_dt ASC
+                    """,
+                    (interval_sec, interval_sec, min_target, max_target),
+                )
+                for grid_dt, value in cursor.fetchall():
+                    if value is None:
+                        continue
+                    actuals_targets.append(grid_dt)
+                    actuals_values.append(float(value))
+            except sqlite3.Error as e:
+                logger.warning(f"Forecast evolution actuals query failed: {e}")
+
+        # Chronological cycle order (oldest first) so callers can fade
+        # older traces and emphasize newer ones by index.
+        cycles = [cycles_map[k] for k in sorted(cycles_map.keys())]
+
+        return {
+            "cycles": cycles,
+            "actuals": {"targets": actuals_targets, "values": actuals_values},
+            "time_range": {"from": min_target, "to": max_target},
         }
 
     def cleanup_forecast_log(self, experiment: str, oldest_datetime: datetime) -> int:

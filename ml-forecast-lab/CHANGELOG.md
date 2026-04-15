@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.11.3
+
+### Bugfix
+
+- **Fix Samples=tiny in revision-improvement card** — the
+  first-vs-latest comparison used `first_pred != last_pred` to filter
+  out single-forecast targets, but this also excluded any target whose
+  re-forecasts happened to produce numerically identical predictions,
+  and the CASE-aggregation interaction dropped counts further. Replaced
+  with an explicit `COUNT(*) >= 2` filter via a window function so the
+  denominator now reflects actual re-forecast targets. Expect Samples
+  to jump from single digits to thousands.
+- **Fix lead-time chart collapsing to 3 points on fine grids** — the
+  query hardcoded a 30-min lead-bucket even when `interval_minutes` was
+  5 or 15, collapsing the chart to 2–3 data points and forcing MAE and
+  RMSE to numerically converge within each chunky bucket. Bucket size
+  now follows `interval_minutes` so a 5-min-grid experiment with a 1h
+  horizon gets ~12 buckets instead of 3.
+
+### Feature
+
+- **Forecast evolution overlay chart** — new plot under the Accuracy
+  by lead time chart. Renders each of the last N forecast cycles as a
+  faded line (older = dimmer, latest = bright cyan) with the actual
+  series overlaid in white. Lets you see how prediction curves
+  converge toward the truth as lead time shrinks — same pattern as the
+  holdout chart but for live production forecasts.
+- **Cycle-count selector** — dropdown to choose 6 / 12 / 24 / 48 most
+  recent cycles for the overlay.
+- **`/experiment/{name}/forecast-evolution` endpoint** — returns the
+  last N forecast snapshots plus grid-snapped actuals over the same
+  window. Backed by `HistoryDB.get_forecast_evolution`.
+
 ## 2.11.2
 
 ### Bugfix

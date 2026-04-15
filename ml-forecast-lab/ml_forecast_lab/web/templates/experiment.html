@@ -1022,6 +1022,24 @@
         <div id="accuracy-lead-chart" style="width:100%;height:380px;"></div>
     </div>
 
+    <!-- Forecast evolution overlay -->
+    <div class="settings-group" id="accuracy-evolution-wrapper">
+        <h3 class="settings-group-title">
+            Forecast evolution
+            <span class="info-tip">?<span class="tip-text">Each faded line is one forecast cycle; brighter = more recent. Watch how curves converge toward the solid actuals line as lead time shrinks.</span></span>
+        </h3>
+        <div style="display:flex;gap:0.75rem;align-items:center;margin-bottom:0.5rem;">
+            <label style="color:var(--text-secondary);font-size:0.85rem;">Cycles:</label>
+            <select id="accuracy-evolution-cycles" class="setting-input" style="width:auto;" onchange="reloadForecastEvolution()">
+                <option value="6">Last 6</option>
+                <option value="12" selected>Last 12</option>
+                <option value="24">Last 24</option>
+                <option value="48">Last 48</option>
+            </select>
+        </div>
+        <div id="accuracy-evolution-chart" style="width:100%;height:420px;"></div>
+    </div>
+
     <!-- Info / empty state -->
     <div id="accuracy-empty" style="display:none;">
         <div class="empty-state">
@@ -1530,7 +1548,75 @@ window.showTab = function(el) {
             console.error('Forecast accuracy load failed:', err);
             document.getElementById('accuracy-empty').style.display = 'block';
         });
+
+        // Render evolution overlay alongside the lead-time chart.
+        loadForecastEvolution();
     });
+
+    // Holdout-style overlay: each recent forecast cycle as a faded line
+    // over the actuals trace, with newer cycles brighter.
+    window.loadForecastEvolution = function() {
+        var sel = document.getElementById('accuracy-evolution-cycles');
+        var n = sel ? sel.value : '12';
+        fetch(BASE + '/experiment/' + EXP_NAME + '/forecast-evolution?cycles=' + n)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var wrap = document.getElementById('accuracy-evolution-wrapper');
+            if (data.error || !data.cycles || !data.cycles.length) {
+                if (wrap) wrap.style.display = 'none';
+                return;
+            }
+            if (wrap) wrap.style.display = '';
+
+            var cycles = data.cycles;
+            var traces = [];
+            var nCycles = cycles.length;
+            cycles.forEach(function(c, idx) {
+                // Fade older cycles; brightest for the latest issuance.
+                var frac = nCycles === 1 ? 1 : (idx / (nCycles - 1));
+                var opacity = 0.25 + 0.65 * frac;
+                var width = idx === nCycles - 1 ? 2.5 : 1.25;
+                traces.push({
+                    x: c.targets, y: c.predictions,
+                    name: c.issued_at.slice(11, 16) + (idx === nCycles - 1 ? ' (latest)' : ''),
+                    type: 'scatter', mode: 'lines',
+                    line: { color: '#00d4ff', width: width },
+                    opacity: opacity,
+                    hovertemplate: 'issued %{text}<br>%{x}<br>pred: %{y:.3f}<extra></extra>',
+                    text: c.targets.map(function() { return c.issued_at; }),
+                    showlegend: idx === nCycles - 1 || idx === 0,
+                });
+            });
+            if (data.actuals && data.actuals.targets.length) {
+                traces.push({
+                    x: data.actuals.targets, y: data.actuals.values,
+                    name: 'Actual', type: 'scatter', mode: 'lines',
+                    line: { color: '#ffffff', width: 2 },
+                    hovertemplate: '%{x}<br>actual: %{y:.3f}<extra></extra>',
+                });
+            }
+            var layout = {
+                xaxis: { title: 'Target time', color: '#b0b0b0', gridcolor: '#2d3561', type: 'date' },
+                yaxis: { title: 'Value{{ " (" + units + ")" if units else "" }}', color: '#b0b0b0', gridcolor: '#2d3561' },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#e0e0e0' },
+                legend: { x: 0.02, y: 0.98, bgcolor: 'rgba(0,0,0,0)' },
+                margin: { t: 20, r: 30 },
+                hovermode: 'closest',
+            };
+            Plotly.newPlot('accuracy-evolution-chart', traces, layout, { responsive: true });
+        })
+        .catch(function(err) {
+            console.error('Forecast evolution load failed:', err);
+            var wrap = document.getElementById('accuracy-evolution-wrapper');
+            if (wrap) wrap.style.display = 'none';
+        });
+    };
+
+    window.reloadForecastEvolution = function() {
+        window.loadForecastEvolution();
+    };
     {% endif %}
 
     // ======== Feature importance charts ========

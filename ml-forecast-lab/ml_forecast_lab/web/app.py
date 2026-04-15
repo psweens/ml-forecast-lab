@@ -1401,6 +1401,45 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         )
         return JSONResponse(content=result)
 
+    @app.get("/experiment/{name}/forecast-evolution")
+    async def forecast_evolution(name: str, request: Request):
+        """Return the last N forecast snapshots + actuals for overlay plot."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        db = app.state.appstate.history_db
+        if not db:
+            return JSONResponse(content={"error": "Database not available"}, status_code=503)
+
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"error": "Config not found"}, status_code=503)
+
+        from ml_forecast_lab.config import load_config
+        try:
+            cfg = load_config(config_path)
+            exp_cfg = next((e for e in cfg.experiments if e.name == name), None)
+            if not exp_cfg:
+                return JSONResponse(content={"error": "Experiment not in config"}, status_code=404)
+            actuals_table = db.safe_table_name(exp_cfg.target_entity)
+        except Exception as e:
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+        # Clamp n_cycles to [2, 48] — 2 is the minimum for a "change over
+        # time" visual, 48 keeps the chart legible and the query cheap.
+        try:
+            n_cycles = int(request.query_params.get("cycles", "12"))
+        except (TypeError, ValueError):
+            n_cycles = 12
+        n_cycles = max(2, min(48, n_cycles))
+
+        result = db.get_forecast_evolution(
+            name, actuals_table,
+            n_cycles=n_cycles,
+            interval_minutes=exp_cfg.interval_minutes,
+        )
+        return JSONResponse(content=result)
+
     @app.post("/experiment/{name}/toggle-mode")
     async def toggle_mode(name: str):
         """
