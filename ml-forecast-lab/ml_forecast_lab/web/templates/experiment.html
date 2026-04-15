@@ -1625,10 +1625,21 @@ window.showTab = function(el) {
                 });
             }
 
-            // Y-axis label: prefer explicit units from the experiment
-            // config; otherwise fall back to the entity id so the user
-            // knows which sensor the trace represents.
-            var yTitle = {% if units %}{{ units | tojson }}{% else %}{{ experiment.target_entity | tojson }}{% endif %};
+            // Y-axis label: combine experiment name + units so the
+            // reader knows *which* sensor and *what scale* — raw "%"
+            // or "kWh" alone is uninformative without context, and if
+            // the preprocessor has converted cumulative-daily to
+            // interval deltas, the literal unit is misleading. We
+            // therefore append "per interval" when the pipeline is
+            // running cumulative → interval conversion.
+            var yTitle = {{ experiment.name | tojson }}
+                       {% if units and exp_config and exp_config.source_is_cumulative %}
+                         + ' ({{ units }} per {{ exp_config.interval_minutes }}-min bucket)'
+                       {% elif units %}
+                         + ' ({{ units }})'
+                       {% else %}
+                         + ' — ' + {{ experiment.target_entity | tojson }}
+                       {% endif %};
 
             var layout = {
                 xaxis: {

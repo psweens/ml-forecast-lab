@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.11.5
+
+### Improvement
+
+- **Y-axis label now identifies the experiment and scale** — the
+  previous label was just the raw `units` string (e.g. `%`), which
+  doesn't tell the reader *of what*, and is actively misleading when
+  the preprocessor has converted a cumulative-daily sensor into
+  per-interval deltas. The label is now:
+  - `<experiment_name> (<units> per <N>-min bucket)` when the target
+    is cumulative (post-preprocessing scale is per-interval)
+  - `<experiment_name> (<units>)` when the target is already an
+    instantaneous reading
+  - `<experiment_name> — <entity_id>` when no units are configured
+
+  So a Mixergy cumulative-daily-% experiment now shows
+  `mixergy_demand (% per 30-min bucket)` instead of just `%`.
+
 ## 2.11.4
 
 ### Improvement
