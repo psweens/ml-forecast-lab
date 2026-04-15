@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}ML Forecast Lab{% endblock %}</title>
+    <link rel="icon" type="image/png" href="{{ base_path | default('') }}/static/icon.png">
     <link rel="stylesheet" href="{{ base_path | default('') }}/static/style.css">
     <script src="{{ base_path | default('') }}/static/htmx.min.js"></script>
     {% block head_scripts %}{% endblock %}
@@ -13,7 +14,7 @@
     <nav class="navbar">
         <div class="navbar-container">
             <div class="navbar-brand">
-                <span class="brand-logo">📈</span>
+                <img class="brand-logo" src="{{ base_path | default('') }}/static/icon.png" alt="ML Forecast Lab">
                 <span class="brand-text">ML Forecast Lab</span>
             </div>
             <button class="hamburger" onclick="this.classList.toggle('open');document.getElementById('nav-menu').classList.toggle('nav-open');" aria-label="Menu">
