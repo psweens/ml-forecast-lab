@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.11.4
+
+### Improvement
+
+- **Readable Forecast evolution chart** — rewrote the overlay so each
+  cycle is visually distinct:
+  - **Sequential HSL colour gradient** (indigo → teal → yellow-green)
+    instead of same-cyan-with-opacity; adjacent issuances no longer
+    blur together.
+  - **Legend labels every cycle** with `DD Mon HH:MM`, grouped under
+    "Forecast cycles (by issue time)", latest tagged "← latest" and
+    ordered at the top. Moved the legend out to the right margin so it
+    stops covering chart data.
+  - **Informative y-axis** — uses the experiment's `units` when set;
+    falls back to the target entity id so the user always knows which
+    sensor the trace represents (was just "Value").
+  - **Clearer x-axis** — "Target time (when the forecast applies)".
+  - **Inline caption** under the heading explains that colour encodes
+    recency and the white line is the measured value — no need to
+    hover the info-tip to understand the chart.
+  - **Richer hover** — bold "Forecast issued DD Mon HH:MM" header,
+    explicit "predicted" / "measured" labels, actuals renamed
+    "Measured (actual)" for contrast with forecast traces.
+
 ## 2.11.3
 
 ### Bugfix

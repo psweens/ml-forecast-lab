@@ -1026,15 +1026,18 @@
     <div class="settings-group" id="accuracy-evolution-wrapper">
         <h3 class="settings-group-title">
             Forecast evolution
-            <span class="info-tip">?<span class="tip-text">Each faded line is one forecast cycle; brighter = more recent. Watch how curves converge toward the solid actuals line as lead time shrinks.</span></span>
+            <span class="info-tip">?<span class="tip-text">Each coloured line is one forecast issuance (one production run). Older runs are darker, newer runs are brighter. The bold white line is the measured value. As lead time shrinks, forecasts should converge toward the actual.</span></span>
         </h3>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
+            Each line is one forecast cycle; colour indicates when it was issued (dark = older, bright = newer). The bold white line is the measured value.
+        </p>
         <div style="display:flex;gap:0.75rem;align-items:center;margin-bottom:0.5rem;">
-            <label style="color:var(--text-secondary);font-size:0.85rem;">Cycles:</label>
+            <label style="color:var(--text-secondary);font-size:0.85rem;">Show last:</label>
             <select id="accuracy-evolution-cycles" class="setting-input" style="width:auto;" onchange="reloadForecastEvolution()">
-                <option value="6">Last 6</option>
-                <option value="12" selected>Last 12</option>
-                <option value="24">Last 24</option>
-                <option value="48">Last 48</option>
+                <option value="6">6 cycles</option>
+                <option value="12" selected>12 cycles</option>
+                <option value="24">24 cycles</option>
+                <option value="48">48 cycles</option>
             </select>
         </div>
         <div id="accuracy-evolution-chart" style="width:100%;height:420px;"></div>
@@ -1553,8 +1556,9 @@ window.showTab = function(el) {
         loadForecastEvolution();
     });
 
-    // Holdout-style overlay: each recent forecast cycle as a faded line
-    // over the actuals trace, with newer cycles brighter.
+    // Holdout-style overlay: each recent forecast cycle as a coloured line
+    // over the actuals trace. Colour encodes recency — darker/cooler hues
+    // are older issuances, brighter/warmer hues are newer.
     window.loadForecastEvolution = function() {
         var sel = document.getElementById('accuracy-evolution-cycles');
         var n = sel ? sel.value : '12';
@@ -1568,41 +1572,84 @@ window.showTab = function(el) {
             }
             if (wrap) wrap.style.display = '';
 
+            // Sequential colour ramp (viridis-like) on dark background:
+            // deep indigo (oldest) → teal → bright yellow-green (newest).
+            // Hue rotates 260°→80°, lightness rises 38%→62%.
+            function cycleColor(frac) {
+                var hue   = 260 - 180 * frac;
+                var light = 38 + 24 * frac;
+                return 'hsl(' + hue.toFixed(0) + ', 70%, ' + light.toFixed(0) + '%)';
+            }
+
+            // Format an ISO-ish timestamp ("YYYY-MM-DD HH:MM:SS") as
+            // "DD Mon HH:MM" — short but unambiguous across days.
+            function fmtIssued(s) {
+                if (!s || s.length < 16) return s || '';
+                var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+                var mo = parseInt(s.slice(5, 7), 10) - 1;
+                var day = s.slice(8, 10);
+                var hm = s.slice(11, 16);
+                return day + ' ' + (months[mo] || '') + ' ' + hm;
+            }
+
             var cycles = data.cycles;
             var traces = [];
             var nCycles = cycles.length;
             cycles.forEach(function(c, idx) {
-                // Fade older cycles; brightest for the latest issuance.
                 var frac = nCycles === 1 ? 1 : (idx / (nCycles - 1));
-                var opacity = 0.25 + 0.65 * frac;
-                var width = idx === nCycles - 1 ? 2.5 : 1.25;
+                var isLatest = idx === nCycles - 1;
+                var label = fmtIssued(c.issued_at) + (isLatest ? '  ← latest' : '');
                 traces.push({
                     x: c.targets, y: c.predictions,
-                    name: c.issued_at.slice(11, 16) + (idx === nCycles - 1 ? ' (latest)' : ''),
+                    name: label,
                     type: 'scatter', mode: 'lines',
-                    line: { color: '#00d4ff', width: width },
-                    opacity: opacity,
-                    hovertemplate: 'issued %{text}<br>%{x}<br>pred: %{y:.3f}<extra></extra>',
-                    text: c.targets.map(function() { return c.issued_at; }),
-                    showlegend: idx === nCycles - 1 || idx === 0,
+                    line: {
+                        color: cycleColor(frac),
+                        width: isLatest ? 2.75 : 1.5,
+                    },
+                    opacity: isLatest ? 1.0 : 0.85,
+                    hovertemplate: '<b>Forecast issued ' + fmtIssued(c.issued_at)
+                                 + '</b><br>target: %{x}<br>predicted: %{y:.3f}<extra></extra>',
+                    legendgroup: 'forecasts',
+                    legendgrouptitle: idx === 0 ? { text: 'Forecast cycles (by issue time)' } : undefined,
                 });
             });
             if (data.actuals && data.actuals.targets.length) {
                 traces.push({
                     x: data.actuals.targets, y: data.actuals.values,
-                    name: 'Actual', type: 'scatter', mode: 'lines',
-                    line: { color: '#ffffff', width: 2 },
-                    hovertemplate: '%{x}<br>actual: %{y:.3f}<extra></extra>',
+                    name: 'Measured (actual)',
+                    type: 'scatter', mode: 'lines',
+                    line: { color: '#ffffff', width: 3 },
+                    hovertemplate: '<b>Actual</b><br>%{x}<br>measured: %{y:.3f}<extra></extra>',
+                    legendgroup: 'actual',
                 });
             }
+
+            // Y-axis label: prefer explicit units from the experiment
+            // config; otherwise fall back to the entity id so the user
+            // knows which sensor the trace represents.
+            var yTitle = {% if units %}{{ units | tojson }}{% else %}{{ experiment.target_entity | tojson }}{% endif %};
+
             var layout = {
-                xaxis: { title: 'Target time', color: '#b0b0b0', gridcolor: '#2d3561', type: 'date' },
-                yaxis: { title: 'Value{{ " (" + units + ")" if units else "" }}', color: '#b0b0b0', gridcolor: '#2d3561' },
+                xaxis: {
+                    title: { text: 'Target time (when the forecast applies)', font: { size: 12 } },
+                    color: '#b0b0b0', gridcolor: '#2d3561', type: 'date',
+                },
+                yaxis: {
+                    title: { text: yTitle, font: { size: 12 } },
+                    color: '#b0b0b0', gridcolor: '#2d3561',
+                },
                 plot_bgcolor: 'rgba(0,0,0,0)',
                 paper_bgcolor: 'rgba(0,0,0,0)',
                 font: { color: '#e0e0e0' },
-                legend: { x: 0.02, y: 0.98, bgcolor: 'rgba(0,0,0,0)' },
-                margin: { t: 20, r: 30 },
+                legend: {
+                    x: 1.02, y: 1,
+                    xanchor: 'left', yanchor: 'top',
+                    bgcolor: 'rgba(0,0,0,0)',
+                    font: { size: 11 },
+                    traceorder: 'reversed',  // latest forecast at top of legend
+                },
+                margin: { t: 20, r: 200, l: 70, b: 50 },
                 hovermode: 'closest',
             };
             Plotly.newPlot('accuracy-evolution-chart', traces, layout, { responsive: true });
