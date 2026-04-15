@@ -186,10 +186,12 @@ class ExperimentCfg:
     - ``zscore``: target z-score normalisation during training with linear output head;
       stats computed per-horizon from training data, denormalised at inference. Keeps
       gradients O(1) regardless of target magnitude and lets the network learn signed
-      residuals without activation saturation. Currently honoured by the LSTM backend
-      only; other backends treat it as ``linear``.
+      residuals without activation saturation. Honoured by all PyTorch neural backends
+      (LSTM, CNN, DLinear, N-BEATS, N-HiTS, TiDE, TSMixer, SparseTSF, PatchTST,
+      iTransformer, Crossformer, TimesNet). Predictions are floored at zero after
+      denormalisation.
 
-    Tree-based models (lightgbm/xgboost) ignore this field."""
+    Tree-based models (lightgbm/xgboost) and NeuralProphet ignore this field."""
 
     subtract: List[str] = field(default_factory=list)
     """Entity IDs to subtract from target (e.g. solar generation from grid import)."""

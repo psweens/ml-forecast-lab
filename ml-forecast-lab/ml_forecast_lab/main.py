@@ -1402,6 +1402,16 @@ class MLForecastLabApp:
                         if y_p_display.ndim > 1:
                             y_p_display = y_p_display.ravel()
 
+                    # Post-hoc clip for cumulative (non-negative) targets.
+                    # Covers any neural backend whose output head can emit
+                    # tiny negatives (LSTM + zscore, linear activation, etc.);
+                    # for tree models this is a no-op in practice but safe.
+                    # Gate on source_is_cumulative so signed targets are
+                    # untouched. Applied before the log-transform invert so
+                    # the branch below still owns its own expm1 clamp.
+                    if getattr(exp_cfg, 'source_is_cumulative', False):
+                        y_p_display = np.maximum(y_p_display, 0.0).astype(np.float32)
+
                     # Invert log-transform for display — both actuals and
                     # predictions live in log(y+1) space while training.
                     if exp_cfg.log_transform:
@@ -1671,10 +1681,15 @@ class MLForecastLabApp:
                 y_pred = np.interp(all_x, horizon_x, multi_pred.astype(np.float32)).astype(np.float32)
                 logger.info(f"  Sparse multi-head: {len(multi_pred)} → {len(y_pred)} interpolated")
 
-            # No post-hoc clipping — the model's output_activation (softplus,
-            # relu, sigmoid, etc.) already constrains predictions to the
-            # correct physical range. Clipping here would mask poor activation
-            # choices rather than surface them.
+            # Post-hoc clip for cumulative (non-negative) targets. The
+            # activation (softplus/relu/sigmoid) should already handle this,
+            # but linear-head paths (LSTM + zscore, or any neural backend
+            # with an unconstrained output head) can emit tiny negatives
+            # that Plotly renders as visually-misleading dips. Gate on
+            # source_is_cumulative so signed targets (temperature deltas,
+            # net flows) stay untouched.
+            if getattr(exp_cfg, 'source_is_cumulative', False):
+                y_pred = np.maximum(y_pred, 0.0).astype(np.float32)
         else:
             # ----- Tree models: RECURSIVE multi-step forecast -----
             # Build a fresh feature row at each step using the rolling
@@ -2533,8 +2548,10 @@ class MLForecastLabApp:
                     np.full(future_periods - len(multi_pred),
                             float(multi_pred[-1]), dtype=np.float32),
                 ])
-            # No post-hoc clipping — see _run_production_inference. The
-            # model's output_activation handles range constraints.
+            # Post-hoc clip for cumulative (non-negative) targets — see
+            # _run_production_inference for rationale.
+            if getattr(exp_cfg, 'source_is_cumulative', False):
+                y_pred = np.maximum(y_pred, 0.0).astype(np.float32)
         else:
             # Tree models: RECURSIVE multi-step forecast.
             # At each step, we build a single feature row using the most recent

@@ -97,17 +97,39 @@ class NeuralProphetModel(ForecastModel):
 
         NeuralProphet needs a DataFrame with 'ds' (datetime) and 'y' columns.
         Since the benchmark runner passes flat numpy arrays, we reconstruct
-        timestamps using a synthetic datetime index.
+        timestamps from the caller's ``date_index`` kwarg where available,
+        otherwise fall back to a fixed-anchor synthetic index (NOT
+        ``pd.Timestamp.now()``, which would shift every fit() call and
+        destroy temporal reproducibility).
+
+        Accepts ``date_index`` in ``kwargs`` — an array-like of timestamps
+        aligned with ``y_train`` — to preserve real calendar effects
+        (seasonality, holidays, day-of-week) that NeuralProphet relies on.
         """
         self._validate_X(X_train)
         y_train = self._validate_y(y_train)
         start_time = time.time()
 
-        # Reconstruct DataFrame with timestamps
-        # Use a synthetic datetime index (NeuralProphet needs 'ds')
         n_samples = len(y_train)
         freq = kwargs.get("freq", self._freq)
-        ds = pd.date_range(end=pd.Timestamp.now(), periods=n_samples, freq=freq)
+
+        # Prefer real timestamps from the caller when available — this is what
+        # NeuralProphet's trend/seasonality/holiday components actually need.
+        date_index = kwargs.get("date_index")
+        if date_index is not None:
+            ds = pd.to_datetime(pd.Index(date_index))
+            if len(ds) != n_samples:
+                raise ValueError(
+                    f"date_index length {len(ds)} does not match y_train "
+                    f"length {n_samples}"
+                )
+        else:
+            # Synthetic fallback anchored at a FIXED reference timestamp
+            # (2000-01-01) so repeated fits with the same y produce
+            # identical timestamps. This is reproducible but loses true
+            # calendar effects — callers should pass date_index when they can.
+            anchor = pd.Timestamp("2000-01-01")
+            ds = pd.date_range(start=anchor, periods=n_samples, freq=freq)
 
         train_df = pd.DataFrame({"ds": ds, "y": y_train.astype(float)})
 

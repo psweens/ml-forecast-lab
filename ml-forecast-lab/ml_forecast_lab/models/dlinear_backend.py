@@ -107,6 +107,10 @@ class DLinearModel(ForecastModel):
         self._channel_mean: Optional[np.ndarray] = None
         self._channel_std: Optional[np.ndarray] = None
         self._sigmoid_scale: float = 1.0
+        # Target z-score stats (only populated when output_activation == 'zscore').
+        # Identity defaults so non-zscore paths are a safe no-op.
+        self._y_mean: Any = 0.0
+        self._y_std: Any = 1.0
 
     @property
     def name(self) -> str:
@@ -165,6 +169,25 @@ class DLinearModel(ForecastModel):
         # ignores for non-sigmoid cases.
         if self.output_activation == 'sigmoid':
             self._sigmoid_scale = _resolve_sigmoid_scale(y_train)
+
+        # Target z-score normalisation (output_activation == 'zscore'):
+        # the head is linear, gradients stay O(1) regardless of target
+        # magnitude, and predictions are denormalised back to physical
+        # units at inference time. Per-horizon stats for multi-horizon so
+        # each horizon column retains its own scale.
+        if self.output_activation == 'zscore':
+            if self._n_horizons > 1:
+                y_mean = y_train.mean(axis=0)
+                y_std = y_train.std(axis=0)
+                y_std = np.where(y_std < 1e-8, 1.0, y_std)
+                self._y_mean = y_mean.astype(np.float32)
+                self._y_std = y_std.astype(np.float32)
+            else:
+                self._y_mean = float(y_train.mean())
+                self._y_std = float(y_train.std())
+                if self._y_std < 1e-8:
+                    self._y_std = 1.0
+            y_train = (y_train - self._y_mean) / self._y_std
 
         # Extract sample weights
         sample_weight = kwargs.get("sample_weight")
@@ -289,6 +312,13 @@ class DLinearModel(ForecastModel):
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
 
+        # Denormalise z-space predictions back to physical units. Floor at
+        # zero because the linear head in z-space is unconstrained and
+        # callers expect physically-valid (non-negative) forecasts.
+        if self.output_activation == 'zscore':
+            predictions = predictions * self._y_std + self._y_mean
+            predictions = np.clip(predictions, 0.0, None)
+
         return predictions.astype(np.float32)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -303,6 +333,12 @@ class DLinearModel(ForecastModel):
         self._model.eval()
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
+
+        # Denormalise z-space predictions *before* slicing to horizon-0 so the
+        # per-horizon stats align with each column of the prediction array.
+        if self.output_activation == 'zscore':
+            predictions = predictions * self._y_std + self._y_mean
+            predictions = np.clip(predictions, 0.0, None)
 
         # Multi-horizon: return only first horizon for backward compat
         if predictions.ndim == 2:
@@ -340,6 +376,8 @@ class DLinearModel(ForecastModel):
             "channel_mean": self._channel_mean,
             "channel_std": self._channel_std,
             "sigmoid_scale": self._sigmoid_scale,
+            "y_mean": self._y_mean,
+            "y_std": self._y_std,
         }, path)
         logger.info(f"Saved DLinear model to {path}")
 
@@ -352,6 +390,8 @@ class DLinearModel(ForecastModel):
         self._channel_std = data.get("channel_std")
         self._n_horizons = data.get("n_horizons", 1)
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
+        self._y_mean = data.get("y_mean", 0.0)
+        self._y_std = data.get("y_std", 1.0)
 
         if self._seq_len is not None and self._n_channels is not None:
             self._model = self._build_model(self._seq_len, self._n_channels,

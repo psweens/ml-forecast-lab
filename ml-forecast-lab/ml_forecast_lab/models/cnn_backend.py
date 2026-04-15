@@ -3,7 +3,7 @@ PyTorch 1D CNN forecasting model backend for ML Forecast Lab.
 
 Implements a stack of 1D causal dilated convolutions (WaveNet-style)
 with learnable positional pooling, using PyTorch with proper autograd,
-residual connections, ReduceLROnPlateau scheduling, best-model
+residual connections, cosine-annealing learning-rate schedule, best-model
 checkpointing, and early stopping. Supports multi-horizon output
 via a shared encoder and multi-output head.
 """
@@ -165,6 +165,10 @@ class CNNModel(ForecastModel):
         self._channel_mean: Optional[np.ndarray] = None
         self._channel_std: Optional[np.ndarray] = None
         self._sigmoid_scale: float = 1.0
+        # Target z-score stats (only populated when output_activation == 'zscore').
+        # Identity defaults so non-zscore paths are a safe no-op.
+        self._y_mean: Any = 0.0
+        self._y_std: Any = 1.0
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -218,6 +222,25 @@ class CNNModel(ForecastModel):
         # a 10% buffer so the network can reach observed extrema.
         if self.output_activation == 'sigmoid':
             self._sigmoid_scale = _resolve_sigmoid_scale(y_train)
+
+        # Target z-score normalisation (output_activation == 'zscore'):
+        # the head is linear, gradients stay O(1) regardless of target
+        # magnitude, and predictions are denormalised back to physical
+        # units at inference time. Per-horizon stats for multi-horizon so
+        # each horizon column retains its own scale.
+        if self.output_activation == 'zscore':
+            if self._n_horizons > 1:
+                y_mean = y_train.mean(axis=0)
+                y_std = y_train.std(axis=0)
+                y_std = np.where(y_std < 1e-8, 1.0, y_std)
+                self._y_mean = y_mean.astype(np.float32)
+                self._y_std = y_std.astype(np.float32)
+            else:
+                self._y_mean = float(y_train.mean())
+                self._y_std = float(y_train.std())
+                if self._y_std < 1e-8:
+                    self._y_std = 1.0
+            y_train = (y_train - self._y_mean) / self._y_std
 
         # Extract sample weights
         sample_weight = kwargs.get("sample_weight")
@@ -363,6 +386,13 @@ class CNNModel(ForecastModel):
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
 
+        # Denormalise z-space predictions back to physical units. Floor at
+        # zero because the linear head in z-space is unconstrained and
+        # callers expect physically-valid (non-negative) forecasts.
+        if self.output_activation == 'zscore':
+            predictions = predictions * self._y_std + self._y_mean
+            predictions = np.clip(predictions, 0.0, None)
+
         return predictions.astype(np.float32)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -380,6 +410,12 @@ class CNNModel(ForecastModel):
         self._model.eval()
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
+
+        # Denormalise z-space predictions *before* slicing to horizon-0 so the
+        # per-horizon stats align with each column of the prediction array.
+        if self.output_activation == 'zscore':
+            predictions = predictions * self._y_std + self._y_mean
+            predictions = np.clip(predictions, 0.0, None)
 
         # Multi-horizon: return only first horizon for backward compat
         if predictions.ndim == 2:
@@ -421,6 +457,8 @@ class CNNModel(ForecastModel):
             "channel_mean": self._channel_mean,
             "channel_std": self._channel_std,
             "sigmoid_scale": self._sigmoid_scale,
+            "y_mean": self._y_mean,
+            "y_std": self._y_std,
         }, path)
         logger.info(f"Saved CNN model to {path}")
 
@@ -434,6 +472,8 @@ class CNNModel(ForecastModel):
         self._channel_std = data.get("channel_std")
         self._n_horizons = data.get("n_horizons", 1)
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
+        self._y_mean = data.get("y_mean", 0.0)
+        self._y_std = data.get("y_std", 1.0)
 
         # Reconstruct the nn.Module and load weights
         if self._input_size is not None and self._sequence_length is not None:

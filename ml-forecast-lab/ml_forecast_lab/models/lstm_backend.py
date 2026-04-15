@@ -2,7 +2,7 @@
 PyTorch LSTM forecasting model backend for ML Forecast Lab.
 
 Implements a multi-layer LSTM with temporal attention using PyTorch,
-Adam optimisation, ReduceLROnPlateau scheduling, best-model
+AdamW optimisation, cosine-annealing learning-rate schedule, best-model
 checkpointing, and early stopping. Supports multi-horizon output
 via a shared encoder and multi-output head.
 """

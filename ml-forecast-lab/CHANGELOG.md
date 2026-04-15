@@ -1,5 +1,83 @@
 # Changelog
 
+## 2.14.0
+
+### Added
+
+- **`output_activation: zscore` is now honoured by every PyTorch neural
+  backend** — previously only the LSTM applied target z-score
+  normalisation; the other eleven (CNN, DLinear, N-BEATS, N-HiTS, TiDE,
+  TSMixer, SparseTSF, PatchTST, iTransformer, Crossformer, TimesNet)
+  silently degraded to `linear`. Each backend now:
+  - fits per-horizon target mean/std on training data (scalars for
+    single-horizon, per-column arrays for multi-horizon),
+  - trains with a linear head in z-space,
+  - denormalises predictions back to physical units in
+    `predict()` and `predict_sequence()`, flooring at zero, and
+  - persists `y_mean`/`y_std` in `save()` / `load()` so checkpoints
+    round-trip cleanly.
+
+  Predictions from a fresh zscore-trained checkpoint are now on the
+  correct physical scale for all backends. Older checkpoints saved
+  under a non-zscore activation load with identity defaults and are
+  unaffected.
+
+- **Config:** documentation for `ExperimentCfg.output_activation`
+  updated to reflect full-backend coverage.
+
+### Changed
+
+- **TimesNet: real multi-period aggregation** — the TimesBlock
+  previously detected the top-k dominant FFT periods but then
+  discarded everything except the median, collapsing the block to
+  single-period 2D convolution and defeating the paper's core
+  contribution. It now runs the shared inception block once per
+  detected period and aggregates the results with softmax-weighted
+  amplitudes (matching Wu et al. 2023). Periods that round to the
+  same integer bucket have their amplitudes merged before softmax.
+
+- **NeuralProphet: reproducible timestamps** — `fit()` used to call
+  `pd.Timestamp.now()` for every fit, so repeated fits on the same
+  `(X, y)` produced different temporal features and broke
+  reproducibility. The backend now accepts `date_index` via kwargs
+  (preferred — preserves real calendar effects for seasonality /
+  holiday components) and falls back to a fixed `2000-01-01` anchor
+  when the caller can't supply one.
+
+### Fixed
+
+- **N-HiTS: defensive copy of `pool_kernels`** — the inner
+  `_NHiTSNet` mutated the caller's list when extending to `n_stacks`,
+  which could silently corrupt a reused kernel list across multiple
+  model constructions.
+
+- **Post-hoc clipping restored for all neural backends on cumulative
+  targets** — v2.13.2 added the clip inside the LSTM backend's
+  `predict()` / `predict_sequence()` for the zscore path only.
+  Every other neural backend (PatchTST, N-BEATS, TiDE, TSMixer,
+  SparseTSF, TimesNet, iTransformer, Crossformer, DLinear, NHiTS,
+  CNN) still had an unguarded linear-output edge case: with a
+  manual `output_activation: linear` override, tiny negatives could
+  slip through into live forecasts and the holdout chart. The clip
+  is now applied in the three central neural forecast paths in
+  `main.py` (`_run_production_inference`, `_forecast_with_cached`,
+  and `_generate_holdout_predictions`), gated on
+  `exp_cfg.source_is_cumulative=True` so signed-target experiments
+  (temperature deltas, net flows) are not clipped.
+
+  Scope note: tree-model paths are unchanged — they already cannot
+  emit negatives for non-negative training targets under normal
+  settings, and the existing log-transform branch's
+  `np.maximum(np.expm1(...), 0.0)` still owns that case. The LSTM
+  backend's internal clip from v2.13.2 is also kept, and the new
+  denormalise-and-clip step in every other neural backend's
+  `predict()` / `predict_sequence()` (see the zscore work above)
+  provides a third layer for the zscore path.
+
+- **Docstring drift:** CNN and LSTM module docstrings no longer
+  claim `ReduceLROnPlateau` scheduling — both backends use
+  `CosineAnnealingLR` (unchanged; documentation only).
+
 ## 2.13.2
 
 ### Change

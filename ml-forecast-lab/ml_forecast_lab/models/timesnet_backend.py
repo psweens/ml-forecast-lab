@@ -76,62 +76,91 @@ class _TimesNetBlock(nn.Module):
 
     def forward(self, x):
         # x: (batch, seq_len, d_model)
+        #
+        # Follows Wu et al. 2023 ("TimesNet: Temporal 2D-Variation Modeling for
+        # General Time Series Analysis"): detect the top-k dominant periods via
+        # FFT, apply the shared inception block to a 2D reshape for EACH period,
+        # and aggregate results with softmax-weighted amplitudes as the
+        # importance weights. Previously this block only used the median period
+        # and discarded the rest, which collapsed to single-period 2D
+        # convolution and defeated the paper's multi-scale contribution.
         batch_size = x.size(0)
         residual = x
 
-        # FFT to find dominant period
+        # FFT to find dominant periods.
         # Compute FFT along time dimension for each feature, average across features
+        # (batch and channel dims) to get a single per-frequency amplitude.
         x_freq = torch.fft.rfft(x, dim=1)  # (batch, freq_bins, d_model)
         amp = x_freq.abs().mean(dim=(0, 2))  # (freq_bins,)
 
-        # Exclude DC component (index 0)
+        # Exclude DC component (index 0) — it encodes the mean, not a period.
+        amp = amp.clone()
         amp[0] = 0.0
 
-        # Find top_k dominant frequencies
-        top_k = min(self.top_k, len(amp) - 1)
-        _, top_indices = torch.topk(amp, top_k)
+        # Find top_k dominant frequencies.
+        top_k = min(self.top_k, amp.numel() - 1)
+        top_amps, top_indices = torch.topk(amp, top_k)
 
-        # Convert frequency index to period, use batch-median (here just the strongest)
-        # Period p = seq_len / freq_index
-        periods = []
-        for idx in top_indices:
-            freq_idx = idx.item()
-            if freq_idx > 0:
-                periods.append(max(2, round(self.seq_len / freq_idx)))
-        if not periods:
-            periods = [self.seq_len]
+        # Convert (freq_idx, amp) pairs into (period, weight) pairs.
+        # Drop any zero-freq indices and deduplicate periods (two nearby freq
+        # bins can round to the same period at short seq_len); when we
+        # deduplicate we sum the amplitudes so the merged period keeps the
+        # combined energy.
+        period_to_weight: Dict[int, torch.Tensor] = {}
+        for idx, a in zip(top_indices.tolist(), top_amps):
+            if idx <= 0:
+                continue
+            p = max(2, round(self.seq_len / idx))
+            p = min(p, self.seq_len)
+            if p in period_to_weight:
+                period_to_weight[p] = period_to_weight[p] + a
+            else:
+                period_to_weight[p] = a
 
-        # Use the median period
-        periods.sort()
-        p = periods[len(periods) // 2]
-        p = min(p, self.seq_len)
+        if not period_to_weight:
+            # Degenerate input (e.g. near-constant signal): fall back to a
+            # single-period pass over the full sequence. Weight doesn't
+            # matter because we only have one component.
+            period_to_weight = {self.seq_len: top_amps.sum() + 1.0}
 
-        # Pad sequence to multiple of p
-        padded_len = math.ceil(self.seq_len / p) * p
-        if padded_len > self.seq_len:
-            x_padded = F.pad(x, (0, 0, 0, padded_len - self.seq_len), mode='constant', value=0.0)
-        else:
-            x_padded = x
+        periods = list(period_to_weight.keys())
+        weights_raw = torch.stack([period_to_weight[p] for p in periods], dim=0)
+        # Softmax-normalise amplitudes so the aggregation is a convex
+        # combination. This matches the official TimesNet implementation.
+        weights = torch.softmax(weights_raw, dim=0)
 
-        n_rows = padded_len // p
+        # Apply the shared inception block once per period, aggregate
+        # amplitude-weighted.
+        out_accum = torch.zeros_like(x)
+        for p, w in zip(periods, weights):
+            # Pad sequence to multiple of p.
+            padded_len = math.ceil(self.seq_len / p) * p
+            if padded_len > self.seq_len:
+                x_padded = F.pad(
+                    x, (0, 0, 0, padded_len - self.seq_len),
+                    mode='constant', value=0.0,
+                )
+            else:
+                x_padded = x
 
-        # Reshape to 2D: (batch, d_model, n_rows, p)
-        # First permute to (batch, d_model, padded_len)
-        x_2d = x_padded.permute(0, 2, 1)  # (batch, d_model, padded_len)
-        x_2d = x_2d.reshape(batch_size, self.d_model, n_rows, p)
+            n_rows = padded_len // p
 
-        # Apply inception block
-        x_2d = self.inception(x_2d)  # (batch, d_model, n_rows, p)
+            # Reshape to 2D: (batch, d_model, n_rows, p).
+            x_2d = x_padded.permute(0, 2, 1)  # (batch, d_model, padded_len)
+            x_2d = x_2d.reshape(batch_size, self.d_model, n_rows, p)
 
-        # Reshape back to 1D: (batch, d_model, padded_len) -> (batch, padded_len, d_model)
-        x_1d = x_2d.reshape(batch_size, self.d_model, padded_len)
-        x_1d = x_1d.permute(0, 2, 1)  # (batch, padded_len, d_model)
+            # Apply inception block.
+            x_2d = self.inception(x_2d)  # (batch, d_model, n_rows, p)
 
-        # Trim back to original seq_len
-        x_1d = x_1d[:, :self.seq_len, :]
+            # Reshape back to (batch, padded_len, d_model) and trim.
+            x_1d = x_2d.reshape(batch_size, self.d_model, padded_len)
+            x_1d = x_1d.permute(0, 2, 1)  # (batch, padded_len, d_model)
+            x_1d = x_1d[:, :self.seq_len, :]
 
-        # Residual connection
-        return x_1d + residual
+            out_accum = out_accum + w * x_1d
+
+        # Residual connection.
+        return out_accum + residual
 
 
 class _TimesNetNet(nn.Module):
@@ -242,6 +271,10 @@ class TimesNetModel(ForecastModel):
         self._channel_mean: Optional[np.ndarray] = None
         self._channel_std: Optional[np.ndarray] = None
         self._sigmoid_scale: float = 1.0
+        # Target z-score stats (only populated when output_activation == 'zscore').
+        # Identity defaults so non-zscore paths are a safe no-op.
+        self._y_mean: Any = 0.0
+        self._y_std: Any = 1.0
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -296,6 +329,25 @@ class TimesNetModel(ForecastModel):
             self._sigmoid_scale = _resolve_sigmoid_scale(y_train)
         else:
             self._sigmoid_scale = 1.0
+
+        # Target z-score normalisation (output_activation == 'zscore'):
+        # the head is linear, gradients stay O(1) regardless of target
+        # magnitude, and predictions are denormalised back to physical
+        # units at inference time. Per-horizon stats for multi-horizon so
+        # each horizon column retains its own scale.
+        if self.output_activation == 'zscore':
+            if self._n_horizons > 1:
+                y_mean = y_train.mean(axis=0)
+                y_std = y_train.std(axis=0)
+                y_std = np.where(y_std < 1e-8, 1.0, y_std)
+                self._y_mean = y_mean.astype(np.float32)
+                self._y_std = y_std.astype(np.float32)
+            else:
+                self._y_mean = float(y_train.mean())
+                self._y_std = float(y_train.std())
+                if self._y_std < 1e-8:
+                    self._y_std = 1.0
+            y_train = (y_train - self._y_mean) / self._y_std
 
         # Extract sample weights
         sample_weight = kwargs.get("sample_weight")
@@ -445,6 +497,13 @@ class TimesNetModel(ForecastModel):
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
 
+        # Denormalise z-space predictions back to physical units. Floor at
+        # zero because the linear head in z-space is unconstrained and
+        # callers expect physically-valid (non-negative) forecasts.
+        if self.output_activation == 'zscore':
+            predictions = predictions * self._y_std + self._y_mean
+            predictions = np.clip(predictions, 0.0, None)
+
         return predictions.astype(np.float32)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -462,6 +521,12 @@ class TimesNetModel(ForecastModel):
         self._model.eval()
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
+
+        # Denormalise z-space predictions *before* slicing to horizon-0 so the
+        # per-horizon stats align with each column of the prediction array.
+        if self.output_activation == 'zscore':
+            predictions = predictions * self._y_std + self._y_mean
+            predictions = np.clip(predictions, 0.0, None)
 
         # Multi-horizon: return only first horizon for backward compat
         if predictions.ndim == 2:
@@ -502,6 +567,8 @@ class TimesNetModel(ForecastModel):
             "channel_mean": self._channel_mean,
             "channel_std": self._channel_std,
             "sigmoid_scale": self._sigmoid_scale,
+            "y_mean": self._y_mean,
+            "y_std": self._y_std,
         }, path)
         logger.info(f"Saved TimesNet model to {path}")
 
@@ -514,6 +581,8 @@ class TimesNetModel(ForecastModel):
 
         self._n_horizons = data.get("n_horizons", 1)
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
+        self._y_mean = data.get("y_mean", 0.0)
+        self._y_std = data.get("y_std", 1.0)
 
         # Reconstruct the nn.Module and load weights
         self._input_size = data.get("input_size")
