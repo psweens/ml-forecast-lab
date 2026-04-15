@@ -1031,14 +1031,26 @@
         <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
             Each line is one forecast cycle; colour indicates when it was issued (dark = older, bright = newer). The bold white line is the measured value.
         </p>
-        <div style="display:flex;gap:0.75rem;align-items:center;margin-bottom:0.5rem;">
-            <label style="color:var(--text-secondary);font-size:0.85rem;">Show last:</label>
-            <select id="accuracy-evolution-cycles" class="setting-input" style="width:auto;" onchange="reloadForecastEvolution()">
-                <option value="6">6 cycles</option>
-                <option value="12" selected>12 cycles</option>
-                <option value="24">24 cycles</option>
-                <option value="48">48 cycles</option>
-            </select>
+        <div style="display:flex;gap:1.5rem;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;">
+            <div style="display:flex;gap:0.5rem;align-items:center;">
+                <label style="color:var(--text-secondary);font-size:0.85rem;">Show last:</label>
+                <select id="accuracy-evolution-cycles" class="setting-input" style="width:auto;" onchange="reloadForecastEvolution()">
+                    <option value="6">6 cycles</option>
+                    <option value="12" selected>12 cycles</option>
+                    <option value="24">24 cycles</option>
+                    <option value="48">48 cycles</option>
+                </select>
+            </div>
+            {% if exp_config and exp_config.source_is_cumulative %}
+            <div style="display:flex;gap:0.5rem;align-items:center;">
+                <label style="color:var(--text-secondary);font-size:0.85rem;">View as:</label>
+                <select id="accuracy-evolution-mode" class="setting-input" style="width:auto;" onchange="reloadForecastEvolution()">
+                    <option value="interval" selected>Per-interval deltas</option>
+                    <option value="cumulative">Cumulative (daily)</option>
+                </select>
+                <span class="info-tip">?<span class="tip-text">The model is trained on per-interval increments (the pipeline converts your cumulative sensor to deltas). "Cumulative" sums these back up within each day and resets at midnight, so you can read values as "% of the daily budget drawn by this time".</span></span>
+            </div>
+            {% endif %}
         </div>
         <div id="accuracy-evolution-chart" style="width:100%;height:420px;"></div>
     </div>
@@ -1556,12 +1568,45 @@ window.showTab = function(el) {
         loadForecastEvolution();
     });
 
+    // Config flags exposed from Jinja so the JS can decide whether
+    // per-interval → cumulative reconstruction makes physical sense,
+    // and whether to reset the cumulative sum at midnight boundaries.
+    var EXP_SOURCE_CUMULATIVE = {% if exp_config and exp_config.source_is_cumulative %}true{% else %}false{% endif %};
+    var EXP_RESET_DAILY       = {% if exp_config and exp_config.reset_daily %}true{% else %}false{% endif %};
+    var EXP_UNITS             = {{ units | tojson if units else '""' }};
+    var EXP_INTERVAL_MIN      = {{ exp_config.interval_minutes if exp_config else 30 }};
+
+    // Reconstruct a cumulative series from per-interval deltas.
+    // Resets to zero whenever the calendar day changes (if reset_daily
+    // is on) — matches the underlying sensor's midnight-reset behaviour.
+    // The absolute scale is slightly off when a series starts mid-day
+    // (cumsum begins at 0 rather than "% already drawn by that time"),
+    // but shape / cross-cycle comparison / convergence toward actuals
+    // all remain correct.
+    function toCumulative(targets, values, resetDaily) {
+        var out = new Array(values.length);
+        var sum = 0;
+        var lastDay = null;
+        for (var i = 0; i < values.length; i++) {
+            var day = (targets[i] || '').slice(0, 10);  // YYYY-MM-DD
+            if (resetDaily && day !== lastDay) sum = 0;
+            sum += (values[i] || 0);
+            out[i] = sum;
+            lastDay = day;
+        }
+        return out;
+    }
+
     // Holdout-style overlay: each recent forecast cycle as a coloured line
     // over the actuals trace. Colour encodes recency — darker/cooler hues
     // are older issuances, brighter/warmer hues are newer.
     window.loadForecastEvolution = function() {
         var sel = document.getElementById('accuracy-evolution-cycles');
         var n = sel ? sel.value : '12';
+        var modeSel = document.getElementById('accuracy-evolution-mode');
+        var viewMode = modeSel ? modeSel.value : 'interval';
+        var isCumulative = (viewMode === 'cumulative' && EXP_SOURCE_CUMULATIVE);
+
         fetch(BASE + '/experiment/' + EXP_NAME + '/forecast-evolution?cycles=' + n)
         .then(function(r) { return r.json(); })
         .then(function(data) {
@@ -1599,8 +1644,11 @@ window.showTab = function(el) {
                 var frac = nCycles === 1 ? 1 : (idx / (nCycles - 1));
                 var isLatest = idx === nCycles - 1;
                 var label = fmtIssued(c.issued_at) + (isLatest ? '  ← latest' : '');
+                var yVals = isCumulative
+                    ? toCumulative(c.targets, c.predictions, EXP_RESET_DAILY)
+                    : c.predictions;
                 traces.push({
-                    x: c.targets, y: c.predictions,
+                    x: c.targets, y: yVals,
                     name: label,
                     type: 'scatter', mode: 'lines',
                     line: {
@@ -1609,37 +1657,53 @@ window.showTab = function(el) {
                     },
                     opacity: isLatest ? 1.0 : 0.85,
                     hovertemplate: '<b>Forecast issued ' + fmtIssued(c.issued_at)
-                                 + '</b><br>target: %{x}<br>predicted: %{y:.3f}<extra></extra>',
+                                 + '</b><br>target: %{x}<br>'
+                                 + (isCumulative ? 'cumulative: ' : 'predicted: ')
+                                 + '%{y:.3f}<extra></extra>',
                     legendgroup: 'forecasts',
                     legendgrouptitle: idx === 0 ? { text: 'Forecast cycles (by issue time)' } : undefined,
                 });
             });
             if (data.actuals && data.actuals.targets.length) {
+                var aVals = isCumulative
+                    ? toCumulative(data.actuals.targets, data.actuals.values, EXP_RESET_DAILY)
+                    : data.actuals.values;
                 traces.push({
-                    x: data.actuals.targets, y: data.actuals.values,
+                    x: data.actuals.targets, y: aVals,
                     name: 'Measured (actual)',
                     type: 'scatter', mode: 'lines',
                     line: { color: '#ffffff', width: 3 },
-                    hovertemplate: '<b>Actual</b><br>%{x}<br>measured: %{y:.3f}<extra></extra>',
+                    hovertemplate: '<b>Actual</b><br>%{x}<br>'
+                                 + (isCumulative ? 'cumulative: ' : 'measured: ')
+                                 + '%{y:.3f}<extra></extra>',
                     legendgroup: 'actual',
                 });
             }
 
             // Y-axis label: combine experiment name + units so the
-            // reader knows *which* sensor and *what scale* — raw "%"
+            // reader knows *which* sensor and *what scale*. Raw "%"
             // or "kWh" alone is uninformative without context, and if
             // the preprocessor has converted cumulative-daily to
-            // interval deltas, the literal unit is misleading. We
-            // therefore append "per interval" when the pipeline is
-            // running cumulative → interval conversion.
-            var yTitle = {{ experiment.name | tojson }}
-                       {% if units and exp_config and exp_config.source_is_cumulative %}
-                         + ' ({{ units }} per {{ exp_config.interval_minutes }}-min bucket)'
-                       {% elif units %}
-                         + ' ({{ units }})'
-                       {% else %}
-                         + ' — ' + {{ experiment.target_entity | tojson }}
-                       {% endif %};
+            // interval deltas the literal unit is misleading. Three
+            // cases:
+            //   - cumulative view: "<name> (cumulative <units>, resets daily)"
+            //   - interval view on cumulative source: "<name> (<units> per Nmin)"
+            //   - interval view on instantaneous source: "<name> (<units>)"
+            //   - no units configured: "<name> — <entity_id>"
+            var expName = {{ experiment.name | tojson }};
+            var entityId = {{ experiment.target_entity | tojson }};
+            var yTitle;
+            if (!EXP_UNITS) {
+                yTitle = expName + ' — ' + entityId;
+            } else if (isCumulative) {
+                yTitle = expName + ' (cumulative ' + EXP_UNITS
+                       + (EXP_RESET_DAILY ? ', resets daily' : '') + ')';
+            } else if (EXP_SOURCE_CUMULATIVE) {
+                yTitle = expName + ' (' + EXP_UNITS + ' per '
+                       + EXP_INTERVAL_MIN + '-min bucket)';
+            } else {
+                yTitle = expName + ' (' + EXP_UNITS + ')';
+            }
 
             var layout = {
                 xaxis: {

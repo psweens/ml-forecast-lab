@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.11.6
+
+### Feature
+
+- **Cumulative view toggle on Forecast evolution chart** — for
+  experiments with `source_is_cumulative: true`, a new "View as"
+  dropdown lets the user switch between:
+  - **Per-interval deltas** (default) — what the model actually
+    predicts: increment per `interval_minutes` bucket.
+  - **Cumulative (daily)** — reconstructed by summing the per-interval
+    predictions within each calendar day, resetting at midnight when
+    `reset_daily: true`. Makes it intuitive to read values as "% of
+    the day's budget drawn by 6pm" rather than "% drawn in this one
+    30-min bucket".
+- **Y-axis label now responds to the view** — shows `<name>
+  (cumulative <units>, resets daily)` in cumulative mode, `<name>
+  (<units> per Nmin bucket)` for interval mode on cumulative sources,
+  and `<name> (<units>)` for instantaneous sources.
+- **Hover tooltip labels match the view** — says "cumulative" in
+  cumulative mode, "predicted" / "measured" in interval mode.
+
 ## 2.11.5
 
 ### Improvement
