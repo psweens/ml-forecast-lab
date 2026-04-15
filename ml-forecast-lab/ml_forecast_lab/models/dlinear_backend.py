@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from .base import ForecastModel, _build_activation, _resolve_sigmoid_scale
+from .base import ForecastModel, _build_activation, _resolve_sigmoid_scale, _RevIN
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +40,14 @@ class _DLinearNet(nn.Module):
 
     def __init__(self, seq_len: int, n_channels: int, kernel_size: int,
                  n_horizons: int = 1, output_activation: str = 'linear',
-                 sigmoid_scale: float = 1.0):
+                 sigmoid_scale: float = 1.0,
+                 use_revin: bool = True, target_channel: int = 0):
         super().__init__()
+        self.use_revin = use_revin
+        # Reversible instance norm (Kim et al. 2022). Handles distribution
+        # shift per-window — replaces the need for dataset-level channel
+        # z-scoring on non-stationary series.
+        self.revin = _RevIN(n_channels, target_channel=target_channel, affine=True) if use_revin else None
         self.seq_len = seq_len
         self.kernel_size = kernel_size
         self.n_horizons = n_horizons
@@ -56,12 +62,20 @@ class _DLinearNet(nn.Module):
 
     def forward(self, x: "torch.Tensor") -> "torch.Tensor":
         # x: (batch, seq_len, n_channels)
+        if self.revin is not None:
+            x = self.revin.normalize(x)
         x_t = x.permute(0, 2, 1)  # (batch, n_channels, seq_len)
         trend = self.avg_pool(x_t)[:, :, :self.seq_len]  # ensure same length
         seasonal = x_t - trend
         trend_flat = trend.reshape(trend.shape[0], -1)
         seasonal_flat = seasonal.reshape(seasonal.shape[0], -1)
         out = self.trend_linear(trend_flat) + self.seasonal_linear(seasonal_flat)
+        if self.revin is not None:
+            # Denormalise in z-space before the output activation so the
+            # activation operates on physical-scale values (matters for
+            # softplus / sigmoid / exp whose range constraints are only
+            # meaningful in target space).
+            out = self.revin.denormalize(out)
         out = self.activation(out)
         if self.n_horizons == 1:
             return out.squeeze(-1)  # (batch,) backward compat
@@ -87,6 +101,8 @@ class DLinearModel(ForecastModel):
         loss_fn: str = 'mse',
         patience: int = 20,
         output_activation: str = 'linear',
+        use_revin: bool = True,
+        target_channel: int = 0,
     ) -> None:
         super().__init__()
         if not TORCH_AVAILABLE:
@@ -99,6 +115,11 @@ class DLinearModel(ForecastModel):
         self.loss_fn = loss_fn
         self.patience = patience
         self.output_activation = output_activation
+        # RevIN (Kim et al. 2022) handles per-window distribution shift. When
+        # on, it supersedes both the dataset-level channel normalisation and
+        # the zscore output_activation path — RevIN owns the scale end to end.
+        self.use_revin = use_revin
+        self.target_channel = target_channel
 
         self._model: Optional[_DLinearNet] = None
         self._seq_len: Optional[int] = None
@@ -128,11 +149,20 @@ class DLinearModel(ForecastModel):
 
     def _build_model(self, seq_len: int, n_channels: int,
                      n_horizons: int = 1) -> "_DLinearNet":
+        # When RevIN is on, the network owns the scale — treat any 'zscore'
+        # activation request as 'linear' inside the forward path because
+        # zscore's identity head is what RevIN expects anyway.
+        _effective_activation = (
+            'linear' if (self.use_revin and self.output_activation == 'zscore')
+            else self.output_activation
+        )
         return _DLinearNet(
             seq_len, n_channels, self.kernel_size,
             n_horizons=n_horizons,
-            output_activation=self.output_activation,
+            output_activation=_effective_activation,
             sigmoid_scale=self._sigmoid_scale,
+            use_revin=self.use_revin,
+            target_channel=self.target_channel,
         )
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray, **kwargs: Any) -> Dict[str, Any]:
@@ -158,10 +188,16 @@ class DLinearModel(ForecastModel):
         self._seq_len = seq_len
         self._n_channels = n_channels
 
-        self._channel_mean = X_seq.mean(axis=(0, 1))
-        self._channel_std = X_seq.std(axis=(0, 1))
-        self._channel_std[self._channel_std < 1e-8] = 1.0
-        X_seq = (X_seq - self._channel_mean) / self._channel_std
+        # Dataset-level channel normalisation is mutually exclusive with
+        # RevIN: RevIN handles per-window instance-level normalisation inside
+        # the network's forward pass, so applying a global z-score first
+        # would double-normalise and wash out the instance signal RevIN
+        # relies on.
+        if not self.use_revin:
+            self._channel_mean = X_seq.mean(axis=(0, 1))
+            self._channel_std = X_seq.std(axis=(0, 1))
+            self._channel_std[self._channel_std < 1e-8] = 1.0
+            X_seq = (X_seq - self._channel_mean) / self._channel_std
 
         # Sigmoid activation needs a ceiling: use training-data maximum with
         # a 10% buffer so the network can reach observed extrema. Other
@@ -175,7 +211,7 @@ class DLinearModel(ForecastModel):
         # magnitude, and predictions are denormalised back to physical
         # units at inference time. Per-horizon stats for multi-horizon so
         # each horizon column retains its own scale.
-        if self.output_activation == 'zscore':
+        if self.output_activation == 'zscore' and not self.use_revin:
             if self._n_horizons > 1:
                 y_mean = y_train.mean(axis=0)
                 y_std = y_train.std(axis=0)
@@ -304,7 +340,9 @@ class DLinearModel(ForecastModel):
             raise RuntimeError("No model loaded")
 
         X_seq = X.copy()
-        if self._channel_mean is not None and self._channel_std is not None:
+        # Dataset-level channel normalisation only applies when RevIN is off —
+        # otherwise RevIN handles per-window normalisation inside forward().
+        if not self.use_revin and self._channel_mean is not None and self._channel_std is not None:
             X_seq = (X_seq - self._channel_mean) / self._channel_std
 
         X_t = torch.FloatTensor(X_seq)
@@ -314,8 +352,10 @@ class DLinearModel(ForecastModel):
 
         # Denormalise z-space predictions back to physical units. Floor at
         # zero because the linear head in z-space is unconstrained and
-        # callers expect physically-valid (non-negative) forecasts.
-        if self.output_activation == 'zscore':
+        # callers expect physically-valid (non-negative) forecasts. Skipped
+        # when use_revin is True: the network already returns target-space
+        # predictions.
+        if self.output_activation == 'zscore' and not self.use_revin:
             predictions = predictions * self._y_std + self._y_mean
             predictions = np.clip(predictions, 0.0, None)
 
@@ -327,7 +367,7 @@ class DLinearModel(ForecastModel):
         self._validate_X(X)
         X_seq = self._reshape_to_sequences(X)
 
-        if self._channel_mean is not None and self._channel_std is not None:
+        if not self.use_revin and self._channel_mean is not None and self._channel_std is not None:
             X_seq = (X_seq - self._channel_mean) / self._channel_std
         X_t = torch.FloatTensor(X_seq)
         self._model.eval()
@@ -336,7 +376,7 @@ class DLinearModel(ForecastModel):
 
         # Denormalise z-space predictions *before* slicing to horizon-0 so the
         # per-horizon stats align with each column of the prediction array.
-        if self.output_activation == 'zscore':
+        if self.output_activation == 'zscore' and not self.use_revin:
             predictions = predictions * self._y_std + self._y_mean
             predictions = np.clip(predictions, 0.0, None)
 
@@ -353,12 +393,15 @@ class DLinearModel(ForecastModel):
             "sequence_length": self.sequence_length, "loss_fn": self.loss_fn,
             "patience": self.patience,
             "output_activation": self.output_activation,
+            "use_revin": self.use_revin,
+            "target_channel": self.target_channel,
         })
 
     def set_params(self, **kwargs: Any) -> None:
         valid = {"kernel_size", "learning_rate", "epochs", "batch_size",
                  "sequence_length", "loss_fn", "patience",
-                 "output_activation"}
+                 "output_activation",
+                 "use_revin", "target_channel"}
         for k, v in kwargs.items():
             if k not in valid:
                 raise ValueError(f"Unknown parameter: {k}")

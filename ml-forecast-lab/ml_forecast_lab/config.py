@@ -189,9 +189,51 @@ class ExperimentCfg:
       residuals without activation saturation. Honoured by all PyTorch neural backends
       (LSTM, CNN, DLinear, N-BEATS, N-HiTS, TiDE, TSMixer, SparseTSF, PatchTST,
       iTransformer, Crossformer, TimesNet). Predictions are floored at zero after
-      denormalisation.
+      denormalisation. Superseded by RevIN when ``use_revin=True`` on the backend
+      — the two schemes are mutually exclusive and RevIN owns the scale.
 
     Tree-based models (lightgbm/xgboost) and NeuralProphet ignore this field."""
+
+    use_revin: bool = True
+    """Reversible Instance Normalization (Kim et al. 2022,
+    https://openreview.net/forum?id=cGDAkQo1C0p). When True (default),
+    every PyTorch neural backend except N-BEATS and N-HiTS applies per-window
+    per-channel normalisation at the input of the network and reverses it at
+    the output, handling distribution shift on non-stationary series without
+    a retrain. Published transformer / MLP-mixer benchmarks (PatchTST,
+    iTransformer, TimesNet, TiDE, TSMixer, SparseTSF, Crossformer) all
+    depend on RevIN in the authors' reference code — leaving it on is the
+    faithful replication.
+
+    N-BEATS and N-HiTS ignore this flag: their doubly-residual backcast-
+    subtraction stacking already handles instance-level normalisation, and
+    stacking RevIN on top would double-normalise. Tree-based models and
+    NeuralProphet ignore this field entirely.
+
+    When True, the ``output_activation='zscore'`` path becomes a no-op (RevIN
+    already provides per-window scale normalisation). Set False to fall back
+    to dataset-level channel stats + the zscore denormalisation path, if you
+    need published-parity with papers that explicitly disable RevIN."""
+
+    future_covariate_features: List[str] = field(default_factory=list)
+    """Feature names (as they appear in the engineered feature matrix) that
+    contain KNOWN-FUTURE values for each forecast horizon step.
+
+    Currently only consumed by the TiDE backend's temporal-decoder path
+    (Das et al. 2023): if this list is non-empty AND the runner supplies
+    a ``future_covariates`` array at fit time, TiDE routes the named
+    features through a feature-projection block and combines them with the
+    decoder state per horizon step via the paper's temporal decoder.
+
+    Typical contents for forecasting use cases:
+    - Calendar features: hour-of-day, day-of-week, day-of-year, holiday flag
+    - Externally-forecast weather: Solcast GHI (p10/p50/p90), Open-Meteo
+      temperature / cloud cover / wind
+    - Known-future schedule: EV charging plan, occupancy calendar
+
+    Do NOT include lags of the target, rolling stats, or any feature
+    derived from the true future value — the whole point is that these
+    values are knowable at forecast-issue time without peeking."""
 
     subtract: List[str] = field(default_factory=list)
     """Entity IDs to subtract from target (e.g. solar generation from grid import)."""

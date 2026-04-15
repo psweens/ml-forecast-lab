@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
-from .base import ForecastModel, _build_activation, _resolve_sigmoid_scale
+from .base import ForecastModel, _build_activation, _resolve_sigmoid_scale, _RevIN
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +42,11 @@ class _iTransformerNet(nn.Module):
                  n_heads: int = 4, n_encoder_layers: int = 2,
                  dim_feedforward: int = 64, dropout: float = 0.2,
                  n_horizons: int = 1,
-                 output_activation: str = 'linear', sigmoid_scale: float = 1.0):
+                 output_activation: str = 'linear', sigmoid_scale: float = 1.0,
+                 use_revin: bool = True, target_channel: int = 0):
         super().__init__()
+        self.use_revin = use_revin
+        self.revin = _RevIN(n_channels, target_channel=target_channel, affine=True) if use_revin else None
         self.n_horizons = n_horizons
         self.seq_len = seq_len
         self.n_channels = n_channels
@@ -79,6 +82,8 @@ class _iTransformerNet(nn.Module):
 
     def forward(self, x):
         # x: (batch, seq_len, n_channels)
+        if self.revin is not None:
+            x = self.revin.normalize(x)
         # Transpose to (batch, n_channels, seq_len) so each channel is a token
         x = x.permute(0, 2, 1)  # (batch, n_channels, seq_len)
 
@@ -95,6 +100,8 @@ class _iTransformerNet(nn.Module):
         # Flatten and project to output
         x = x.reshape(x.size(0), -1)  # (batch, n_channels * d_model)
         out = self.head(x)  # (batch, n_horizons)
+        if self.revin is not None:
+            out = self.revin.denormalize(out)
         out = self.activation(out)
 
         if self.n_horizons == 1:
@@ -126,6 +133,8 @@ class iTransformerModel(ForecastModel):
         loss_fn: str = 'mse',
         patience: int = 20,
         output_activation: str = 'linear',
+        use_revin: bool = True,
+        target_channel: int = 0,
     ) -> None:
         super().__init__()
         if not TORCH_AVAILABLE:
@@ -143,6 +152,8 @@ class iTransformerModel(ForecastModel):
         self.loss_fn = loss_fn
         self.patience = patience
         self.output_activation = output_activation
+        self.use_revin = use_revin
+        self.target_channel = target_channel
 
         self._model: Optional[_iTransformerNet] = None
         self._input_size: Optional[int] = None
@@ -198,11 +209,12 @@ class iTransformerModel(ForecastModel):
         self._input_size = input_size
         self._seq_len = seq_len
 
-        # Per-channel z-score standardisation (fitted on training data)
-        self._channel_mean = X_seq.mean(axis=(0, 1))  # shape (n_channels,)
-        self._channel_std = X_seq.std(axis=(0, 1))     # shape (n_channels,)
-        self._channel_std[self._channel_std < 1e-8] = 1.0
-        X_seq = (X_seq - self._channel_mean) / self._channel_std
+        if not self.use_revin:
+            # Per-channel z-score standardisation (fitted on training data)
+            self._channel_mean = X_seq.mean(axis=(0, 1))  # shape (n_channels,)
+            self._channel_std = X_seq.std(axis=(0, 1))     # shape (n_channels,)
+            self._channel_std[self._channel_std < 1e-8] = 1.0
+            X_seq = (X_seq - self._channel_mean) / self._channel_std
 
         # Sigmoid activation needs a ceiling: use training-data maximum with
         # a 10% buffer so the network can reach observed extrema.
@@ -214,7 +226,7 @@ class iTransformerModel(ForecastModel):
         # magnitude, and predictions are denormalised back to physical
         # units at inference time. Per-horizon stats for multi-horizon so
         # each horizon column retains its own scale.
-        if self.output_activation == 'zscore':
+        if self.output_activation == 'zscore' and not self.use_revin:
             if self._n_horizons > 1:
                 y_mean = y_train.mean(axis=0)
                 y_std = y_train.std(axis=0)
@@ -252,6 +264,10 @@ class iTransformerModel(ForecastModel):
         y_val_t = torch.FloatTensor(y_val)
 
         # Create model
+        _effective_activation = (
+            'linear' if (self.use_revin and self.output_activation == 'zscore')
+            else self.output_activation
+        )
         self._model = _iTransformerNet(
             seq_len=seq_len,
             n_channels=input_size,
@@ -261,8 +277,10 @@ class iTransformerModel(ForecastModel):
             dim_feedforward=self.dim_feedforward,
             dropout=self.dropout,
             n_horizons=self._n_horizons,
-            output_activation=self.output_activation,
+            output_activation=_effective_activation,
             sigmoid_scale=self._sigmoid_scale,
+            use_revin=self.use_revin,
+            target_channel=self.target_channel,
         )
         optimiser = torch.optim.AdamW(self._model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=self.epochs, eta_min=1e-6)
@@ -369,7 +387,7 @@ class iTransformerModel(ForecastModel):
             raise RuntimeError("No model loaded")
 
         X_seq = X.copy()
-        if self._channel_mean is not None and self._channel_std is not None:
+        if not self.use_revin and self._channel_mean is not None and self._channel_std is not None:
             X_seq = (X_seq - self._channel_mean) / self._channel_std
 
         X_t = torch.FloatTensor(X_seq)
@@ -380,7 +398,7 @@ class iTransformerModel(ForecastModel):
         # Denormalise z-space predictions back to physical units. Floor at
         # zero because the linear head in z-space is unconstrained and
         # callers expect physically-valid (non-negative) forecasts.
-        if self.output_activation == 'zscore':
+        if self.output_activation == 'zscore' and not self.use_revin:
             predictions = predictions * self._y_std + self._y_mean
             predictions = np.clip(predictions, 0.0, None)
 
@@ -393,7 +411,7 @@ class iTransformerModel(ForecastModel):
 
         X_seq = self._reshape_to_sequences(X)
 
-        if self._channel_mean is not None and self._channel_std is not None:
+        if not self.use_revin and self._channel_mean is not None and self._channel_std is not None:
             X_seq = (X_seq - self._channel_mean) / self._channel_std
 
         X_t = torch.FloatTensor(X_seq)
@@ -404,7 +422,7 @@ class iTransformerModel(ForecastModel):
 
         # Denormalise z-space predictions *before* slicing to horizon-0 so the
         # per-horizon stats align with each column of the prediction array.
-        if self.output_activation == 'zscore':
+        if self.output_activation == 'zscore' and not self.use_revin:
             predictions = predictions * self._y_std + self._y_mean
             predictions = np.clip(predictions, 0.0, None)
 
@@ -424,13 +442,16 @@ class iTransformerModel(ForecastModel):
             "sequence_length": self.sequence_length, "loss_fn": self.loss_fn,
             "patience": self.patience,
             "output_activation": self.output_activation,
+            "use_revin": self.use_revin,
+            "target_channel": self.target_channel,
         })
 
     def set_params(self, **kwargs: Any) -> None:
         valid = {"d_model", "n_heads", "n_encoder_layers", "dim_feedforward",
                  "dropout", "learning_rate", "epochs", "batch_size",
                  "sequence_length", "loss_fn", "patience",
-                 "output_activation"}
+                 "output_activation",
+                 "use_revin", "target_channel"}
         for k, v in kwargs.items():
             if k not in valid:
                 raise ValueError(f"Unknown parameter: {k}")
@@ -470,6 +491,10 @@ class iTransformerModel(ForecastModel):
         self._seq_len = data.get("seq_len")
         state_dict = data.get("state_dict")
         if state_dict is not None and self._input_size is not None and self._seq_len is not None:
+            _effective_activation = (
+                'linear' if (self.use_revin and self.output_activation == 'zscore')
+                else self.output_activation
+            )
             self._model = _iTransformerNet(
                 seq_len=self._seq_len,
                 n_channels=self._input_size,
@@ -479,8 +504,10 @@ class iTransformerModel(ForecastModel):
                 dim_feedforward=self.dim_feedforward,
                 dropout=self.dropout,
                 n_horizons=self._n_horizons,
-                output_activation=self.output_activation,
+                output_activation=_effective_activation,
                 sigmoid_scale=self._sigmoid_scale,
+                use_revin=self.use_revin,
+                target_channel=self.target_channel,
             )
             self._model.load_state_dict(state_dict)
             self._model.eval()

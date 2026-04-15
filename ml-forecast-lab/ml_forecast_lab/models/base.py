@@ -136,10 +136,128 @@ try:
         def forward(self, x: "torch.Tensor") -> "torch.Tensor":
             return _torch.sigmoid(x) * self.scale
 
+    class _RevIN(_nn.Module):
+        """
+        Reversible Instance Normalization (Kim et al. 2022,
+        https://openreview.net/forum?id=cGDAkQo1C0p).
+
+        Per-sample, per-channel mean/std are computed over the time axis of
+        each input window independently, used to normalise the input, and
+        reversed at the output using the target channel's statistics. This
+        handles distribution shift between train and test on non-stationary
+        series without requiring a retrain — each forecast window is
+        automatically rescaled to its own instant level.
+
+        The published architectures this codebase imitates (PatchTST,
+        iTransformer, TimesNet, TiDE, TSMixer, SparseTSF, Crossformer) all
+        ship with RevIN in their reference implementations. N-BEATS and
+        N-HiTS handle instance-level normalisation architecturally via the
+        doubly-residual backcast-subtraction stacking, so RevIN is not
+        applied to them (it would double-normalise and conflict).
+
+        Design notes
+        ------------
+        - Stats are computed with ``.detach()`` so the per-sample normalisation
+          does not receive gradients — the network cannot game the stats.
+        - Denormalisation uses the *target channel's* per-sample stats (default
+          channel 0). This matches the common convention that the target's
+          most-recent lag features live on channel 0 of the input window.
+        - An optional learnable affine (per-channel ``γ`` and ``β``) is applied
+          after normalisation; the target-channel affine is reversed before
+          the per-sample scale is re-applied at denormalisation.
+        - This module is stateful within one forward pass: ``normalize()``
+          stashes ``_mean`` / ``_stdev`` as non-buffer tensors, which
+          ``denormalize()`` then consumes. A fresh forward always recomputes.
+        - RevIN is mutually exclusive with ``output_activation='zscore'``:
+          the instance-level and dataset-level target normalisation schemes
+          would compose incorrectly. Backends that see both active should
+          treat zscore as ``linear`` and let RevIN own the scale.
+        """
+
+        def __init__(
+            self,
+            n_channels: int,
+            target_channel: int = 0,
+            eps: float = 1e-5,
+            affine: bool = True,
+        ) -> None:
+            super().__init__()
+            self.n_channels = int(n_channels)
+            self.target_channel = int(target_channel)
+            self.eps = float(eps)
+            self.affine = bool(affine)
+            if self.affine:
+                self.affine_weight = _nn.Parameter(_torch.ones(self.n_channels))
+                self.affine_bias = _nn.Parameter(_torch.zeros(self.n_channels))
+            # Per-forward-pass state (not buffers — differ per batch).
+            self._mean: Optional["torch.Tensor"] = None
+            self._stdev: Optional["torch.Tensor"] = None
+
+        def normalize(self, x: "torch.Tensor") -> "torch.Tensor":
+            """
+            Normalise a per-window input tensor.
+
+            Parameters
+            ----------
+            x : torch.Tensor, shape (batch, seq_len, n_channels)
+
+            Returns
+            -------
+            torch.Tensor
+                Input with per-sample per-channel zero-mean unit-variance
+                (plus learnable affine if enabled).
+            """
+            # Detach so per-sample stats are constants w.r.t. autograd — the
+            # network sees the normalised values but cannot pull gradient
+            # through the normalisation itself.
+            mean = x.mean(dim=1, keepdim=True).detach()
+            var = x.var(dim=1, keepdim=True, unbiased=False).detach()
+            stdev = _torch.sqrt(var + self.eps)
+            self._mean = mean
+            self._stdev = stdev
+            x_norm = (x - mean) / stdev
+            if self.affine:
+                x_norm = x_norm * self.affine_weight + self.affine_bias
+            return x_norm
+
+        def denormalize(self, y: "torch.Tensor") -> "torch.Tensor":
+            """
+            Reverse the target-channel normalisation on a prediction tensor.
+
+            Parameters
+            ----------
+            y : torch.Tensor, shape (batch,) or (batch, n_horizons)
+
+            Returns
+            -------
+            torch.Tensor
+                Same shape as input, rescaled to the original target scale
+                using the target channel's per-sample stats from the most
+                recent ``normalize()`` call.
+            """
+            if self._mean is None or self._stdev is None:
+                raise RuntimeError(
+                    "RevIN: denormalize() called before normalize() in this forward pass"
+                )
+            # (batch,) slices from (batch, 1, n_channels).
+            mean_t = self._mean[:, 0, self.target_channel]
+            stdev_t = self._stdev[:, 0, self.target_channel]
+            # Reverse the target-channel affine (inputs went through
+            # γ and β after normalise — undo them before re-scaling).
+            if self.affine:
+                w_t = self.affine_weight[self.target_channel]
+                b_t = self.affine_bias[self.target_channel]
+                y = (y - b_t) / (w_t + self.eps)
+            if y.dim() == 1:
+                return y * stdev_t + mean_t
+            # Multi-horizon: broadcast over the horizon axis.
+            return y * stdev_t.unsqueeze(-1) + mean_t.unsqueeze(-1)
+
 except ImportError:
     # Torch not installed — activation factory will raise at call time.
     _ExpActivation = None  # type: ignore[assignment]
     _ScaledSigmoid = None  # type: ignore[assignment]
+    _RevIN = None  # type: ignore[assignment]
 
 
 def _resolve_sigmoid_scale(y: np.ndarray, buffer: float = 1.1) -> float:

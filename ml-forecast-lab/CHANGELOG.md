@@ -1,5 +1,64 @@
 # Changelog
 
+## 2.15.0
+
+### Added
+
+- **Reversible Instance Normalization (RevIN)** — per-window, per-channel
+  normalisation (Kim et al. 2022,
+  https://openreview.net/forum?id=cGDAkQo1C0p) added to the shared `base.py`
+  and plumbed into every PyTorch neural backend except N-BEATS and N-HiTS:
+  LSTM, CNN, DLinear, TiDE, TSMixer, SparseTSF, PatchTST, iTransformer,
+  Crossformer, TimesNet. On by default (`use_revin=True`) because the
+  reference implementations of these papers all ship with RevIN — without
+  it, the codebase was systematically under-performing published benchmarks
+  on non-stationary series.
+
+  Each enabled backend now:
+  - wraps its forward pass with input `normalize()` (per-sample, per-channel
+    mean/std over the time axis, plus a learnable affine),
+  - reverses the target-channel stats on the head output via `denormalize()`
+    before the output activation,
+  - stores/restores `use_revin` and `target_channel` in `get_params`,
+    `set_params`, `save`, and `load`,
+  - skips the pre-v2.15.0 dataset-level channel normalisation and the zscore
+    target z-scoring when RevIN is active (the two schemes are mutually
+    exclusive). `output_activation='zscore'` is now a no-op when RevIN is on.
+
+  N-BEATS and N-HiTS are left untouched because their doubly-residual
+  backcast-subtraction stacking handles instance-level normalisation
+  architecturally; layering RevIN on top would double-normalise.
+
+- **TiDE future-covariate path** — TiDE is now the full architecture from
+  Das et al. 2023, with:
+  - a feature-projection residual block for known-future covariates,
+  - a per-horizon temporal decoder that fuses the decoder state with each
+    horizon step's projected future features,
+  - a global linear residual from the past window straight to the forecast.
+
+  `fit()`, `predict()`, and `predict_sequence()` now accept an optional
+  `future_covariates` kwarg of shape `(n_samples, n_horizons,
+  n_future_covariates)`. Typical contents: calendar features (hour of day,
+  day of week, holiday flag), externally-forecast weather (Solcast GHI
+  p10/p50/p90, Open-Meteo temperature), or a known-future schedule. When
+  not provided, TiDE degrades gracefully to a dense encoder-decoder on the
+  past window alone (backwards-compatible with pre-v2.15.0 behaviour).
+
+- **Config:** `ExperimentCfg.use_revin` (default `True`) and
+  `ExperimentCfg.future_covariate_features` (default `[]`) added to expose
+  the two features to experiment YAMLs.
+
+### Changed
+
+- **Config doc for `output_activation`** notes that `zscore` is superseded
+  by RevIN when `use_revin=True`.
+
+- **TiDE backend** is now a full paper replication rather than a simplified
+  dense encoder-decoder. Older TiDE checkpoints load with
+  `n_future_covariates=0` and the global-residual + temporal-decoder paths
+  still function — the network shape degrades cleanly, but you'll want to
+  retrain to get the temporal-decoder weights.
+
 ## 2.14.0
 
 ### Added

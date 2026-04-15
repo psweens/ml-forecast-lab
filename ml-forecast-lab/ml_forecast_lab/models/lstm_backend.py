@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
-from .base import ForecastModel, _build_activation, _resolve_sigmoid_scale
+from .base import ForecastModel, _build_activation, _resolve_sigmoid_scale, _RevIN
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +55,15 @@ class _LSTMNet(nn.Module):
 
     def __init__(self, input_size: int, hidden_size: int, num_layers: int,
                  dropout: float, n_horizons: int = 1,
-                 output_activation: str = 'linear', sigmoid_scale: float = 1.0):
+                 output_activation: str = 'linear', sigmoid_scale: float = 1.0,
+                 use_revin: bool = True, target_channel: int = 0):
         super().__init__()
         self.n_horizons = n_horizons
+        self.use_revin = use_revin
+        # Reversible instance norm (Kim et al. 2022). Handles distribution
+        # shift per-window — replaces the need for dataset-level target
+        # z-scoring on non-stationary series.
+        self.revin = _RevIN(input_size, target_channel=target_channel, affine=True) if use_revin else None
         self.layer_norm = nn.LayerNorm(input_size)
         self.lstm = nn.LSTM(
             input_size=input_size,
@@ -78,10 +84,21 @@ class _LSTMNet(nn.Module):
 
     def forward(self, x):
         # x: (batch, seq_len, input_size)
+        if self.revin is not None:
+            x = self.revin.normalize(x)
         x = self.layer_norm(x)
         lstm_out, _ = self.lstm(x)  # (batch, seq_len, hidden_size)
         context = self.attention(lstm_out)  # (batch, hidden_size)
         out = self.head(context)  # (batch, n_horizons)
+        if self.revin is not None:
+            # Denormalise in z-space before the output activation so the
+            # activation operates on physical-scale values (matters for
+            # softplus / sigmoid / exp whose range constraints are only
+            # meaningful in target space).
+            if out.dim() == 1:
+                out = self.revin.denormalize(out)
+            else:
+                out = self.revin.denormalize(out)
         out = self.activation(out)
         if self.n_horizons == 1:
             return out.squeeze(-1)  # (batch,) backward compat
@@ -109,6 +126,8 @@ class LSTMModel(ForecastModel):
         loss_fn: str = 'mse',
         patience: int = 20,
         output_activation: str = 'linear',
+        use_revin: bool = True,
+        target_channel: int = 0,
     ) -> None:
         super().__init__()
         if not TORCH_AVAILABLE:
@@ -124,6 +143,11 @@ class LSTMModel(ForecastModel):
         self.loss_fn = loss_fn
         self.patience = patience
         self.output_activation = output_activation
+        # RevIN (Kim et al. 2022) handles per-window distribution shift. When
+        # on, it supersedes both the dataset-level channel normalisation and
+        # the zscore output_activation path — RevIN owns the scale end to end.
+        self.use_revin = use_revin
+        self.target_channel = target_channel
 
         self._model: Optional[_LSTMNet] = None
         self._input_size: Optional[int] = None
@@ -131,7 +155,8 @@ class LSTMModel(ForecastModel):
         self._channel_mean: Optional[np.ndarray] = None
         self._channel_std: Optional[np.ndarray] = None
         self._sigmoid_scale: float = 1.0
-        # Target z-score stats (only populated when output_activation == 'zscore').
+        # Target z-score stats (only populated when output_activation == 'zscore'
+        # AND use_revin is False — otherwise RevIN handles scale per-window).
         # Scalar for single-horizon, per-horizon ndarray for multi-horizon.
         # Defaults (0.0, 1.0) are identity — safe no-op for non-zscore paths.
         self._y_mean: Any = 0.0
@@ -178,25 +203,35 @@ class LSTMModel(ForecastModel):
         _, seq_len, input_size = X_seq.shape
         self._input_size = input_size
 
-        # Per-channel z-score standardisation (fitted on training data)
-        self._channel_mean = X_seq.mean(axis=(0, 1))  # shape (n_channels,)
-        self._channel_std = X_seq.std(axis=(0, 1))     # shape (n_channels,)
-        self._channel_std[self._channel_std < 1e-8] = 1.0  # Avoid division by zero
-        X_seq = (X_seq - self._channel_mean) / self._channel_std
+        # Dataset-level channel normalisation is mutually exclusive with
+        # RevIN: RevIN handles per-window instance-level normalisation inside
+        # the network's forward pass, so applying a global z-score first
+        # would double-normalise and wash out the instance signal RevIN
+        # relies on.
+        if not self.use_revin:
+            # Per-channel z-score standardisation (fitted on training data)
+            self._channel_mean = X_seq.mean(axis=(0, 1))  # shape (n_channels,)
+            self._channel_std = X_seq.std(axis=(0, 1))     # shape (n_channels,)
+            self._channel_std[self._channel_std < 1e-8] = 1.0  # Avoid division by zero
+            X_seq = (X_seq - self._channel_mean) / self._channel_std
 
         # Sigmoid activation needs a ceiling: use training-data maximum with
         # a 10% buffer so the network can reach observed extrema.
         if self.output_activation == 'sigmoid':
             self._sigmoid_scale = _resolve_sigmoid_scale(y_train)
 
-        # Target z-score normalisation (output_activation == 'zscore'):
+        # Target z-score normalisation (output_activation == 'zscore')
         # compute per-horizon (mean, std) from training targets and transform
         # y into z-space before training. The network predicts in z-space
         # through a linear head, and predictions are denormalised back to
         # physical units at inference time. Keeps gradient magnitudes O(1)
         # regardless of target scale, which is important for multi-horizon
         # MSE/Huber losses on raw targets with wide dynamic ranges.
-        if self.output_activation == 'zscore':
+        #
+        # When use_revin is True this path is skipped — RevIN already
+        # provides per-window scale normalisation and the two schemes
+        # compose incorrectly.
+        if self.output_activation == 'zscore' and not self.use_revin:
             if y_train.ndim == 2 and self._n_horizons > 1:
                 y_mean = y_train.mean(axis=0)
                 y_std = y_train.std(axis=0)
@@ -214,6 +249,11 @@ class LSTMModel(ForecastModel):
                 f"[zscore] target normalised: "
                 f"mean={np.asarray(self._y_mean).mean():.4f}, "
                 f"std={np.asarray(self._y_std).mean():.4f}"
+            )
+        elif self.output_activation == 'zscore' and self.use_revin:
+            logger.debug(
+                "LSTM: output_activation='zscore' ignored because use_revin=True; "
+                "RevIN owns the scale end to end."
             )
 
         # Extract sample weights
@@ -240,11 +280,20 @@ class LSTMModel(ForecastModel):
         y_val_t = torch.FloatTensor(y_val)
 
         # Create model
+        # When RevIN is on, the network owns the scale — treat any 'zscore'
+        # activation request as 'linear' inside the forward path because
+        # zscore's identity head is what RevIN expects anyway.
+        _effective_activation = (
+            'linear' if (self.use_revin and self.output_activation == 'zscore')
+            else self.output_activation
+        )
         self._model = _LSTMNet(
             input_size, self.hidden_size, self.num_layers, self.dropout,
             n_horizons=self._n_horizons,
-            output_activation=self.output_activation,
+            output_activation=_effective_activation,
             sigmoid_scale=self._sigmoid_scale,
+            use_revin=self.use_revin,
+            target_channel=self.target_channel,
         )
         optimiser = torch.optim.AdamW(self._model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=self.epochs, eta_min=1e-6)
@@ -351,7 +400,9 @@ class LSTMModel(ForecastModel):
             raise RuntimeError("No model loaded")
 
         X_seq = X.copy()
-        if self._channel_mean is not None and self._channel_std is not None:
+        # Dataset-level channel normalisation only applies when RevIN is off —
+        # otherwise RevIN handles per-window normalisation inside forward().
+        if not self.use_revin and self._channel_mean is not None and self._channel_std is not None:
             X_seq = (X_seq - self._channel_mean) / self._channel_std
 
         X_t = torch.FloatTensor(X_seq)
@@ -364,9 +415,9 @@ class LSTMModel(ForecastModel):
         # for single-horizon they're scalars. Floor at zero — the linear
         # head in z-space is unconstrained, and denormalising a slightly
         # negative z-prediction can produce values below zero for
-        # non-negative physical targets. Mirrors the pre-v2.11.0 clip
-        # that used to live after the target-unnormalisation step.
-        if self.output_activation == 'zscore':
+        # non-negative physical targets. Skipped when use_revin is True:
+        # the network already returns target-space predictions.
+        if self.output_activation == 'zscore' and not self.use_revin:
             predictions = predictions * self._y_std + self._y_mean
             predictions = np.clip(predictions, 0.0, None)
 
@@ -379,7 +430,7 @@ class LSTMModel(ForecastModel):
 
         X_seq = self._reshape_to_sequences(X)
 
-        if self._channel_mean is not None and self._channel_std is not None:
+        if not self.use_revin and self._channel_mean is not None and self._channel_std is not None:
             X_seq = (X_seq - self._channel_mean) / self._channel_std
 
         X_t = torch.FloatTensor(X_seq)
@@ -391,7 +442,7 @@ class LSTMModel(ForecastModel):
         # Denormalise z-space predictions *before* slicing to horizon-0, so
         # the per-horizon stats align with each column of the prediction array.
         # Floor at zero — see predict_sequence() for rationale.
-        if self.output_activation == 'zscore':
+        if self.output_activation == 'zscore' and not self.use_revin:
             predictions = predictions * self._y_std + self._y_mean
             predictions = np.clip(predictions, 0.0, None)
 
@@ -409,13 +460,16 @@ class LSTMModel(ForecastModel):
             "sequence_length": self.sequence_length, "loss_fn": self.loss_fn,
             "patience": self.patience,
             "output_activation": self.output_activation,
+            "use_revin": self.use_revin,
+            "target_channel": self.target_channel,
         })
 
     def set_params(self, **kwargs: Any) -> None:
         valid = {"hidden_size", "num_layers", "dropout", "learning_rate",
                  "epochs", "batch_size", "sequence_length", "loss_fn",
                  "patience",
-                 "output_activation"}
+                 "output_activation",
+                 "use_revin", "target_channel"}
         for k, v in kwargs.items():
             if k not in valid:
                 raise ValueError(f"Unknown parameter: {k}")
@@ -458,11 +512,17 @@ class LSTMModel(ForecastModel):
         self._input_size = data.get("input_size")
         state_dict = data.get("state_dict")
         if state_dict is not None and self._input_size is not None:
+            _effective_activation = (
+                'linear' if (self.use_revin and self.output_activation == 'zscore')
+                else self.output_activation
+            )
             self._model = _LSTMNet(
                 self._input_size, self.hidden_size, self.num_layers, self.dropout,
                 n_horizons=self._n_horizons,
-                output_activation=self.output_activation,
+                output_activation=_effective_activation,
                 sigmoid_scale=self._sigmoid_scale,
+                use_revin=self.use_revin,
+                target_channel=self.target_channel,
             )
             self._model.load_state_dict(state_dict)
             self._model.eval()
