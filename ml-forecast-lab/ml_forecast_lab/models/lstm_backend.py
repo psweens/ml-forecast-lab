@@ -361,10 +361,14 @@ class LSTMModel(ForecastModel):
 
         # Denormalise z-space predictions back to physical units. For
         # multi-horizon the stats are (n_horizons,) and broadcast across rows;
-        # for single-horizon they're scalars. No floor is applied — the user
-        # wants to see the raw distribution.
+        # for single-horizon they're scalars. Floor at zero — the linear
+        # head in z-space is unconstrained, and denormalising a slightly
+        # negative z-prediction can produce values below zero for
+        # non-negative physical targets. Mirrors the pre-v2.11.0 clip
+        # that used to live after the target-unnormalisation step.
         if self.output_activation == 'zscore':
             predictions = predictions * self._y_std + self._y_mean
+            predictions = np.clip(predictions, 0.0, None)
 
         return predictions.astype(np.float32)
 
@@ -386,8 +390,10 @@ class LSTMModel(ForecastModel):
 
         # Denormalise z-space predictions *before* slicing to horizon-0, so
         # the per-horizon stats align with each column of the prediction array.
+        # Floor at zero — see predict_sequence() for rationale.
         if self.output_activation == 'zscore':
             predictions = predictions * self._y_std + self._y_mean
+            predictions = np.clip(predictions, 0.0, None)
 
         # Multi-horizon: return only first horizon for backward compat
         if predictions.ndim == 2:

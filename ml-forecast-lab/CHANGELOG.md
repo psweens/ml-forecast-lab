@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.13.2
+
+### Change
+
+- **LSTM zscore path now clips predictions at zero** —
+  `output_activation: zscore` uses a linear head in z-space, and
+  denormalising a slightly-negative z-prediction can emit values
+  below zero for physically non-negative targets. v2.13.0 shipped
+  without the clip (explicit "try without clipping first" test);
+  with the unclamped output now confirmed to show a bi-modal
+  flat-at-mean regime, the clip is restored in `predict()` /
+  `predict_sequence()` immediately after the z-unnormalisation step.
+  Matches the pre-v2.11.0 behaviour for the same (z-score + linear)
+  training setup.
+- **Diagnostic hypothesis under test:** the pre-today wavy-looking
+  forecasts may have been clipped flat-at-zero predictions
+  overlaid with occasional peaks. Clipping here won't fix the
+  underlying encoder-state dominance but will let us visually
+  separate "network output" from "masked-by-clip floor" in the
+  evolution chart.
+
 ## 2.13.1
 
 ### Bugfix
