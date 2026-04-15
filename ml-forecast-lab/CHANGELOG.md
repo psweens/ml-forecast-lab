@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.12.1
+
+### Bugfix
+
+- **Forecast evolution and stability charts now display in local
+  time (respects DST)** — timestamps are stored in `forecast_log` as
+  UTC strings, but the charts were handing the bare strings to Plotly
+  which then rendered them in UTC. For a user in BST (or any non-UTC
+  TZ) this showed events an hour off the wall-clock and mis-aligned
+  the midnight resets in cumulative view. Timestamps are now parsed
+  as UTC (`new Date(s + 'Z')`) and passed to Plotly as `Date` objects,
+  which it renders in the browser's local TZ. The x-axis label also
+  shows the active TZ abbreviation (e.g. `Target time (BST)`).
+- **Cumulative-reset boundary uses local date, not UTC date** —
+  matches the behaviour of the underlying HA `_today` sensors, which
+  reset at local midnight. Previously a BST user saw the cumulative
+  curve dropping to zero at 01:00 local (UTC midnight); now it resets
+  at 00:00 local as expected.
+
 ## 2.12.0
 
 ### Feature

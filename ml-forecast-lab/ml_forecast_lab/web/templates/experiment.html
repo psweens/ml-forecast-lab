@@ -1623,19 +1623,43 @@ window.showTab = function(el) {
     var EXP_UNITS             = {{ units | tojson if units else '""' }};
     var EXP_INTERVAL_MIN      = {{ exp_config.interval_minutes if exp_config else 30 }};
 
+    // Timestamps in forecast_log are stored as naive UTC strings
+    // ("YYYY-MM-DD HH:MM:SS" — see HistoryDB.log_forecast). When we
+    // hand them to Plotly as bare strings it treats them as UTC and
+    // displays in UTC — so a BST user sees resets at 01:00 instead of
+    // 00:00 local. Convert to Date (parsed as UTC by appending 'Z')
+    // and Plotly will render in the browser's local TZ. The sensor
+    // itself resets at local midnight (HA "_today" convention), so
+    // local-time display is the one that lines up with reality.
+    function toLocalDate(utcStr) {
+        if (!utcStr) return null;
+        // Accept "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DDTHH:MM:SS"
+        var iso = utcStr.length >= 19
+            ? utcStr.slice(0, 10) + 'T' + utcStr.slice(11, 19) + 'Z'
+            : utcStr;
+        return new Date(iso);
+    }
+    function toLocalDates(utcStrings) {
+        return (utcStrings || []).map(toLocalDate);
+    }
+    function localDayKey(d) {
+        if (!d) return '';
+        var y = d.getFullYear();
+        var m = (d.getMonth() + 1).toString().padStart(2, '0');
+        var day = d.getDate().toString().padStart(2, '0');
+        return y + '-' + m + '-' + day;
+    }
+
     // Reconstruct a cumulative series from per-interval deltas.
-    // Resets to zero whenever the calendar day changes (if reset_daily
-    // is on) — matches the underlying sensor's midnight-reset behaviour.
-    // The absolute scale is slightly off when a series starts mid-day
-    // (cumsum begins at 0 rather than "% already drawn by that time"),
-    // but shape / cross-cycle comparison / convergence toward actuals
-    // all remain correct.
-    function toCumulative(targets, values, resetDaily) {
+    // Resets to zero whenever the *local* calendar day changes (if
+    // reset_daily is on) — matches the underlying HA "_today" sensor,
+    // which resets at local midnight.
+    function toCumulative(targetDates, values, resetDaily) {
         var out = new Array(values.length);
         var sum = 0;
         var lastDay = null;
         for (var i = 0; i < values.length; i++) {
-            var day = (targets[i] || '').slice(0, 10);  // YYYY-MM-DD
+            var day = localDayKey(targetDates[i]);
             if (resetDaily && day !== lastDay) sum = 0;
             sum += (values[i] || 0);
             out[i] = sum;
@@ -1673,15 +1697,16 @@ window.showTab = function(el) {
                 return 'hsl(' + hue.toFixed(0) + ', 70%, ' + light.toFixed(0) + '%)';
             }
 
-            // Format an ISO-ish timestamp ("YYYY-MM-DD HH:MM:SS") as
-            // "DD Mon HH:MM" — short but unambiguous across days.
-            function fmtIssued(s) {
-                if (!s || s.length < 16) return s || '';
+            // Format a Date object as "DD Mon HH:MM" in local TZ —
+            // short but unambiguous across days, matches what the user
+            // reads on the wall clock.
+            function fmtIssuedLocal(d) {
+                if (!d) return '';
                 var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-                var mo = parseInt(s.slice(5, 7), 10) - 1;
-                var day = s.slice(8, 10);
-                var hm = s.slice(11, 16);
-                return day + ' ' + (months[mo] || '') + ' ' + hm;
+                var day = d.getDate().toString().padStart(2, '0');
+                var hh = d.getHours().toString().padStart(2, '0');
+                var mm = d.getMinutes().toString().padStart(2, '0');
+                return day + ' ' + months[d.getMonth()] + ' ' + hh + ':' + mm;
             }
 
             var cycles = data.cycles;
@@ -1690,12 +1715,15 @@ window.showTab = function(el) {
             cycles.forEach(function(c, idx) {
                 var frac = nCycles === 1 ? 1 : (idx / (nCycles - 1));
                 var isLatest = idx === nCycles - 1;
-                var label = fmtIssued(c.issued_at) + (isLatest ? '  ← latest' : '');
+                var issuedDate = toLocalDate(c.issued_at);
+                var issuedLabel = fmtIssuedLocal(issuedDate);
+                var targetDates = toLocalDates(c.targets);
                 var yVals = isCumulative
-                    ? toCumulative(c.targets, c.predictions, EXP_RESET_DAILY)
+                    ? toCumulative(targetDates, c.predictions, EXP_RESET_DAILY)
                     : c.predictions;
+                var label = issuedLabel + (isLatest ? '  ← latest' : '');
                 traces.push({
-                    x: c.targets, y: yVals,
+                    x: targetDates, y: yVals,
                     name: label,
                     type: 'scatter', mode: 'lines',
                     line: {
@@ -1703,8 +1731,8 @@ window.showTab = function(el) {
                         width: isLatest ? 2.75 : 1.5,
                     },
                     opacity: isLatest ? 1.0 : 0.85,
-                    hovertemplate: '<b>Forecast issued ' + fmtIssued(c.issued_at)
-                                 + '</b><br>target: %{x}<br>'
+                    hovertemplate: '<b>Forecast issued ' + issuedLabel
+                                 + '</b><br>target: %{x|%d %b %H:%M}<br>'
                                  + (isCumulative ? 'cumulative: ' : 'predicted: ')
                                  + '%{y:.3f}<extra></extra>',
                     legendgroup: 'forecasts',
@@ -1712,15 +1740,16 @@ window.showTab = function(el) {
                 });
             });
             if (data.actuals && data.actuals.targets.length) {
+                var actualDates = toLocalDates(data.actuals.targets);
                 var aVals = isCumulative
-                    ? toCumulative(data.actuals.targets, data.actuals.values, EXP_RESET_DAILY)
+                    ? toCumulative(actualDates, data.actuals.values, EXP_RESET_DAILY)
                     : data.actuals.values;
                 traces.push({
-                    x: data.actuals.targets, y: aVals,
+                    x: actualDates, y: aVals,
                     name: 'Measured (actual)',
                     type: 'scatter', mode: 'lines',
                     line: { color: '#ffffff', width: 3 },
-                    hovertemplate: '<b>Actual</b><br>%{x}<br>'
+                    hovertemplate: '<b>Actual</b><br>%{x|%d %b %H:%M}<br>'
                                  + (isCumulative ? 'cumulative: ' : 'measured: ')
                                  + '%{y:.3f}<extra></extra>',
                     legendgroup: 'actual',
@@ -1752,9 +1781,19 @@ window.showTab = function(el) {
                 yTitle = expName + ' (' + EXP_UNITS + ')';
             }
 
+            // Local TZ name for the axis label, e.g. "BST", "CET", "PST".
+            // Falls back to UTC offset in hours if the browser doesn't
+            // expose a short name (rare).
+            var tzName = '';
+            try {
+                var tzPart = new Date().toLocaleTimeString('en-GB', { timeZoneName: 'short' }).split(' ').pop();
+                tzName = tzPart || '';
+            } catch (e) { tzName = ''; }
+            var xTitle = 'Target time' + (tzName ? ' (' + tzName + ')' : ' (local)');
+
             var layout = {
                 xaxis: {
-                    title: { text: 'Target time (when the forecast applies)', font: { size: 12 } },
+                    title: { text: xTitle, font: { size: 12 } },
                     color: '#b0b0b0', gridcolor: '#2d3561', type: 'date',
                 },
                 yaxis: {
@@ -1829,10 +1868,12 @@ window.showTab = function(el) {
             var stepsEl = document.getElementById('stability-steps');
             if (stepsEl) stepsEl.textContent = (s.steps_analysed || 0).toLocaleString();
 
-            // Per-timestep cross-cycle std chart
+            // Per-timestep cross-cycle std chart. Convert UTC strings
+            // to Date objects so Plotly renders in local TZ.
             var pt = data.per_timestep;
+            var ptDates = toLocalDates(pt.target_dt);
             var traces = [{
-                x: pt.target_dt,
+                x: ptDates,
                 y: pt.std,
                 type: 'scatter', mode: 'lines',
                 line: { color: '#f0b429', width: 2 },
@@ -1840,7 +1881,7 @@ window.showTab = function(el) {
                 customdata: pt.target_dt.map(function(_, i) {
                     return [pt.mean[i], pt.cv_pct[i], pt.n_cycles[i]];
                 }),
-                hovertemplate: '<b>%{x}</b>'
+                hovertemplate: '<b>%{x|%d %b %H:%M}</b>'
                              + '<br>std across cycles: %{y:.3f}'
                              + '<br>mean prediction: %{customdata[0]:.3f}'
                              + '<br>CV: %{customdata[1]:.1f}%'
@@ -1848,9 +1889,14 @@ window.showTab = function(el) {
                              + '<extra></extra>',
                 name: 'Cross-cycle std',
             }];
+            var tzName = '';
+            try {
+                var tzPart = new Date().toLocaleTimeString('en-GB', { timeZoneName: 'short' }).split(' ').pop();
+                tzName = tzPart || '';
+            } catch (e) { tzName = ''; }
             var layout = {
                 xaxis: {
-                    title: { text: 'Target time', font: { size: 12 } },
+                    title: { text: 'Target time' + (tzName ? ' (' + tzName + ')' : ' (local)'), font: { size: 12 } },
                     color: '#b0b0b0', gridcolor: '#2d3561', type: 'date',
                 },
                 yaxis: {
