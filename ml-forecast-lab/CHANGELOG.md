@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.13.1
+
+### Bugfix
+
+- **`zscore` now appears in the Settings → Output activation
+  dropdown** — v2.13.0 shipped the backend but the UI dropdown and
+  its `?` helper tooltip still listed only the six pre-zscore
+  options. The dropdown now includes *Z-score (normalised target,
+  LSTM)* and the tooltip documents both the new option and the
+  updated `Auto` resolution (zscore for LSTM, softplus/linear
+  otherwise).
+- **Settings save endpoint now accepts `zscore`** — the server-side
+  validator whitelist was missing the new value, so even setting it
+  via `mlfl.yaml` edit would have been stripped on any subsequent
+  UI save of any other field.
+
 ## 2.13.0
 
 ### Feature

@@ -207,7 +207,7 @@
                 </select>
             </div>
             <div class="exp-field">
-                <label class="field-label">Output activation (neural) <span class="info-tip">?<span class="tip-text">Activation applied to the final linear head of neural models, constraining output to a physical range. <b>Auto</b>: softplus if target is cumulative, else linear. <b>Linear</b>: unbounded, signed (temperature, deltas). <b>Softplus</b>: smooth non-negative (0, ∞) for energy / power / counts. <b>ReLU</b>: hard non-negative; may produce dead units if many zero targets. <b>Exp</b>: strictly positive, for orders-of-magnitude variance. <b>Sigmoid</b>: bounded (0, s) where s is learned from training max — for quantities with a physical ceiling (SoC, humidity).</span></span></label>
+                <label class="field-label">Output activation (neural) <span class="info-tip">?<span class="tip-text">Activation applied to the final linear head of neural models, constraining output to a physical range. <b>Auto</b>: zscore for LSTM; for other neural backends, softplus if target is cumulative else linear. <b>Linear</b>: unbounded, signed (temperature, deltas). <b>Softplus</b>: smooth non-negative (0, ∞) for energy / power / counts. <b>ReLU</b>: hard non-negative; may produce dead units if many zero targets. <b>Exp</b>: strictly positive, for orders-of-magnitude variance. <b>Sigmoid</b>: bounded (0, s) where s is learned from training max — for quantities with a physical ceiling (SoC, humidity). <b>Z-score</b>: target z-score normalised during training with linear head, denormalised at inference — keeps gradients O(1) across any target scale. LSTM-only; other backends treat as linear.</span></span></label>
                 <select class="setting-input" data-field="output_activation" onchange="saveSettingsField(this)">
                     <option value="auto" {% if not exp_config or exp_config.output_activation == 'auto' %}selected{% endif %}>Auto</option>
                     <option value="linear" {% if exp_config and exp_config.output_activation == 'linear' %}selected{% endif %}>Linear</option>
@@ -215,6 +215,7 @@
                     <option value="relu" {% if exp_config and exp_config.output_activation == 'relu' %}selected{% endif %}>ReLU (≥ 0, hard)</option>
                     <option value="exp" {% if exp_config and exp_config.output_activation == 'exp' %}selected{% endif %}>Exp (> 0)</option>
                     <option value="sigmoid" {% if exp_config and exp_config.output_activation == 'sigmoid' %}selected{% endif %}>Sigmoid (bounded)</option>
+                    <option value="zscore" {% if exp_config and exp_config.output_activation == 'zscore' %}selected{% endif %}>Z-score (normalised target, LSTM)</option>
                 </select>
             </div>
         </div>

@@ -2102,7 +2102,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "include_sun_elevation": lambda v: bool(v),
             "include_clear_sky_irradiance": lambda v: bool(v),
             "output_activation": lambda v: v if v in (
-                "auto", "linear", "softplus", "relu", "exp", "sigmoid"
+                "auto", "linear", "softplus", "relu", "exp", "sigmoid", "zscore"
             ) else None,
         }
 
