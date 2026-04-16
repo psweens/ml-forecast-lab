@@ -278,14 +278,26 @@ class ExperimentCfg:
     NeuralProphet and tree models."""
 
     daily_loss_weight: float = 0.0
-    """Weight λ for an optional horizon-sum (cumulative) loss term added to the
-    per-interval loss during neural training. 0.0 disables it (interval loss
-    only — current default). With ``future_periods=48`` and
-    ``interval_minutes=30`` the horizon spans 24 h, so this becomes a rolling
-    daily-cumulative loss. Applied to torch neural backends (LSTM, CNN,
-    N-BEATS, N-HiTS, TiDE, DLinear, TSMixer, PatchTST, iTransformer,
-    Crossformer, TimesNet, SparseTSF); silently ignored by NeuralProphet and
-    tree models. Typical useful range: 0.1–1.0."""
+    """Weight λ for the cumulative-trajectory loss term added to the per-interval
+    loss during neural training. 0.0 disables (interval loss only — default).
+
+    The daily term penalises error in the cumulative forecast curve at every
+    horizon step (not just the endpoint), so the SHAPE of the predicted
+    cumulative trajectory must match the actual cumulative trajectory. With
+    ``future_periods=48`` and ``interval_minutes=30`` this is the 24 h
+    daily-cumulative curve, directly aligned with what users evaluate on
+    cumulative-origin targets such as ``sensor.mixergy_demand_today`` or
+    daily energy-usage sensors.
+
+    History: v2.16 used a mean-over-horizons constraint (just the endpoint).
+    v2.18 replaced it with the trajectory formulation above after experiments
+    on Mixergy demand showed the mean-only version was too weak to affect
+    training measurably — the mean is already matched by any unbiased model,
+    regardless of the curve shape.
+
+    Applied to torch neural backends only; silently ignored by NeuralProphet
+    and tree models. Typical useful range: 0.1–1.0 (stronger under MSE than
+    MAE due to loss geometry)."""
 
     recency_half_life_days: float = 7.0
     """Half-life for exponential recency weighting in days. Recent samples receive

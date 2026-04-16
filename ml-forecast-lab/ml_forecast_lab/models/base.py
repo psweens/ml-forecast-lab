@@ -727,54 +727,91 @@ class ForecastModel(ABC):
         daily_weight: float,
     ) -> Tuple["torch.Tensor", "torch.Tensor"]:
         """
-        Interval loss with an optional horizon-sum (cumulative) term.
+        Interval loss + optional cumulative-trajectory loss.
 
-        The horizon-sum term penalises error in the *mean* of the forecast
-        over the multi-step horizon — i.e. the cumulative demand over the
-        forecast window. With ``future_periods=48`` and ``interval_minutes=30``
-        the horizon is exactly 24 h, so this reduces to a rolling daily
-        cumulative loss; for shorter horizons it becomes a
-        "horizon-window cumulative" loss of the same flavour.
+        The cumulative-trajectory term penalises the error in the predicted
+        cumulative curve at every horizon step:
 
-        ``criterion`` must be instantiated with ``reduction='none'``. The
-        backward loss is ``L_interval + daily_weight * L_daily``. We use the
-        *mean* across horizons (not sum) so both terms are on the same scale
-        and ``daily_weight`` is an intuitive 0..1ish knob rather than needing
-        to be scaled by ``1/H``.
+            L_daily = mean_h  criterion( cumsum(ŷ)[h],  cumsum(y)[h] )  /  H
+
+        Unlike a simple endpoint or mean-over-horizons constraint, this term
+        constrains the SHAPE of the cumulative trajectory across the entire
+        horizon. For a cumulative-origin target like
+        ``sensor.mixergy_demand_today`` (smooth monotonic cumulative that
+        resets at midnight), this is what the user actually evaluates
+        against — per-interval predictions that regress to the mean still
+        produce a straight-line cumulative ramp that badly misses the
+        actual stepped-curve shape. The trajectory loss penalises that
+        drift directly at every intermediate horizon.
+
+        The same ``criterion`` (MSE / MAE / Huber from ``loss_fn``) is
+        applied to both the interval and cumulative terms. ``criterion``
+        must be instantiated with ``reduction='none'``.
+
+        Normalisation note
+        ------------------
+        The per-horizon cumulative loss is averaged over H and then divided
+        by H. Under unbiased noise this keeps the daily term on the same
+        order as the interval term; under systematic bias it grows by
+        roughly H/3× for MSE (less for MAE/Huber), providing strong
+        bias-correction pressure — which is exactly the failure mode the
+        trajectory loss is designed to fix. λ is therefore intuitively
+        "how much extra pressure to apply to cumulative-shape matching",
+        with 0.5 being a reasonable default when the toggle is on.
 
         Returns
         -------
         (loss, interval_per_sample)
             ``loss`` is the scalar to call ``.backward()`` on.
-            ``interval_per_sample`` is the pre-reduction interval-loss tensor
-            so callers can log the same ``epoch_loss`` quantity as before —
-            keeping train-loss curves comparable to pre-composite runs.
+            ``interval_per_sample`` is the pre-reduction interval-loss
+            tensor so callers can log the same ``epoch_loss`` quantity as
+            before — keeping train-loss curves comparable across
+            daily_weight values.
 
         Notes
         -----
-        When ``daily_weight == 0`` (the default) or when the output is
-        single-horizon (1-D or horizon dim == 1), this is identical to the
-        pre-existing interval-only loss — no extra compute and no behaviour
-        change.
+        - When ``daily_weight == 0`` (the default), behaviour is identical
+          to the pre-composite interval-only loss — no extra compute, no
+          behavioural difference.
+        - For single-horizon outputs (1-D or horizon dim == 1), the daily
+          term is silently skipped — cumsum of a single value equals the
+          value itself, so the term would be redundant with the interval
+          term.
+
+        History
+        -------
+        v2.18.0: replaced the previous mean-over-horizons constraint
+        (``criterion(mean_h(ŷ), mean_h(y))``) with this trajectory-matching
+        formulation. Experiments on cumulative-origin targets
+        (e.g. Mixergy daily demand) showed the mean-only constraint was
+        too weak to measurably affect training — the mean is approximately
+        matched by any unbiased model, regardless of curve shape.
         """
-        # Interval term — same as before.
+        # Interval term — unchanged.
         interval_per_sample = criterion(y_pred, y_true)
         if w_batch is not None:
             loss = ForecastModel._weighted_mean_loss(interval_per_sample, w_batch)
         else:
             loss = interval_per_sample.mean()
 
-        # Daily term only meaningful for multi-horizon outputs.
+        # Cumulative-trajectory term — only meaningful for multi-horizon
+        # outputs. Guard ensures daily_weight=0 incurs zero extra compute.
         if daily_weight > 0.0 and y_pred.dim() == 2 and y_pred.size(1) > 1:
-            yp_mean = y_pred.mean(dim=1)
-            yt_mean = y_true.mean(dim=1)
-            daily_per_sample = criterion(yp_mean, yt_mean)
+            H = y_pred.size(1)
+            # Per-sample cumulative trajectory, shape (batch, H).
+            yp_cum = y_pred.cumsum(dim=1)
+            yt_cum = y_true.cumsum(dim=1)
+            # Loss at every horizon step along the trajectory, shape (batch, H).
+            cum_per_step = criterion(yp_cum, yt_cum)
+            # Average over horizons then normalise by H (see Normalisation
+            # note in the docstring). Shape (batch,).
+            cum_per_sample = cum_per_step.mean(dim=1) / float(H)
             if w_batch is not None:
                 daily_loss = ForecastModel._weighted_mean_loss(
-                    daily_per_sample, w_batch
+                    cum_per_sample, w_batch
                 )
             else:
-                daily_loss = daily_per_sample.mean()
+                daily_loss = cum_per_sample.mean()
             loss = loss + daily_weight * daily_loss
 
         return loss, interval_per_sample

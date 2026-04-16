@@ -232,7 +232,7 @@
                            onchange="saveSettingsToggle(this, 'daily_loss_weight')">
                     <span class="toggle-slider"></span>
                 </label>
-                <span class="field-label">Daily cumulative loss (neural) <span class="info-tip">?<span class="tip-text">Adds an extra loss term that penalises error in the forecast's aggregate over the horizon window. With 30-min intervals × 48 horizons this is the 24 h rolling cumulative — useful when per-interval predictions look fine but their daily total drifts. Applies to torch neural models (LSTM, CNN, N-BEATS, N-HiTS, TiDE, DLinear, TSMixer, PatchTST, iTransformer, Crossformer, TimesNet, SparseTSF); silently ignored by NeuralProphet and tree models (LightGBM, XGBoost).</span></span></span>
+                <span class="field-label">Daily cumulative loss (neural) <span class="info-tip">?<span class="tip-text">Adds a loss term that penalises error in the predicted cumulative curve at every horizon step. Unlike the per-interval loss (which only cares about local values and tends to regress to the mean on sparse targets), this constrains the SHAPE of the cumulative trajectory — so predictions have to match the actual cumulative curve as it accumulates through the day. Designed for cumulative-origin targets like <code>sensor.x_today</code> (daily demand, daily energy), where users evaluate on the cumulative curve rather than per-interval values. Applies to torch neural models (LSTM, CNN, N-BEATS, N-HiTS, TiDE, DLinear, TSMixer, PatchTST, iTransformer, Crossformer, TimesNet, SparseTSF); silently ignored by NeuralProphet and tree models (LightGBM, XGBoost).</span></span></span>
             </div>
         </div>
     </div>

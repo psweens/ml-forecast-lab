@@ -1,5 +1,71 @@
 # Changelog
 
+## 2.18.0
+
+### Changed
+
+- **Daily cumulative loss is now trajectory-matching** (was: mean over
+  horizons). `daily_loss_weight > 0` now penalises error in the predicted
+  cumulative *curve* at every horizon step — not just a single aggregate
+  constraint at the endpoint.
+
+  **New formula** (in ``_composite_horizon_loss``):
+  ```
+  L_daily = mean_h  criterion( cumsum(ŷ)[h], cumsum(y)[h] )  /  H
+  ```
+  The cumulative error is penalised at every h=1..H, then averaged and
+  normalised by H so λ stays reasonably invariant to horizon length.
+
+  **Previous formula** (v2.16–v2.17):
+  ```
+  L_daily_old = criterion( mean_h(ŷ), mean_h(y) )
+  ```
+  The mean-of-horizons match was a single scalar per sample — a straight
+  line ramp and the actual stepped daily-demand curve can have identical
+  means and still look completely different visually, so the term had
+  almost no effect on training.
+
+  **Why this matters for cumulative-origin targets**
+  (``sensor.x_today``-style sensors that reset at midnight): the training
+  objective now directly aligns with the cumulative curve users evaluate
+  against. Per-interval predictions that regress to the mean on sparse
+  targets produce a constant-slope cumulative ramp that misses the actual
+  curve shape — the trajectory loss penalises this drift at every
+  intermediate horizon.
+
+  **Breaking behaviour note**: experiments that already have
+  ``daily_loss_weight > 0`` will train differently after upgrading.
+  Models retrained on v2.18+ will produce different forecasts than
+  v2.16/v2.17 did with the same setting. The default (``0.0``) preserves
+  pre-composite-loss behaviour byte-identically, so experiments that
+  never toggled the setting are unaffected.
+
+  **Single-horizon outputs** (``future_periods=1`` or ``y_pred.dim()==1``)
+  silently skip the daily term — cumsum of a single value equals the
+  value itself, so the term would be redundant with the interval term.
+
+### Context
+
+Real-world testing on a Mixergy hot-water demand target
+(``sensor.mixergy_demand_today``, a cumulative-reset-daily sensor) showed
+the v2.16 mean-based daily loss had no measurable effect. The mean of the
+forecast horizon is approximately matched by any unbiased model
+regardless of curve shape, so the penalty term had no gradient to
+contribute. The trajectory formulation directly penalises the
+drift-accumulation failure mode.
+
+### Audit note
+
+Pre-release audit of the ``source_is_cumulative=True, reset_daily=True``
+preprocessing path (``cumulative_to_interval``) confirmed the training
+signal is clean for cumulative-reset-daily targets — primary reset
+detection via ``diffs < 0`` (preprocessing.py:86) is timezone-independent
+and correctly identifies real resets regardless of local-vs-UTC
+midnight alignment. Two minor cosmetic issues in the publishing layer
+(``daily_cumulative_series`` doesn't include a today-so-far seed when
+aligning with the source sensor) will be addressed in a separate
+release; they don't affect training.
+
 ## 2.17.0
 
 ### Added
