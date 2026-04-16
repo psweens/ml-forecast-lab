@@ -150,6 +150,7 @@ class CNNModel(ForecastModel):
         dropout: float = 0.15,
         loss_fn: str = 'mse',
         daily_loss_weight: float = 0.0,
+        optimiser: str = 'adamw',
         patience: int = 20,
         output_activation: str = 'linear',
         use_revin: bool = True,
@@ -170,6 +171,7 @@ class CNNModel(ForecastModel):
         self.dropout = dropout
         self.loss_fn = loss_fn
         self.daily_loss_weight = float(daily_loss_weight)
+        self.optimiser = optimiser
         self.patience = patience
         self.output_activation = output_activation
         # RevIN handles per-window distribution shift. When on, supersedes
@@ -303,7 +305,9 @@ class CNNModel(ForecastModel):
             use_revin=self.use_revin,
             target_channel=self.target_channel,
         )
-        optimiser = torch.optim.AdamW(self._model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
+        optimiser = self._build_optimiser(
+            self._model.parameters(), self.optimiser, self.learning_rate,
+        )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=self.epochs, eta_min=1e-6)
         _loss_map = {'mse': nn.MSELoss, 'mae': nn.L1Loss, 'l1': nn.L1Loss, 'huber': nn.SmoothL1Loss}
         criterion = _loss_map.get(self.loss_fn, nn.MSELoss)(reduction='none')
@@ -464,6 +468,7 @@ class CNNModel(ForecastModel):
             "batch_size": self.batch_size, "dropout": self.dropout,
             "loss_fn": self.loss_fn,
             "daily_loss_weight": self.daily_loss_weight,
+            "optimiser": self.optimiser,
             "patience": self.patience,
             "output_activation": self.output_activation,
             "use_revin": self.use_revin,
@@ -473,7 +478,7 @@ class CNNModel(ForecastModel):
     def set_params(self, **kwargs: Any) -> None:
         valid = {"n_filters", "kernel_size", "n_layers", "dilation_base",
                  "learning_rate", "epochs", "batch_size",
-                 "dropout", "loss_fn", "daily_loss_weight", "patience",
+                 "dropout", "loss_fn", "daily_loss_weight", "optimiser", "patience",
                  "output_activation",
                  "use_revin", "target_channel"}
         for k, v in kwargs.items():

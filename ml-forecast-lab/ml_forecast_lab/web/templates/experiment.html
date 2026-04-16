@@ -207,6 +207,13 @@
                 </select>
             </div>
             <div class="exp-field">
+                <label class="field-label">Optimiser (neural) <span class="info-tip">?<span class="tip-text"><b>AdamW</b> (default): decoupled weight decay — every parameter receives the same effective regularisation regardless of its gradient history. This is what every published time-series transformer paper uses. <b>Adam</b>: classic Adam with tied weight decay — decay is divided by the adaptive per-parameter learning rate, so frequently-updated weights receive less effective regularisation than bias terms / layer-norm scales. Both share the same learning rate, cosine schedule, and weight_decay=1e-4. Use Adam to investigate how the tied-vs-decoupled choice affects your models; leave on AdamW unless you have a reason.</span></span></label>
+                <select class="setting-input" data-field="optimiser" onchange="saveSettingsField(this)">
+                    <option value="adamw" {% if not exp_config or exp_config.optimiser == 'adamw' %}selected{% endif %}>AdamW (decoupled weight decay)</option>
+                    <option value="adam" {% if exp_config and exp_config.optimiser == 'adam' %}selected{% endif %}>Adam (tied weight decay)</option>
+                </select>
+            </div>
+            <div class="exp-field">
                 <label class="field-label">Output activation (neural) <span class="info-tip">?<span class="tip-text">Activation applied to the final linear head of neural models, constraining output to a physical range. <b>Auto</b>: zscore for LSTM; for other neural backends, softplus if target is cumulative else linear. <b>Linear</b>: unbounded, signed (temperature, deltas). <b>Softplus</b>: smooth non-negative (0, ∞) for energy / power / counts. <b>ReLU</b>: hard non-negative; may produce dead units if many zero targets. <b>Exp</b>: strictly positive, for orders-of-magnitude variance. <b>Sigmoid</b>: bounded (0, s) where s is learned from training max — for quantities with a physical ceiling (SoC, humidity). <b>Z-score</b>: target z-score normalised during training with linear head, denormalised at inference — keeps gradients O(1) across any target scale. LSTM-only; other backends treat as linear.</span></span></label>
                 <select class="setting-input" data-field="output_activation" onchange="saveSettingsField(this)">
                     <option value="auto" {% if not exp_config or exp_config.output_activation == 'auto' %}selected{% endif %}>Auto</option>

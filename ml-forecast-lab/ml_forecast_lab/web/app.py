@@ -2098,6 +2098,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "retrain_every_hours": lambda v: float(v) if float(v) >= 0.1 else None,
             "production_metric": lambda v: v if v in ("mae", "rmse", "mase") else None,
             "loss_fn": lambda v: v if v in ("mse", "mae", "huber") else None,
+            "optimiser": lambda v: v if v in ("adamw", "adam") else None,
             # UI sends bool (toggle); we map true→0.5, false→0.0. Raw float values
             # (e.g. from hand-edited YAML) pass through clamped to ≥ 0 so sophisticated
             # users can still override the default λ without UI churn.

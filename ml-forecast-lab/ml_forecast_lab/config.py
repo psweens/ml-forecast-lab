@@ -268,6 +268,15 @@ class ExperimentCfg:
     loss_fn: str = 'mse'
     """Training loss for neural models: 'mse', 'mae', or 'huber'."""
 
+    optimiser: str = 'adamw'
+    """Optimiser for neural models: 'adamw' (default, decoupled weight decay as
+    used by every published time-series transformer paper) or 'adam' (classic
+    Adam; weight decay is tied to the adaptive learning rate, which means
+    frequently-updated parameters receive less effective regularisation). Both
+    share the same ``learning_rate`` and ``weight_decay=1e-4``; the difference
+    is purely in how weight decay composes with the adaptive update. Ignored by
+    NeuralProphet and tree models."""
+
     daily_loss_weight: float = 0.0
     """Weight λ for an optional horizon-sum (cumulative) loss term added to the
     per-interval loss during neural training. 0.0 disables it (interval loss
@@ -328,6 +337,12 @@ class ExperimentCfg:
         if self.daily_loss_weight < 0:
             raise ValueError(
                 f'daily_loss_weight must be >= 0, got {self.daily_loss_weight}'
+            )
+        valid_optimisers = {'adam', 'adamw'}
+        if self.optimiser not in valid_optimisers:
+            raise ValueError(
+                f'optimiser must be one of {sorted(valid_optimisers)}, '
+                f'got {self.optimiser!r}'
             )
         valid_activations = {
             'auto', 'linear', 'softplus', 'relu', 'exp', 'sigmoid', 'zscore',

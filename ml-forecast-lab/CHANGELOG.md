@@ -1,5 +1,53 @@
 # Changelog
 
+## 2.17.0
+
+### Added
+
+- **Optimiser choice (neural)** — new per-experiment dropdown in Settings →
+  Training selects between **AdamW** (default, decoupled weight decay — the
+  optimiser every published time-series transformer paper uses) and
+  **Adam** (classic, tied weight decay). Both share the same
+  ``learning_rate``, cosine schedule, and ``weight_decay=1e-4``, so the
+  choice isolates the decoupled-vs-tied weight-decay behaviour rather than
+  confounding it with decay magnitude or LR.
+
+  Default remains AdamW, preserving pre-2.17 behaviour for existing
+  experiments. Applied to all 12 torch neural backends; silently ignored
+  by NeuralProphet and tree models.
+
+  Implementation: new ``ForecastModel._build_optimiser`` static helper on
+  the base class replaces the previously-hardcoded ``torch.optim.AdamW(...)``
+  line in each of the 12 backend ``fit()`` methods; hyperparam
+  round-trips through ``get_params``/``set_params``/save/load.
+
+### Fixed
+
+- **Covariate Analysis and Tuning now honour Settings-level neural params.**
+  Previously, the Covariate Analysis and Hyperparameter Tuning code paths
+  instantiated neural models with the backend's defaults — so if you
+  selected ``loss_fn='huber'``, ``daily_loss_weight>0``, or (as of 2.17)
+  ``optimiser='adam'`` in Settings, those choices were silently ignored by
+  anything outside the main CV loop and the production-training path. The
+  main benchmark minimised one objective; Covariate Analysis and Tuning
+  minimised another (typically MSE with λ=0 and AdamW), which made the
+  two flows incomparable and hid the effect of Settings changes.
+
+  New helper ``_apply_experiment_neural_params(model, exp_cfg, overrides=…)``
+  in ``main.py`` propagates ``loss_fn``, ``daily_loss_weight``, and
+  ``optimiser`` from the experiment config to any freshly-created neural
+  model, guarded by ``hasattr`` (tree models / NeuralProphet silently skip)
+  and respecting caller-supplied ``overrides`` (so Optuna-swept params and
+  ``model_overrides`` still take priority). Called from:
+  - Tuning baseline trial (``_run_tuning``)
+  - Tuning per-trial objective
+  - Holdout re-fit in Tuning (``_run_holdout``)
+  - Covariate Analysis per-config-per-model fit
+
+  The 4 pre-existing ``set_params(loss_fn=…)`` call-sites in the main CV
+  and production paths are left unchanged — they already handle the same
+  propagation inline and continue to work.
+
 ## 2.16.0
 
 ### Added

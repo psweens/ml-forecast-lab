@@ -74,6 +74,53 @@ def _apply_output_activation(model, exp_cfg) -> None:
         pass
 
 
+def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
+    """
+    Propagate experiment-level neural training settings to a model.
+
+    Currently propagates ``loss_fn``, ``daily_loss_weight``, and
+    ``optimiser`` from ``exp_cfg`` so every code path that instantiates a
+    neural model (benchmark CV, production training, Tuning trials,
+    holdout refits, Covariate Analysis) honours the user's Settings
+    selection — not just the main CV loop. Without this helper, secondary
+    paths would silently train with the backend's default ``loss_fn='mse'``
+    / ``optimiser='adamw'`` / ``daily_loss_weight=0`` regardless of what
+    the user picked in Settings.
+
+    Silently no-ops for tree backends and NeuralProphet (``hasattr`` guard).
+    Skips any param already present in ``overrides`` so user-provided
+    ``model_overrides`` and Optuna-swept params take priority.
+
+    Parameters
+    ----------
+    model : ForecastModel
+        Freshly-created model instance.
+    exp_cfg : ExperimentCfg
+        Experiment configuration to read settings from.
+    overrides : dict, optional
+        Dict of param names already applied (e.g. Optuna trial params or
+        ``model_overrides``). Entries here are NOT overwritten, preserving
+        the caller's intent.
+    """
+    if not getattr(model, 'is_neural', False):
+        return
+    overrides = overrides or {}
+    for attr in ('loss_fn', 'daily_loss_weight', 'optimiser'):
+        if attr in overrides:
+            continue
+        value = getattr(exp_cfg, attr, None)
+        if value is None:
+            continue
+        if not hasattr(model, attr):
+            continue
+        try:
+            model.set_params(**{attr: value})
+        except (ValueError, TypeError):
+            # Backend doesn't support this kwarg (old checkpoint, or not yet
+            # migrated) — silently skip rather than break the whole run.
+            pass
+
+
 class MLForecastLabApp:
     """
     Main application controller for ML Forecast Lab.
@@ -1098,6 +1145,9 @@ class MLForecastLabApp:
                 if (m.is_neural and hasattr(m, 'daily_loss_weight')
                         and 'daily_loss_weight' not in overrides):
                     m.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
+                if (m.is_neural and hasattr(m, 'optimiser')
+                        and 'optimiser' not in overrides):
+                    m.set_params(optimiser=exp_cfg.optimiser)
                 if overrides:
                     m.set_params(**overrides)
                     logger.info(f"Applied {len(overrides)} override(s) for {model_name}"
@@ -1311,6 +1361,9 @@ class MLForecastLabApp:
                     if (m.is_neural and hasattr(m, 'daily_loss_weight')
                             and 'daily_loss_weight' not in overrides):
                         m.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
+                    if (m.is_neural and hasattr(m, 'optimiser')
+                            and 'optimiser' not in overrides):
+                        m.set_params(optimiser=exp_cfg.optimiser)
                     if overrides:
                         m.set_params(**overrides)
                     if 'output_activation' not in overrides:
@@ -1594,6 +1647,9 @@ class MLForecastLabApp:
         if (model.is_neural and hasattr(model, 'daily_loss_weight')
                 and 'daily_loss_weight' not in overrides):
             model.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
+        if (model.is_neural and hasattr(model, 'optimiser')
+                and 'optimiser' not in overrides):
+            model.set_params(optimiser=exp_cfg.optimiser)
         if overrides:
             model.set_params(**overrides)
             logger.info(f"Applied {len(overrides)} override(s) for {prod_model_name}")
@@ -2081,6 +2137,9 @@ class MLForecastLabApp:
         if (model.is_neural and hasattr(model, 'daily_loss_weight')
                 and 'daily_loss_weight' not in overrides):
             model.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
+        if (model.is_neural and hasattr(model, 'optimiser')
+                and 'optimiser' not in overrides):
+            model.set_params(optimiser=exp_cfg.optimiser)
         if overrides:
             model.set_params(**overrides)
         if 'output_activation' not in overrides:
@@ -3010,6 +3069,9 @@ class MLForecastLabApp:
         try:
             baseline_model = self.model_registry.create(model_name, **baseline_params)
             _apply_tuning_overrides(baseline_model)
+            _apply_experiment_neural_params(
+                baseline_model, exp_cfg, overrides=baseline_params
+            )
             baseline_result = runner.run_single_model(
                 combined, baseline_model, fold_indices,
                 precomputed_sequences=precomputed_sequences,
@@ -3091,6 +3153,7 @@ class MLForecastLabApp:
             try:
                 model = self.model_registry.create(model_name, **params)
                 _apply_tuning_overrides(model)
+                _apply_experiment_neural_params(model, exp_cfg, overrides=params)
                 result = runner.run_single_model(
                     combined, model, fold_indices,
                     precomputed_sequences=precomputed_sequences,
@@ -3266,6 +3329,7 @@ class MLForecastLabApp:
                 import gc as _gc
                 m = self.model_registry.create(model_name, **params)
                 _apply_output_activation(m, exp_cfg)
+                _apply_experiment_neural_params(m, exp_cfg, overrides=params)
                 if _ho_seq_train is not None:
                     # Neural path: proper sliding windows
                     m.fit(
@@ -3446,6 +3510,10 @@ class MLForecastLabApp:
                         model.set_params(**overrides)
                     if 'output_activation' not in overrides:
                         _apply_output_activation(model, exp_cfg)
+                    # Honour Settings-level neural params (loss_fn,
+                    # daily_loss_weight, optimiser) so covariate analysis
+                    # minimises the SAME objective as the main benchmark.
+                    _apply_experiment_neural_params(model, exp_cfg, overrides=overrides)
 
                     def _train_and_eval():
                         if model.is_neural:

@@ -664,6 +664,61 @@ class ForecastModel(ABC):
         return (per_sample * w_batch).sum() / w_sum
 
     @staticmethod
+    def _build_optimiser(
+        params,
+        name: str,
+        lr: float,
+        weight_decay: float = 1e-4,
+    ):
+        """
+        Build a torch optimiser by name.
+
+        Parameters
+        ----------
+        params : iterable of torch.nn.Parameter
+            Typically ``model.parameters()``.
+        name : {'adamw', 'adam'}
+            Optimiser selection. Case-insensitive. ``'adamw'`` uses
+            decoupled weight decay (Loshchilov & Hutter 2017) — the default
+            and the one every published time-series transformer paper
+            uses. ``'adam'`` is classic Adam with tied weight decay (decay
+            divided by per-parameter adaptive LR, so frequently-updated
+            parameters receive less effective regularisation).
+        lr : float
+            Initial learning rate. Passed through to the optimiser and then
+            scheduled by the caller's ``CosineAnnealingLR``.
+        weight_decay : float
+            L2 regularisation strength. Default 1e-4 — the same value each
+            backend was previously hardcoding. Kept consistent across both
+            optimisers so the Adam vs AdamW comparison isolates the
+            decoupling behaviour rather than confounding it with decay
+            magnitude.
+
+        Returns
+        -------
+        torch.optim.Optimizer
+
+        Raises
+        ------
+        ValueError
+            If ``name`` is not one of the supported values.
+        """
+        try:
+            import torch.optim as optim
+        except ImportError as e:
+            raise RuntimeError(
+                'PyTorch is required to build an optimiser but is not installed'
+            ) from e
+        key = str(name).lower()
+        if key == 'adamw':
+            return optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+        if key == 'adam':
+            return optim.Adam(params, lr=lr, weight_decay=weight_decay)
+        raise ValueError(
+            f"Unknown optimiser: {name!r} (expected 'adamw' or 'adam')"
+        )
+
+    @staticmethod
     def _composite_horizon_loss(
         y_pred: "torch.Tensor",
         y_true: "torch.Tensor",

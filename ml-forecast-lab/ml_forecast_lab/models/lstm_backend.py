@@ -125,6 +125,7 @@ class LSTMModel(ForecastModel):
         sequence_length: Optional[int] = None,
         loss_fn: str = 'mse',
         daily_loss_weight: float = 0.0,
+        optimiser: str = 'adamw',
         patience: int = 20,
         output_activation: str = 'linear',
         use_revin: bool = True,
@@ -143,6 +144,7 @@ class LSTMModel(ForecastModel):
         self.sequence_length = sequence_length
         self.loss_fn = loss_fn
         self.daily_loss_weight = float(daily_loss_weight)
+        self.optimiser = optimiser
         self.patience = patience
         self.output_activation = output_activation
         # RevIN (Kim et al. 2022) handles per-window distribution shift. When
@@ -297,7 +299,9 @@ class LSTMModel(ForecastModel):
             use_revin=self.use_revin,
             target_channel=self.target_channel,
         )
-        optimiser = torch.optim.AdamW(self._model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
+        optimiser = self._build_optimiser(
+            self._model.parameters(), self.optimiser, self.learning_rate,
+        )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=self.epochs, eta_min=1e-6)
         _loss_map = {'mse': nn.MSELoss, 'mae': nn.L1Loss, 'l1': nn.L1Loss, 'huber': nn.SmoothL1Loss}
         criterion = _loss_map.get(self.loss_fn, nn.MSELoss)(reduction='none')
@@ -462,6 +466,7 @@ class LSTMModel(ForecastModel):
             "epochs": self.epochs, "batch_size": self.batch_size,
             "sequence_length": self.sequence_length, "loss_fn": self.loss_fn,
             "daily_loss_weight": self.daily_loss_weight,
+            "optimiser": self.optimiser,
             "patience": self.patience,
             "output_activation": self.output_activation,
             "use_revin": self.use_revin,
@@ -471,7 +476,7 @@ class LSTMModel(ForecastModel):
     def set_params(self, **kwargs: Any) -> None:
         valid = {"hidden_size", "num_layers", "dropout", "learning_rate",
                  "epochs", "batch_size", "sequence_length", "loss_fn",
-                 "daily_loss_weight",
+                 "daily_loss_weight", "optimiser",
                  "patience",
                  "output_activation",
                  "use_revin", "target_channel"}
