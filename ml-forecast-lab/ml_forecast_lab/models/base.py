@@ -11,7 +11,7 @@ import pickle
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -662,6 +662,67 @@ class ForecastModel(ABC):
             per_sample = loss_per_sample
         w_sum = w_batch.sum().clamp_min(1e-8)
         return (per_sample * w_batch).sum() / w_sum
+
+    @staticmethod
+    def _composite_horizon_loss(
+        y_pred: "torch.Tensor",
+        y_true: "torch.Tensor",
+        criterion: "nn.Module",
+        w_batch: Optional["torch.Tensor"],
+        daily_weight: float,
+    ) -> Tuple["torch.Tensor", "torch.Tensor"]:
+        """
+        Interval loss with an optional horizon-sum (cumulative) term.
+
+        The horizon-sum term penalises error in the *mean* of the forecast
+        over the multi-step horizon — i.e. the cumulative demand over the
+        forecast window. With ``future_periods=48`` and ``interval_minutes=30``
+        the horizon is exactly 24 h, so this reduces to a rolling daily
+        cumulative loss; for shorter horizons it becomes a
+        "horizon-window cumulative" loss of the same flavour.
+
+        ``criterion`` must be instantiated with ``reduction='none'``. The
+        backward loss is ``L_interval + daily_weight * L_daily``. We use the
+        *mean* across horizons (not sum) so both terms are on the same scale
+        and ``daily_weight`` is an intuitive 0..1ish knob rather than needing
+        to be scaled by ``1/H``.
+
+        Returns
+        -------
+        (loss, interval_per_sample)
+            ``loss`` is the scalar to call ``.backward()`` on.
+            ``interval_per_sample`` is the pre-reduction interval-loss tensor
+            so callers can log the same ``epoch_loss`` quantity as before —
+            keeping train-loss curves comparable to pre-composite runs.
+
+        Notes
+        -----
+        When ``daily_weight == 0`` (the default) or when the output is
+        single-horizon (1-D or horizon dim == 1), this is identical to the
+        pre-existing interval-only loss — no extra compute and no behaviour
+        change.
+        """
+        # Interval term — same as before.
+        interval_per_sample = criterion(y_pred, y_true)
+        if w_batch is not None:
+            loss = ForecastModel._weighted_mean_loss(interval_per_sample, w_batch)
+        else:
+            loss = interval_per_sample.mean()
+
+        # Daily term only meaningful for multi-horizon outputs.
+        if daily_weight > 0.0 and y_pred.dim() == 2 and y_pred.size(1) > 1:
+            yp_mean = y_pred.mean(dim=1)
+            yt_mean = y_true.mean(dim=1)
+            daily_per_sample = criterion(yp_mean, yt_mean)
+            if w_batch is not None:
+                daily_loss = ForecastModel._weighted_mean_loss(
+                    daily_per_sample, w_batch
+                )
+            else:
+                daily_loss = daily_per_sample.mean()
+            loss = loss + daily_weight * daily_loss
+
+        return loss, interval_per_sample
 
     def _validate_fitted(self) -> None:
         """

@@ -218,6 +218,15 @@
                     <option value="zscore" {% if exp_config and exp_config.output_activation == 'zscore' %}selected{% endif %}>Z-score (normalised target, LSTM)</option>
                 </select>
             </div>
+            <div class="settings-toggle-field">
+                <label class="toggle-switch">
+                    <input type="checkbox" data-field="daily_loss_weight"
+                           {% if exp_config and exp_config.daily_loss_weight and exp_config.daily_loss_weight > 0 %}checked{% endif %}
+                           onchange="saveSettingsToggle(this, 'daily_loss_weight')">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span class="field-label">Daily cumulative loss (neural) <span class="info-tip">?<span class="tip-text">Adds an extra loss term that penalises error in the forecast's aggregate over the horizon window. With 30-min intervals × 48 horizons this is the 24 h rolling cumulative — useful when per-interval predictions look fine but their daily total drifts. Applies to torch neural models (LSTM, CNN, N-BEATS, N-HiTS, TiDE, DLinear, TSMixer, PatchTST, iTransformer, Crossformer, TimesNet, SparseTSF); silently ignored by NeuralProphet and tree models (LightGBM, XGBoost).</span></span></span>
+            </div>
         </div>
     </div>
 

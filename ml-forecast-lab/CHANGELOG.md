@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.16.0
+
+### Added
+
+- **Daily cumulative loss (optional)** — new per-experiment toggle that adds a
+  horizon-aggregate term to the training loss of all 12 torch neural
+  backends. Useful for cumulative-origin targets (e.g.
+  `sensor.mixergy_demand_today`, energy meters) where per-interval errors
+  otherwise accumulate across the forecast window into a wrong daily total.
+
+  **Loss form:** `L = L_interval(ŷ, y) + λ · L_interval(mean_H(ŷ), mean_H(y))`
+  where the second term applies the existing `loss_fn` (MSE / MAE / Huber) to
+  the mean-over-horizons of each sample. With `future_periods=48` and
+  `interval_minutes=30` the horizon spans 24 h, so the term is exactly a
+  rolling daily cumulative. Using the mean (not sum) keeps both terms on the
+  same scale so λ is intuitive; single-horizon outputs silently skip the
+  daily term.
+
+  **λ:** hardcoded at 0.5 when the toggle is on (a sensible
+  "daily term is half as important as interval term" default), 0.0 when off.
+  Sophisticated users can still hand-edit `daily_loss_weight` as a float in
+  `mlfl.yaml` — the app.py validator and `ExperimentCfg` field accept any
+  value ≥ 0; the UI toggle just writes the two canonical ones.
+
+  **Applies to:** LSTM, CNN, N-BEATS, N-HiTS, TiDE, DLinear, TSMixer,
+  PatchTST, iTransformer, Crossformer, TimesNet, SparseTSF. Silently ignored
+  by NeuralProphet (internal fit loop, no loss-hook) and tree models
+  (LightGBM, XGBoost — sample-wise gradient API doesn't fit a cross-sample
+  aggregate loss; revisit via post-hoc reconciliation if needed).
+
+  **Implementation:** one new `ForecastModel._composite_horizon_loss`
+  static helper on the base class; each of the 12 backends replaces its
+  `criterion(...).mean()` train and val loss blocks with a single
+  helper call; the hyperparam round-trips through `get_params`/`set_params`.
+  Default 0.0 preserves byte-identical behaviour with pre-2.16 runs.
+
+  UI toggle lives in the experiment Settings → Training section, next to the
+  output-activation selector.
+
 ## 2.15.0
 
 ### Added

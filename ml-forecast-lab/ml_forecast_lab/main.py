@@ -1095,6 +1095,9 @@ class MLForecastLabApp:
                 # Apply experiment-level loss_fn first, then overrides
                 if m.is_neural and hasattr(m, 'loss_fn') and 'loss_fn' not in overrides:
                     m.set_params(loss_fn=exp_cfg.loss_fn)
+                if (m.is_neural and hasattr(m, 'daily_loss_weight')
+                        and 'daily_loss_weight' not in overrides):
+                    m.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
                 if overrides:
                     m.set_params(**overrides)
                     logger.info(f"Applied {len(overrides)} override(s) for {model_name}"
@@ -1305,6 +1308,9 @@ class MLForecastLabApp:
                     overrides = self.config.model_overrides.get(m_name, {})
                     if m.is_neural and hasattr(m, 'loss_fn') and 'loss_fn' not in overrides:
                         m.set_params(loss_fn=exp_cfg.loss_fn)
+                    if (m.is_neural and hasattr(m, 'daily_loss_weight')
+                            and 'daily_loss_weight' not in overrides):
+                        m.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
                     if overrides:
                         m.set_params(**overrides)
                     if 'output_activation' not in overrides:
@@ -1585,6 +1591,9 @@ class MLForecastLabApp:
         overrides = self.config.model_overrides.get(prod_model_name, {})
         if model.is_neural and hasattr(model, 'loss_fn') and 'loss_fn' not in overrides:
             model.set_params(loss_fn=exp_cfg.loss_fn)
+        if (model.is_neural and hasattr(model, 'daily_loss_weight')
+                and 'daily_loss_weight' not in overrides):
+            model.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
         if overrides:
             model.set_params(**overrides)
             logger.info(f"Applied {len(overrides)} override(s) for {prod_model_name}")
@@ -2069,6 +2078,9 @@ class MLForecastLabApp:
             overrides.update(exp_params)
         if model.is_neural and hasattr(model, 'loss_fn') and 'loss_fn' not in overrides:
             model.set_params(loss_fn=exp_cfg.loss_fn)
+        if (model.is_neural and hasattr(model, 'daily_loss_weight')
+                and 'daily_loss_weight' not in overrides):
+            model.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
         if overrides:
             model.set_params(**overrides)
         if 'output_activation' not in overrides:

@@ -124,6 +124,7 @@ class LSTMModel(ForecastModel):
         batch_size: int = 64,
         sequence_length: Optional[int] = None,
         loss_fn: str = 'mse',
+        daily_loss_weight: float = 0.0,
         patience: int = 20,
         output_activation: str = 'linear',
         use_revin: bool = True,
@@ -141,6 +142,7 @@ class LSTMModel(ForecastModel):
         self.batch_size = batch_size
         self.sequence_length = sequence_length
         self.loss_fn = loss_fn
+        self.daily_loss_weight = float(daily_loss_weight)
         self.patience = patience
         self.output_activation = output_activation
         # RevIN (Kim et al. 2022) handles per-window distribution shift. When
@@ -319,12 +321,10 @@ class LSTMModel(ForecastModel):
 
                 optimiser.zero_grad()
                 y_pred = self._model(X_batch)
-                loss_per_sample = criterion(y_pred, y_batch)
-                if w_tr_t is not None:
-                    w_batch = w_tr_t[batch_idx]
-                    loss = self._weighted_mean_loss(loss_per_sample, w_batch)
-                else:
-                    loss = loss_per_sample.mean()
+                w_batch = w_tr_t[batch_idx] if w_tr_t is not None else None
+                loss, loss_per_sample = self._composite_horizon_loss(
+                    y_pred, y_batch, criterion, w_batch, self.daily_loss_weight,
+                )
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self._model.parameters(), max_norm=5.0)
                 optimiser.step()
@@ -340,7 +340,10 @@ class LSTMModel(ForecastModel):
             self._model.eval()
             with torch.no_grad():
                 val_pred = self._model(X_val_t)
-                val_loss = criterion(val_pred, y_val_t).mean().item()
+                val_loss_t, _ = self._composite_horizon_loss(
+                    val_pred, y_val_t, criterion, None, self.daily_loss_weight,
+                )
+                val_loss = val_loss_t.item()
 
             avg_loss = epoch_loss / max(n_batches, 1)
             self._training_history["train_loss"].append(avg_loss)
@@ -458,6 +461,7 @@ class LSTMModel(ForecastModel):
             "dropout": self.dropout, "learning_rate": self.learning_rate,
             "epochs": self.epochs, "batch_size": self.batch_size,
             "sequence_length": self.sequence_length, "loss_fn": self.loss_fn,
+            "daily_loss_weight": self.daily_loss_weight,
             "patience": self.patience,
             "output_activation": self.output_activation,
             "use_revin": self.use_revin,
@@ -467,6 +471,7 @@ class LSTMModel(ForecastModel):
     def set_params(self, **kwargs: Any) -> None:
         valid = {"hidden_size", "num_layers", "dropout", "learning_rate",
                  "epochs", "batch_size", "sequence_length", "loss_fn",
+                 "daily_loss_weight",
                  "patience",
                  "output_activation",
                  "use_revin", "target_channel"}

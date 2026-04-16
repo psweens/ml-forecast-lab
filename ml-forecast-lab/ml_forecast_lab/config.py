@@ -268,6 +268,16 @@ class ExperimentCfg:
     loss_fn: str = 'mse'
     """Training loss for neural models: 'mse', 'mae', or 'huber'."""
 
+    daily_loss_weight: float = 0.0
+    """Weight λ for an optional horizon-sum (cumulative) loss term added to the
+    per-interval loss during neural training. 0.0 disables it (interval loss
+    only — current default). With ``future_periods=48`` and
+    ``interval_minutes=30`` the horizon spans 24 h, so this becomes a rolling
+    daily-cumulative loss. Applied to torch neural backends (LSTM, CNN,
+    N-BEATS, N-HiTS, TiDE, DLinear, TSMixer, PatchTST, iTransformer,
+    Crossformer, TimesNet, SparseTSF); silently ignored by NeuralProphet and
+    tree models. Typical useful range: 0.1–1.0."""
+
     recency_half_life_days: float = 7.0
     """Half-life for exponential recency weighting in days. Recent samples receive
     higher weight during training so models prioritise current patterns.
@@ -314,6 +324,10 @@ class ExperimentCfg:
         if self.recency_half_life_days < 0:
             raise ValueError(
                 f'recency_half_life_days must be >= 0, got {self.recency_half_life_days}'
+            )
+        if self.daily_loss_weight < 0:
+            raise ValueError(
+                f'daily_loss_weight must be >= 0, got {self.daily_loss_weight}'
             )
         valid_activations = {
             'auto', 'linear', 'softplus', 'relu', 'exp', 'sigmoid', 'zscore',
