@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.19.0
+
+### Removed
+
+- **NeuralProphet backend deleted.** The `neuralprophet_backend.py` module,
+  its schema and catalog entries, the optional-backend registration in
+  `main.py`, the sample `mlfl.yaml` entry, and the `neuralprophet` pin in
+  `requirements.txt` are all gone. Docstrings in `config.py` that called
+  out NeuralProphet as a special case have been simplified to just "tree
+  models". Any existing `mlfl.yaml` with `"neuralprophet"` in
+  `models_enabled` will silently skip the model (the registry no longer
+  registers it) — remove the line to keep configs tidy.
+
+### Changed
+
+- **Models tab grouped into Tree Models and Neural Models**, both on the
+  standalone `/models` page and each experiment's Models tab. Grouping is
+  driven by `model_type == 'Tree'` on the existing catalog — no new field.
+- **Model identifiers render as display names across the UI.** A new
+  `model_display` Jinja filter and matching `modelDisplay()` JS helper map
+  internal ids (`cnn`, `lightgbm`, `nbeats`, …) to their catalog
+  `display_name` everywhere user-visible: comparison tables, fold-stability
+  chart legends, holdout / residual legends, feature-importance headings,
+  the tuning banner and holdout chart title, the live-training "Current
+  Model" stat and event log, the model-select dropdowns on Tuning and
+  Covariate Analysis, and the dashboard card's Best Model / Training
+  badge. CNN is now CNN, not cnn.
+- **Descriptions corrected to match implementations.**
+    - LSTM: was "2-layer LSTM …" (the schema allows 1–8 layers);
+      now "Multi-layer LSTM with temporal attention and multi-horizon
+      output head."
+    - TiDE: was "Time-series Dense Encoder with residual MLP
+      encoder-decoder." (undersold the paper implementation); now "Dense
+      encoder-decoder with temporal decoder and global residual skip."
+- **`batch_size` and `loss_fn` excluded from the Optuna search space.**
+  Both now carry `"tunable": False` in `MODEL_PARAM_SCHEMA` and the
+  tuning objective loop skips any spec flagged non-tunable. Rationale:
+  `batch_size` is a compute/memory knob (tuning already force-overrode
+  it to 16), and `loss_fn` decides *what* is being optimised — tuning it
+  makes the composite score non-comparable across trials. Both remain
+  manually configurable on the Models page; `loss_fn` is still set
+  per-experiment in Settings and propagated to every trial via
+  `_apply_experiment_neural_params`.
+
 ## 2.18.0
 
 ### Changed

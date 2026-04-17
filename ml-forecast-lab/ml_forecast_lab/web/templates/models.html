@@ -8,10 +8,11 @@
     <p class="subtitle">Configure default hyperparameters for each model backend. Select which models to train in each experiment's detail page.</p>
 </section>
 
-<section class="section">
-    <div class="experiments-grid" style="grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));">
-        {% for model in models %}
-        <div class="experiment-card model-card" id="card-{{ model.name }}">
+{% set tree_models = models | selectattr('model_type', 'equalto', 'Tree') | list %}
+{% set neural_models = models | rejectattr('model_type', 'equalto', 'Tree') | list %}
+
+{% macro model_card(model) %}
+<div class="experiment-card model-card" id="card-{{ model.name }}">
             <div class="card-header">
                 <h3 class="card-title">{{ model.display_name }}</h3>
                 <span class="status-badge" style="background: rgba(0,212,255,0.15); color: #00d4ff;">{{ model.model_type }}</span>
@@ -87,7 +88,21 @@
                 {% endif %}
             </div>
         </div>
-        {% endfor %}
+{% endmacro %}
+
+<section class="section">
+    <h2 style="color: var(--text-primary); margin-bottom: 0.25rem;">Tree Models</h2>
+    <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">Gradient-boosted decision trees — fast, feature-driven, interpretable via feature importance.</p>
+    <div class="experiments-grid" style="grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));">
+        {% for model in tree_models %}{{ model_card(model) }}{% endfor %}
+    </div>
+</section>
+
+<section class="section">
+    <h2 style="color: var(--text-primary); margin-bottom: 0.25rem;">Neural Models</h2>
+    <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">Deep learning architectures — sequence-aware, benefit from longer history and richer covariate signals.</p>
+    <div class="experiments-grid" style="grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));">
+        {% for model in neural_models %}{{ model_card(model) }}{% endfor %}
     </div>
 </section>
 

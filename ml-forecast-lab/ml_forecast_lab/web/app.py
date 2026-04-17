@@ -382,8 +382,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "num_layers": {"type": "int", "default": 2, "label": "LSTM layers", "min": 1, "max": 8},
             "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
             "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
-            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
-            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
         "cnn": {
             "n_filters": {"type": "int", "default": 32, "label": "Filters per layer", "min": 8, "max": 128},
@@ -392,24 +392,14 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "dilation_base": {"type": "int", "default": 2, "label": "Dilation base", "min": 1, "max": 3},
             "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
             "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
-            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
-            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
-        },
-        "neuralprophet": {
-            "n_lags": {"type": "int", "default": 12, "label": "Autoregressive lags", "min": 1, "max": 100},
-            "n_forecasts": {"type": "int", "default": 1, "label": "Forecast steps", "min": 1, "max": 48},
-            "learning_rate": {"type": "float", "default": 0.01, "label": "Learning rate", "min": 1e-5, "max": 0.1, "step": 1e-4},
-            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
-            "yearly_seasonality": {"type": "bool", "default": False, "label": "Yearly seasonality"},
-            "weekly_seasonality": {"type": "bool", "default": True, "label": "Weekly seasonality"},
-            "daily_seasonality": {"type": "bool", "default": True, "label": "Daily seasonality"},
-            "n_changepoints": {"type": "int", "default": 10, "label": "Trend changepoints", "min": 0, "max": 50},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
         "dlinear": {
             "kernel_size": {"type": "int", "default": 25, "label": "Decomposition kernel", "min": 3, "max": 101},
             "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
-            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
-            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
         "nbeats": {
             "hidden_size": {"type": "int", "default": 64, "label": "Hidden size", "min": 8, "max": 256},
@@ -417,8 +407,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "blocks_per_stack": {"type": "int", "default": 2, "label": "Blocks per stack", "min": 1, "max": 4},
             "n_fc_layers": {"type": "int", "default": 4, "label": "FC layers per block", "min": 1, "max": 6},
             "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
-            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
-            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
         "nhits": {
             "hidden_size": {"type": "int", "default": 64, "label": "Hidden size", "min": 8, "max": 512},
@@ -426,8 +416,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "blocks_per_stack": {"type": "int", "default": 1, "label": "Blocks per stack", "min": 1, "max": 8},
             "n_fc_layers": {"type": "int", "default": 4, "label": "FC layers per block", "min": 1, "max": 8},
             "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
-            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
-            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
         "tide": {
             "hidden_size": {"type": "int", "default": 64, "label": "Hidden size", "min": 8, "max": 512},
@@ -435,23 +425,23 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "decoder_layers": {"type": "int", "default": 2, "label": "Decoder layers", "min": 1, "max": 8},
             "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
             "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
-            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
-            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
         "tsmixer": {
             "n_mixer_layers": {"type": "int", "default": 4, "label": "Mixer layers", "min": 1, "max": 12},
             "hidden": {"type": "int", "default": 64, "label": "Hidden size", "min": 8, "max": 512},
             "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
             "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
-            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
-            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
         "sparsetsf": {
             "period_len": {"type": "int", "default": 48, "label": "Period length", "min": 2, "max": 336},
             "dropout": {"type": "float", "default": 0.1, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
             "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
-            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
-            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
         "patchtst": {
             "patch_len": {"type": "int", "default": 8, "label": "Patch length", "min": 2, "max": 48},
@@ -461,8 +451,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "n_encoder_layers": {"type": "int", "default": 2, "label": "Encoder layers", "min": 1, "max": 8},
             "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
             "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
-            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
-            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
         "itransformer": {
             "d_model": {"type": "int", "default": 32, "label": "Model dimension", "min": 8, "max": 256},
@@ -471,8 +461,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "dim_feedforward": {"type": "int", "default": 64, "label": "Feedforward dimension", "min": 16, "max": 512},
             "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
             "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
-            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
-            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
         "crossformer": {
             "seg_len": {"type": "int", "default": 6, "label": "Segment length", "min": 2, "max": 48},
@@ -481,8 +471,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "n_layers": {"type": "int", "default": 2, "label": "Encoder layers", "min": 1, "max": 8},
             "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
             "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
-            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
-            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
         "timesnet": {
             "d_model": {"type": "int", "default": 16, "label": "Model dimension", "min": 8, "max": 256},
@@ -490,8 +480,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "top_k": {"type": "int", "default": 3, "label": "Top-K periods", "min": 1, "max": 10},
             "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
             "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
-            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512},
-            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"]},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
     }
 
@@ -574,14 +564,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
          "description": "Gradient boosting framework optimised for speed and memory efficiency.",
          "speed": "⚡ Very Fast", "best_for": "Default choice — fast and accurate"},
         {"name": "lstm", "display_name": "LSTM", "model_type": "PyTorch",
-         "description": "2-layer LSTM with temporal attention and multi-horizon output head.",
+         "description": "Multi-layer LSTM with temporal attention and multi-horizon output head.",
          "speed": "🔶 Moderate", "best_for": "Complex temporal patterns"},
         {"name": "nbeats", "display_name": "N-BEATS", "model_type": "PyTorch",
          "description": "Neural Basis Expansion with doubly-residual stacking.",
          "speed": "🔶 Moderate", "best_for": "Pure time-series without covariates"},
-        {"name": "neuralprophet", "display_name": "NeuralProphet", "model_type": "PyTorch",
-         "description": "Neural forecasting with trend decomposition and automatic seasonality.",
-         "speed": "🔶 Moderate", "best_for": "Strong seasonality + covariates"},
         {"name": "nhits", "display_name": "N-HiTS", "model_type": "PyTorch",
          "description": "Hierarchical interpolation with multi-rate temporal downsampling.",
          "speed": "🔶 Moderate", "best_for": "Multi-scale temporal patterns"},
@@ -592,7 +579,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
          "description": "Period-based sparse cross-period linear model.",
          "speed": "⚡ Fast", "best_for": "Strong daily/weekly periodicity"},
         {"name": "tide", "display_name": "TiDE", "model_type": "PyTorch",
-         "description": "Time-series Dense Encoder with residual MLP encoder-decoder.",
+         "description": "Dense encoder-decoder with temporal decoder and global residual skip.",
          "speed": "🔶 Moderate", "best_for": "Efficient long-horizon forecasting"},
         {"name": "timesnet", "display_name": "TimesNet", "model_type": "PyTorch",
          "description": "FFT period detection with 2D inception convolutions.",
@@ -604,6 +591,16 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
          "description": "Extreme gradient boosting with L1/L2 regularisation.",
          "speed": "⚡ Fast", "best_for": "When LightGBM overfits"},
     ]
+
+    _MODEL_DISPLAY_NAMES = {m["name"]: m["display_name"] for m in MODEL_CATALOG}
+
+    def _model_display(name):
+        """Map a model identifier (e.g. 'cnn') to its display name ('CNN')."""
+        if not name:
+            return name
+        return _MODEL_DISPLAY_NAMES.get(name, name)
+
+    templates.env.filters["model_display"] = _model_display
 
     @app.get("/models", response_class=Response)
     async def models_page(request: Request):

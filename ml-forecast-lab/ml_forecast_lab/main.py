@@ -87,7 +87,7 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
     / ``optimiser='adamw'`` / ``daily_loss_weight=0`` regardless of what
     the user picked in Settings.
 
-    Silently no-ops for tree backends and NeuralProphet (``hasattr`` guard).
+    Silently no-ops for tree backends (``hasattr`` guard).
     Skips any param already present in ``overrides`` so user-provided
     ``model_overrides`` and Optuna-swept params take priority.
 
@@ -309,7 +309,6 @@ class MLForecastLabApp:
 
             # Register optional backends
             _optional_backends = [
-                ("neuralprophet", "neuralprophet_backend", "NeuralProphetModel"),
                 ("dlinear", "dlinear_backend", "DLinearModel"),
                 ("nbeats", "nbeats_backend", "NBeatsModel"),
                 ("nhits", "nhits_backend", "NHiTSModel"),
@@ -3135,6 +3134,8 @@ class MLForecastLabApp:
 
             params = {}
             for pname, spec in param_schema.items():
+                if spec.get("tunable", True) is False:
+                    continue
                 ptype = spec.get("type", "float")
                 if ptype == "int":
                     params[pname] = trial.suggest_int(pname, spec["min"], spec["max"])

@@ -67,7 +67,6 @@ experiments:
       - "xgboost"
       - "lstm"
       - "cnn"
-      - "neuralprophet"
       # - "dlinear"                 # Decomposition-Linear (Zeng et al., 2023)
       # - "nbeats"                  # Neural Basis Expansion (Oreshkin et al., 2020)
       # - "nhits"                   # Neural Hierarchical Interpolation (Challu et al., 2023)

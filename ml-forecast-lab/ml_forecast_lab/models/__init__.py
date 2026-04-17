@@ -37,7 +37,6 @@ _optional_imports = {
     'iTransformerModel': 'itransformer_backend',
     'CrossformerModel': 'crossformer_backend',
     'TimesNetModel': 'timesnet_backend',
-    'NeuralProphetModel': 'neuralprophet_backend',
 }
 
 for _cls_name, _module in _optional_imports.items():

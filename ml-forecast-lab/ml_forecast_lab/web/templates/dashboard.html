@@ -52,7 +52,7 @@
                 {% if exp.best_model and exp.name not in running_experiments %}
                 <div class="card-field">
                     <span class="field-label">{% if exp.mode == 'production' %}Production Model{% else %}Best Model{% endif %}</span>
-                    <span class="field-value color-accent font-bold">{{ exp.best_model }}</span>
+                    <span class="field-value color-accent font-bold">{{ exp.best_model | model_display }}</span>
                 </div>
                 {% endif %}
 
@@ -61,7 +61,7 @@
                     <span class="field-value">
                         {% if exp.name in running_experiments and training_summaries.get(exp.name) %}
                         {% set ts = training_summaries[exp.name] %}
-                        <span class="status-badge status-running training">Training: {{ ts.current_model }}</span>
+                        <span class="status-badge status-running training">Training: {{ ts.current_model | model_display }}</span>
                         {% else %}
                         <span class="status-badge status-{{ exp.last_benchmark_status | lower }}">
                             {{ exp.last_benchmark_status | title }}

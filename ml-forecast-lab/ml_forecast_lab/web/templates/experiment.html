@@ -29,7 +29,7 @@
         </span>
         <span id="benchmark-timestamp" data-iso="{{ benchmark_result.timestamp }}">{{ benchmark_result.timestamp[:19] | replace('T', ' ') }}</span>
         {% if benchmark_result.best_model_name %}
-        <span>Best: <strong style="color:var(--accent-secondary);">{{ benchmark_result.best_model_name }}</strong></span>
+        <span>Best: <strong style="color:var(--accent-secondary);">{{ benchmark_result.best_model_name | model_display }}</strong></span>
         {% endif %}
         {% if benchmark_result.error_message %}
         <span style="color:var(--error);">{{ benchmark_result.error_message }}</span>
@@ -42,14 +42,15 @@
             <span id="btn-run-text">{% if is_running %}Running...{% else %}Run Pipeline{% endif %}</span>
         </button>
         {% if experiment.best_model %}
+            {% set _publish_model = experiment.selected_model or experiment.best_model %}
             {% if experiment.mode == 'production' %}
-        <button class="btn btn-success" disabled title="Publishing forecasts with {{ experiment.selected_model or experiment.best_model }}">
-            Publishing {{ experiment.selected_model or experiment.best_model }}
+        <button class="btn btn-success" disabled title="Publishing forecasts with {{ _publish_model | model_display }}">
+            Publishing {{ _publish_model | model_display }}
         </button>
             {% else %}
         <button class="btn btn-success" id="promote-btn"
                 onclick="promoteSelected('{{ experiment.name }}')">
-            Publish <span id="promote-model-name">{{ experiment.selected_model or experiment.best_model }}</span>
+            Publish <span id="promote-model-name">{{ _publish_model | model_display }}</span>
         </button>
             {% endif %}
         {% endif %}
@@ -232,7 +233,7 @@
                            onchange="saveSettingsToggle(this, 'daily_loss_weight')">
                     <span class="toggle-slider"></span>
                 </label>
-                <span class="field-label">Daily cumulative loss (neural) <span class="info-tip">?<span class="tip-text">Adds a loss term that penalises error in the predicted cumulative curve at every horizon step. Unlike the per-interval loss (which only cares about local values and tends to regress to the mean on sparse targets), this constrains the SHAPE of the cumulative trajectory — so predictions have to match the actual cumulative curve as it accumulates through the day. Designed for cumulative-origin targets like <code>sensor.x_today</code> (daily demand, daily energy), where users evaluate on the cumulative curve rather than per-interval values. Applies to torch neural models (LSTM, CNN, N-BEATS, N-HiTS, TiDE, DLinear, TSMixer, PatchTST, iTransformer, Crossformer, TimesNet, SparseTSF); silently ignored by NeuralProphet and tree models (LightGBM, XGBoost).</span></span></span>
+                <span class="field-label">Daily cumulative loss (neural) <span class="info-tip">?<span class="tip-text">Adds a loss term that penalises error in the predicted cumulative curve at every horizon step. Unlike the per-interval loss (which only cares about local values and tends to regress to the mean on sparse targets), this constrains the SHAPE of the cumulative trajectory — so predictions have to match the actual cumulative curve as it accumulates through the day. Designed for cumulative-origin targets like <code>sensor.x_today</code> (daily demand, daily energy), where users evaluate on the cumulative curve rather than per-interval values. Applies to torch neural models (LSTM, CNN, N-BEATS, N-HiTS, TiDE, DLinear, TSMixer, PatchTST, iTransformer, Crossformer, TimesNet, SparseTSF); silently ignored by tree models (LightGBM, XGBoost).</span></span></span>
             </div>
         </div>
     </div>
@@ -329,33 +330,47 @@
 
 <!-- ====== TAB: Models (per-experiment selection) ====== -->
 <div class="tab-section" id="sec-models" style="display:none;">
+{% set exp_tree_models = model_catalog | selectattr('model_type', 'equalto', 'Tree') | list %}
+{% set exp_neural_models = model_catalog | rejectattr('model_type', 'equalto', 'Tree') | list %}
+
+{% macro exp_model_card(m) %}
+<div class="experiment-card model-card" id="exp-model-card-{{ m.name }}" style="{% if m.name not in exp_models_enabled %}opacity:0.5;{% endif %}">
+    <div class="card-header" style="padding:0.75rem 1rem;">
+        <h3 class="card-title" style="font-size:1rem;">{{ m.display_name }}</h3>
+        <div style="display:flex;align-items:center;gap:0.5rem;">
+            <span class="status-badge" style="background:rgba(0,212,255,0.15);color:#00d4ff;font-size:0.7rem;padding:0.1rem 0.4rem;">{{ m.model_type }}</span>
+            <label class="toggle-switch">
+                <input type="checkbox" data-model="{{ m.name }}"
+                       {% if m.name in exp_models_enabled %}checked{% endif %}
+                       onchange="toggleExpModel(this, '{{ m.name }}')">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+    </div>
+    <div class="card-body" style="padding:0.5rem 1rem 0.75rem;">
+        <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:0.25rem;">{{ m.description }}</p>
+        <div style="display:flex;gap:0.75rem;font-size:0.75rem;color:var(--text-muted);">
+            <span>{{ m.speed }}</span>
+            <span style="color:var(--accent-secondary);">{{ m.best_for }}</span>
+        </div>
+    </div>
+</div>
+{% endmacro %}
+
 <section class="section">
     <h2>Model Selection</h2>
     <p style="color:var(--text-secondary);margin-bottom:1rem;">Choose which models to include when running the pipeline. Visit the <a href="{{ base_path | default('') }}/models" style="color:var(--accent-secondary);">Models</a> page to configure hyperparameters.</p>
+
+    <h3 style="color:var(--text-primary);margin:1rem 0 0.25rem;">Tree Models</h3>
+    <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:0.75rem;">Gradient-boosted decision trees — fast, feature-driven, interpretable via feature importance.</p>
     <div class="experiments-grid" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr));">
-        {% for m in model_catalog %}
-        <div class="experiment-card model-card" id="exp-model-card-{{ m.name }}" style="{% if m.name not in exp_models_enabled %}opacity:0.5;{% endif %}">
-            <div class="card-header" style="padding:0.75rem 1rem;">
-                <h3 class="card-title" style="font-size:1rem;">{{ m.display_name }}</h3>
-                <div style="display:flex;align-items:center;gap:0.5rem;">
-                    <span class="status-badge" style="background:rgba(0,212,255,0.15);color:#00d4ff;font-size:0.7rem;padding:0.1rem 0.4rem;">{{ m.model_type }}</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" data-model="{{ m.name }}"
-                               {% if m.name in exp_models_enabled %}checked{% endif %}
-                               onchange="toggleExpModel(this, '{{ m.name }}')">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-            </div>
-            <div class="card-body" style="padding:0.5rem 1rem 0.75rem;">
-                <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:0.25rem;">{{ m.description }}</p>
-                <div style="display:flex;gap:0.75rem;font-size:0.75rem;color:var(--text-muted);">
-                    <span>{{ m.speed }}</span>
-                    <span style="color:var(--accent-secondary);">{{ m.best_for }}</span>
-                </div>
-            </div>
-        </div>
-        {% endfor %}
+        {% for m in exp_tree_models %}{{ exp_model_card(m) }}{% endfor %}
+    </div>
+
+    <h3 style="color:var(--text-primary);margin:1.5rem 0 0.25rem;">Neural Models</h3>
+    <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:0.75rem;">Deep learning architectures — sequence-aware, benefit from longer history and richer covariate signals.</p>
+    <div class="experiments-grid" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr));">
+        {% for m in exp_neural_models %}{{ exp_model_card(m) }}{% endfor %}
     </div>
 </section>
 </div>
@@ -452,7 +467,7 @@
                                onchange="selectModel('{{ experiment.name }}', '{{ model.name }}')"
                                style="accent-color:var(--accent-secondary);cursor:pointer;">
                     </td>
-                    <td class="model-name">{{ model.name }}</td>
+                    <td class="model-name">{{ model.name | model_display }}</td>
                     <td>
                         <span class="metric-value">{{ "%.3f" | format(model.mae.mean) }}</span>
                         <span class="metric-std">± {{ "%.3f" | format(model.mae.std) }}</span>
@@ -501,7 +516,7 @@
                 {% for model in models %}
                 {% if model.daily_mae %}
                 <tr>
-                    <td class="model-name">{{ model.name }}</td>
+                    <td class="model-name">{{ model.name | model_display }}</td>
                     <td>
                         <span class="metric-value">{{ "%.3f" | format(model.daily_mae.mean) }}</span>
                         <span class="metric-std">± {{ "%.3f" | format(model.daily_mae.std) }}</span>
@@ -538,7 +553,7 @@
             {% for model in models %}
             {% if model.fold_results %}
             <div class="fold-section">
-                <h4>{{ model.name }}</h4>
+                <h4>{{ model.name | model_display }}</h4>
                 <table class="fold-table">
                     <thead>
                         <tr>
@@ -640,7 +655,7 @@
                 {% set mae_underfit = model.mae.mean > best_test_mae * 1.5 if best_test_mae > 0 else false %}
                 {% set rmse_underfit = model.rmse.mean > best_test_rmse * 1.5 if best_test_rmse > 0 else false %}
                 <tr>
-                    <td><span class="model-name">{{ model.name }}</span></td>
+                    <td><span class="model-name">{{ model.name | model_display }}</span></td>
                     <td><span class="metric-value">{{ "%.3f" | format(model.train_mae.mean) }}</span></td>
                     <td><span class="metric-value">{{ "%.3f" | format(model.mae.mean) }}</span></td>
                     <td class="gap-cell" style="color: {% if mae_ratio > 1.0 %}var(--error){% elif mae_ratio > 0.3 or mae_underfit %}var(--warning){% else %}var(--success){% endif %};">
@@ -675,7 +690,7 @@
     <h2>Feature Importance <span class="info-tip">?<span class="tip-text">Shows which input features contribute most to the model's predictions. Higher importance means the feature has more influence. Only available for tree-based models (LightGBM, XGBoost).</span></span></h2>
     <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:1rem;">Feature importance is available for tree-based models. For neural models, use the <strong>Covariate Analysis</strong> tab to test the impact of each covariate on all model types.</p>
     {% for fi in feature_importances %}
-    <h3 style="color: var(--accent-secondary); margin-bottom: 0.5rem;">{{ fi.model_name }}</h3>
+    <h3 style="color: var(--accent-secondary); margin-bottom: 0.5rem;">{{ fi.model_name | model_display }}</h3>
     <div id="feature-importance-{{ fi.model_name }}" style="min-height: 400px;"></div>
     {% endfor %}
 </section>
@@ -694,7 +709,7 @@
             <select id="tuning-model" class="setting-input" style="padding:0.4rem 0.6rem;font-size:0.9rem;min-width:180px;">
                 {% set sel_model = experiment.selected_model or best_model %}
                 {% for m in exp_models_enabled %}
-                <option value="{{ m }}" {% if m == sel_model %}selected{% endif %}>{{ m }}{% if m == sel_model %} (selected){% endif %}</option>
+                <option value="{{ m }}" {% if m == sel_model %}selected{% endif %}>{{ m | model_display }}{% if m == sel_model %} (selected){% endif %}</option>
                 {% endfor %}
             </select>
         </div>
@@ -750,13 +765,13 @@
                 <span style="color:var(--success);font-weight:600;">Best — Trial #{{ tuning_result.best_trial_id }}, composite {{ "%.4f"|format(tuning_result.best_score) }}</span>
                 <button class="btn btn-success" style="padding:0.4rem 1rem;font-size:0.85rem;"
                         onclick="applyTuning('{{ experiment.name }}', this)"
-                        title="Save tuned params to mlfl.yaml, promote {{ tuning_result.model_name }} to production, and start a fresh retrain so the live forecast picks up the new params immediately.">
+                        title="Save tuned params to mlfl.yaml, promote {{ tuning_result.model_name | model_display }} to production, and start a fresh retrain so the live forecast picks up the new params immediately.">
                     Apply Tuned Params, Promote &amp; Retrain
                 </button>
             </div>
             <p style="margin:0 0 0.4rem 0;color:var(--text-secondary);font-size:0.82rem;">
                 Clicking the button above writes the tuned params to <code style="color:var(--text-muted);">mlfl.yaml</code>,
-                marks <strong style="color:var(--text-primary);">{{ tuning_result.model_name }}</strong> as the production
+                marks <strong style="color:var(--text-primary);">{{ tuning_result.model_name | model_display }}</strong> as the production
                 model, and immediately kicks off a fresh retrain — you don't need to wait for the next scheduled cycle.
             </p>
             <table style="border:none;border-collapse:collapse;width:100%;font-size:0.82rem;">
@@ -864,7 +879,7 @@
             {% set sel_model = experiment.selected_model or best_model %}
             <select id="covariate-analysis-model" class="setting-input" style="padding:0.4rem 0.6rem;font-size:0.9rem;min-width:180px;">
                 {% for model in models %}
-                <option value="{{ model.name }}" {% if model.name == sel_model %}selected{% endif %}>{{ model.name }}{% if model.name == sel_model %} (selected){% endif %}</option>
+                <option value="{{ model.name }}" {% if model.name == sel_model %}selected{% endif %}>{{ model.name | model_display }}{% if model.name == sel_model %} (selected){% endif %}</option>
                 {% endfor %}
                 <option value="all">All models</option>
             </select>
@@ -912,7 +927,7 @@
                 <tr>
                     <th>Configuration</th>
                     {% for model in covariate_analysis.model_names %}
-                    <th>{{ model }}</th>
+                    <th>{{ model | model_display }}</th>
                     {% endfor %}
                 </tr>
             </thead>
@@ -1393,6 +1408,14 @@ window.showTab = function(el) {
         '#fb923c', '#a78bfa', '#34d399', '#f87171', '#facc15'
     ];
 
+    // Model-id → display-name mapping, derived from MODEL_CATALOG server-side
+    // so chart legends and live training labels show proper-cased names.
+    var MODEL_DISPLAY = {{ model_catalog | map(attribute='name') | list | tojson }}.reduce(function(acc, n, i) {
+        acc[n] = {{ model_catalog | map(attribute='display_name') | list | tojson }}[i];
+        return acc;
+    }, {});
+    function modelDisplay(name) { return (name && MODEL_DISPLAY[name]) || name; }
+
     // ======== Predictions + Residuals charts ========
     {% if lab_forecast and lab_forecast.model_predictions %}
     var labData = {{ lab_forecast.model_dump() | tojson }};
@@ -1422,7 +1445,7 @@ window.showTab = function(el) {
             traces.push({
                 x: mp.timestamps,
                 y: cumulative ? cumsum(mp.predictions, mp.timestamps) : mp.predictions,
-                name: mp.model_name, mode: 'lines',
+                name: modelDisplay(mp.model_name), mode: 'lines',
                 line: { width: 2 }
             });
         });
@@ -1444,7 +1467,7 @@ window.showTab = function(el) {
             traces.push({
                 x: mp.timestamps,
                 y: mp.actuals.map(function(a, i) { return (a !== null && a !== undefined) ? a - mp.predictions[i] : null; }),
-                name: mp.model_name, mode: 'lines',
+                name: modelDisplay(mp.model_name), mode: 'lines',
                 line: { width: 1.5 }
             });
         });
@@ -1495,7 +1518,7 @@ window.showTab = function(el) {
                 traces.push({
                     x: model.fold_results.map(function(_, i) { return 'Fold ' + (i + 1); }),
                     y: model.fold_results.map(function(f) { return f[metric.key] || 0; }),
-                    name: model.name, mode: 'lines+markers',
+                    name: modelDisplay(model.name), mode: 'lines+markers',
                     line: { width: 2 },
                     marker: { size: 7 }
                 });
@@ -1541,7 +1564,7 @@ window.showTab = function(el) {
             { x: _tuningTs, y: d, name: 'Default params', mode: 'lines', line: { color: '#ff6b6b', width: 2 } },
             { x: _tuningTs, y: t, name: 'Tuned params', mode: 'lines', line: { color: '#ffd93d', width: 2 } }
         ], {
-            title: (cumulative ? 'Daily Cumulative ' : '') + '{{ tuning_result.model_name }} — Default vs Tuned',
+            title: (cumulative ? 'Daily Cumulative ' : '') + '{{ tuning_result.model_name | model_display }} — Default vs Tuned',
             xaxis: { title: 'Time', gridcolor: '#2d3561' },
             yaxis: { title: cumulative ? 'Daily Cumulative{{ " (" + units + ")" if units else "" }}' : 'Value{{ " (" + units + ")" if units else "" }}', gridcolor: '#2d3561' },
             hovermode: 'x unified', plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
@@ -1987,7 +2010,7 @@ window.showTab = function(el) {
                 y: features.map(function(f) { return f.name; }).reverse(),
                 type: 'bar', orientation: 'h', marker: { color: '#ff6b6b' }
             }], {
-                title: '{{ fi.model_name }} — Top Features',
+                title: '{{ fi.model_name | model_display }} — Top Features',
                 xaxis: { title: 'Importance', gridcolor: '#2d3561' },
                 plot_bgcolor: '#16213e', paper_bgcolor: '#1a1a2e',
                 font: { color: '#e0e0e0' }, margin: { l: 200, r: 20, t: 50, b: 50 }
@@ -2326,8 +2349,8 @@ window.showTab = function(el) {
                 addModelToDropdown(ev.model_name);
                 displayModel = ev.model_name;
                 document.getElementById('model-select').value = ev.model_name;
-                document.getElementById('stat-model').textContent = ev.model_name;
-                logEvent('info', 'Started: ' + ev.model_name + ' (' + ev.message + ')');
+                document.getElementById('stat-model').textContent = modelDisplay(ev.model_name);
+                logEvent('info', 'Started: ' + modelDisplay(ev.model_name) + ' (' + ev.message + ')');
                 resetStats();
                 if (!isReplaying) renderChartForModel(displayModel);
                 break;
@@ -2397,7 +2420,7 @@ window.showTab = function(el) {
     function addModelToDropdown(modelName) {
         if (knownModels.indexOf(modelName) >= 0) return;
         knownModels.push(modelName);
-        var opt = document.createElement('option'); opt.value = modelName; opt.textContent = modelName;
+        var opt = document.createElement('option'); opt.value = modelName; opt.textContent = modelDisplay(modelName);
         document.getElementById('model-select').appendChild(opt);
     }
 
@@ -2405,7 +2428,7 @@ window.showTab = function(el) {
 
     function renderChartForModel(modelName) {
         var modelData = allLossData[modelName];
-        if (!modelData) { CHART_LAYOUT.title = modelName + ' — Training & Validation Loss'; Plotly.newPlot('loss-chart', [], CHART_LAYOUT, { responsive: true, displayModeBar: false }); foldTraceMap = {}; return; }
+        if (!modelData) { CHART_LAYOUT.title = modelDisplay(modelName) + ' — Training & Validation Loss'; Plotly.newPlot('loss-chart', [], CHART_LAYOUT, { responsive: true, displayModeBar: false }); foldTraceMap = {}; return; }
         var traces = [], colorIdx = 0; foldTraceMap = {};
         var foldKeys = Object.keys(modelData).sort();
         for (var k = 0; k < foldKeys.length; k++) {
@@ -2417,7 +2440,7 @@ window.showTab = function(el) {
             foldTraceMap[foldKey] = { trainIdx: trainIdx, valIdx: valIdx };
             colorIdx++;
         }
-        CHART_LAYOUT.title = modelName + ' — Training & Validation Loss';
+        CHART_LAYOUT.title = modelDisplay(modelName) + ' — Training & Validation Loss';
         Plotly.newPlot('loss-chart', traces, CHART_LAYOUT, { responsive: true, displayModeBar: false });
     }
 

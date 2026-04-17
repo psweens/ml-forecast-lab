@@ -192,7 +192,7 @@ class ExperimentCfg:
       denormalisation. Superseded by RevIN when ``use_revin=True`` on the backend
       — the two schemes are mutually exclusive and RevIN owns the scale.
 
-    Tree-based models (lightgbm/xgboost) and NeuralProphet ignore this field."""
+    Tree-based models (lightgbm/xgboost) ignore this field."""
 
     use_revin: bool = True
     """Reversible Instance Normalization (Kim et al. 2022,
@@ -207,8 +207,8 @@ class ExperimentCfg:
 
     N-BEATS and N-HiTS ignore this flag: their doubly-residual backcast-
     subtraction stacking already handles instance-level normalisation, and
-    stacking RevIN on top would double-normalise. Tree-based models and
-    NeuralProphet ignore this field entirely.
+    stacking RevIN on top would double-normalise. Tree-based models ignore
+    this field entirely.
 
     When True, the ``output_activation='zscore'`` path becomes a no-op (RevIN
     already provides per-window scale normalisation). Set False to fall back
@@ -274,8 +274,8 @@ class ExperimentCfg:
     Adam; weight decay is tied to the adaptive learning rate, which means
     frequently-updated parameters receive less effective regularisation). Both
     share the same ``learning_rate`` and ``weight_decay=1e-4``; the difference
-    is purely in how weight decay composes with the adaptive update. Ignored by
-    NeuralProphet and tree models."""
+    is purely in how weight decay composes with the adaptive update. Ignored
+    by tree models."""
 
     daily_loss_weight: float = 0.0
     """Weight λ for the cumulative-trajectory loss term added to the per-interval
@@ -295,9 +295,9 @@ class ExperimentCfg:
     training measurably — the mean is already matched by any unbiased model,
     regardless of the curve shape.
 
-    Applied to torch neural backends only; silently ignored by NeuralProphet
-    and tree models. Typical useful range: 0.1–1.0 (stronger under MSE than
-    MAE due to loss geometry)."""
+    Applied to torch neural backends only; silently ignored by tree models.
+    Typical useful range: 0.1–1.0 (stronger under MSE than MAE due to loss
+    geometry)."""
 
     recency_half_life_days: float = 7.0
     """Half-life for exponential recency weighting in days. Recent samples receive
