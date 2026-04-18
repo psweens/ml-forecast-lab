@@ -48,6 +48,101 @@ def _atomic_yaml_write(config_path: Path, data: dict) -> None:
 
 
 @dataclass
+class SubtractCfg:
+    """Configuration for a single load-subtract sensor.
+
+    Represents one signal to subtract from the target before training /
+    forecasting — e.g. EV charging or an iBoost solar-divert dump to remove
+    those contributions from a whole-house load signal so the model learns
+    only the baseline household pattern.
+
+    Robustness fields encode the checklist:
+
+    - ``source`` makes cumulative semantics explicit (no inference)
+    - ``on_missing`` decides what to do with ``unavailable`` / ``unknown`` /
+      gap rows — **never silently coerced to 0** unless you ask for it
+    - ``scale`` lets you fix a unit mismatch (e.g. Wh → kWh = 0.001) at
+      config time rather than hiding it in preprocessing
+    - ``max_fraction_of_load`` + ``max_fraction_violation_pct`` are the
+      fail-fast guard for unit bugs or the subtract sensor measuring more
+      than the parent
+    """
+
+    entity_id: str
+    """Home Assistant sensor entity_id to subtract."""
+
+    source: str = "auto"
+    """Cumulative semantics of the sensor. One of:
+
+    - ``cumulative_daily``: resets every day (e.g. ``*_today`` energy sensors)
+    - ``cumulative_monotonic``: monotonically increasing (e.g. utility meter)
+    - ``interval``: already per-interval values (kWh / interval or W)
+    - ``auto``: infer from the target's ``source_is_cumulative`` /
+      ``reset_daily`` — only safe when the subtract sensor has the same
+      semantics as the parent load sensor
+
+    Pick explicitly; ``auto`` is the convenience default but leaves a bug
+    surface when you mix sensor types."""
+
+    on_missing: str = "zero"
+    """Policy for unavailable / gap rows in the subtract sensor:
+
+    - ``zero``: fill with 0.0 (common for EV / iBoost — missing often means
+      "wasn't on"). Audit log records the filled count so you can spot
+      pathological cases.
+    - ``drop``: drop the row from the load series. Shrinks the training
+      set but avoids fabricated zeros if "missing" does not mean "idle".
+    - ``error``: raise ``ValueError``. Strictest — use when any gap is a
+      data-pipeline bug you want to surface.
+    """
+
+    scale: Optional[float] = None
+    """Optional multiplier applied before subtraction — use to fix unit
+    mismatches (e.g. Wh → kWh: ``scale: 0.001``). ``None`` = no scaling."""
+
+    max_fraction_of_load: float = 1.0
+    """Per-row ceiling on ``subtract / load``. Rows where the subtract total
+    exceeds this fraction of the parent load are counted as violations.
+    Set > 1.0 only if you have a legitimate reason to believe subtract can
+    momentarily exceed parent (net metering, sensor latency, etc.)."""
+
+    max_fraction_violation_pct: float = 5.0
+    """Maximum percentage of rows allowed to violate ``max_fraction_of_load``
+    before ``apply_load_subtract`` raises. This is the fail-fast guard for
+    unit bugs and double-counted signals — a 0.1 % violation rate is noise,
+    a 50 % rate almost certainly means Wh vs kWh."""
+
+    def __post_init__(self) -> None:
+        """Validate configuration."""
+        valid_sources = {
+            "auto", "cumulative_daily", "cumulative_monotonic", "interval",
+        }
+        if self.source not in valid_sources:
+            raise ValueError(
+                f"source must be one of {sorted(valid_sources)}, "
+                f"got {self.source!r}"
+            )
+        valid_on_missing = {"zero", "drop", "error"}
+        if self.on_missing not in valid_on_missing:
+            raise ValueError(
+                f"on_missing must be one of {sorted(valid_on_missing)}, "
+                f"got {self.on_missing!r}"
+            )
+        if self.max_fraction_of_load < 0:
+            raise ValueError(
+                f"max_fraction_of_load must be >= 0, "
+                f"got {self.max_fraction_of_load}"
+            )
+        if not 0.0 <= self.max_fraction_violation_pct <= 100.0:
+            raise ValueError(
+                f"max_fraction_violation_pct must be in [0, 100], "
+                f"got {self.max_fraction_violation_pct}"
+            )
+        if not self.entity_id:
+            raise ValueError("entity_id must be non-empty")
+
+
+@dataclass
 class CovariateCfg:
     """Configuration for a single covariate (external feature)."""
 
@@ -236,7 +331,29 @@ class ExperimentCfg:
     values are knowable at forecast-issue time without peeking."""
 
     subtract: List[str] = field(default_factory=list)
-    """Entity IDs to subtract from target (e.g. solar generation from grid import)."""
+    """DEPRECATED stub — prefer ``load_subtract`` with per-sensor config.
+
+    Kept only so existing YAML with ``subtract: [...]`` doesn't crash on load.
+    ``load_config`` emits a deprecation warning and does NOT wire this list
+    into preprocessing. Migrate to ``load_subtract`` for a robust pipeline."""
+
+    load_subtract: List[SubtractCfg] = field(default_factory=list)
+    """Sensors to subtract from the target before feature build / training.
+
+    Use case: the GivTCP whole-house load sensor includes EV charging and
+    iBoost solar-divert dumps, both of which are noise for a model trying to
+    learn *baseline household* load patterns. Subtracting them produces a
+    cleaner training signal.
+
+    Each entry is a ``SubtractCfg`` — see its docstring for the robustness
+    semantics (source type, missing-data policy, unit-scale, fail-fast
+    fraction guard). Subtraction is applied in ``_fetch_and_preprocess``
+    after cumulative→interval conversion and before outlier clipping, so
+    outlier bounds reflect the adjusted (baseline) signal rather than
+    spikes from the subtracted component.
+
+    Double-subtraction is the consumer's problem: if the downstream system
+    (e.g. predbat) also subtracts the same sensors, don't do both."""
 
     mode: str = 'lab'
     """Operational mode: 'lab' (benchmark all models) or 'production' (forecast with best model)."""
@@ -481,6 +598,7 @@ def load_config(config_path: Path | str) -> AppConfig:
 
     exp_fields = {f.name for f in dataclasses.fields(ExperimentCfg)}
     cov_fields = {f.name for f in dataclasses.fields(CovariateCfg)}
+    sub_fields = {f.name for f in dataclasses.fields(SubtractCfg)}
     app_fields = {f.name for f in dataclasses.fields(AppConfig)} - {'experiments'}
 
     # Track whether we need to rewrite the YAML to clean deprecated fields
@@ -507,13 +625,51 @@ def load_config(config_path: Path | str) -> AppConfig:
                 cov = {k: v for k, v in cov.items() if k in cov_fields}
             covariates.append(CovariateCfg(**cov))
 
+        # Parse load_subtract (robust, per-sensor config).
+        #
+        # Each entry must be a mapping with SubtractCfg fields. Plain string
+        # entries are tolerated as a convenience (treated as entity_id with
+        # defaults) but logged as an ambiguity — the defaults may not match
+        # the sensor's actual semantics.
+        load_subtract_data = exp_data.pop('load_subtract', [])
+        load_subtract = []
+        for sub in load_subtract_data:
+            if isinstance(sub, str):
+                logger.warning(
+                    f'load_subtract entry {sub!r} is a bare string; '
+                    f'using SubtractCfg defaults (source=auto, on_missing=zero). '
+                    f'Prefer an explicit mapping with source/on_missing.'
+                )
+                sub = {'entity_id': sub}
+            unknown_sub = set(sub) - sub_fields
+            if unknown_sub:
+                logger.warning(
+                    f'Ignoring unknown load_subtract fields: {unknown_sub}'
+                )
+                sub = {k: v for k, v in sub.items() if k in sub_fields}
+            load_subtract.append(SubtractCfg(**sub))
+
+        # Deprecation: legacy `subtract: [str]` field is a stub that was never
+        # wired into preprocessing. Warn loudly so users migrate to
+        # load_subtract rather than silently ignoring what they set.
+        if exp_data.get('subtract'):
+            logger.warning(
+                f"Experiment {exp_data.get('name', '?')!r}: field 'subtract' "
+                f"is deprecated and has no effect. Migrate to 'load_subtract' "
+                f"with explicit source/on_missing per sensor."
+            )
+
         # Filter unknown experiment fields
         unknown_exp = set(exp_data) - exp_fields
         if unknown_exp:
             logger.warning(f'Ignoring unknown experiment fields: {unknown_exp}')
             exp_data = {k: v for k, v in exp_data.items() if k in exp_fields}
 
-        exp = ExperimentCfg(**exp_data, covariates=covariates)
+        exp = ExperimentCfg(
+            **exp_data,
+            covariates=covariates,
+            load_subtract=load_subtract,
+        )
         experiments.append(exp)
 
     # Extract model_overrides before filtering
@@ -783,6 +939,138 @@ def add_experiment_covariate(
         return True
 
     return False
+
+
+def add_experiment_load_subtract(
+    config_path: Path | str,
+    experiment_name: str,
+    subtract: Dict[str, Any],
+) -> bool:
+    """
+    Add a load-subtract sensor to an experiment's config.
+
+    Parameters
+    ----------
+    config_path : Path or str
+        Path to the YAML configuration file.
+    experiment_name : str
+        Experiment name to update.
+    subtract : dict
+        SubtractCfg fields (must include 'entity_id' at minimum).
+
+    Returns
+    -------
+    bool
+        True if added successfully, False if experiment not found or
+        a subtract with that entity_id already exists.
+
+    Raises
+    ------
+    ValueError
+        If the subtract dict contains invalid fields or fails
+        ``SubtractCfg.__post_init__`` validation.
+    """
+    sub_fields = {f.name for f in dataclasses.fields(SubtractCfg)}
+    unknown = set(subtract) - sub_fields
+    if unknown:
+        raise ValueError(f'Unknown load_subtract fields: {unknown}')
+    if 'entity_id' not in subtract or not subtract['entity_id']:
+        raise ValueError(
+            'load_subtract entry must include a non-empty "entity_id" field'
+        )
+
+    # Validate by constructing (raises ValueError on bad source/on_missing/etc.)
+    SubtractCfg(**subtract)
+
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    for exp in data.get('experiments', []):
+        if exp.get('name') != experiment_name:
+            continue
+        subs = exp.setdefault('load_subtract', [])
+        # Reject duplicate entity_id (bare strings treated as entity_id too)
+        for existing in subs:
+            existing_id = (
+                existing if isinstance(existing, str)
+                else existing.get('entity_id')
+            )
+            if existing_id == subtract['entity_id']:
+                return False
+        # Strip None values so YAML stays clean
+        clean = {k: v for k, v in subtract.items() if v is not None}
+        subs.append(clean)
+        _atomic_yaml_write(config_path, data)
+        return True
+
+    return False
+
+
+def remove_experiment_load_subtract(
+    config_path: Path | str,
+    experiment_name: str,
+    entity_id: str,
+) -> bool:
+    """
+    Remove a load-subtract sensor from an experiment's config.
+
+    ``entity_id`` can be the full entity ID (``sensor.ev_energy_today``) or
+    its short suffix (``ev_energy_today``).
+
+    Returns True if an entry was removed, False if not found.
+    """
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    def _matches(sub, target: str) -> bool:
+        ent = sub if isinstance(sub, str) else (sub.get('entity_id') or '')
+        if not ent:
+            return False
+        return ent == target or ent.split('.')[-1] == target
+
+    removed = False
+    for exp in data.get('experiments', []):
+        if exp.get('name') != experiment_name:
+            continue
+        subs = exp.get('load_subtract', [])
+        original_len = len(subs)
+        exp['load_subtract'] = [s for s in subs if not _matches(s, entity_id)]
+        removed = len(exp['load_subtract']) < original_len
+        break
+
+    if removed:
+        _atomic_yaml_write(config_path, data)
+
+    return removed
+
+
+def clear_experiment_load_subtract(
+    config_path: Path | str,
+    experiment_name: str,
+) -> int:
+    """
+    Remove ALL load-subtract entries from an experiment's config.
+
+    Returns the number of entries that were removed.
+    """
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    removed = 0
+    for exp in data.get('experiments', []):
+        if exp.get('name') != experiment_name:
+            continue
+        removed = len(exp.get('load_subtract', []))
+        exp['load_subtract'] = []
+        break
+
+    if removed > 0:
+        _atomic_yaml_write(config_path, data)
+
+    return removed
 
 
 _EXP_NAME_RE = re.compile(r'^[a-z][a-z0-9_]{0,63}$')

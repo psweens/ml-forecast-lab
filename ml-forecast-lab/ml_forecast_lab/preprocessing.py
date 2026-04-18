@@ -6,12 +6,21 @@ and transformations into a single coherent set of functions.
 """
 
 import logging
-from typing import Literal, Optional, Tuple
+from typing import Any, Literal, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+class LoadSubtractError(ValueError):
+    """Raised when load-subtract fails a fail-fast robustness check.
+
+    The message includes the offending entity_id, the observed violation
+    rate, and the threshold that was exceeded — enough to diagnose a unit
+    mismatch or a double-counted signal without re-running training.
+    """
 
 
 def cumulative_to_interval(
@@ -345,6 +354,316 @@ def subtract_series(
     result = result - subtract_aligned
 
     return result.ffill()
+
+
+def apply_load_subtract(
+    load: pd.Series,
+    subtracts: Sequence[Tuple[Mapping[str, Any], pd.Series]],
+) -> Tuple[pd.Series, dict]:
+    """Subtract one or more sensor signals from a load series, robustly.
+
+    Each ``subtracts`` entry is ``(cfg, series)`` where ``cfg`` is a mapping
+    exposing ``SubtractCfg`` fields (``entity_id``, ``on_missing``, ``scale``,
+    ``max_fraction_of_load``, ``max_fraction_violation_pct``) and ``series``
+    is an already-preprocessed pandas ``Series`` on the same grid as
+    ``load`` (i.e. ``cumulative_to_interval`` / ``resample_to_grid`` already
+    applied by the caller, which owns cumulative semantics via
+    ``cfg.source``).
+
+    This function is ONLY responsible for subtracting — the fetch / cumulative
+    interpretation happens upstream. That separation keeps ``preprocessing.py``
+    independent of the HA client and lets tests pass synthetic frames.
+
+    Robustness checklist (each item returns audit data rather than silent
+    behaviour):
+
+    - **on_missing**: ``zero`` fills gap rows with 0.0; ``drop`` drops the
+      parent-load row for that timestamp; ``error`` raises
+      ``LoadSubtractError``. Never silently coerce NaN to 0 unless you ask.
+    - **scale**: applied before subtraction to fix unit mismatches (Wh→kWh).
+    - **history coverage gap**: if the subtract series is shorter than the
+      load, the first/last gap windows are recorded in ``audit['per_sensor']``
+      with ``gap_start``/``gap_end``.
+    - **negative clip**: after subtraction, the result is ``clip(lower=0)``
+      and the number of clipped rows is counted. > 5 % → warning.
+    - **fraction guard**: per-row ``(sum_subtract / load)`` is checked against
+      ``max_fraction_of_load``. If the violation rate exceeds
+      ``max_fraction_violation_pct`` for ANY sensor, raises
+      ``LoadSubtractError`` with a diagnostic message. This is the unit-bug
+      canary.
+    - **timezone**: load and subtract series must have matching index
+      tz-awareness (both naive or both aware). Mismatch raises before
+      anything else runs.
+
+    Parameters
+    ----------
+    load : pd.Series
+        Target load, already on the experiment's interval grid. Must have a
+        ``DatetimeIndex``.
+    subtracts : sequence of (cfg_mapping, pd.Series)
+        One entry per subtract sensor.
+
+    Returns
+    -------
+    (adjusted_load, audit) : (pd.Series, dict)
+        ``adjusted_load`` is ``load - Σ subtracts`` clipped to [0, ∞), reindexed
+        by ``load.index`` (minus any rows dropped via ``on_missing='drop'``).
+
+        ``audit`` has shape::
+
+            {
+                "n_rows": int,                 # rows after any drops
+                "n_clipped_rows": int,         # rows where raw result < 0
+                "clipped_pct": float,          # 100 * n_clipped_rows / n_rows
+                "load_total_kwh": float,       # Σ load on the kept index
+                "subtract_total_kwh": float,   # Σ (Σ subtracts) on the kept index
+                "per_sensor": [
+                    {
+                        "entity_id": str,
+                        "rows_present": int,       # non-NaN after reindex
+                        "rows_missing": int,       # NaN after reindex
+                        "rows_dropped": int,       # how many load rows removed
+                        "mean_kwh": float,         # mean of post-scale values
+                        "sum_kwh": float,
+                        "max_fraction": float,     # max (this_sensor / load)
+                        "violation_rows": int,     # rows > max_fraction_of_load
+                        "violation_pct": float,
+                        "gap_start": str | None,   # ISO ts of first missing window
+                        "gap_end": str | None,
+                    },
+                    ...
+                ],
+            }
+
+    Raises
+    ------
+    TypeError
+        If ``load`` is not a ``pd.Series`` with a ``DatetimeIndex``.
+    ValueError
+        If a subtract series has mismatched tz-awareness, or a sensor is
+        missing but ``on_missing='error'``.
+    LoadSubtractError
+        If any sensor exceeds its ``max_fraction_violation_pct`` threshold.
+    """
+    if not isinstance(load, pd.Series):
+        raise TypeError("load must be a pandas Series")
+    if not isinstance(load.index, pd.DatetimeIndex):
+        raise TypeError("load must have a DatetimeIndex")
+
+    if not subtracts:
+        # Nothing to do. Return a copy so callers can't accidentally alias.
+        return load.copy(), {
+            "n_rows": len(load),
+            "n_clipped_rows": 0,
+            "clipped_pct": 0.0,
+            "load_total_kwh": float(load.sum()) if len(load) else 0.0,
+            "subtract_total_kwh": 0.0,
+            "per_sensor": [],
+        }
+
+    load_tz_aware = load.index.tz is not None
+
+    # --- Stage 1: align each subtract series, apply scale + on_missing. -----
+    #
+    # We build two parallel structures:
+    #   - scaled_series[i]: the per-sensor series reindexed to load.index
+    #     with scale applied and NaN handled per on_missing.
+    #   - per_sensor_audit[i]: the diagnostic record we'll return.
+    #
+    # We also accumulate a boolean mask of rows to DROP (only used when any
+    # sensor has on_missing='drop'). This mask is applied once at the end
+    # so multiple 'drop' sensors compose correctly.
+    scaled_series: list[pd.Series] = []
+    per_sensor_audit: list[dict] = []
+    drop_mask = pd.Series(False, index=load.index)
+
+    for cfg, raw in subtracts:
+        if not isinstance(raw, pd.Series):
+            raise TypeError(
+                f"subtract series for {cfg.get('entity_id', '?')} is not "
+                f"a pandas Series"
+            )
+        if not isinstance(raw.index, pd.DatetimeIndex):
+            raise TypeError(
+                f"subtract series for {cfg.get('entity_id', '?')} must "
+                f"have a DatetimeIndex"
+            )
+        raw_tz_aware = raw.index.tz is not None
+        if raw_tz_aware != load_tz_aware:
+            raise ValueError(
+                f"subtract series for {cfg.get('entity_id', '?')} has "
+                f"tz-{'aware' if raw_tz_aware else 'naive'} index but load "
+                f"is tz-{'aware' if load_tz_aware else 'naive'}; normalise "
+                f"upstream"
+            )
+
+        entity_id = cfg.get("entity_id", "?")
+        on_missing = cfg.get("on_missing", "zero")
+        scale = cfg.get("scale")
+
+        # Reindex onto the load grid. Anything outside the raw series'
+        # covered range is NaN — that's the signal we act on next.
+        aligned = raw.reindex(load.index)
+        if scale is not None:
+            aligned = aligned * scale
+
+        missing_mask = aligned.isna()
+        rows_missing = int(missing_mask.sum())
+        rows_present = len(aligned) - rows_missing
+
+        # Detect history-coverage gap windows. We only report the FIRST
+        # contiguous leading gap and the last trailing gap, because the
+        # common case is "the sensor didn't exist before install date".
+        # Interior gaps roll up into rows_missing without per-window detail.
+        gap_start: Optional[str] = None
+        gap_end: Optional[str] = None
+        if rows_missing > 0:
+            leading = missing_mask.values.argmax() if missing_mask.iloc[0] else -1
+            if leading >= 0:
+                # find end of leading gap (first non-missing)
+                not_missing = (~missing_mask).values
+                if not_missing.any():
+                    first_present = int(not_missing.argmax())
+                    gap_start = load.index[0].isoformat()
+                    gap_end = load.index[first_present - 1].isoformat()
+                else:
+                    # All missing. Whole window is a gap.
+                    gap_start = load.index[0].isoformat()
+                    gap_end = load.index[-1].isoformat()
+
+        # Apply on_missing policy.
+        rows_dropped = 0
+        if rows_missing > 0:
+            if on_missing == "zero":
+                aligned = aligned.fillna(0.0)
+            elif on_missing == "drop":
+                # Mark these rows for removal at the end.
+                drop_mask = drop_mask | missing_mask
+                rows_dropped = rows_missing
+                aligned = aligned.fillna(0.0)  # placeholder; row will be dropped
+            elif on_missing == "error":
+                first_missing_ts = load.index[missing_mask.values.argmax()]
+                raise ValueError(
+                    f"load_subtract[{entity_id}]: {rows_missing} missing row(s) "
+                    f"with on_missing='error' (first at {first_missing_ts})"
+                )
+            else:
+                raise ValueError(
+                    f"load_subtract[{entity_id}]: unknown on_missing "
+                    f"{on_missing!r}"
+                )
+
+        scaled_series.append(aligned)
+        per_sensor_audit.append({
+            "entity_id": entity_id,
+            "rows_present": rows_present,
+            "rows_missing": rows_missing,
+            "rows_dropped": rows_dropped,
+            "mean_kwh": float(aligned.mean()) if len(aligned) else 0.0,
+            "sum_kwh": float(aligned.sum()) if len(aligned) else 0.0,
+            "max_fraction": 0.0,      # filled in below
+            "violation_rows": 0,       # filled in below
+            "violation_pct": 0.0,      # filled in below
+            "gap_start": gap_start,
+            "gap_end": gap_end,
+        })
+
+    # --- Stage 2: per-sensor fraction-of-load guard (pre-drop). -------------
+    #
+    # Evaluate each sensor's ratio to load on rows where load > 0. Division by
+    # zero/near-zero is the common noise case (e.g. sleeping household), not a
+    # unit bug, so we exclude near-zero load rows from the guard rather than
+    # letting them dominate the violation rate.
+    #
+    # We check BEFORE applying the drop mask so the guard sees the full signal
+    # — dropping rows then checking would hide the bug we're trying to catch.
+    NEAR_ZERO_LOAD = 1e-9
+    valid_load_mask = load.abs() > NEAR_ZERO_LOAD
+    n_valid = int(valid_load_mask.sum())
+
+    for cfg, aligned, audit in zip(
+        (c for c, _ in subtracts), scaled_series, per_sensor_audit
+    ):
+        max_fraction = cfg.get("max_fraction_of_load", 1.0)
+        max_violation_pct = cfg.get("max_fraction_violation_pct", 5.0)
+
+        if n_valid == 0:
+            continue  # can't evaluate a ratio; let downstream handle it
+
+        ratio = (aligned[valid_load_mask].abs()
+                 / load[valid_load_mask].abs())
+        # NaN means load was non-zero but aligned was NaN; treat conservatively
+        # as zero ratio (after on_missing handling, NaN shouldn't appear for
+        # 'zero'/'drop'; 'error' would have already raised).
+        ratio = ratio.fillna(0.0)
+        audit["max_fraction"] = float(ratio.max()) if len(ratio) else 0.0
+
+        violations = ratio > max_fraction
+        n_violations = int(violations.sum())
+        violation_pct = 100.0 * n_violations / n_valid
+        audit["violation_rows"] = n_violations
+        audit["violation_pct"] = violation_pct
+
+        if violation_pct > max_violation_pct:
+            # Find the worst offender for the diagnostic message.
+            worst_idx = ratio.idxmax()
+            worst_ratio = float(ratio.max())
+            worst_load = float(load.loc[worst_idx])
+            worst_sub = float(aligned.loc[worst_idx])
+            raise LoadSubtractError(
+                f"load_subtract[{audit['entity_id']}]: subtract exceeded "
+                f"{max_fraction:.2f}× load on "
+                f"{violation_pct:.2f}% of rows (threshold "
+                f"{max_violation_pct:.2f}%). "
+                f"Worst: {worst_idx} subtract={worst_sub:.3f} "
+                f"load={worst_load:.3f} ratio={worst_ratio:.2f}. "
+                f"Likely a unit mismatch (Wh vs kWh?) or the subtract sensor "
+                f"measures a superset of the parent load."
+            )
+
+    # --- Stage 3: sum subtracts, subtract from load, clip, apply drops. -----
+    total_subtract = sum(scaled_series, start=pd.Series(0.0, index=load.index))
+    raw_adjusted = load - total_subtract
+
+    # Negative-clip audit: rows where subtracts exceed load (usually small
+    # measurement-noise band, but the count is a useful health metric).
+    clipped_mask = raw_adjusted < 0
+    n_clipped = int(clipped_mask.sum())
+    adjusted = raw_adjusted.clip(lower=0.0)
+
+    # Apply any 'drop' masks last so clip/fraction-guard see the full signal.
+    if drop_mask.any():
+        adjusted = adjusted[~drop_mask]
+        kept_load = load[~drop_mask]
+        kept_subtract = total_subtract[~drop_mask]
+    else:
+        kept_load = load
+        kept_subtract = total_subtract
+
+    n_rows = len(adjusted)
+    clipped_pct = (100.0 * n_clipped / n_rows) if n_rows else 0.0
+
+    if n_clipped > 0:
+        # Noise band is usually < 1%. 5% is the warn threshold — any higher
+        # almost certainly means a miscalibrated subtract rather than jitter.
+        log = logger.warning if clipped_pct > 5.0 else logger.info
+        log(
+            f"load_subtract: clipped {n_clipped}/{n_rows} rows ({clipped_pct:.2f}%) "
+            f"to zero after subtraction"
+        )
+
+    audit = {
+        "n_rows": n_rows,
+        "n_clipped_rows": n_clipped,
+        "clipped_pct": clipped_pct,
+        "load_total_kwh": float(kept_load.sum()) if len(kept_load) else 0.0,
+        "subtract_total_kwh": (
+            float(kept_subtract.sum()) if len(kept_subtract) else 0.0
+        ),
+        "per_sensor": per_sensor_audit,
+    }
+
+    return adjusted.astype("float64"), audit
 
 
 def power_to_energy(

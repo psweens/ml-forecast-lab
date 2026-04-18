@@ -19,14 +19,16 @@ from .publishing import (
 )
 
 # Core modules: configuration, preprocessing, and features
-from .config import AppConfig, CovariateCfg, ExperimentCfg, load_config
+from .config import AppConfig, CovariateCfg, ExperimentCfg, SubtractCfg, load_config
 from .features import (
     build_features,
     prepare_train_test,
     reshape_for_sequence,
 )
 from .preprocessing import (
+    LoadSubtractError,
     align_series,
+    apply_load_subtract,
     apply_log_transform,
     apply_transform,
     clip_outliers,
@@ -38,7 +40,7 @@ from .preprocessing import (
     subtract_series,
 )
 
-__version__ = "2.19.0"
+__version__ = "2.20.0"
 
 __all__ = [
     # Legacy
@@ -58,6 +60,7 @@ __all__ = [
     "AppConfig",
     "CovariateCfg",
     "ExperimentCfg",
+    "SubtractCfg",
     "load_config",
     # Core preprocessing
     "cumulative_to_interval",
@@ -68,6 +71,8 @@ __all__ = [
     "apply_transform",
     "invert_transform",
     "subtract_series",
+    "apply_load_subtract",
+    "LoadSubtractError",
     "power_to_energy",
     "align_series",
     # Core features

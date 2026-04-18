@@ -325,6 +325,81 @@
         </div>
     </div>
 
+    <!-- Load Subtract -->
+    <!--
+      Sensors listed here are subtracted from the target load before training.
+      Use case: remove EV charging / iBoost solar-divert contributions from a
+      whole-house load sensor so the model learns baseline household patterns.
+      Each entry maps to a SubtractCfg — see config.py for field semantics.
+    -->
+    <div class="settings-group">
+        <h3 class="settings-group-title">
+            Load Subtract
+            <span class="info-tip">?<span class="tip-text">Sensors to subtract from the target before feature build, e.g. EV charging or iBoost solar dumps. Useful when the target sensor bundles multiple signals and you want the model to learn one. Each entry runs through a robustness layer (unit scale, missing-data policy, fraction guard) — see the audit line in the training logs for per-sensor stats. Note: if the downstream system (e.g. predbat) also subtracts these, don't double-subtract.</span></span>
+        </h3>
+        <div class="covariate-list" id="load-subtract-list">
+            {% if exp_config and exp_config.load_subtract %}
+            {% for sub in exp_config.load_subtract %}
+            <div class="covariate-row" data-entity="{{ sub.entity_id }}">
+                <span class="cov-entity">{{ sub.entity_id }}</span>
+                <span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">{{ sub.source }}</span></span>
+                <span class="cov-meta">missing: {{ sub.on_missing }}</span>
+                {% if sub.scale is not none %}<span class="cov-meta">scale: {{ sub.scale }}</span>{% endif %}
+                {% if sub.max_fraction_of_load != 1.0 %}<span class="cov-meta">max_frac: {{ sub.max_fraction_of_load }}</span>{% endif %}
+                <button class="cov-remove-btn" onclick="removeLoadSubtract('{{ sub.entity_id }}')" title="Remove">&times;</button>
+            </div>
+            {% endfor %}
+            {% else %}
+            <p id="no-load-subtract-msg" style="color:var(--text-secondary);font-size:0.85rem;">No load-subtract sensors configured.</p>
+            {% endif %}
+        </div>
+
+        <div class="add-cov-form" id="add-load-subtract-form">
+            <div class="exp-field entity-search-wrapper">
+                <label class="field-label">Entity</label>
+                <input type="text" class="setting-input" id="sub-entity-input" placeholder="Search HA entities..."
+                       autocomplete="off" oninput="searchEntities(this)">
+                <div class="entity-search-results" id="entity-results-sub" style="display:none;"></div>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Source
+                    <span class="info-tip">?<span class="tip-text">Cumulative semantics of the sensor. Pick explicitly — auto inherits from the target's source_is_cumulative/reset_daily, only safe when sensors match.</span></span>
+                </label>
+                <select class="setting-input" id="sub-source-input">
+                    <option value="auto">auto</option>
+                    <option value="cumulative_daily">cumulative_daily</option>
+                    <option value="cumulative_monotonic">cumulative_monotonic</option>
+                    <option value="interval">interval</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">On missing
+                    <span class="info-tip">?<span class="tip-text">zero: fill gaps with 0 (EV/iBoost usually OK). drop: drop those rows from training. error: raise — strictest, for pipeline-bug surfacing.</span></span>
+                </label>
+                <select class="setting-input" id="sub-on-missing-input">
+                    <option value="zero">zero</option>
+                    <option value="drop">drop</option>
+                    <option value="error">error</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Scale
+                    <span class="info-tip">?<span class="tip-text">Multiplier before subtraction — use to fix a unit mismatch (e.g. Wh→kWh = 0.001).</span></span>
+                </label>
+                <input type="number" class="setting-input" id="sub-scale-input" step="any" placeholder="Optional">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Max fraction
+                    <span class="info-tip">?<span class="tip-text">Per-row ceiling on subtract/load. Default 1.0 (subtract shouldn't exceed parent). The fraction guard fails fast if violated on >5% of rows — catches unit bugs.</span></span>
+                </label>
+                <input type="number" class="setting-input" id="sub-max-fraction-input" step="any" placeholder="1.0">
+            </div>
+            <div class="exp-field" style="align-self:end;">
+                <button class="btn btn-primary" onclick="addLoadSubtract()" style="padding:0.4rem 0.75rem;font-size:0.85rem;">Add</button>
+            </div>
+        </div>
+    </div>
+
 </section>
 </div>
 
@@ -1294,7 +1369,15 @@ window.showTab = function(el) {
     window.searchEntities = function(inputEl) {
         clearTimeout(_entitySearchTimer);
         var q = inputEl.value.trim();
-        var resultsDiv = document.getElementById('entity-results');
+        // Find the results div as a sibling of the input (via wrapper).
+        // This keeps the function reusable for multiple entity pickers
+        // on the page (covariate form + load-subtract form share the same
+        // handler but have their own results divs).
+        var wrapper = inputEl.closest('.entity-search-wrapper');
+        var resultsDiv = wrapper
+            ? wrapper.querySelector('.entity-search-results')
+            : document.getElementById('entity-results');
+        if (!resultsDiv) return;
         if (q.length < 2) { resultsDiv.style.display = 'none'; return; }
 
         _entitySearchTimer = setTimeout(function() {
@@ -1320,12 +1403,13 @@ window.showTab = function(el) {
         }, 300);
     };
 
-    // Close entity search on outside click
+    // Close entity search on outside click — close ALL result divs on the
+    // page, since there may be multiple (covariate + load-subtract).
     document.addEventListener('click', function(e) {
-        var resultsDiv = document.getElementById('entity-results');
-        if (resultsDiv && !e.target.closest('.entity-search-wrapper')) {
-            resultsDiv.style.display = 'none';
-        }
+        if (e.target.closest('.entity-search-wrapper')) return;
+        document.querySelectorAll('.entity-search-results').forEach(function(r) {
+            r.style.display = 'none';
+        });
     });
 
     window.addCovariate = function() {
@@ -1385,11 +1469,90 @@ window.showTab = function(el) {
         .then(function(result) {
             if (result.success) {
                 mlfl.toast('Covariate removed', 'success');
-                var row = document.querySelector('.covariate-row[data-entity="' + entity + '"]');
+                var row = document.querySelector('#covariate-list .covariate-row[data-entity="' + entity + '"]');
                 if (row) row.remove();
-                if (!document.querySelectorAll('.covariate-row').length) {
+                if (!document.querySelectorAll('#covariate-list .covariate-row').length) {
                     var list = document.getElementById('covariate-list');
                     list.innerHTML = '<p id="no-covariates-msg" style="color:var(--text-secondary);font-size:0.85rem;">No covariates configured.</p>';
+                }
+            } else {
+                mlfl.toast('Failed: ' + result.error, 'error');
+            }
+        })
+        .catch(function(err) { mlfl.toast('Error: ' + err, 'error'); });
+    };
+
+    // ----- Load Subtract handlers -----
+    //
+    // Mirrors addCovariate/removeCovariate but posts to /add-load-subtract
+    // and /remove-load-subtract, with SubtractCfg-shaped fields. List and
+    // remove-selectors are scoped to #load-subtract-list so covariate and
+    // subtract rows don't leak into each other's DOM queries.
+
+    window.addLoadSubtract = function() {
+        var entity = document.getElementById('sub-entity-input').value.trim();
+        if (!entity) { mlfl.toast('Entity is required', 'error'); return; }
+
+        var body = {
+            entity_id: entity,
+            source: document.getElementById('sub-source-input').value,
+            on_missing: document.getElementById('sub-on-missing-input').value
+        };
+        var scaleVal = document.getElementById('sub-scale-input').value;
+        if (scaleVal !== '') body.scale = parseFloat(scaleVal);
+        var maxFracVal = document.getElementById('sub-max-fraction-input').value;
+        if (maxFracVal !== '') body.max_fraction_of_load = parseFloat(maxFracVal);
+
+        fetch(BASE + '/experiment/' + EXP_NAME + '/add-load-subtract', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.success) {
+                mlfl.toast('Load-subtract added', 'success');
+                var list = document.getElementById('load-subtract-list');
+                var noMsg = document.getElementById('no-load-subtract-msg');
+                if (noMsg) noMsg.remove();
+                var row = document.createElement('div');
+                row.className = 'covariate-row';
+                row.setAttribute('data-entity', entity);
+                var metas = '<span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">' + body.source + '</span></span>' +
+                    '<span class="cov-meta">missing: ' + body.on_missing + '</span>';
+                if (body.scale !== undefined) metas += '<span class="cov-meta">scale: ' + body.scale + '</span>';
+                if (body.max_fraction_of_load !== undefined && body.max_fraction_of_load !== 1.0) {
+                    metas += '<span class="cov-meta">max_frac: ' + body.max_fraction_of_load + '</span>';
+                }
+                row.innerHTML = '<span class="cov-entity">' + entity + '</span>' + metas +
+                    '<button class="cov-remove-btn" onclick="removeLoadSubtract(\'' + entity + '\')" title="Remove">&times;</button>';
+                list.appendChild(row);
+                // Clear form
+                document.getElementById('sub-entity-input').value = '';
+                document.getElementById('sub-scale-input').value = '';
+                document.getElementById('sub-max-fraction-input').value = '';
+            } else {
+                mlfl.toast('Failed: ' + result.error, 'error');
+            }
+        })
+        .catch(function(err) { mlfl.toast('Error: ' + err, 'error'); });
+    };
+
+    window.removeLoadSubtract = function(entity) {
+        fetch(BASE + '/experiment/' + EXP_NAME + '/remove-load-subtract', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ entity_id: entity })
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.success) {
+                mlfl.toast('Load-subtract removed', 'success');
+                var row = document.querySelector('#load-subtract-list .covariate-row[data-entity="' + entity + '"]');
+                if (row) row.remove();
+                if (!document.querySelectorAll('#load-subtract-list .covariate-row').length) {
+                    var list = document.getElementById('load-subtract-list');
+                    list.innerHTML = '<p id="no-load-subtract-msg" style="color:var(--text-secondary);font-size:0.85rem;">No load-subtract sensors configured.</p>';
                 }
             } else {
                 mlfl.toast('Failed: ' + result.error, 'error');

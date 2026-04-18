@@ -1,5 +1,69 @@
 # Changelog
 
+## 2.20.0
+
+### Added
+
+- **Load subtract**: new per-experiment `load_subtract` config field for
+  removing sensor contributions (EV charging, iBoost solar-divert, etc.)
+  from the target load before training, so models learn the baseline
+  household pattern rather than a mixed signal. Each entry is a
+  `SubtractCfg` with explicit `source` (`cumulative_daily`,
+  `cumulative_monotonic`, `interval`, `auto`), `on_missing` policy
+  (`zero`, `drop`, `error`), optional `scale` for unit conversion
+  (Wh→kWh), and `max_fraction_of_load` / `max_fraction_violation_pct`
+  guards that fail fast on unit bugs or double-counted signals. Replaces
+  the unwired legacy `subtract: [str]` stub, which is now deprecated and
+  logs a warning when present in YAML.
+- **Robustness layer** in `preprocessing.apply_load_subtract()`:
+  per-sensor unit scaling, missing-data policy enforcement, negative
+  clipping with clipped-row count and >5% warn threshold, fraction guard
+  that raises `LoadSubtractError` with a worst-row diagnostic
+  (`ratio=X.XX subtract=Y load=Z`) when subtract exceeds load on too
+  many rows, leading-gap window detection for history coverage, and
+  tz-awareness mismatch detection.
+- **Audit logging** in the training pipeline: per-run boxed summary
+  showing total load, total subtracted (with % share), clipped rows, and
+  a per-sensor breakdown of sum/missing/max-fraction/violations/gap
+  window. Same numbers that would drive a dry-run, emitted at training
+  time.
+- **Load Subtract UI card** on each experiment's config tab with entity
+  picker (HA search), source / on_missing / scale / max_fraction inputs,
+  and row removal — mirroring the Covariates card. Three new endpoints
+  (`POST /experiment/{name}/add-load-subtract`,
+  `remove-load-subtract`, `clear-load-subtract`) wrap the YAML helpers.
+- **Pipeline placement chosen deliberately**: subtract runs AFTER
+  cumulative→interval conversion and resample, but BEFORE outlier
+  clipping. Outlier bounds are then computed on the adjusted (baseline)
+  signal rather than on raw spikes from the subtracted component, so
+  real baseline peaks aren't muted by EV / iBoost outliers.
+
+### Changed
+
+- **`searchEntities` JS** now finds its results dropdown via the input's
+  `.entity-search-wrapper` parent rather than a hardcoded
+  `#entity-results` ID, so multiple entity pickers (Covariates + Load
+  Subtract) coexist on the experiment config page. Outside-click handler
+  closes all open result divs rather than only the covariate one.
+
+### Deprecated
+
+- `ExperimentCfg.subtract: list[str]` — was never wired into the
+  pipeline. Now emits a deprecation warning at `load_config` time
+  telling users to migrate to `load_subtract`. No behaviour change for
+  anyone who had it set (it did nothing before; it does nothing now).
+
+### Tests
+
+- **29 new tests** in `tests/test_load_subtract.py` covering
+  `SubtractCfg` validation, YAML round-trip (including bare-string
+  tolerance and legacy-`subtract` deprecation warning), add/remove/clear
+  helpers, and every branch of the robustness checklist:
+  perfect-alignment, `on_missing` policies, leading-gap detection,
+  negative clipping, fraction-guard firing on unit bug, fraction-guard
+  tolerating noise band, scale application, tz mismatch, and
+  multi-sensor summation.
+
 ## 2.19.0
 
 ### Removed

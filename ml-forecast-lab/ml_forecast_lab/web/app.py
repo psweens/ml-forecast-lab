@@ -1182,6 +1182,138 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             logger.error(f"Failed to add covariate: {e}")
             return JSONResponse(content={"success": False, "error": str(e)})
 
+    @app.post("/experiment/{name}/add-load-subtract")
+    async def add_load_subtract(name: str, request: Request):
+        """Add a load-subtract sensor to an experiment's config.
+
+        Body: {entity_id (required), source?, on_missing?, scale?,
+               max_fraction_of_load?, max_fraction_violation_pct?}.
+
+        Validation is delegated to ``SubtractCfg.__post_init__`` inside
+        ``add_experiment_load_subtract`` — a 200 with ``success=false`` is
+        returned on duplicate/invalid rather than raising, so the UI can
+        surface the error in a toast.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        entity_id = body.get("entity_id")
+        if not entity_id:
+            return JSONResponse(
+                content={"success": False, "error": "entity_id is required"}
+            )
+
+        sub_dict = {"entity_id": entity_id}
+        for opt_field in (
+            "source", "on_missing", "scale",
+            "max_fraction_of_load", "max_fraction_violation_pct",
+        ):
+            if opt_field in body and body[opt_field] is not None:
+                sub_dict[opt_field] = body[opt_field]
+
+        from ml_forecast_lab.config import add_experiment_load_subtract
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(
+                content={"success": False, "error": "Config file not found"}
+            )
+
+        try:
+            added = add_experiment_load_subtract(config_path, name, sub_dict)
+            if added:
+                logger.info(f"Added load_subtract {entity_id} to {name}")
+                return JSONResponse(
+                    content={"success": True, "entity_id": entity_id}
+                )
+            return JSONResponse(content={
+                "success": False,
+                "error": "load_subtract already exists or experiment not found",
+            })
+        except ValueError as e:
+            # SubtractCfg validation failure — message is user-actionable.
+            return JSONResponse(content={"success": False, "error": str(e)})
+        except Exception as e:
+            logger.error(f"Failed to add load_subtract: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
+
+    @app.post("/experiment/{name}/remove-load-subtract")
+    async def remove_load_subtract(name: str, request: Request):
+        """Remove a single load-subtract entry from an experiment's config.
+
+        Body: {entity_id}. Accepts either the full ID (``sensor.ev_today``)
+        or the short suffix (``ev_today``) — matches ``remove_experiment_
+        load_subtract``'s suffix-matching behaviour.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        entity_id = body.get("entity_id")
+        if not entity_id:
+            return JSONResponse(
+                content={"success": False, "error": "entity_id required"}
+            )
+
+        from ml_forecast_lab.config import remove_experiment_load_subtract
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(
+                content={"success": False, "error": "Config file not found"}
+            )
+
+        try:
+            removed = remove_experiment_load_subtract(
+                config_path, name, entity_id,
+            )
+            if removed:
+                logger.info(f"Removed load_subtract {entity_id} from {name}")
+                return JSONResponse(
+                    content={"success": True, "entity_id": entity_id}
+                )
+            return JSONResponse(content={
+                "success": False, "error": "load_subtract entry not found",
+            })
+        except Exception as e:
+            logger.error(f"Failed to remove load_subtract: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
+
+    @app.post("/experiment/{name}/clear-load-subtract")
+    async def clear_load_subtract(name: str):
+        """Remove all load-subtract entries from an experiment's config.
+
+        Returns the count of entries that were removed so the UI can show
+        a meaningful toast."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        from ml_forecast_lab.config import clear_experiment_load_subtract
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(
+                content={"success": False, "error": "Config file not found"}
+            )
+
+        try:
+            n_removed = clear_experiment_load_subtract(config_path, name)
+            logger.info(
+                f"Cleared {n_removed} load_subtract entrie(s) from {name}"
+            )
+            return JSONResponse(
+                content={"success": True, "removed": n_removed}
+            )
+        except Exception as e:
+            logger.error(f"Failed to clear load_subtract: {e}")
+            return JSONResponse(content={"success": False, "error": str(e)})
+
     @app.post("/experiment/{name}/stop-training")
     async def stop_training(name: str):
         """Stop a running training/tuning task, or remove from queue."""

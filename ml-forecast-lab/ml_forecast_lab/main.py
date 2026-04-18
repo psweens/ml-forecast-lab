@@ -643,6 +643,161 @@ class MLForecastLabApp:
             return None
         return self._site_location
 
+    async def _prepare_load_subtract_inputs(
+        self,
+        exp_cfg,
+        start: datetime,
+        now: datetime,
+        freq: str,
+    ) -> list:
+        """Fetch and preprocess ``load_subtract`` sensors for one experiment.
+
+        Returns a list of ``(cfg_dict, series)`` pairs suitable for passing
+        directly to ``apply_load_subtract``. Each series is on the same
+        grid (``freq``) as the target load.
+
+        Fetch path mirrors the target-load path in ``_fetch_and_preprocess``
+        (raw history via HA REST, tz-naive normalisation), but runs the
+        cumulative→interval step based on each entry's explicit
+        ``source`` field. ``source='auto'`` defers to the target's
+        ``source_is_cumulative``/``reset_daily`` — correct only when the
+        subtract sensor has the same semantics as the parent.
+
+        A fetch failure for one sensor does NOT abort the experiment; the
+        sensor is skipped and logged. The fail-fast guards live in
+        ``apply_load_subtract`` itself, where they can see the aligned
+        signal and produce a ratio-based diagnostic.
+        """
+        import dataclasses as _dc
+
+        from ml_forecast_lab.ha_interface import normalise_history
+        from ml_forecast_lab.preprocessing import (
+            cumulative_to_interval,
+            resample_to_grid,
+        )
+
+        inputs: list = []
+        for sub_cfg in exp_cfg.load_subtract:
+            entity_id = sub_cfg.entity_id
+            try:
+                raw_records = await self.ha_interface.get_history(
+                    entity_id, start, now,
+                )
+                sub_df = normalise_history(raw_records)
+                if sub_df.empty:
+                    logger.warning(
+                        f"    ⊘ load_subtract[{entity_id}]: no history returned "
+                        f"from HA — skipping"
+                    )
+                    continue
+
+                # Normalise tz-naive to match target-load conventions. Done up
+                # front so apply_load_subtract sees matching index tz-awareness.
+                if (
+                    hasattr(sub_df["ds"].dtype, "tz")
+                    and sub_df["ds"].dt.tz is not None
+                ):
+                    sub_df["ds"] = sub_df["ds"].dt.tz_localize(None)
+
+                sub_df = sub_df.set_index("ds").sort_index()
+                sub_series = sub_df["value"]
+
+                # Apply cumulative semantics explicitly. source='auto' inherits
+                # from the parent target — convenience, not correctness: only
+                # safe when subtract sensor matches the parent's cumulative type.
+                source = sub_cfg.source
+                if source == "auto":
+                    if exp_cfg.source_is_cumulative:
+                        source = (
+                            "cumulative_daily" if exp_cfg.reset_daily
+                            else "cumulative_monotonic"
+                        )
+                    else:
+                        source = "interval"
+
+                if source == "cumulative_daily":
+                    sub_series = cumulative_to_interval(
+                        sub_series,
+                        interval_minutes=exp_cfg.interval_minutes,
+                        reset_daily=True,
+                    )
+                elif source == "cumulative_monotonic":
+                    sub_series = cumulative_to_interval(
+                        sub_series,
+                        interval_minutes=exp_cfg.interval_minutes,
+                        reset_daily=False,
+                    )
+                # source == "interval": no transformation needed
+
+                # Resample to target grid. Use 'sum' for converted-from-cumulative
+                # signals (interval energy should aggregate), 'mean' otherwise.
+                sub_method = (
+                    "sum" if source.startswith("cumulative") else "mean"
+                )
+                sub_series = resample_to_grid(
+                    sub_series, freq=freq, method=sub_method,
+                )
+
+                # Pass the full SubtractCfg (as dict) so apply_load_subtract
+                # sees all robustness-relevant fields (scale, on_missing,
+                # max_fraction_*). asdict is cheap and avoids coupling the
+                # preprocessing module to the dataclass.
+                inputs.append((_dc.asdict(sub_cfg), sub_series))
+
+                logger.info(
+                    f"    ↓ load_subtract[{entity_id}]: "
+                    f"{len(raw_records)} raw → {len(sub_series)} aligned "
+                    f"(source={source}, on_missing={sub_cfg.on_missing})"
+                )
+            except Exception as e:
+                # Non-fatal per-sensor: log and skip. apply_load_subtract will
+                # still run on whichever sensors succeeded.
+                logger.warning(
+                    f"    ✗ load_subtract[{entity_id}] fetch failed: {e}"
+                )
+
+        return inputs
+
+    def _log_load_subtract_audit(self, exp_cfg, audit: dict) -> None:
+        """Emit a human-readable summary of load_subtract audit stats.
+
+        Format matches the Predbat-inspired boxed / ✓ marker style used
+        elsewhere in the runner. Keeps the log readable when several
+        sensors are subtracted.
+        """
+        load_total = audit.get("load_total_kwh", 0.0)
+        sub_total = audit.get("subtract_total_kwh", 0.0)
+        n_clipped = audit.get("n_clipped_rows", 0)
+        clipped_pct = audit.get("clipped_pct", 0.0)
+        share_pct = (100.0 * sub_total / load_total) if load_total > 0 else 0.0
+
+        logger.info(
+            f"  ✓ load_subtract applied: "
+            f"load={load_total:.2f} kWh, "
+            f"subtracted={sub_total:.2f} kWh ({share_pct:.1f}% of load), "
+            f"clipped={n_clipped} rows ({clipped_pct:.2f}%)"
+        )
+        for sensor in audit.get("per_sensor", []):
+            gap = ""
+            if sensor.get("gap_start"):
+                gap = (
+                    f", gap={sensor['gap_start'][:10]}→"
+                    f"{sensor['gap_end'][:10]}"
+                )
+            dropped = ""
+            if sensor.get("rows_dropped", 0) > 0:
+                dropped = f", dropped={sensor['rows_dropped']}"
+            logger.info(
+                f"      · {sensor['entity_id']}: "
+                f"sum={sensor['sum_kwh']:.2f} kWh, "
+                f"missing={sensor['rows_missing']}"
+                f"{dropped}"
+                f", max_frac={sensor['max_fraction']:.2f}, "
+                f"violations={sensor['violation_rows']} "
+                f"({sensor['violation_pct']:.2f}%)"
+                f"{gap}"
+            )
+
     async def _fetch_and_preprocess(self, exp_cfg) -> Optional[pd.DataFrame]:
         """
         Fetch history and preprocess for an experiment.
@@ -656,6 +811,8 @@ class MLForecastLabApp:
             resample_to_grid,
             clip_outliers,
             apply_log_transform,
+            apply_load_subtract,
+            LoadSubtractError,
         )
 
         now = datetime.now(timezone.utc)
@@ -747,6 +904,40 @@ class MLForecastLabApp:
         # --- Resample to regular grid ---
         resample_method = "sum" if exp_cfg.source_is_cumulative else "mean"
         series = resample_to_grid(series, freq=freq, method=resample_method)
+
+        # --- Load subtract (optional) ---
+        #
+        # Runs BEFORE clip_outliers so that outlier bounds are computed on the
+        # adjusted (baseline) signal rather than on the raw signal which may
+        # contain subtractable spikes (EV charging, iBoost dumps). If clipping
+        # ran first, those spikes would elevate the 99.5-percentile bound and
+        # mute real baseline peaks after subtraction.
+        if getattr(exp_cfg, "load_subtract", None):
+            try:
+                subtract_inputs = await self._prepare_load_subtract_inputs(
+                    exp_cfg, start, now, freq,
+                )
+            except Exception as e:
+                logger.error(
+                    f"  ✗ load_subtract fetch failed for {exp_cfg.name}: {e}"
+                )
+                subtract_inputs = []
+
+            if subtract_inputs:
+                try:
+                    series, sub_audit = apply_load_subtract(
+                        series, subtract_inputs,
+                    )
+                    self._log_load_subtract_audit(exp_cfg, sub_audit)
+                except LoadSubtractError as e:
+                    # Fail-fast guard fired — do NOT silently proceed with a
+                    # broken subtract. Surface the error to the caller so the
+                    # experiment run aborts and the user sees the diagnostic.
+                    logger.error(
+                        f"  ✗ load_subtract robustness check failed for "
+                        f"{exp_cfg.name}: {e}"
+                    )
+                    raise
 
         # --- Clip outliers ---
         series = clip_outliers(series, positive_only=exp_cfg.source_is_cumulative)
