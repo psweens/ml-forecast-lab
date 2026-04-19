@@ -1124,6 +1124,8 @@
         <div class="acc-control acc-model-badge" id="acc-model-badge" style="display:none;">
             <span>Model:</span>
             <strong id="acc-model-name">—</strong>
+            <span id="acc-model-version-sep" style="display:none;color:var(--text-secondary);">·</span>
+            <span id="acc-model-version" style="display:none;color:var(--text-secondary);font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.8rem;"></span>
         </div>
     </div>
 
@@ -2109,22 +2111,59 @@ window.showTab = function(el) {
             document.getElementById('accuracy-empty').style.display = 'none';
             _lastAccuracyData = data;
 
-            // Surface which model the metrics are for, and whether the
-            // server had to fall back from the current champion because
-            // it has no logged forecasts in the window.
+            // Surface which model + version the metrics are for, and
+            // whether the server had to fall back because the current
+            // champion (or its latest weights) has no logged forecasts
+            // in the window.
             var modelBadge = document.getElementById('acc-model-badge');
             var modelNameEl = document.getElementById('acc-model-name');
+            var verSepEl = document.getElementById('acc-model-version-sep');
+            var verEl = document.getElementById('acc-model-version');
             if (data.model_fallback) {
+                var fb = data.model_fallback;
                 modelBadge.style.display = '';
-                modelNameEl.textContent = 'all (fallback)';
-                modelNameEl.title = 'Requested "' + data.model_fallback.requested
-                    + '" but no forecasts logged for it in this window — showing all models.';
+                var label;
+                var tip;
+                if (fb.used_model === null) {
+                    label = 'all (fallback)';
+                    tip = 'Requested "' + fb.requested_model + '" but no forecasts '
+                        + 'logged for it in this window — showing all models.';
+                } else {
+                    // Version fallback: kept the model, widened the version.
+                    label = fb.used_model + ' · all versions (fallback)';
+                    tip = 'Requested version "' + fb.requested_version
+                        + '" but no forecasts logged for it yet — '
+                        + 'showing all weight regimes of this model.';
+                }
+                modelNameEl.textContent = label;
+                modelNameEl.title = tip;
                 modelNameEl.style.color = 'var(--warning)';
+                verSepEl.style.display = 'none';
+                verEl.style.display = 'none';
             } else if (data.model_name) {
                 modelBadge.style.display = '';
                 modelNameEl.textContent = data.model_name;
                 modelNameEl.title = '';
                 modelNameEl.style.color = '';
+                if (data.model_version) {
+                    // Show version as a short "since DD MMM HH:MM" so
+                    // the ISO timestamp doesn't dominate the badge.
+                    var vd = toLocalDate(data.model_version.replace('Z', ''));
+                    var short = '—';
+                    if (vd && !isNaN(vd.getTime())) {
+                        var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+                        short = 'since ' + vd.getDate() + ' ' + months[vd.getMonth()]
+                              + ' ' + vd.getHours().toString().padStart(2,'0')
+                              + ':' + vd.getMinutes().toString().padStart(2,'0');
+                    }
+                    verEl.textContent = short;
+                    verEl.title = 'Weights trained at ' + data.model_version;
+                    verSepEl.style.display = '';
+                    verEl.style.display = '';
+                } else {
+                    verSepEl.style.display = 'none';
+                    verEl.style.display = 'none';
+                }
             } else {
                 modelBadge.style.display = 'none';
             }

@@ -38,7 +38,7 @@ GENEROUS_WINDOW = 3650
 
 
 def _log_cycle(db, experiment, issued_at, targets, predictions,
-               model_name="lgb", upper=None, lower=None):
+               model_name="lgb", upper=None, lower=None, model_version=None):
     """Thin wrapper over HistoryDB.log_forecast with list-of-datetimes."""
     return db.log_forecast(
         experiment=experiment,
@@ -48,6 +48,7 @@ def _log_cycle(db, experiment, issued_at, targets, predictions,
         model_name=model_name,
         upper_bounds=upper,
         lower_bounds=lower,
+        model_version=model_version,
     )
 
 
@@ -541,3 +542,168 @@ class TestStability:
             source_is_cumulative=True, model_name="lgb",
         )
         assert all(d["day"] != "2024-06-15" for d in s["daily_totals"])
+
+
+# ---------------------------------------------------------------------
+# Model version filtering (v2.24.0)
+# ---------------------------------------------------------------------
+
+class TestModelVersion:
+    """
+    `model_version` segregates weight regimes of a model that keeps the
+    same name across retrains. Without it, the stability / accuracy /
+    coverage / trajectory queries silently pool predictions from v1 and
+    v2 under a shared model_name, which is the "I retrained and now
+    stability looks terrible" pattern.
+    """
+
+    def test_migration_adds_column_to_legacy_table(self, tmp_db):
+        # Simulate a pre-2.24 DB: create the table without model_version.
+        import sqlite3 as _sql
+        conn = _sql.connect(tmp_db)
+        conn.execute("""
+            CREATE TABLE forecast_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                experiment TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                issued_at TEXT NOT NULL,
+                target_dt TEXT NOT NULL,
+                lead_minutes INTEGER NOT NULL,
+                predicted REAL NOT NULL,
+                forecast_type TEXT NOT NULL DEFAULT 'cached',
+                upper REAL,
+                lower REAL
+            )
+        """)
+        conn.execute(
+            "INSERT INTO forecast_log "
+            "(experiment, model_name, issued_at, target_dt, lead_minutes, predicted) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("exp", "lgb", "2024-06-15 08:00:00", "2024-06-15 08:30:00", 30, 1.0),
+        )
+        conn.commit()
+        conn.close()
+
+        # Open through HistoryDB — ensure_forecast_log_table should
+        # ALTER the column in, preserving the legacy row as NULL.
+        h = HistoryDB(tmp_db)
+        h.ensure_forecast_log_table()
+        cur = h.conn.cursor()
+        cur.execute("PRAGMA table_info(forecast_log)")
+        cols = {row[1] for row in cur.fetchall()}
+        assert "model_version" in cols
+        cur.execute("SELECT model_version FROM forecast_log")
+        assert cur.fetchone()[0] is None  # legacy row: null version
+        h.close()
+
+    def test_log_forecast_stamps_version(self, db):
+        t = [datetime(2024, 6, 15, 9, 0)]
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 8, 0),
+                   t, [1.0], "lgb", model_version="2024-06-15T07:00:00Z")
+        cur = db.conn.cursor()
+        cur.execute("SELECT model_version FROM forecast_log")
+        assert cur.fetchone()[0] == "2024-06-15T07:00:00Z"
+
+    def test_version_filter_segregates_weight_regimes(self, db):
+        """
+        Same model_name, two weight regimes: v1 predicts ~100, v2
+        predicts ~5. Pooled stability CV is astronomical; filtered to
+        v2 only it collapses to the real single-regime disagreement.
+        """
+        t = datetime(2024, 6, 15, 9, 0)
+        # v1: old weights, noisy-around-100 predictions
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 5, 0), [t], [100.0],
+                   "lgb", model_version="v1")
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 6, 0), [t], [110.0],
+                   "lgb", model_version="v1")
+        # v2: new weights, tight-around-5 predictions
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 7, 0), [t], [5.0],
+                   "lgb", model_version="v2")
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 8, 0), [t], [5.1],
+                   "lgb", model_version="v2")
+
+        mixed = db.get_forecast_stability(
+            "exp", max_age_days=GENEROUS_WINDOW, source_is_cumulative=False,
+            model_name="lgb", model_version=None,
+        )
+        v2_only = db.get_forecast_stability(
+            "exp", max_age_days=GENEROUS_WINDOW, source_is_cumulative=False,
+            model_name="lgb", model_version="v2",
+        )
+        # Mixed: huge CV from pooling two regimes. v2-only: tight.
+        assert mixed["summary"]["median_step_cv_pct"] > 50
+        assert v2_only["summary"]["median_step_cv_pct"] < 5
+
+    def test_version_filter_excludes_null_legacy_rows(self, db):
+        """
+        Legacy rows (no version) should NOT pool into a version-
+        filtered query — that's the whole point of the column.
+        """
+        t = datetime(2024, 6, 15, 9, 0)
+        # Two legacy rows (no version)
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 5, 0), [t], [100.0], "lgb")
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 6, 0), [t], [200.0], "lgb")
+        # Two versioned rows
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 7, 0), [t], [5.0],
+                   "lgb", model_version="v2")
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 8, 0), [t], [5.1],
+                   "lgb", model_version="v2")
+
+        v2_only = db.get_forecast_stability(
+            "exp", max_age_days=GENEROUS_WINDOW, source_is_cumulative=False,
+            model_name="lgb", model_version="v2",
+        )
+        # Only 2 v2 cycles should contribute (NULL legacy rows excluded).
+        assert v2_only["summary"]["total_cycles"] == 2
+        assert v2_only["summary"]["median_step_cv_pct"] < 5
+
+    def test_accuracy_coverage_trajectory_all_honour_version(
+        self, db, actuals_monotonic
+    ):
+        # Verify the filter propagates through all four analytics
+        # queries, not just stability. Setup: v1 predictions far from
+        # actual; v2 predictions spot-on.
+        issued1 = datetime(2024, 6, 15, 7, 0)
+        issued2 = datetime(2024, 6, 15, 7, 30)
+        targets = [datetime(2024, 6, 15, 8, 30),
+                   datetime(2024, 6, 15, 9, 0)]  # actuals 17.0, 18.0
+        # v1: wildly off
+        _log_cycle(db, "exp", issued1, targets, [1.0, 1.0], "lgb",
+                   upper=[2.0, 2.0], lower=[0.0, 0.0], model_version="v1")
+        _log_cycle(db, "exp", issued2, targets, [1.0, 1.0], "lgb",
+                   upper=[2.0, 2.0], lower=[0.0, 0.0], model_version="v1")
+        # v2: perfect
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 8, 0),
+                   targets, [17.0, 18.0], "lgb",
+                   upper=[18.0, 19.0], lower=[16.0, 17.0], model_version="v2")
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 8, 15),
+                   targets, [17.0, 18.0], "lgb",
+                   upper=[18.0, 19.0], lower=[16.0, 17.0], model_version="v2")
+
+        acc_v2 = db.get_forecast_accuracy(
+            "exp", actuals_monotonic, max_age_days=GENEROUS_WINDOW,
+            evaluation_mode="raw", model_name="lgb", model_version="v2",
+        )
+        # v2 is perfect → MAE ≈ 0 at every bucket.
+        assert all(m < 1e-6 for m in acc_v2["lead_time_curve"]["mae"])
+
+        cov_v2 = db.get_forecast_coverage(
+            "exp", actuals_monotonic, max_age_days=GENEROUS_WINDOW,
+            model_name="lgb", model_version="v2",
+        )
+        # v2 bands cover the actual; v1 bands don't.
+        assert cov_v2["overall"]["coverage"] == 1.0
+        cov_v1 = db.get_forecast_coverage(
+            "exp", actuals_monotonic, max_age_days=GENEROUS_WINDOW,
+            model_name="lgb", model_version="v1",
+        )
+        assert cov_v1["overall"]["coverage"] == 0.0
+
+        traj_v2 = db.get_forecast_trajectory(
+            "exp", actuals_monotonic,
+            interval_minutes=30, max_age_days=GENEROUS_WINDOW,
+            source_is_cumulative=False,
+            model_name="lgb", model_version="v2",
+        )
+        # Only v2 forecast rows should feed the chosen target.
+        assert all(f["predicted"] in (17.0, 18.0) for f in traj_v2["forecasts"])

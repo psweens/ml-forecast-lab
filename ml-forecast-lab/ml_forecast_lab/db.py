@@ -194,7 +194,8 @@ class HistoryDB:
                 predicted    REAL    NOT NULL,
                 forecast_type TEXT   NOT NULL DEFAULT 'cached',
                 upper        REAL,
-                lower        REAL
+                lower        REAL,
+                model_version TEXT
             )
         """)
         # Migrate pre-existing tables that don't have the upper/lower
@@ -205,6 +206,17 @@ class HistoryDB:
             cursor.execute("ALTER TABLE forecast_log ADD COLUMN upper REAL")
         if "lower" not in existing_cols:
             cursor.execute("ALTER TABLE forecast_log ADD COLUMN lower REAL")
+        # `model_version` distinguishes weight regimes of a model that
+        # keeps the same name across retrains. Without it, the stability
+        # metric silently pools predictions from weights v1 and v2 under
+        # model_name='lgb' and reports that as "run-to-run disagreement".
+        # NULL is a legitimate legacy marker — rows predating this
+        # migration have no version and are filtered out once a versioned
+        # cohort appears for that experiment (see the analytics queries).
+        if "model_version" not in existing_cols:
+            cursor.execute(
+                "ALTER TABLE forecast_log ADD COLUMN model_version TEXT"
+            )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_flog_exp_target "
             "ON forecast_log(experiment, target_dt)"
@@ -212,6 +224,10 @@ class HistoryDB:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_flog_exp_issued "
             "ON forecast_log(experiment, issued_at)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_flog_exp_model_ver "
+            "ON forecast_log(experiment, model_name, model_version)"
         )
         self.conn.commit()
         logger.debug("Ensured forecast_log table")
@@ -226,6 +242,7 @@ class HistoryDB:
         forecast_type: str = "cached",
         upper_bounds: Optional[list] = None,
         lower_bounds: Optional[list] = None,
+        model_version: Optional[str] = None,
     ) -> int:
         """
         Bulk-insert a forecast snapshot into the log.
@@ -249,6 +266,13 @@ class HistoryDB:
             Pass None when no intervals are available — stored as NULL
             so the coverage query can tell calibrated rows from legacy
             point-only rows.
+        model_version : str, optional
+            Opaque version tag distinguishing weight regimes of the same
+            ``model_name``. Typically the ISO-timestamp of the last
+            training completion. When provided, analytics queries will
+            default to filtering on this so post-retrain cycles don't
+            pool with pre-retrain ones. Pass None on legacy/uninitialised
+            rows — they'll sort as their own implicit cohort.
 
         Returns
         -------
@@ -270,14 +294,15 @@ class HistoryDB:
             rows.append((
                 experiment, model_name, issued_str, target_str,
                 lead_min, float(val), forecast_type, upper_val, lower_val,
+                model_version,
             ))
         cursor = self.conn.cursor()
         try:
             cursor.executemany(
                 "INSERT INTO forecast_log "
                 "(experiment, model_name, issued_at, target_dt, lead_minutes, "
-                "predicted, forecast_type, upper, lower) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "predicted, forecast_type, upper, lower, model_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
             self.conn.commit()
@@ -295,6 +320,7 @@ class HistoryDB:
         interval_minutes: int = 30,
         evaluation_mode: str = "raw",
         model_name: Optional[str] = None,
+        model_version: Optional[str] = None,
     ) -> dict:
         """
         Compute forecast accuracy by lead time.
@@ -348,10 +374,19 @@ class HistoryDB:
         interval_sec = interval_minutes * 60
         bucket_min = max(1, int(interval_minutes))
         increment = evaluation_mode == "increment"
-        # Optional model filter, spliced directly into forecast_vals so
-        # both the lead-time curve and revision query apply it.
-        model_filter_sql = " AND model_name = ?" if model_name else ""
-        model_filter_param = (model_name,) if model_name else ()
+        # Optional filters, spliced directly into forecast_vals so both
+        # the lead-time curve and revision query apply them. Combined
+        # into a single clause to keep parameter ordering simple.
+        _filter_clauses = []
+        _filter_params: list = []
+        if model_name:
+            _filter_clauses.append("model_name = ?")
+            _filter_params.append(model_name)
+        if model_version:
+            _filter_clauses.append("model_version = ?")
+            _filter_params.append(model_version)
+        model_filter_sql = (" AND " + " AND ".join(_filter_clauses)) if _filter_clauses else ""
+        model_filter_param = tuple(_filter_params)
 
         # Build value-extraction CTEs according to mode. In "raw" mode we
         # just pass the stored value through; in "increment" mode we take
@@ -640,6 +675,7 @@ class HistoryDB:
         max_age_days: int = 14,
         source_is_cumulative: bool = False,
         model_name: Optional[str] = None,
+        model_version: Optional[str] = None,
     ) -> dict:
         """
         Return every forecast ever issued for a single target_dt, plus
@@ -700,8 +736,16 @@ class HistoryDB:
         if not cursor.fetchone():
             return {"error": "No actuals data available yet"}
 
-        model_filter_sql = " AND fl.model_name = ?" if model_name else ""
-        model_filter_param = (model_name,) if model_name else ()
+        _clauses = []
+        _params: list = []
+        if model_name:
+            _clauses.append("fl.model_name = ?")
+            _params.append(model_name)
+        if model_version:
+            _clauses.append("fl.model_version = ?")
+            _params.append(model_version)
+        model_filter_sql = (" AND " + " AND ".join(_clauses)) if _clauses else ""
+        model_filter_param = tuple(_params)
 
         # Build the actuals_vals CTE according to source type. For
         # cumulative sources we need to diff so the actual lives in the
@@ -803,12 +847,14 @@ class HistoryDB:
         if not target_dt or target_dt not in available_targets:
             target_dt = available_targets[0]
 
-        # Fetch all forecasts for the chosen target.
+        # Fetch all forecasts for the chosen target. The `fl.` aliases in
+        # model_filter_sql carry over intact — single-table here but
+        # SQLite doesn't mind qualified names without a join.
         try:
             cursor.execute(
                 "SELECT issued_at, predicted, lead_minutes, model_name "
-                "FROM forecast_log "
-                f"WHERE experiment = ? AND target_dt = ?{(' AND model_name = ?' if model_name else '')} "
+                "FROM forecast_log fl "
+                f"WHERE experiment = ? AND target_dt = ?{model_filter_sql} "
                 "ORDER BY issued_at ASC",
                 (experiment, target_dt, *model_filter_param),
             )
@@ -877,6 +923,7 @@ class HistoryDB:
         interval_minutes: int = 30,
         max_age_days: int = 14,
         min_samples: int = 10,
+        model_version: Optional[str] = None,
     ) -> dict:
         """
         Compute per-lead-time conformal nonconformity quantiles from
@@ -948,10 +995,14 @@ class HistoryDB:
 
         params = [interval_sec, interval_sec, bucket_min, bucket_min,
                   experiment, now_str, cutoff_str]
-        model_filter = ""
+        _clauses = []
         if model_name:
-            model_filter = "AND fl.model_name = ?"
+            _clauses.append("fl.model_name = ?")
             params.append(model_name)
+        if model_version:
+            _clauses.append("fl.model_version = ?")
+            params.append(model_version)
+        model_filter = ("AND " + " AND ".join(_clauses)) if _clauses else ""
 
         try:
             cursor.execute(f"""
@@ -1028,6 +1079,7 @@ class HistoryDB:
         interval_minutes: int = 30,
         max_age_days: int = 30,
         model_name: Optional[str] = None,
+        model_version: Optional[str] = None,
     ) -> dict:
         """
         Compute empirical coverage of published interval forecasts.
@@ -1065,10 +1117,19 @@ class HistoryDB:
         if not cursor.fetchone():
             return {"by_lead": {"lead_minutes": [], "coverage": [], "n": []}, "overall": {}}
 
-        # Optional model filter — coverage of a rotated-out model tells
-        # the user little about the current champion's calibration.
-        model_filter_sql = " AND fl.model_name = ?" if model_name else ""
-        model_filter_param = (model_name,) if model_name else ()
+        # Optional filters — coverage of a rotated-out model (or
+        # pre-retrain weights of the current model) tells the user
+        # little about the current champion's calibration.
+        _clauses = []
+        _params: list = []
+        if model_name:
+            _clauses.append("fl.model_name = ?")
+            _params.append(model_name)
+        if model_version:
+            _clauses.append("fl.model_version = ?")
+            _params.append(model_version)
+        model_filter_sql = (" AND " + " AND ".join(_clauses)) if _clauses else ""
+        model_filter_param = tuple(_params)
 
         try:
             cursor.execute(f"""
@@ -1293,6 +1354,7 @@ class HistoryDB:
         max_age_days: int = 30,
         source_is_cumulative: bool = False,
         model_name: Optional[str] = None,
+        model_version: Optional[str] = None,
     ) -> dict:
         """
         Return self-consistency metrics across forecast issuances.
@@ -1333,8 +1395,20 @@ class HistoryDB:
         cutoff_str = (
             datetime.utcnow() - pd.Timedelta(days=max_age_days)
         ).strftime("%Y-%m-%d %H:%M:%S")
-        model_filter_sql = " AND model_name = ?" if model_name else ""
-        model_filter_param = (model_name,) if model_name else ()
+        # Combined name + version filter. Without the version split,
+        # cycles under the same model_name but different weight regimes
+        # (i.e. around a retrain) pool together and inflate cross-run
+        # disagreement — the original motivation for versioning.
+        _clauses = []
+        _params: list = []
+        if model_name:
+            _clauses.append("model_name = ?")
+            _params.append(model_name)
+        if model_version:
+            _clauses.append("model_version = ?")
+            _params.append(model_version)
+        model_filter_sql = (" AND " + " AND ".join(_clauses)) if _clauses else ""
+        model_filter_param = tuple(_params)
 
         # --- Per-timestep cross-cycle stability ---
         # SQLite has no STDDEV; compute it via the sum-of-squares

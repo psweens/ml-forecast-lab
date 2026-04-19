@@ -2426,29 +2426,37 @@ class MLForecastLabApp:
             f"solar={solar_in_features or 'none'}"
         )
 
-        # Cache the trained model
+        # Cache the trained model. trained_at doubles as the model_version
+        # tag on subsequent forecast_log writes — analytics queries filter
+        # on it by default so predictions from this retrain don't pool
+        # with previous-weights predictions under the same model_name.
+        trained_at = datetime.now(timezone.utc)
+        model_version = trained_at.strftime("%Y-%m-%dT%H:%M:%SZ")
         self._cached_models[exp_cfg.name] = {
             "model": model,
             "model_name": prod_model_name,
             "feature_cols": feature_cols,
             "combined": combined,
             "exp_cfg": exp_cfg,
-            "trained_at": datetime.now(timezone.utc),
+            "trained_at": trained_at,
+            "model_version": model_version,
             "is_neural": is_neural,
             "seq_kwargs": seq_kwargs,
         }
 
-        # Also run a forecast immediately after retrain
-        await self._forecast_with_cached(exp_cfg.name)
-
-        # Update web status
+        # Update web status — advance model_version BEFORE the post-retrain
+        # forecast so its log_forecast call carries the new tag.
         if self.web_app:
             status = self.web_app.state.appstate.experiment_statuses.get(exp_cfg.name)
             if status:
                 status.best_model = prod_model_name
-                status.last_benchmark_timestamp = datetime.now(timezone.utc).isoformat()
+                status.model_version = model_version
+                status.last_benchmark_timestamp = trained_at.isoformat()
                 status.last_benchmark_status = "completed"
                 status.last_error = None  # Clear any previous error
+
+        # Also run a forecast immediately after retrain
+        await self._forecast_with_cached(exp_cfg.name)
 
     async def _run_forecast_cycle(self):
         """
@@ -2548,11 +2556,16 @@ class MLForecastLabApp:
                     exp_cfg.target_entity
                 )
                 target_level = interval_level if interval_level is not None else 0.8
+                # Pin residual quantiles to the current model_version so
+                # conformal bands don't widen after a retrain just
+                # because old-weights residuals are pooled in.
+                cached = self._cached_models.get(exp_cfg.name) or {}
                 cq = self.history_db.get_conformal_quantiles(
                     exp_cfg.name,
                     actuals_table,
                     level=target_level,
                     model_name=model_name,
+                    model_version=cached.get("model_version"),
                     interval_minutes=exp_cfg.interval_minutes,
                 )
                 quantiles = cq.get("quantiles") or {}
@@ -2624,6 +2637,11 @@ class MLForecastLabApp:
                     "retrain" if extra_main_attrs.get("train_time_seconds")
                     else "cached"
                 )
+                # Tag each row with the training timestamp of the cached
+                # model so analytics queries segregate pre- and post-
+                # retrain cycles under the same model_name.
+                cached = self._cached_models.get(exp_cfg.name) or {}
+                model_version = cached.get("model_version")
                 self.history_db.log_forecast(
                     experiment=exp_cfg.name,
                     issued_at=datetime.now(timezone.utc),
@@ -2637,6 +2655,7 @@ class MLForecastLabApp:
                     lower_bounds=(
                         y_pred_lower.tolist() if have_intervals else None
                     ),
+                    model_version=model_version,
                 )
             except Exception as e:
                 logger.warning(f"Failed to log forecast evolution: {e}")

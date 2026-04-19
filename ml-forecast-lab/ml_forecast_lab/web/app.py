@@ -83,6 +83,12 @@ class ExperimentStatus(BaseModel):
     mode: str  # 'lab' or 'production'
     best_model: Optional[str] = None
     selected_model: Optional[str] = None  # User's chosen model (defaults to best)
+    # ISO-timestamp tag set each time the selected model finishes
+    # training. Stamped on every subsequent log_forecast so analytics
+    # queries can segregate pre- and post-retrain cycles of the same
+    # model_name — fixes the "retrain under same name silently
+    # contaminates stability" artefact.
+    model_version: Optional[str] = None
     last_benchmark_timestamp: Optional[str] = None
     last_benchmark_status: str = "pending"
     last_error: Optional[str] = None  # Human-readable error from last failed cycle
@@ -353,6 +359,57 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         for match in _glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
             return Path(match)
         return None
+
+    def _resolve_model_filter(experiment_name: str, request: Request):
+        """Resolve the (model_name, model_version) filter for analytics queries.
+
+        Contract:
+          - Default (no query params) → filter to the experiment's current
+            selected/best model AND its latest training tag. This keeps
+            metrics pinned to the active champion's current weights so
+            pre-retrain or rotated-out data doesn't pool in.
+          - ``?model=all`` → no model filter AND no version filter (show
+            everything).
+          - ``?model=<name>`` → filter to that name, no version filter
+            (ask for the whole history of that model across retrains).
+          - ``?version=all`` → suppress just the version filter (keep
+            the name filter but include all weight regimes).
+          - ``?version=<tag>`` → filter to that specific version.
+
+        Returns
+        -------
+        (model_name: Optional[str], model_version: Optional[str])
+        """
+        exp_status = app.state.appstate.experiment_statuses.get(experiment_name)
+        default_model = (
+            getattr(exp_status, "selected_model", None)
+            or getattr(exp_status, "best_model", None)
+            if exp_status else None
+        )
+        default_version = (
+            getattr(exp_status, "model_version", None) if exp_status else None
+        )
+
+        model_param = request.query_params.get("model")
+        version_param = request.query_params.get("version")
+
+        if model_param == "all":
+            model_name = None
+            model_version = None  # 'all' overrides both dimensions
+        elif model_param:
+            model_name = model_param
+            # When the caller asks for a specific model but doesn't pin a
+            # version, give them the whole history of that model.
+            model_version = None if version_param in (None, "all") else version_param
+        else:
+            model_name = default_model
+            if version_param == "all":
+                model_version = None
+            elif version_param:
+                model_version = version_param
+            else:
+                model_version = default_version
+        return model_name, model_version
 
     # ---- Model parameter schema (type, default, display label) ----
 
@@ -941,6 +998,12 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if not any(m.name == model_name for m in benchmark_result.models):
             raise HTTPException(status_code=404, detail="Model not found in results")
 
+        # Track whether the champion name actually changed. Re-promoting
+        # the same name (idempotent click) shouldn't wipe forecast_log
+        # since there's no new model to disambiguate from.
+        previous_model = exp_status.best_model
+        champion_changed = (previous_model != model_name)
+
         # Update in-memory status
         exp_status.best_model = model_name
         exp_status.selected_model = model_name
@@ -960,15 +1023,16 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             except Exception as e:
                 logger.warning(f"Failed to persist promotion to YAML: {e}")
 
-        # Prune forecast_log of rows issued under the previous champion
-        # (or earlier weights of this champion). Pre-promotion rows pool
-        # into the stability metric under the same model_name and
-        # produce "I retrained, now stability looks terrible" artefacts.
-        # Controlled by ExperimentCfg.clear_forecast_log_on_retrain.
+        # Prune forecast_log of rows issued under the PREVIOUS champion.
+        # Only fires when the name actually changes — same-name idempotent
+        # promotes don't touch history. For same-name-different-weights
+        # discrimination we now rely on the model_version column (stamped
+        # at each retrain), so cleanup is defensive rather than load-
+        # bearing. Controlled by ExperimentCfg.clear_forecast_log_on_retrain.
         deleted = 0
         try:
             db = app.state.appstate.history_db
-            if db and config_path:
+            if db and config_path and champion_changed:
                 cfg = load_config(config_path)
                 exp_cfg = next((e for e in cfg.experiments if e.name == name), None)
                 if exp_cfg and getattr(exp_cfg, "clear_forecast_log_on_retrain", True):
@@ -976,8 +1040,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                     deleted = db.cleanup_forecast_log(name, datetime.utcnow())
                     if deleted:
                         logger.info(
-                            f"Promotion of {model_name} for {name}: "
-                            f"cleared {deleted} pre-promotion forecast_log rows"
+                            f"Promotion {previous_model!r} → {model_name!r} "
+                            f"for {name}: cleared {deleted} pre-promotion "
+                            f"forecast_log rows"
                         )
         except Exception as e:
             logger.warning(f"Forecast-log cleanup on promote failed: {e}")
@@ -1560,22 +1625,12 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             evaluation_mode = mode_param
         else:
             evaluation_mode = "increment" if exp_cfg.source_is_cumulative else "raw"
-        # Restrict to the currently-selected model so a mid-window champion
-        # swap doesn't mix residuals from two different models. UI can
-        # override (or request "all") via ?model=<name>.
-        exp_status = app.state.appstate.experiment_statuses.get(name)
-        default_model = (
-            getattr(exp_status, "selected_model", None)
-            or getattr(exp_status, "best_model", None)
-            if exp_status else None
-        )
+        # Default filter: current champion + its latest training tag. UI
+        # can escape via ?model=all or ?version=all. See
+        # _resolve_model_filter for the full contract.
+        model_name, model_version = _resolve_model_filter(name, request)
         model_param = request.query_params.get("model")
-        if model_param == "all":
-            model_name = None
-        elif model_param:
-            model_name = model_param
-        else:
-            model_name = default_model
+        version_param = request.query_params.get("version")
 
         model_fallback = None
         result = db.get_forecast_accuracy(
@@ -1583,29 +1638,54 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             interval_minutes=exp_cfg.interval_minutes,
             evaluation_mode=evaluation_mode,
             model_name=model_name,
+            model_version=model_version,
         )
-        # If the champion filter returns no rows but the experiment has
-        # logged forecasts under other models in this window, fall back
-        # to unfiltered and flag it for the UI — otherwise users who
-        # switched models mid-window see a blank chart with no
-        # explanation.
-        empty = not result.get("lead_time_curve", {}).get("lead_minutes")
-        if empty and model_name and not model_param:
-            unfiltered = db.get_forecast_accuracy(
+        # Fallback ladder when the default (champion + latest version)
+        # filter empties the result:
+        #   1. Drop the version but keep the model_name — picks up
+        #      older weights of the same champion (pre-retrain).
+        #   2. Drop both filters — picks up rotated-out models too.
+        # Each step only runs if the user didn't explicitly pin the
+        # dimension we're about to relax.
+        def _empty(res):
+            return not res.get("lead_time_curve", {}).get("lead_minutes")
+        if _empty(result) and model_version and not version_param:
+            relaxed = db.get_forecast_accuracy(
                 name, actuals_table, max_age_days=days,
                 interval_minutes=exp_cfg.interval_minutes,
                 evaluation_mode=evaluation_mode,
-                model_name=None,
+                model_name=model_name, model_version=None,
             )
-            if unfiltered.get("lead_time_curve", {}).get("lead_minutes"):
+            if not _empty(relaxed):
                 model_fallback = {
-                    "requested": model_name,
-                    "used": None,
+                    "requested_model": model_name,
+                    "requested_version": model_version,
+                    "used_model": model_name,
+                    "used_version": None,
+                    "reason": "No forecasts logged for this version yet; showing all versions of this model.",
+                }
+                result = relaxed
+                model_version = None
+        if _empty(result) and model_name and not model_param:
+            relaxed = db.get_forecast_accuracy(
+                name, actuals_table, max_age_days=days,
+                interval_minutes=exp_cfg.interval_minutes,
+                evaluation_mode=evaluation_mode,
+                model_name=None, model_version=None,
+            )
+            if not _empty(relaxed):
+                model_fallback = {
+                    "requested_model": model_name,
+                    "requested_version": model_version,
+                    "used_model": None,
+                    "used_version": None,
                     "reason": "No forecasts logged for this model in the selected window.",
                 }
-                result = unfiltered
+                result = relaxed
                 model_name = None
+                model_version = None
         result["model_name"] = model_name
+        result["model_version"] = model_version
         if model_fallback:
             result["model_fallback"] = model_fallback
         # Merge empirical interval coverage. Always on raw values (that's
@@ -1616,6 +1696,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 interval_minutes=exp_cfg.interval_minutes,
                 max_age_days=days,
                 model_name=model_name,
+                model_version=model_version,
             )
             result["coverage"] = coverage
             result["nominal_interval_level"] = 0.8
@@ -1648,47 +1729,50 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"error": str(e)}, status_code=500)
 
         target_dt = request.query_params.get("target_dt") or None
-        # Same model-filter contract as /forecast-accuracy
-        exp_status = app.state.appstate.experiment_statuses.get(name)
-        default_model = (
-            getattr(exp_status, "selected_model", None)
-            or getattr(exp_status, "best_model", None)
-            if exp_status else None
-        )
+        model_name, model_version = _resolve_model_filter(name, request)
         model_param = request.query_params.get("model")
-        if model_param == "all":
-            model_name = None
-        elif model_param:
-            model_name = model_param
-        else:
-            model_name = default_model
+        version_param = request.query_params.get("version")
 
-        result = db.get_forecast_trajectory(
-            name, actuals_table,
-            target_dt=target_dt,
-            interval_minutes=exp_cfg.interval_minutes,
-            source_is_cumulative=bool(exp_cfg.source_is_cumulative),
-            model_name=model_name,
-        )
-        # Fall back to unfiltered if the champion filter empties the list
-        empty = not result.get("available_targets")
-        if empty and model_name and not model_param:
-            unfiltered = db.get_forecast_trajectory(
+        def _fetch(mn, mv):
+            return db.get_forecast_trajectory(
                 name, actuals_table,
                 target_dt=target_dt,
                 interval_minutes=exp_cfg.interval_minutes,
                 source_is_cumulative=bool(exp_cfg.source_is_cumulative),
-                model_name=None,
+                model_name=mn, model_version=mv,
             )
-            if unfiltered.get("available_targets"):
-                result = unfiltered
+
+        result = _fetch(model_name, model_version)
+        # Same fallback ladder as /forecast-accuracy:
+        def _empty(res):
+            return not res.get("available_targets")
+        if _empty(result) and model_version and not version_param:
+            relaxed = _fetch(model_name, None)
+            if not _empty(relaxed):
+                result = relaxed
                 result["model_fallback"] = {
-                    "requested": model_name,
-                    "used": None,
+                    "requested_model": model_name,
+                    "requested_version": model_version,
+                    "used_model": model_name,
+                    "used_version": None,
+                    "reason": "No forecasts logged for this version yet; showing all versions of this model.",
+                }
+                model_version = None
+        if _empty(result) and model_name and not model_param:
+            relaxed = _fetch(None, None)
+            if not _empty(relaxed):
+                result = relaxed
+                result["model_fallback"] = {
+                    "requested_model": model_name,
+                    "requested_version": model_version,
+                    "used_model": None,
+                    "used_version": None,
                     "reason": "No forecasts logged for this model in the selected window.",
                 }
                 model_name = None
+                model_version = None
         result["model_name"] = model_name
+        result["model_version"] = model_version
         return JSONResponse(content=result)
 
     @app.get("/experiment/{name}/forecast-evolution")
@@ -1766,47 +1850,48 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             days = 30
         days = max(1, min(90, days))
 
-        # Mirror the accuracy endpoint: default to the currently-selected
-        # model so tinker-era runs don't inflate the disagreement metric.
-        exp_status = app.state.appstate.experiment_statuses.get(name)
-        default_model = (
-            getattr(exp_status, "selected_model", None)
-            or getattr(exp_status, "best_model", None)
-            if exp_status else None
-        )
+        model_name, model_version = _resolve_model_filter(name, request)
         model_param = request.query_params.get("model")
-        if model_param == "all":
-            model_name = None
-        elif model_param:
-            model_name = model_param
-        else:
-            model_name = default_model
+        version_param = request.query_params.get("version")
 
-        result = db.get_forecast_stability(
-            name,
-            max_age_days=days,
-            source_is_cumulative=bool(exp_cfg.source_is_cumulative),
-            model_name=model_name,
-        )
-        # If the champion filter empties the result but the experiment
-        # has data from other models in the window, fall back and flag.
-        empty = not result.get("per_timestep", {}).get("target_dt")
-        if empty and model_name and not model_param:
-            unfiltered = db.get_forecast_stability(
+        def _fetch(mn, mv):
+            return db.get_forecast_stability(
                 name,
                 max_age_days=days,
                 source_is_cumulative=bool(exp_cfg.source_is_cumulative),
-                model_name=None,
+                model_name=mn, model_version=mv,
             )
-            if unfiltered.get("per_timestep", {}).get("target_dt"):
-                result = unfiltered
+
+        result = _fetch(model_name, model_version)
+        def _empty(res):
+            return not res.get("per_timestep", {}).get("target_dt")
+        if _empty(result) and model_version and not version_param:
+            relaxed = _fetch(model_name, None)
+            if not _empty(relaxed):
+                result = relaxed
                 result["model_fallback"] = {
-                    "requested": model_name,
-                    "used": None,
+                    "requested_model": model_name,
+                    "requested_version": model_version,
+                    "used_model": model_name,
+                    "used_version": None,
+                    "reason": "No forecasts logged for this version yet; showing all versions of this model.",
+                }
+                model_version = None
+        if _empty(result) and model_name and not model_param:
+            relaxed = _fetch(None, None)
+            if not _empty(relaxed):
+                result = relaxed
+                result["model_fallback"] = {
+                    "requested_model": model_name,
+                    "requested_version": model_version,
+                    "used_model": None,
+                    "used_version": None,
                     "reason": "No forecasts logged for this model in the selected window.",
                 }
                 model_name = None
+                model_version = None
         result["model_name"] = model_name
+        result["model_version"] = model_version
         return JSONResponse(content=result)
 
     @app.post("/experiment/{name}/toggle-mode")

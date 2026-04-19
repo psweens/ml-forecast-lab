@@ -1,5 +1,69 @@
 # Changelog
 
+## 2.24.0
+
+### Added
+
+- **`model_version` column on ``forecast_log``** — an opaque,
+  typically ISO-timestamp tag stamped by the pipeline each time a
+  model finishes training. Cycles under the same ``model_name`` but
+  different weight regimes now live in distinct cohorts, so the
+  stability / accuracy / coverage / trajectory queries no longer
+  silently pool v1 and v2 predictions together. Fixes the "I retrain
+  every 24h under the same name and stability looks terrible"
+  pattern that was the underlying cause of the overnight Apr-16
+  spikes. Backwards-compatible schema migration: the column is added
+  via ``ALTER TABLE ADD COLUMN`` on legacy DBs and existing rows
+  carry NULL — they're treated as a separate cohort when a versioned
+  cycle appears for the same experiment.
+- **`?version=<tag>` / `?version=all` query params** on
+  ``/forecast-accuracy``, ``/forecast-stability``, and
+  ``/forecast-trajectory``. Endpoints default to the experiment's
+  current training tag (``ExperimentStatus.model_version``), with
+  ``?version=all`` escaping the default to show every weight regime.
+  A two-step **fallback ladder** now runs when the default filter
+  empties the result: first widen to "all versions of this model",
+  then to "all models". Each fallback step is flagged back to the UI
+  via ``model_fallback`` so the user knows what's being shown vs
+  requested.
+- **Model-version badge in the Layer 1 top controls** — the
+  existing model badge now carries a ``since DD MMM HH:MM`` tail
+  reflecting the timestamp of the current weights, with the full ISO
+  tag on hover. On version fallback the badge reads ``<model> · all
+  versions (fallback)`` in amber with an explanation in the tooltip.
+- **`_resolve_model_filter()`** helper in ``app.py`` that factors
+  the (model, version) resolution out of the three endpoints —
+  single source of truth for "current champion + current weights by
+  default, with escape hatches".
+- **Training path stamps ``ExperimentStatus.model_version``** in
+  ``_retrain_and_cache`` as soon as training completes, so the very
+  next forecast is written under the new tag. The cached-model dict
+  also carries ``model_version`` so ``_publish_forecast_sensors``
+  can pin conformal-band residuals to the current weights and avoid
+  post-retrain band inflation from stale residuals.
+- **Tests** — 5 new cases in
+  ``tests/test_forecast_analytics.py::TestModelVersion``:
+  schema migration on a legacy table; ``log_forecast`` actually
+  stamping the version; v1/v2 stability pooled vs v2-only (flipped
+  median CV from 50%+ to <5%); NULL legacy rows correctly excluded
+  from a version-filtered query; version filter propagating through
+  accuracy / coverage / trajectory alongside stability.
+
+### Changed
+
+- **`/experiment/{name}/promote/{model_name}` is now idempotent.**
+  Previously cleared ``forecast_log`` on every call regardless of
+  whether the champion name actually changed, which was too
+  aggressive — a user re-clicking promote on the already-current
+  model would wipe their metrics history. The cleanup now gates on
+  ``previous_model != model_name`` (matches the behaviour in
+  ``_run_benchmark``). Response echoes the previous→new transition
+  in the log line when a clear actually happens.
+- ``clear_forecast_log_on_retrain`` (added in 2.23.0) is now
+  defensive rather than load-bearing — the ``model_version`` column
+  already segregates pre- and post-retrain cycles under the same
+  model_name, so the cleanup is mostly for storage hygiene.
+
 ## 2.23.0
 
 ### Added
