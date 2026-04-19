@@ -1,5 +1,57 @@
 # Changelog
 
+## 2.23.0
+
+### Added
+
+- **`stability_focus` experiment-config knob** that drives which
+  run-to-run CV the Layer 1 verdict chip and headline sentence read.
+  Two values:
+  - ``per_moment`` (default) — median cross-cycle CV of predictions
+    at the same target moment. Right when the downstream consumer
+    cares about *when* demand hits: HVAC setpoints, pre-heat timing,
+    battery dispatch.
+  - ``daily_total`` — median cross-cycle CV of daily-total
+    predictions (cumulative sensors only). Right when the downstream
+    consumer integrates over the day: Predbat iBoost heating a hot-
+    water tank, EV daily charging budgets, solar-export daily
+    planning. For those use cases a ±50% per-moment swing can be
+    fine as long as the daily total is stable, and the old
+    per-moment-only chip was giving misleading "poor" verdicts.
+
+  The Layer 3 accordion still surfaces both metrics regardless of
+  focus — only the Layer 1 chip, headline, and swing-tile label
+  follow this setting. Validator rejects ``daily_total`` on
+  instantaneous sensors (summing them across a day isn't a physical
+  quantity) and rejects unknown values.
+- **`clear_forecast_log_on_retrain` experiment-config knob**
+  (default ``True``) that prunes ``forecast_log`` rows issued before
+  a champion promotion. Old cycles logged under the previous weights
+  (even under the *same* model_name) pool into stability metrics and
+  produce the "I retrained and now run-to-run looks terrible"
+  artefact. Wired into two promotion paths:
+  - ``/experiment/{name}/promote/{model_name}`` — the explicit UI
+    promote action (app.py) now calls
+    ``HistoryDB.cleanup_forecast_log()`` with a "now" cutoff,
+    returning ``forecast_log_rows_cleared`` in the response.
+  - The automatic champion-change path inside ``_run_benchmark``
+    (main.py) does the same when the benchmark actually promotes a
+    new name (no-op when the champion hasn't changed).
+
+  Set to ``False`` to preserve full history for offline analysis.
+
+### Tests
+
+- New ``tests/test_config.py::TestStabilityFocus`` (4 assertions)
+  and ``TestClearForecastLogOnRetrain`` (2 assertions) covering
+  defaults, validation, and the cumulative-gating rule for
+  ``daily_total`` focus.
+- New ``tests/test_forecast_analytics.py::TestStability::
+  test_cleanup_removes_pre_retrain_rows`` pins the promotion-time
+  cleanup: seeded pre-retrain cycles with wildly different
+  predictions produce CV > 50%; after ``cleanup_forecast_log()``
+  removes them, the metric drops below 5%.
+
 ## 2.22.2
 
 ### Fixed

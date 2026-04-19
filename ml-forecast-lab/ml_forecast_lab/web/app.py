@@ -951,7 +951,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 model.is_production = model.name == model_name
 
         # Persist to YAML so promotion survives restarts
-        from ml_forecast_lab.config import save_experiment_field
+        from ml_forecast_lab.config import load_config, save_experiment_field
         config_path = _find_config_path()
         if config_path:
             try:
@@ -960,11 +960,34 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             except Exception as e:
                 logger.warning(f"Failed to persist promotion to YAML: {e}")
 
+        # Prune forecast_log of rows issued under the previous champion
+        # (or earlier weights of this champion). Pre-promotion rows pool
+        # into the stability metric under the same model_name and
+        # produce "I retrained, now stability looks terrible" artefacts.
+        # Controlled by ExperimentCfg.clear_forecast_log_on_retrain.
+        deleted = 0
+        try:
+            db = app.state.appstate.history_db
+            if db and config_path:
+                cfg = load_config(config_path)
+                exp_cfg = next((e for e in cfg.experiments if e.name == name), None)
+                if exp_cfg and getattr(exp_cfg, "clear_forecast_log_on_retrain", True):
+                    from datetime import datetime
+                    deleted = db.cleanup_forecast_log(name, datetime.utcnow())
+                    if deleted:
+                        logger.info(
+                            f"Promotion of {model_name} for {name}: "
+                            f"cleared {deleted} pre-promotion forecast_log rows"
+                        )
+        except Exception as e:
+            logger.warning(f"Forecast-log cleanup on promote failed: {e}")
+
         return JSONResponse(
             content={
                 "message": f"Model {model_name} promoted to production",
                 "experiment": name,
                 "model": model_name,
+                "forecast_log_rows_cleared": deleted,
             }
         )
 

@@ -358,6 +358,35 @@ class ExperimentCfg:
     mode: str = 'lab'
     """Operational mode: 'lab' (benchmark all models) or 'production' (forecast with best model)."""
 
+    clear_forecast_log_on_retrain: bool = True
+    """Whether to prune forecast_log rows older than the latest retrain
+    timestamp when the champion is promoted.
+
+    Forecasts logged under an older set of weights (even under the same
+    model_name) pool into the stability metric and inflate cross-run
+    disagreement — the "I retrained and now stability looks terrible"
+    pattern. Clearing pre-retrain rows keeps the metric honest. Set to
+    False if you want to preserve the full history for offline analysis
+    and are willing to read the stability chart with that in mind."""
+
+    stability_focus: str = 'per_moment'
+    """Which stability metric drives the Forecast Accuracy verdict chip.
+
+    - ``per_moment`` (default): chip reads median cross-cycle CV of
+      predictions at the same target moment. Right when the downstream
+      consumer cares about *when* demand hits (HVAC setpoints, pre-heat
+      timing, battery dispatch).
+    - ``daily_total``: chip reads median cross-cycle CV of daily-total
+      predictions (cumulative sensors only). Right when the downstream
+      consumer only integrates over the day — e.g. Predbat iBoost
+      deciding how much to heat a hot-water tank, EV daily charging
+      budget, solar-export daily planning. For those use cases a
+      ±50% per-moment swing may be fine as long as the daily total is
+      stable, so reporting per-moment "poor" gives the wrong verdict.
+
+    The Layer 3 accordion still shows both metrics regardless; only
+    the Layer 1 chip and headline follow this setting."""
+
     max_age: int = 365
     """Maximum days to keep in SQLite cache."""
 
@@ -446,6 +475,18 @@ class ExperimentCfg:
         if self.cv_strategy not in valid_cv:
             raise ValueError(
                 f'cv_strategy must be one of {valid_cv}, got {self.cv_strategy!r}'
+            )
+        valid_stability = {'per_moment', 'daily_total'}
+        if self.stability_focus not in valid_stability:
+            raise ValueError(
+                f'stability_focus must be one of {valid_stability}, '
+                f'got {self.stability_focus!r}'
+            )
+        if self.stability_focus == 'daily_total' and not self.source_is_cumulative:
+            # Daily-total CV isn't meaningful for instantaneous sensors —
+            # summing them over a day doesn't produce a physical quantity.
+            raise ValueError(
+                "stability_focus='daily_total' requires source_is_cumulative=True"
             )
         if self.cv_folds < 2:
             raise ValueError(f'cv_folds must be >= 2, got {self.cv_folds}')

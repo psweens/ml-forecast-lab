@@ -1885,6 +1885,13 @@ window.showTab = function(el) {
     var EXP_RESET_DAILY       = {% if exp_config and exp_config.reset_daily %}true{% else %}false{% endif %};
     var EXP_UNITS             = {{ units | tojson if units else '""' }};
     var EXP_INTERVAL_MIN      = {{ exp_config.interval_minutes if exp_config else 30 }};
+    // stability_focus drives which run-to-run CV the Layer 1 verdict
+    // chip reads. "per_moment" (default) uses cross-cycle std of
+    // predictions at the same target moment — right for setpoint /
+    // timing-sensitive consumers. "daily_total" uses cross-cycle std
+    // of daily totals — right when the downstream consumer integrates
+    // over the day (Predbat iBoost, EV daily budgets, etc.).
+    var EXP_STABILITY_FOCUS   = {{ (exp_config.stability_focus if exp_config and exp_config.stability_focus else 'per_moment') | tojson }};
 
     // Mode state: "increment" defaults for cumulative sensors (raw value
     // errors mostly reflect the day's shape, not model skill), "raw"
@@ -2016,10 +2023,48 @@ window.showTab = function(el) {
         }
 
         // --- Stability chip + swing tile ---
+        // Which CV the chip reads follows EXP_STABILITY_FOCUS. Aggregate-
+        // focused consumers (Predbat iBoost, daily budgets) only care
+        // about daily-total stability; per-moment swing is noise to
+        // them. Timing-sensitive consumers (HVAC setpoints, pre-heat)
+        // care about per-moment. The Layer 3 accordion shows both
+        // regardless; only this chip + sentence follows the knob.
         var stabStatus = 'unknown';
         var stabCv = null;
-        if (s && s.summary && isFinite(s.summary.median_step_cv_pct) && s.summary.steps_analysed > 0) {
-            stabCv = s.summary.median_step_cv_pct;
+        var focus = EXP_STABILITY_FOCUS === 'daily_total' ? 'daily_total' : 'per_moment';
+        var stabLabel = 'Run-to-run swing';
+        var stabSubLabel = 'of predicted value';
+        var stabNoData = 'need ≥2 cycles per moment';
+        if (s && s.summary) {
+            if (focus === 'daily_total' &&
+                isFinite(s.summary.median_daily_cv_pct) &&
+                s.daily_totals && s.daily_totals.length > 0) {
+                stabCv = s.summary.median_daily_cv_pct;
+                stabLabel = 'Daily-total swing';
+                stabSubLabel = 'of daily total';
+                stabNoData = 'need ≥2 full-coverage cycles per day';
+            } else if (focus === 'per_moment' &&
+                isFinite(s.summary.median_step_cv_pct) &&
+                s.summary.steps_analysed > 0) {
+                stabCv = s.summary.median_step_cv_pct;
+            }
+        }
+        // Retitle the tile to match the focus so the user isn't reading
+        // one number with a different label above it.
+        var tileEl = document.getElementById('v-stability-tile');
+        if (tileEl) {
+            var labelEl = tileEl.querySelector('.vnum-label');
+            var subEl = tileEl.querySelector('.vnum-sub');
+            if (labelEl) {
+                // Replace just the leading text node; keep the info-tip span.
+                var firstNode = labelEl.firstChild;
+                if (firstNode && firstNode.nodeType === Node.TEXT_NODE) {
+                    firstNode.nodeValue = stabLabel + ' ';
+                }
+            }
+            if (subEl) subEl.textContent = stabSubLabel;
+        }
+        if (stabCv !== null) {
             stabStatus = _classify('stability', stabCv);
             document.getElementById('v-stability').textContent = '±' + stabCv.toFixed(1) + '%';
             _applyChip('chip-stability', stabStatus,
@@ -2027,8 +2072,7 @@ window.showTab = function(el) {
                 stabStatus === 'fair' ? 'some swing' : 'unstable');
         } else {
             document.getElementById('v-stability').textContent = '—';
-            _applyChip('chip-stability', 'unknown',
-                s ? 'need ≥2 cycles per moment' : 'no data');
+            _applyChip('chip-stability', 'unknown', s ? stabNoData : 'no data');
         }
 
         // --- Overall headline ---

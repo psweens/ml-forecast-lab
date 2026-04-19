@@ -1196,10 +1196,37 @@ class MLForecastLabApp:
         # Update experiment status with best model; default selected_model
         # to rank-1 if the user hasn't manually chosen one yet.
         exp_status = self.web_app.state.appstate.experiment_statuses.get(exp_cfg.name)
+        champion_changed = False
         if exp_status and best_model_name:
+            champion_changed = (exp_status.best_model != best_model_name)
             exp_status.best_model = best_model_name
             if not exp_status.selected_model:
                 exp_status.selected_model = best_model_name
+
+        # Clear forecast_log rows issued under the previous champion when
+        # the benchmark actually promotes a new one, so the stability
+        # metric doesn't pool residuals across two model-weight regimes.
+        # Gated on ExperimentCfg.clear_forecast_log_on_retrain (default
+        # True); no-op when the champion hasn't changed.
+        if (
+            champion_changed
+            and self.history_db
+            and getattr(exp_cfg, "clear_forecast_log_on_retrain", True)
+        ):
+            try:
+                deleted = self.history_db.cleanup_forecast_log(
+                    exp_cfg.name, datetime.utcnow()
+                )
+                if deleted:
+                    logger.info(
+                        f"Champion change for {exp_cfg.name} "
+                        f"({best_model_name}): cleared {deleted} "
+                        f"pre-promotion forecast_log rows"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"forecast_log cleanup after champion change failed: {e}"
+                )
 
     async def _run_benchmark(self, exp_cfg):
         """
