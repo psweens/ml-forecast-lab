@@ -715,3 +715,192 @@ select.setting-input, select.form-input { cursor: pointer; }
         transition-duration: 0.01ms !important;
     }
 }
+
+/* ==========================================================
+   Forecast Accuracy tab — three-layer layout
+   ========================================================== */
+
+/* Top controls row (window / mode / model badge) */
+.acc-top-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.25rem;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    background: rgba(0, 0, 0, 0.15);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 1rem;
+}
+.acc-control {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+.acc-control label { color: var(--text-secondary); font-size: 0.85rem; }
+.acc-hint {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    font-style: italic;
+}
+.acc-model-badge {
+    margin-left: auto;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+.acc-model-badge strong {
+    color: var(--accent-secondary);
+    font-family: ui-monospace, SFMono-Regular, monospace;
+}
+
+/* Layer 1 — Verdict card */
+.verdict-card {
+    background: linear-gradient(180deg,
+        rgba(0, 212, 255, 0.06) 0%,
+        rgba(0, 0, 0, 0.15) 100%);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem 1.25rem 1rem;
+    margin-bottom: 1.25rem;
+}
+.verdict-headline {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 0.85rem;
+}
+.verdict-headline[data-status="good"]    { color: var(--success); }
+.verdict-headline[data-status="fair"]    { color: var(--warning); }
+.verdict-headline[data-status="poor"]    { color: var(--error); }
+.verdict-headline[data-status="unknown"] { color: var(--text-secondary); font-weight: 500; }
+
+.verdict-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+.verdict-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.3rem 0.75rem;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 0.85rem;
+}
+.vchip-label { color: var(--text-secondary); }
+.vchip-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    background: var(--text-secondary);
+    flex-shrink: 0;
+}
+.vchip-dot[data-status="good"]    { background: var(--success); box-shadow: 0 0 6px rgba(46,204,113,0.5); }
+.vchip-dot[data-status="fair"]    { background: var(--warning); box-shadow: 0 0 6px rgba(243,156,18,0.5); }
+.vchip-dot[data-status="poor"]    { background: var(--error);   box-shadow: 0 0 6px rgba(231,76,60,0.5); }
+.vchip-dot[data-status="unknown"] { background: var(--text-secondary); opacity: 0.4; }
+.vchip-status {
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+.verdict-numbers {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.85rem;
+}
+.vnum {
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+}
+.vnum-label {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    margin-bottom: 0.25rem;
+}
+.vnum-value {
+    color: var(--text-primary);
+    font-size: 1.35rem;
+    font-weight: 700;
+    line-height: 1.2;
+}
+.vnum-sub {
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    margin-top: 0.15rem;
+}
+
+/* Layer 2 — Revision card re-layout */
+.rev-sentence {
+    color: var(--text-primary);
+    font-size: 0.95rem;
+    margin: 0 0 0.9rem 0;
+    line-height: 1.45;
+}
+.rev-tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 0.85rem;
+}
+.rev-tiles > div {
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.65rem 0.85rem;
+    text-align: center;
+}
+.tile-label {
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    margin-bottom: 0.2rem;
+}
+.tile-value {
+    color: var(--text-primary);
+    font-size: 1.25rem;
+    font-weight: 700;
+}
+.tile-sub {
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    margin-top: 0.15rem;
+}
+
+/* Layer 3 — Diagnostic accordion */
+.diag-accordion {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.1);
+    margin-top: 1rem;
+    padding: 0;
+}
+.diag-accordion > summary {
+    padding: 0.85rem 1rem;
+    cursor: pointer;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    list-style: none;
+    user-select: none;
+}
+.diag-accordion > summary::-webkit-details-marker { display: none; }
+.diag-accordion > summary::before {
+    content: '▸ ';
+    display: inline-block;
+    margin-right: 0.35rem;
+    transition: transform 0.15s ease;
+    color: var(--accent-secondary);
+}
+.diag-accordion[open] > summary::before { transform: rotate(90deg); }
+.diag-accordion > .settings-group {
+    margin: 0.75rem 1rem 1rem;
+}
+.diag-accordion[open] {
+    background: rgba(0, 0, 0, 0.18);
+}

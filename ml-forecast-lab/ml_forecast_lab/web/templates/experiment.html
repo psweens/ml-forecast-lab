@@ -1097,182 +1097,252 @@
 <section class="section">
     <h2>Forecast Accuracy</h2>
     <p style="color:var(--text-secondary);margin-bottom:1rem;">
-        How prediction accuracy changes with lead time, and whether re-forecasting improves results.
+        Is your forecast working well? Start with the verdict below; expand the diagnostic tools if something looks off.
     </p>
 
-    <!-- Evaluation mode toggle (shown only for cumulative sensors) -->
-    <div id="accuracy-mode-wrapper" style="display:none;margin-bottom:1rem;">
-        <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;">
-            <label style="color:var(--text-secondary);font-size:0.85rem;">Evaluate on:</label>
+    <!-- ============================================================ -->
+    <!-- TOP CONTROLS: window, evaluation mode, model badge            -->
+    <!-- ============================================================ -->
+    <div class="acc-top-controls">
+        <div class="acc-control">
+            <label for="accuracy-window">Window:</label>
+            <select id="accuracy-window" class="setting-input" onchange="reloadAccuracyAll()">
+                <option value="7">Last 7 days</option>
+                <option value="30" selected>Last 30 days</option>
+                <option value="90">Last 90 days</option>
+            </select>
+        </div>
+        <!-- Evaluation mode toggle — cumulative sensors only -->
+        <div class="acc-control" id="accuracy-mode-wrapper" style="display:none;">
+            <label>Evaluate as:</label>
             <div class="toggle-group" style="display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
                 <button type="button" id="accuracy-mode-increment" class="toggle-btn active" onclick="setAccuracyMode('increment')" style="padding:0.35rem 0.75rem;background:var(--accent-secondary);color:#fff;border:none;cursor:pointer;font-size:0.85rem;">Per-interval demand</button>
                 <button type="button" id="accuracy-mode-raw" class="toggle-btn" onclick="setAccuracyMode('raw')" style="padding:0.35rem 0.75rem;background:transparent;color:var(--text-secondary);border:none;cursor:pointer;font-size:0.85rem;">Cumulative value</button>
             </div>
-            <span class="info-tip">?<span class="tip-text">Cumulative sensors (resets at midnight) make raw-value errors mostly reflect the shape of the day — 23:30 errors look big just because the number is big. Per-interval demand evaluates error on <code>value[t] − value[t−1]</code>, so the error at 03:00 and 18:00 are directly comparable.</span></span>
+            <span class="acc-hint">Recommended — avoids mistaking "big numbers late in the day" for poor forecasts.</span>
+        </div>
+        <div class="acc-control acc-model-badge" id="acc-model-badge" style="display:none;">
+            <span>Model:</span>
+            <strong id="acc-model-name">—</strong>
         </div>
     </div>
 
-    <!-- Interval calibration card (shown when conformal bands exist) -->
-    <div id="accuracy-coverage-card" style="display:none;margin-bottom:1rem;">
-        <div class="settings-group" style="display:flex;gap:2rem;flex-wrap:wrap;align-items:center;">
-            <div style="text-align:center;flex:1;min-width:160px;">
-                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">
-                    Interval coverage
-                    <span class="info-tip">?<span class="tip-text">The fraction of actuals that fell inside the published 80% band. A well-calibrated model sits near 80%. Consistently higher = bands are wider than needed; lower = bands are too tight and under-sell uncertainty.</span></span>
+    <!-- ============================================================ -->
+    <!-- LAYER 1 — VERDICT CARD                                        -->
+    <!-- ============================================================ -->
+    <div id="verdict-card" class="verdict-card" style="display:none;">
+        <div class="verdict-headline" id="verdict-headline">Checking recent forecasts…</div>
+        <div class="verdict-chips">
+            <div class="verdict-chip" id="chip-accuracy">
+                <span class="vchip-label">Accuracy</span>
+                <span class="vchip-dot" data-status="unknown"></span>
+                <span class="vchip-status">—</span>
+            </div>
+            <div class="verdict-chip" id="chip-calibration">
+                <span class="vchip-label">Calibration</span>
+                <span class="vchip-dot" data-status="unknown"></span>
+                <span class="vchip-status">—</span>
+            </div>
+            <div class="verdict-chip" id="chip-stability">
+                <span class="vchip-label">Stability</span>
+                <span class="vchip-dot" data-status="unknown"></span>
+                <span class="vchip-status">—</span>
+            </div>
+        </div>
+        <div class="verdict-numbers">
+            <div class="vnum">
+                <div class="vnum-label">
+                    Typical next-step error
+                    <span class="info-tip">?<span class="tip-text">Mean absolute error at the shortest lead time — the first forecast point published to HA. Smaller is better.</span></span>
                 </div>
-                <div id="cov-value" style="font-size:1.5rem;font-weight:700;">—</div>
-                <div style="font-size:0.72rem;color:var(--text-secondary);">target <span id="cov-target">80%</span></div>
+                <div class="vnum-value" id="v-mae">—</div>
+                <div class="vnum-sub" id="v-mae-sub">—</div>
             </div>
-            <div style="text-align:center;flex:1;min-width:120px;">
-                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Samples</div>
-                <div id="cov-samples" style="font-size:1.5rem;font-weight:700;color:var(--text-secondary);">—</div>
+            <div class="vnum" id="v-coverage-tile">
+                <div class="vnum-label">
+                    Uncertainty bands
+                    <span class="info-tip">?<span class="tip-text">How often the real value fell inside the published 80% band. Near 80% = well-calibrated.</span></span>
+                </div>
+                <div class="vnum-value" id="v-coverage">—</div>
+                <div class="vnum-sub" id="v-coverage-sub">target 80%</div>
             </div>
-            <div style="flex:2;min-width:220px;color:var(--text-secondary);font-size:0.85rem;">
-                <div id="cov-diagnosis">—</div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Revision summary card -->
-    <div id="accuracy-revision-card" style="display:none;margin-bottom:1.5rem;">
-        <div class="settings-group" style="display:flex;gap:2rem;flex-wrap:wrap;align-items:center;">
-            <div style="text-align:center;flex:1;min-width:140px;">
-                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">First forecast MAE</div>
-                <div id="rev-first-mae" style="font-size:1.5rem;font-weight:700;color:var(--text-primary);">—</div>
-                <div id="rev-first-me" style="font-size:0.75rem;color:var(--text-secondary);margin-top:0.15rem;">bias —</div>
-            </div>
-            <div style="font-size:1.5rem;color:var(--text-secondary);">→</div>
-            <div style="text-align:center;flex:1;min-width:140px;">
-                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Latest forecast MAE</div>
-                <div id="rev-last-mae" style="font-size:1.5rem;font-weight:700;color:var(--text-primary);">—</div>
-                <div id="rev-last-me" style="font-size:0.75rem;color:var(--text-secondary);margin-top:0.15rem;">bias —</div>
-            </div>
-            <div style="text-align:center;flex:1;min-width:140px;">
-                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Improvement</div>
-                <div id="rev-improvement" style="font-size:1.5rem;font-weight:700;">—</div>
-            </div>
-            <div style="text-align:center;flex:1;min-width:100px;">
-                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Samples</div>
-                <div id="rev-samples" style="font-size:1.5rem;font-weight:700;color:var(--text-secondary);">—</div>
+            <div class="vnum" id="v-stability-tile">
+                <div class="vnum-label">
+                    Run-to-run swing
+                    <span class="info-tip">?<span class="tip-text">Typical disagreement between forecasts for the same future moment across consecutive runs. Lower = more stable.</span></span>
+                </div>
+                <div class="vnum-value" id="v-stability">—</div>
+                <div class="vnum-sub">of predicted value</div>
             </div>
         </div>
     </div>
 
-    <!-- Lead-time vs accuracy chart -->
-    <div class="settings-group">
-        <h3 class="settings-group-title">
-            Accuracy by lead time
-            <span class="info-tip">?<span class="tip-text">MAE/RMSE grow with lead time as the forecast horizon extends. Signed bias (ME, dashed green) shows whether the model systematically over- (positive) or under-predicts (negative). A well-calibrated model sits near zero.</span></span>
-        </h3>
-        <div id="accuracy-lead-chart" style="width:100%;height:380px;"></div>
+    <!-- ============================================================ -->
+    <!-- LAYER 2 — DRIVERS                                             -->
+    <!-- ============================================================ -->
+    <div id="drivers-section">
+
+        <!-- Does re-forecasting help? -->
+        <div id="accuracy-revision-card" class="settings-group" style="display:none;">
+            <h3 class="settings-group-title">
+                Does re-forecasting help?
+                <span class="info-tip">?<span class="tip-text">For each future moment, we compare the first forecast issued for it against the latest one. If later (shorter-lead-time) forecasts are more accurate, re-forecasting is doing its job.</span></span>
+            </h3>
+            <p class="rev-sentence" id="rev-sentence">—</p>
+            <div class="rev-tiles">
+                <div>
+                    <div class="tile-label">First forecast error <span id="rev-units-1"></span></div>
+                    <div class="tile-value" id="rev-first-mae">—</div>
+                    <div class="tile-sub" id="rev-first-me">bias —</div>
+                </div>
+                <div>
+                    <div class="tile-label">Latest forecast error <span id="rev-units-2"></span></div>
+                    <div class="tile-value" id="rev-last-mae">—</div>
+                    <div class="tile-sub" id="rev-last-me">bias —</div>
+                </div>
+                <div>
+                    <div class="tile-label">Based on</div>
+                    <div class="tile-value" id="rev-samples">—</div>
+                    <div class="tile-sub">target moments</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Lead-time chart — MAE only by default -->
+        <div class="settings-group">
+            <div class="settings-group-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem;">
+                <h3 class="settings-group-title" style="margin:0;">
+                    How error grows with forecast horizon
+                    <span class="info-tip">?<span class="tip-text">As the model looks further ahead, error usually grows. A flat curve means the model gains nothing from shorter lead times; a steep curve means the near-term forecast is much better than the long-range one.</span></span>
+                </h3>
+                <label class="leadtime-detail-toggle" style="color:var(--text-secondary);font-size:0.85rem;cursor:pointer;">
+                    <input type="checkbox" id="leadtime-detail" onchange="loadForecastAccuracy()" style="vertical-align:middle;margin-right:0.25rem;">
+                    Show RMSE &amp; bias
+                </label>
+            </div>
+            <div id="accuracy-lead-chart" style="width:100%;height:360px;"></div>
+        </div>
     </div>
 
-    <!-- Forecast evolution overlay -->
-    <div class="settings-group" id="accuracy-evolution-wrapper">
-        <h3 class="settings-group-title">
-            Forecast evolution
-            <span class="info-tip">?<span class="tip-text">Each coloured line is one forecast issuance (one production run). Older runs are darker, newer runs are brighter. The bold white line is the measured value. As lead time shrinks, forecasts should converge toward the actual.</span></span>
-        </h3>
-        <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
-            Each line is one forecast cycle; colour indicates when it was issued (dark = older, bright = newer). The bold white line is the measured value.
-        </p>
-        <div style="display:flex;gap:1.5rem;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;">
-            <div style="display:flex;gap:0.5rem;align-items:center;">
-                <label style="color:var(--text-secondary);font-size:0.85rem;">Show last:</label>
-                <select id="accuracy-evolution-cycles" class="setting-input" style="width:auto;" onchange="reloadForecastEvolution()">
-                    <option value="6">6 cycles</option>
-                    <option value="12" selected>12 cycles</option>
-                    <option value="24">24 cycles</option>
-                    <option value="48">48 cycles</option>
+    <!-- ============================================================ -->
+    <!-- LAYER 3 — DIAGNOSTIC TOOLS (collapsed by default)             -->
+    <!-- ============================================================ -->
+    <details id="diag-accordion" class="diag-accordion">
+        <summary>
+            Diagnostic tools
+            <span style="color:var(--text-secondary);font-size:0.85rem;font-weight:400;"> — for deeper debugging</span>
+        </summary>
+
+        <!-- Forecast convergence (fan) -->
+        <div class="settings-group" id="accuracy-evolution-wrapper">
+            <h3 class="settings-group-title">
+                Forecast convergence
+                <span class="info-tip">?<span class="tip-text">The shaded band shows the range of predictions from recent forecast runs for each moment. The bright line is the latest run. The white line is the actual. The band should narrow around the latest run as lead time shrinks, and land on the actual.</span></span>
+            </h3>
+            <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
+                Shaded band = range across recent runs. Bright line = latest run. White line = measured.
+            </p>
+            <div style="display:flex;gap:1.5rem;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;">
+                <div style="display:flex;gap:0.5rem;align-items:center;">
+                    <label style="color:var(--text-secondary);font-size:0.85rem;">Show last:</label>
+                    <select id="accuracy-evolution-cycles" class="setting-input" style="width:auto;" onchange="reloadForecastEvolution()">
+                        <option value="6">6 cycles</option>
+                        <option value="12" selected>12 cycles</option>
+                        <option value="24">24 cycles</option>
+                        <option value="48">48 cycles</option>
+                    </select>
+                </div>
+                {% if exp_config and exp_config.source_is_cumulative %}
+                <div style="display:flex;gap:0.5rem;align-items:center;">
+                    <label style="color:var(--text-secondary);font-size:0.85rem;">View as:</label>
+                    <select id="accuracy-evolution-mode" class="setting-input" style="width:auto;" onchange="reloadForecastEvolution()">
+                        <option value="interval" selected>Per-interval deltas</option>
+                        <option value="cumulative">Cumulative (daily)</option>
+                    </select>
+                </div>
+                {% endif %}
+            </div>
+            <div id="accuracy-evolution-chart" style="width:100%;height:420px;"></div>
+        </div>
+
+        <!-- Forecast trajectory — sort by worst error by default -->
+        <div class="settings-group" id="accuracy-trajectory-wrapper">
+            <h3 class="settings-group-title">
+                One moment, every prediction of it
+                <span class="info-tip">?<span class="tip-text">For a single future moment: every forecast ever issued of it, plotted at the time it was issued. The horizontal line is the actual. A well-behaved model walks toward the line as the target approaches.</span></span>
+            </h3>
+            <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
+                Default shows the biggest miss in the window — the most instructive moments for debugging.
+            </p>
+            <div style="display:flex;gap:0.75rem;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;">
+                <label style="color:var(--text-secondary);font-size:0.85rem;">Sort by:</label>
+                <select id="trajectory-sort" class="setting-input" style="width:auto;" onchange="reloadForecastTrajectory(true)">
+                    <option value="worst" selected>Biggest miss</option>
+                    <option value="recent">Most recent</option>
+                </select>
+                <label style="color:var(--text-secondary);font-size:0.85rem;">Target:</label>
+                <select id="trajectory-target-select" class="setting-input" style="width:auto;min-width:220px;" onchange="reloadForecastTrajectory(false)">
+                    <option value="">Loading…</option>
                 </select>
             </div>
-            {% if exp_config and exp_config.source_is_cumulative %}
-            <div style="display:flex;gap:0.5rem;align-items:center;">
-                <label style="color:var(--text-secondary);font-size:0.85rem;">View as:</label>
-                <select id="accuracy-evolution-mode" class="setting-input" style="width:auto;" onchange="reloadForecastEvolution()">
-                    <option value="interval" selected>Per-interval deltas</option>
-                    <option value="cumulative">Cumulative (daily)</option>
-                </select>
-                <span class="info-tip">?<span class="tip-text">The model is trained on per-interval increments (the pipeline converts your cumulative sensor to deltas). "Cumulative" sums these back up within each day and resets at midnight, so you can read values as "% of the daily budget drawn by this time".</span></span>
+            <div id="trajectory-empty" style="display:none;color:var(--text-secondary);font-size:0.9rem;padding:1rem 0;">
+                No targets yet — need at least two forecasts of the same future moment plus a measured actual.
             </div>
+            <div id="accuracy-trajectory-chart" style="width:100%;height:360px;"></div>
+        </div>
+
+        <!-- Model stability -->
+        <div class="settings-group" id="accuracy-stability-wrapper" style="display:none;">
+            <h3 class="settings-group-title">
+                Run-to-run disagreement
+                <span class="info-tip">?<span class="tip-text">How much forecasts for the same future moment vary between consecutive runs. Low disagreement = stable model; high disagreement = predictions depend heavily on when they were issued.</span></span>
+            </h3>
+            <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
+                <span id="stab-plain-sentence">—</span>
+            </p>
+
+            <div style="display:flex;gap:2rem;flex-wrap:wrap;align-items:center;margin-bottom:1rem;">
+                <div style="text-align:center;flex:1;min-width:140px;">
+                    <div class="tile-label">Per-moment swing</div>
+                    <div class="tile-value" id="stability-step-cv">—</div>
+                    <div class="tile-sub">median across moments</div>
+                </div>
+                {% if exp_config and exp_config.source_is_cumulative %}
+                <div style="text-align:center;flex:1;min-width:140px;">
+                    <div class="tile-label">Daily-total swing</div>
+                    <div class="tile-value" id="stability-daily-cv">—</div>
+                    <div class="tile-sub">how much the day's forecast moves</div>
+                </div>
+                {% endif %}
+                <div style="text-align:center;flex:1;min-width:120px;">
+                    <div class="tile-label">Runs</div>
+                    <div class="tile-value" id="stability-total-cycles">—</div>
+                    <div class="tile-sub">analysed</div>
+                </div>
+                <div style="text-align:center;flex:1;min-width:120px;">
+                    <div class="tile-label">Moments</div>
+                    <div class="tile-value" id="stability-steps">—</div>
+                    <div class="tile-sub">covered</div>
+                </div>
+            </div>
+
+            <div id="stability-std-chart" style="width:100%;height:320px;"></div>
+
+            {% if exp_config and exp_config.source_is_cumulative %}
+            <h4 style="color:var(--text-secondary);font-size:0.9rem;margin-top:1.25rem;margin-bottom:0.5rem;">
+                Daily-total disagreement by day
+            </h4>
+            <div id="stability-daily-chart" style="width:100%;height:220px;"></div>
             {% endif %}
         </div>
-        <div id="accuracy-evolution-chart" style="width:100%;height:420px;"></div>
-    </div>
+    </details>
 
-    <!-- Forecast trajectory — one target, every prediction of it -->
-    <div class="settings-group" id="accuracy-trajectory-wrapper">
-        <h3 class="settings-group-title">
-            Forecast trajectory
-            <span class="info-tip">?<span class="tip-text">Pick a past timestamp. Each dot is one forecast that predicted this moment, plotted on the horizontal axis at the time it was issued. The horizontal line is the measured value. A well-behaved model walks toward the line as the target approaches — oscillation or drift here is diagnostic.</span></span>
-        </h3>
-        <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
-            For one target timestamp: every forecast ever issued of that moment, ordered by when it was issued. The horizontal line is the actual.
-        </p>
-        <div style="display:flex;gap:0.5rem;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;">
-            <label style="color:var(--text-secondary);font-size:0.85rem;">Target:</label>
-            <select id="trajectory-target-select" class="setting-input" style="width:auto;min-width:220px;" onchange="reloadForecastTrajectory()">
-                <option value="">Loading…</option>
-            </select>
-        </div>
-        <div id="trajectory-empty" style="display:none;color:var(--text-secondary);font-size:0.9rem;padding:1rem 0;">
-            No targets yet — need at least two forecasts of the same future moment plus a measured actual.
-        </div>
-        <div id="accuracy-trajectory-chart" style="width:100%;height:360px;"></div>
-    </div>
-
-    <!-- Model stability -->
-    <div class="settings-group" id="accuracy-stability-wrapper" style="display:none;">
-        <h3 class="settings-group-title">
-            Model stability
-            <span class="info-tip">?<span class="tip-text">Self-consistency across forecast cycles — distinct from accuracy. A stable model produces similar predictions for the same future target each time it runs; an unstable one swings wildly between issuances even when the target hasn't changed.</span></span>
-        </h3>
-        <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
-            How much do forecasts for the same future target disagree across cycles? Lower is better. High values mean the model's predictions depend heavily on when it was run.
-        </p>
-
-        <!-- Summary cards -->
-        <div style="display:flex;gap:2rem;flex-wrap:wrap;align-items:center;margin-bottom:1rem;">
-            <div style="text-align:center;flex:1;min-width:140px;">
-                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Median step CV</div>
-                <div id="stability-step-cv" style="font-size:1.5rem;font-weight:700;color:var(--text-primary);">—</div>
-                <div style="font-size:0.7rem;color:var(--text-secondary);">per-timestep spread</div>
-            </div>
-            {% if exp_config and exp_config.source_is_cumulative %}
-            <div style="text-align:center;flex:1;min-width:140px;">
-                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Median daily CV</div>
-                <div id="stability-daily-cv" style="font-size:1.5rem;font-weight:700;color:var(--text-primary);">—</div>
-                <div style="font-size:0.7rem;color:var(--text-secondary);">daily-total spread</div>
-            </div>
-            {% endif %}
-            <div style="text-align:center;flex:1;min-width:120px;">
-                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Cycles</div>
-                <div id="stability-total-cycles" style="font-size:1.5rem;font-weight:700;color:var(--text-secondary);">—</div>
-            </div>
-            <div style="text-align:center;flex:1;min-width:120px;">
-                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Timesteps analysed</div>
-                <div id="stability-steps" style="font-size:1.5rem;font-weight:700;color:var(--text-secondary);">—</div>
-            </div>
-        </div>
-
-        <!-- Per-timestep std chart -->
-        <div id="stability-std-chart" style="width:100%;height:360px;"></div>
-
-        {% if exp_config and exp_config.source_is_cumulative %}
-        <!-- Daily-total CV chart (cumulative-source only) -->
-        <h4 style="color:var(--text-secondary);font-size:0.9rem;margin-top:1.25rem;margin-bottom:0.5rem;">
-            Daily-total disagreement by day
-        </h4>
-        <div id="stability-daily-chart" style="width:100%;height:240px;"></div>
-        {% endif %}
-    </div>
-
-    <!-- Info / empty state -->
+    <!-- Empty state + footer -->
     <div id="accuracy-empty" style="display:none;">
         <div class="empty-state">
             <span class="empty-state-icon">📊</span>
-            <p>No forecast accuracy data yet.</p>
-            <p class="empty-state-hint">Data accumulates automatically each time a production forecast runs.</p>
+            <p id="accuracy-empty-title">No forecast accuracy data yet.</p>
+            <p class="empty-state-hint" id="accuracy-empty-hint">Data accumulates automatically each time a production forecast runs.</p>
         </div>
     </div>
 
@@ -1806,53 +1876,257 @@ window.showTab = function(el) {
 
     // ======== Forecast accuracy chart ========
     {% if experiment.mode == 'production' %}
+    // Config flags exposed from Jinja. Declared here (not further down)
+    // because `accuracyMode` below reads EXP_SOURCE_CUMULATIVE at script
+    // load — `var` hoists the declaration but not the initialiser, so a
+    // later `var EXP_SOURCE_CUMULATIVE = …` would leave it `undefined`
+    // here and silently default cumulative sensors to 'raw' mode.
+    var EXP_SOURCE_CUMULATIVE = {% if exp_config and exp_config.source_is_cumulative %}true{% else %}false{% endif %};
+    var EXP_RESET_DAILY       = {% if exp_config and exp_config.reset_daily %}true{% else %}false{% endif %};
+    var EXP_UNITS             = {{ units | tojson if units else '""' }};
+    var EXP_INTERVAL_MIN      = {{ exp_config.interval_minutes if exp_config else 30 }};
+
     // Mode state: "increment" defaults for cumulative sensors (raw value
     // errors mostly reflect the day's shape, not model skill), "raw"
     // otherwise. User can flip via the toggle buttons.
     var accuracyMode = EXP_SOURCE_CUMULATIVE ? 'increment' : 'raw';
+    // Cached last accuracy+stability payloads — used by the verdict
+    // card, which is a function of both endpoints resolving.
+    var _lastAccuracyData = null;
+    var _lastStabilityData = null;
+    // Minimum sample count before we trust a lead bucket's MAE in the
+    // headline or on the chart. Below this we show the bucket as a
+    // lighter dashed marker so the reader can tell it's noisy.
+    var LEADBUCKET_MIN_N = 10;
+
+    function _accuracyDays() {
+        var sel = document.getElementById('accuracy-window');
+        var d = sel ? parseInt(sel.value, 10) : 30;
+        return (isFinite(d) && d > 0) ? d : 30;
+    }
+
+    function _fmtUnits(v, digits) {
+        if (v === null || v === undefined || !isFinite(v)) return '—';
+        digits = digits === undefined ? 3 : digits;
+        return v.toFixed(digits) + (EXP_UNITS ? ' ' + EXP_UNITS : '');
+    }
+
+    // Classify a metric into good/fair/poor — bands used both in the
+    // verdict chip and the lead-time chart colour.
+    function _classify(metric, value) {
+        if (value === null || value === undefined || !isFinite(value)) return 'unknown';
+        if (metric === 'nmae') {
+            if (value < 0.15) return 'good';
+            if (value < 0.30) return 'fair';
+            return 'poor';
+        }
+        if (metric === 'coverage') {
+            // value = |observed − nominal| in pp
+            if (value <= 5) return 'good';
+            if (value <= 10) return 'fair';
+            return 'poor';
+        }
+        if (metric === 'stability') {
+            if (value < 10) return 'good';
+            if (value < 25) return 'fair';
+            return 'poor';
+        }
+        return 'unknown';
+    }
+    var _statusRank = { good: 0, fair: 1, poor: 2, unknown: -1 };
+    var _statusLabel = { good: 'Good', fair: 'Fair', poor: 'Poor', unknown: '—' };
+
+    function _applyChip(id, status, detail) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.querySelector('.vchip-dot').setAttribute('data-status', status);
+        el.querySelector('.vchip-status').textContent =
+            _statusLabel[status] + (detail ? ' · ' + detail : '');
+    }
+
+    function _renderVerdict() {
+        var a = _lastAccuracyData;
+        var s = _lastStabilityData;
+        if (!a) return;
+        var card = document.getElementById('verdict-card');
+        card.style.display = 'block';
+
+        // --- Accuracy chip + headline MAE ---
+        var ltc = a.lead_time_curve || {};
+        var leads = ltc.lead_minutes || [];
+        var maes = ltc.mae || [];
+        var ns = ltc.sample_count || [];
+        // First bucket with sufficient samples = "typical next-step
+        // error" — what the user sees on their HA dashboard.
+        var idx = -1;
+        for (var i = 0; i < leads.length; i++) {
+            if (ns[i] >= LEADBUCKET_MIN_N) { idx = i; break; }
+        }
+        // Fall back to first bucket if no bucket meets the threshold
+        // (cold-start window), but flag it as unknown.
+        var headlineMae = null, nextStepN = 0, coldStart = false;
+        if (idx >= 0) {
+            headlineMae = maes[idx];
+            nextStepN = ns[idx];
+        } else if (leads.length > 0) {
+            headlineMae = maes[0];
+            nextStepN = ns[0];
+            coldStart = true;
+        }
+        var typical = a.typical_interval_demand;
+        var nmae = (headlineMae != null && typical && typical > 1e-9)
+            ? (headlineMae / typical) : null;
+        var accStatus = coldStart ? 'unknown' : _classify('nmae', nmae);
+        var accDetail = nmae != null ? (nmae * 100).toFixed(0) + '% of typical'
+                        : (coldStart ? 'not enough data' : 'no baseline');
+        _applyChip('chip-accuracy', accStatus, accDetail);
+        document.getElementById('v-mae').textContent = _fmtUnits(headlineMae, 3);
+        var maeSub = document.getElementById('v-mae-sub');
+        if (headlineMae != null) {
+            var parts = [];
+            if (nmae != null) parts.push((nmae * 100).toFixed(0) + '% of typical');
+            if (nextStepN) parts.push('n=' + nextStepN);
+            if (coldStart) parts.push('cold-start estimate');
+            maeSub.textContent = parts.join(' · ') || '—';
+        } else {
+            maeSub.textContent = '—';
+        }
+
+        // --- Calibration chip + coverage tile ---
+        var cov = a.coverage && a.coverage.overall;
+        var nominal = (a.nominal_interval_level != null) ? a.nominal_interval_level : 0.8;
+        var covStatus = 'unknown';
+        if (cov && typeof cov.coverage === 'number' && cov.n >= 5) {
+            var covPct = cov.coverage * 100;
+            var targetPct = nominal * 100;
+            var delta = Math.abs(covPct - targetPct);
+            covStatus = _classify('coverage', delta);
+            document.getElementById('v-coverage').textContent = covPct.toFixed(0) + '%';
+            var dir = covPct > targetPct ? 'over' : covPct < targetPct ? 'under' : 'on';
+            document.getElementById('v-coverage-sub').textContent =
+                'target ' + targetPct.toFixed(0) + '% · ' + dir + ' by ' + delta.toFixed(1) + 'pp';
+            _applyChip('chip-calibration', covStatus,
+                dir === 'on' ? 'on target' :
+                dir === 'over' ? 'bands wide' : 'bands tight');
+        } else {
+            document.getElementById('v-coverage').textContent = '—';
+            document.getElementById('v-coverage-sub').textContent =
+                cov && cov.n ? 'need ≥5 samples, have ' + cov.n : 'no calibrated bands yet';
+            _applyChip('chip-calibration', 'unknown', 'no data');
+        }
+
+        // --- Stability chip + swing tile ---
+        var stabStatus = 'unknown';
+        var stabCv = null;
+        if (s && s.summary && isFinite(s.summary.median_step_cv_pct) && s.summary.steps_analysed > 0) {
+            stabCv = s.summary.median_step_cv_pct;
+            stabStatus = _classify('stability', stabCv);
+            document.getElementById('v-stability').textContent = '±' + stabCv.toFixed(1) + '%';
+            _applyChip('chip-stability', stabStatus,
+                stabStatus === 'good' ? 'consistent' :
+                stabStatus === 'fair' ? 'some swing' : 'unstable');
+        } else {
+            document.getElementById('v-stability').textContent = '—';
+            _applyChip('chip-stability', 'unknown',
+                s ? 'need ≥2 cycles per moment' : 'no data');
+        }
+
+        // --- Overall headline ---
+        var statuses = [accStatus, covStatus, stabStatus].filter(function(x) { return x !== 'unknown'; });
+        var worst = statuses.reduce(function(w, x) {
+            return _statusRank[x] > _statusRank[w] ? x : w;
+        }, 'good');
+        var headline = document.getElementById('verdict-headline');
+        if (statuses.length === 0) {
+            headline.textContent = 'Warming up — first verdict available after a few production cycles.';
+            headline.setAttribute('data-status', 'unknown');
+        } else if (worst === 'good') {
+            headline.textContent = 'Looking healthy — forecasts are accurate, bands are calibrated, runs agree.';
+            headline.setAttribute('data-status', 'good');
+        } else if (worst === 'fair') {
+            headline.textContent = 'Mostly OK, with room to improve — expand the diagnostic tools below.';
+            headline.setAttribute('data-status', 'fair');
+        } else {
+            headline.textContent = 'Something looks off — expand the diagnostic tools below to investigate.';
+            headline.setAttribute('data-status', 'poor');
+        }
+    }
 
     function loadForecastAccuracy() {
-        var url = BASE + '/experiment/' + EXP_NAME + '/forecast-accuracy?mode=' + accuracyMode;
+        var url = BASE + '/experiment/' + EXP_NAME + '/forecast-accuracy'
+            + '?mode=' + accuracyMode + '&days=' + _accuracyDays();
         fetch(url)
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (data.error || !data.lead_time_curve || !data.lead_time_curve.lead_minutes.length) {
-                document.getElementById('accuracy-empty').style.display = 'block';
+                _renderAccuracyEmpty(data);
                 return;
             }
             document.getElementById('accuracy-empty').style.display = 'none';
+            _lastAccuracyData = data;
 
-            // Lead-time vs accuracy chart
+            // Surface which model the metrics are for
+            var modelBadge = document.getElementById('acc-model-badge');
+            if (data.model_name) {
+                modelBadge.style.display = '';
+                document.getElementById('acc-model-name').textContent = data.model_name;
+            } else {
+                modelBadge.style.display = 'none';
+            }
+
+            // Lead-time vs accuracy chart — MAE only by default, RMSE/bias
+            // behind the "show detail" toggle.
             var ltc = data.lead_time_curve;
             var xHours = ltc.lead_minutes.map(function(m) { return m / 60; });
+            var detail = document.getElementById('leadtime-detail');
+            var showDetail = !!(detail && detail.checked);
+            // Split low-n buckets into a separate trace so they render
+            // with a lighter marker — avoids making a single 3-sample
+            // bucket look as authoritative as a 300-sample one.
+            function maskBy(arr, pred) { return arr.map(function(v, i) { return pred(i) ? v : null; }); }
+            var strong = function(i) { return (ltc.sample_count[i] || 0) >= LEADBUCKET_MIN_N; };
+            var weak   = function(i) { return (ltc.sample_count[i] || 0) <  LEADBUCKET_MIN_N; };
             var traces = [
                 {
-                    x: xHours, y: ltc.mae, name: 'MAE',
+                    x: xHours, y: maskBy(ltc.mae, strong), name: 'MAE',
                     type: 'scatter', mode: 'lines+markers',
-                    line: { color: '#ff6b6b', width: 2 },
-                    marker: { size: 4 },
-                    hovertemplate: '%{y:.3f} (n=%{customdata})<extra>MAE</extra>',
+                    line: { color: '#ff6b6b', width: 2.5 },
+                    marker: { size: 6, color: '#ff6b6b' },
+                    hovertemplate: 'MAE %{y:.3f} (n=%{customdata})<extra></extra>',
                     customdata: ltc.sample_count,
+                    connectgaps: true,
                 },
                 {
+                    x: xHours, y: maskBy(ltc.mae, weak), name: 'MAE (low n)',
+                    type: 'scatter', mode: 'markers',
+                    marker: { size: 6, color: '#ff6b6b', opacity: 0.35, symbol: 'circle-open' },
+                    hovertemplate: 'MAE %{y:.3f} (n=%{customdata}, low confidence)<extra></extra>',
+                    customdata: ltc.sample_count,
+                    showlegend: false,
+                },
+            ];
+            if (showDetail) {
+                traces.push({
                     x: xHours, y: ltc.rmse, name: 'RMSE',
                     type: 'scatter', mode: 'lines+markers',
                     line: { color: '#4d96ff', width: 2, dash: 'dot' },
                     marker: { size: 4 },
-                    hovertemplate: '%{y:.3f}<extra>RMSE</extra>',
-                },
-                {
+                    hovertemplate: 'RMSE %{y:.3f}<extra></extra>',
+                });
+                traces.push({
                     x: xHours, y: ltc.me, name: 'Bias (ME)',
                     type: 'scatter', mode: 'lines+markers',
                     line: { color: '#6dd67c', width: 2, dash: 'dash' },
                     marker: { size: 4 },
-                    hovertemplate: '%{y:.3f}<extra>Bias</extra>',
-                },
-            ];
+                    hovertemplate: 'Bias %{y:.3f}<extra></extra>',
+                });
+            }
+            var yTitle = 'Error'
+                + (EXP_UNITS ? (accuracyMode === 'increment' ? ' (' + EXP_UNITS + ' per bin)' : ' (' + EXP_UNITS + ')') : '');
             var layout = {
                 xaxis: { title: 'Lead time (hours)', color: '#b0b0b0', gridcolor: '#2d3561' },
                 yaxis: {
-                    title: 'Error{{ " (" + units + ")" if units else "" }}',
+                    title: yTitle,
                     color: '#b0b0b0', gridcolor: '#2d3561',
                     zeroline: true, zerolinecolor: '#4a5178', zerolinewidth: 1,
                 },
@@ -1865,68 +2139,77 @@ window.showTab = function(el) {
             };
             Plotly.newPlot('accuracy-lead-chart', traces, layout, { responsive: true });
 
-            // Interval coverage card (only if we have calibrated bands)
-            var cov = data.coverage && data.coverage.overall;
-            var nominal = (data.nominal_interval_level != null) ? data.nominal_interval_level : 0.8;
-            var covCard = document.getElementById('accuracy-coverage-card');
-            if (cov && typeof cov.coverage === 'number' && cov.n > 0) {
-                covCard.style.display = 'block';
-                var covPct = cov.coverage * 100;
-                var targetPct = nominal * 100;
-                var covEl = document.getElementById('cov-value');
-                covEl.textContent = covPct.toFixed(1) + '%';
-                // Colour: green within ±5pp of target, amber within
-                // ±10pp, red beyond. These bands match the "is the
-                // model well-calibrated?" quick-glance heuristic.
-                var delta = Math.abs(covPct - targetPct);
-                covEl.style.color = delta <= 5 ? 'var(--success)'
-                                  : delta <= 10 ? 'var(--warning, #f0ad4e)'
-                                  : 'var(--error)';
-                document.getElementById('cov-target').textContent = targetPct.toFixed(0) + '%';
-                document.getElementById('cov-samples').textContent = cov.n.toLocaleString();
-                var diag;
-                if (delta <= 5) {
-                    diag = 'Well calibrated — empirical coverage is within ±5pp of the target.';
-                } else if (covPct > targetPct) {
-                    diag = 'Bands are wider than needed (over-covering). Intervals are conservative.';
-                } else {
-                    diag = 'Bands are too tight (under-covering). Intervals under-sell uncertainty — consider waiting for more residuals or a recalibration.';
-                }
-                document.getElementById('cov-diagnosis').textContent = diag;
-            } else {
-                covCard.style.display = 'none';
-            }
-
-            // Revision improvement card
+            // Revision improvement tile — re-worded so the direction of
+            // "improvement" is unambiguous.
             var rev = data.revision_improvement;
+            var revCard = document.getElementById('accuracy-revision-card');
             if (rev && rev.sample_count > 0) {
-                document.getElementById('accuracy-revision-card').style.display = 'block';
-                document.getElementById('rev-first-mae').textContent = rev.first_forecast_mae.toFixed(3);
-                document.getElementById('rev-last-mae').textContent = rev.latest_forecast_mae.toFixed(3);
+                revCard.style.display = 'block';
+                document.getElementById('rev-first-mae').textContent = _fmtUnits(rev.first_forecast_mae, 3);
+                document.getElementById('rev-last-mae').textContent = _fmtUnits(rev.latest_forecast_mae, 3);
+                var modeLabel = accuracyMode === 'increment' ? 'per-interval demand' : 'raw value';
+                document.getElementById('rev-units-1').textContent = '(' + modeLabel + ')';
+                document.getElementById('rev-units-2').textContent = '(' + modeLabel + ')';
                 function fmtBias(v) {
                     if (v === null || v === undefined) return 'bias —';
                     return 'bias ' + (v >= 0 ? '+' : '') + v.toFixed(3);
                 }
                 document.getElementById('rev-first-me').textContent = fmtBias(rev.first_forecast_me);
                 document.getElementById('rev-last-me').textContent = fmtBias(rev.latest_forecast_me);
-                var impEl = document.getElementById('rev-improvement');
-                impEl.textContent = (rev.improvement_pct > 0 ? '+' : '') + rev.improvement_pct.toFixed(1) + '%';
-                impEl.style.color = rev.improvement_pct > 0 ? 'var(--success)' : 'var(--error)';
                 document.getElementById('rev-samples').textContent = rev.sample_count.toLocaleString();
+                var sentence = document.getElementById('rev-sentence');
+                var pct = rev.improvement_pct;
+                if (!isFinite(pct)) {
+                    sentence.textContent = 'Not enough variation between first and latest forecasts to judge.';
+                    sentence.style.color = 'var(--text-secondary)';
+                } else if (pct > 0.5) {
+                    sentence.innerHTML = 'Errors <strong style="color:var(--success)">dropped ' + pct.toFixed(1)
+                        + '%</strong> between first and latest forecast — re-forecasting is helping.';
+                } else if (pct < -0.5) {
+                    sentence.innerHTML = 'Errors <strong style="color:var(--error)">grew ' + Math.abs(pct).toFixed(1)
+                        + '%</strong> between first and latest forecast — late forecasts are worse, which is unusual.';
+                } else {
+                    sentence.textContent = 'First and latest forecasts perform about the same — re-forecasting isn\'t adding much.';
+                    sentence.style.color = 'var(--text-secondary)';
+                }
+            } else {
+                revCard.style.display = 'none';
             }
 
-            // Stats
+            // Stats footer
             document.getElementById('accuracy-stats').style.display = 'block';
             document.getElementById('accuracy-total-logged').textContent = (data.total_logged || 0).toLocaleString();
             if (data.date_range && data.date_range.from) {
                 document.getElementById('accuracy-date-range').textContent =
                     ' · ' + data.date_range.from.slice(0, 10) + ' to ' + data.date_range.to.slice(0, 10);
+            } else {
+                document.getElementById('accuracy-date-range').textContent = '';
             }
+
+            _renderVerdict();
         })
         .catch(function(err) {
             console.error('Forecast accuracy load failed:', err);
-            document.getElementById('accuracy-empty').style.display = 'block';
+            _renderAccuracyEmpty({ error: String(err) });
         });
+    }
+
+    function _renderAccuracyEmpty(data) {
+        document.getElementById('verdict-card').style.display = 'none';
+        document.getElementById('accuracy-revision-card').style.display = 'none';
+        document.getElementById('accuracy-empty').style.display = 'block';
+        var title = document.getElementById('accuracy-empty-title');
+        var hint = document.getElementById('accuracy-empty-hint');
+        if (data && data.error && /table|actuals/i.test(data.error)) {
+            title.textContent = 'Waiting for actuals from Home Assistant.';
+            hint.textContent = 'The target sensor hasn\'t been read into history yet. First numbers appear once a fresh production cycle runs AND the sensor has reported.';
+        } else if (data && data.total_logged === 0) {
+            title.textContent = 'No forecasts logged yet.';
+            hint.textContent = 'Metrics accumulate each production cycle — check back after the next run.';
+        } else {
+            title.textContent = 'No forecast accuracy data in this window.';
+            hint.textContent = 'Try widening the window at the top of this tab, or wait for more forecast cycles to complete.';
+        }
     }
 
     window.setAccuracyMode = function(mode) {
@@ -1944,27 +2227,53 @@ window.showTab = function(el) {
         loadForecastAccuracy();
     };
 
+    // Reload all accuracy-tab data — used when the user changes the
+    // window selector (which affects every endpoint on the tab).
+    window.reloadAccuracyAll = function() {
+        loadForecastAccuracy();
+        loadForecastStability();
+        if (_diagOpened) {
+            loadForecastEvolution();
+            loadForecastTrajectory(true);
+        }
+    };
+
+    // Only render Layer 3 charts when the accordion is first opened —
+    // saves the initial paint on the common case where the user just
+    // wants to glance at the verdict.
+    var _diagOpened = false;
+    function _bindDiagAccordion() {
+        var det = document.getElementById('diag-accordion');
+        if (!det) return;
+        det.addEventListener('toggle', function() {
+            if (!det.open || _diagOpened) return;
+            _diagOpened = true;
+            loadForecastEvolution();
+            loadForecastTrajectory(true);
+            // Stability charts depend on data already loaded into
+            // Layer 1; re-render now that the container is visible.
+            if (_lastStabilityData) _renderStabilityCharts(_lastStabilityData);
+            // Force a Plotly resize for anything that was hidden.
+            setTimeout(function() {
+                det.querySelectorAll('.js-plotly-plot').forEach(function(c) {
+                    Plotly.Plots.resize(c);
+                });
+            }, 50);
+        });
+    }
+
     queueChart('sec-forecast-accuracy', function() {
         // Show mode toggle only for cumulative sensors (increment
         // evaluation is meaningful only when the target accumulates).
         if (EXP_SOURCE_CUMULATIVE) {
-            document.getElementById('accuracy-mode-wrapper').style.display = 'block';
+            document.getElementById('accuracy-mode-wrapper').style.display = '';
         }
+        _bindDiagAccordion();
         loadForecastAccuracy();
-
-        // Render evolution overlay alongside the lead-time chart.
-        loadForecastEvolution();
-        loadForecastTrajectory();
+        // Stability is a Layer-1 input (the verdict chip) — fetch it
+        // up-front even though the chart lives in the accordion.
         loadForecastStability();
     });
-
-    // Config flags exposed from Jinja so the JS can decide whether
-    // per-interval → cumulative reconstruction makes physical sense,
-    // and whether to reset the cumulative sum at midnight boundaries.
-    var EXP_SOURCE_CUMULATIVE = {% if exp_config and exp_config.source_is_cumulative %}true{% else %}false{% endif %};
-    var EXP_RESET_DAILY       = {% if exp_config and exp_config.reset_daily %}true{% else %}false{% endif %};
-    var EXP_UNITS             = {{ units | tojson if units else '""' }};
-    var EXP_INTERVAL_MIN      = {{ exp_config.interval_minutes if exp_config else 30 }};
 
     // Timestamps in forecast_log are stored as naive UTC strings
     // ("YYYY-MM-DD HH:MM:SS" — see HistoryDB.log_forecast). When we
@@ -2011,9 +2320,11 @@ window.showTab = function(el) {
         return out;
     }
 
-    // Holdout-style overlay: each recent forecast cycle as a coloured line
-    // over the actuals trace. Colour encodes recency — darker/cooler hues
-    // are older issuances, brighter/warmer hues are newer.
+    // Forecast convergence as a fan chart: shaded band = min/max of
+    // predictions for each target across recent cycles, bright line =
+    // latest cycle, white line = measured. This communicates "how much
+    // the forecast wobbles run-to-run, and whether the latest run lands
+    // on the actual" much more cleanly than N overlaid lines.
     window.loadForecastEvolution = function() {
         var sel = document.getElementById('accuracy-evolution-cycles');
         var n = sel ? sel.value : '12';
@@ -2031,57 +2342,81 @@ window.showTab = function(el) {
             }
             if (wrap) wrap.style.display = '';
 
-            // Sequential colour ramp (viridis-like) on dark background:
-            // deep indigo (oldest) → teal → bright yellow-green (newest).
-            // Hue rotates 260°→80°, lightness rises 38%→62%.
-            function cycleColor(frac) {
-                var hue   = 260 - 180 * frac;
-                var light = 38 + 24 * frac;
-                return 'hsl(' + hue.toFixed(0) + ', 70%, ' + light.toFixed(0) + '%)';
-            }
-
-            // Format a Date object as "DD Mon HH:MM" in local TZ —
-            // short but unambiguous across days, matches what the user
-            // reads on the wall clock.
-            function fmtIssuedLocal(d) {
-                if (!d) return '';
-                var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-                var day = d.getDate().toString().padStart(2, '0');
-                var hh = d.getHours().toString().padStart(2, '0');
-                var mm = d.getMinutes().toString().padStart(2, '0');
-                return day + ' ' + months[d.getMonth()] + ' ' + hh + ':' + mm;
-            }
-
             var cycles = data.cycles;
-            var traces = [];
             var nCycles = cycles.length;
-            cycles.forEach(function(c, idx) {
-                var frac = nCycles === 1 ? 1 : (idx / (nCycles - 1));
-                var isLatest = idx === nCycles - 1;
-                var issuedDate = toLocalDate(c.issued_at);
-                var issuedLabel = fmtIssuedLocal(issuedDate);
+            // Build: target_ts → array of predictions from each cycle.
+            // Keys are ISO strings (already grid-aligned server-side).
+            var byTarget = {};
+            cycles.forEach(function(c) {
                 var targetDates = toLocalDates(c.targets);
                 var yVals = isCumulative
                     ? toCumulative(targetDates, c.predictions, EXP_RESET_DAILY)
                     : c.predictions;
-                var label = issuedLabel + (isLatest ? '  ← latest' : '');
-                traces.push({
-                    x: targetDates, y: yVals,
-                    name: label,
-                    type: 'scatter', mode: 'lines',
-                    line: {
-                        color: cycleColor(frac),
-                        width: isLatest ? 2.75 : 1.5,
-                    },
-                    opacity: isLatest ? 1.0 : 0.85,
-                    hovertemplate: '<b>Forecast issued ' + issuedLabel
-                                 + '</b><br>target: %{x|%d %b %H:%M}<br>'
-                                 + (isCumulative ? 'cumulative: ' : 'predicted: ')
-                                 + '%{y:.3f}<extra></extra>',
-                    legendgroup: 'forecasts',
-                    legendgrouptitle: idx === 0 ? { text: 'Forecast cycles (by issue time)' } : undefined,
+                c.targets.forEach(function(t, i) {
+                    var bucket = byTarget[t] || (byTarget[t] = { xs: targetDates[i], vals: [] });
+                    if (yVals[i] != null) bucket.vals.push(yVals[i]);
                 });
             });
+            var targetKeys = Object.keys(byTarget).sort();
+            var fanX = [], fanMin = [], fanMax = [], fanMid = [];
+            targetKeys.forEach(function(k) {
+                var b = byTarget[k];
+                if (!b.vals.length) return;
+                fanX.push(b.xs);
+                fanMin.push(Math.min.apply(null, b.vals));
+                fanMax.push(Math.max.apply(null, b.vals));
+                var sorted = b.vals.slice().sort(function(a, b) { return a - b; });
+                fanMid.push(sorted[Math.floor(sorted.length / 2)]);
+            });
+
+            // Latest cycle — rendered as a bright line on top.
+            var latest = cycles[cycles.length - 1];
+            var latestDates = toLocalDates(latest.targets);
+            var latestVals = isCumulative
+                ? toCumulative(latestDates, latest.predictions, EXP_RESET_DAILY)
+                : latest.predictions;
+            var latestIssued = toLocalDate(latest.issued_at);
+            function fmtLocal(d) {
+                if (!d) return '';
+                var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+                return d.getDate().toString().padStart(2, '0') + ' ' + months[d.getMonth()]
+                     + ' ' + d.getHours().toString().padStart(2, '0') + ':'
+                     + d.getMinutes().toString().padStart(2, '0');
+            }
+            var latestLabel = 'Latest run (' + fmtLocal(latestIssued) + ')';
+
+            var traces = [];
+            // Upper edge (invisible line, anchors the fill)
+            traces.push({
+                x: fanX, y: fanMax, type: 'scatter', mode: 'lines',
+                line: { color: 'rgba(77,150,255,0)' },
+                showlegend: false, hoverinfo: 'skip',
+            });
+            // Lower edge with fill to previous trace = the fan band.
+            traces.push({
+                x: fanX, y: fanMin, type: 'scatter', mode: 'lines',
+                fill: 'tonexty', fillcolor: 'rgba(77,150,255,0.18)',
+                line: { color: 'rgba(77,150,255,0)' },
+                name: 'Range across last ' + nCycles + ' runs',
+                hovertemplate: '%{x|%d %b %H:%M}<br>range %{y:.3f}<extra></extra>',
+            });
+            // Median across cycles — subtle guide line
+            traces.push({
+                x: fanX, y: fanMid, type: 'scatter', mode: 'lines',
+                line: { color: '#4d96ff', width: 1, dash: 'dot' },
+                name: 'Median across runs',
+                hovertemplate: '%{x|%d %b %H:%M}<br>median %{y:.3f}<extra></extra>',
+                opacity: 0.8,
+            });
+            // Latest cycle — emphasis
+            traces.push({
+                x: latestDates, y: latestVals,
+                name: latestLabel,
+                type: 'scatter', mode: 'lines',
+                line: { color: '#ffd166', width: 2.5 },
+                hovertemplate: '<b>Latest run</b><br>%{x|%d %b %H:%M}<br>predicted %{y:.3f}<extra></extra>',
+            });
+            // Measured actuals
             if (data.actuals && data.actuals.targets.length) {
                 var actualDates = toLocalDates(data.actuals.targets);
                 var aVals = isCumulative
@@ -2092,23 +2427,10 @@ window.showTab = function(el) {
                     name: 'Measured (actual)',
                     type: 'scatter', mode: 'lines',
                     line: { color: '#ffffff', width: 3 },
-                    hovertemplate: '<b>Actual</b><br>%{x|%d %b %H:%M}<br>'
-                                 + (isCumulative ? 'cumulative: ' : 'measured: ')
-                                 + '%{y:.3f}<extra></extra>',
-                    legendgroup: 'actual',
+                    hovertemplate: '<b>Actual</b><br>%{x|%d %b %H:%M}<br>measured %{y:.3f}<extra></extra>',
                 });
             }
 
-            // Y-axis label: combine experiment name + units so the
-            // reader knows *which* sensor and *what scale*. Raw "%"
-            // or "kWh" alone is uninformative without context, and if
-            // the preprocessor has converted cumulative-daily to
-            // interval deltas the literal unit is misleading. Three
-            // cases:
-            //   - cumulative view: "<name> (cumulative <units>, resets daily)"
-            //   - interval view on cumulative source: "<name> (<units> per Nmin)"
-            //   - interval view on instantaneous source: "<name> (<units>)"
-            //   - no units configured: "<name> — <entity_id>"
             var expName = {{ experiment.name | tojson }};
             var entityId = {{ experiment.target_entity | tojson }};
             var yTitle;
@@ -2124,9 +2446,6 @@ window.showTab = function(el) {
                 yTitle = expName + ' (' + EXP_UNITS + ')';
             }
 
-            // Local TZ name for the axis label, e.g. "BST", "CET", "PST".
-            // Falls back to UTC offset in hours if the browser doesn't
-            // expose a short name (rare).
             var tzName = '';
             try {
                 var tzPart = new Date().toLocaleTimeString('en-GB', { timeZoneName: 'short' }).split(' ').pop();
@@ -2151,10 +2470,9 @@ window.showTab = function(el) {
                     xanchor: 'left', yanchor: 'top',
                     bgcolor: 'rgba(0,0,0,0)',
                     font: { size: 11 },
-                    traceorder: 'reversed',  // latest forecast at top of legend
                 },
-                margin: { t: 20, r: 200, l: 70, b: 50 },
-                hovermode: 'closest',
+                margin: { t: 20, r: 180, l: 70, b: 50 },
+                hovermode: 'x unified',
             };
             Plotly.newPlot('accuracy-evolution-chart', traces, layout, { responsive: true });
         })
@@ -2170,18 +2488,21 @@ window.showTab = function(el) {
     };
 
     // Forecast trajectory — all forecasts of one target_dt plotted by
-    // issued_at, with the actual as a horizontal reference. Shows the
-    // *shape* of revision behaviour (converging / oscillating / drifting)
-    // that the single first-vs-last revision metric collapses.
-    window.loadForecastTrajectory = function() {
+    // issued_at, with the actual as a horizontal reference. The default
+    // sort mode is "biggest miss" — the most instructive target for
+    // debugging. Users can switch to "most recent" if they want the
+    // freshest view.
+    // pickDefault: when true, the current selection is overridden with
+    // the top-of-sorted target (used when the user changes the sort
+    // mode or on first load).
+    window.loadForecastTrajectory = function(pickDefault) {
         var sel = document.getElementById('trajectory-target-select');
-        var chosen = sel && sel.value ? sel.value : '';
+        var chosen = (!pickDefault && sel && sel.value) ? sel.value : '';
         var url = BASE + '/experiment/' + EXP_NAME + '/forecast-trajectory'
             + (chosen ? '?target_dt=' + encodeURIComponent(chosen) : '');
         fetch(url)
         .then(function(r) { return r.json(); })
         .then(function(data) {
-            var wrap = document.getElementById('accuracy-trajectory-wrapper');
             var empty = document.getElementById('trajectory-empty');
             if (data.error || !data.available_targets || !data.available_targets.length) {
                 if (empty) empty.style.display = 'block';
@@ -2191,26 +2512,52 @@ window.showTab = function(el) {
             }
             if (empty) empty.style.display = 'none';
 
-            // Populate dropdown if empty or stale. Compare against current
-            // option set to avoid clobbering user's selection on reload.
+            // Sort targets by sort mode. "worst" = max abs error desc,
+            // "recent" = target_dt desc. Server ships both pieces in
+            // target_meta so we don't need a second round trip.
+            var sortSel = document.getElementById('trajectory-sort');
+            var sortMode = sortSel ? sortSel.value : 'worst';
+            var meta = (data.target_meta && data.target_meta.length)
+                ? data.target_meta.slice()
+                : data.available_targets.map(function(t) {
+                    return { target_dt: t, max_abs_error: null, actual: null };
+                });
+            if (sortMode === 'worst') {
+                meta.sort(function(a, b) {
+                    var ea = a.max_abs_error == null ? -Infinity : a.max_abs_error;
+                    var eb = b.max_abs_error == null ? -Infinity : b.max_abs_error;
+                    return eb - ea;
+                });
+            } else {
+                meta.sort(function(a, b) { return a.target_dt < b.target_dt ? 1 : -1; });
+            }
+
             if (sel) {
-                var currentValues = Array.prototype.map.call(sel.options, function(o) { return o.value; });
-                var want = data.available_targets;
-                var needsRebuild = currentValues.length !== want.length ||
-                    want.some(function(v, i) { return currentValues[i] !== v; });
-                if (needsRebuild) {
-                    sel.innerHTML = '';
-                    want.forEach(function(t) {
-                        var opt = document.createElement('option');
-                        opt.value = t;
-                        // Display in local time, matching toLocalDate
-                        // conventions elsewhere on the page.
-                        var d = toLocalDate(t);
-                        opt.textContent = d ? d.toLocaleString() : t;
-                        sel.appendChild(opt);
-                    });
+                sel.innerHTML = '';
+                meta.forEach(function(m) {
+                    var opt = document.createElement('option');
+                    opt.value = m.target_dt;
+                    var d = toLocalDate(m.target_dt);
+                    var stamp = d ? d.toLocaleString() : m.target_dt;
+                    if (sortMode === 'worst' && m.max_abs_error != null) {
+                        opt.textContent = stamp + '  (miss ' + m.max_abs_error.toFixed(2) + ')';
+                    } else {
+                        opt.textContent = stamp;
+                    }
+                    sel.appendChild(opt);
+                });
+                // If pickDefault (sort-mode change or first load) use
+                // the top of the sorted list; otherwise honour what the
+                // server picked.
+                var want = pickDefault ? meta[0].target_dt : (data.target_dt || meta[0].target_dt);
+                sel.value = want;
+                // If the server didn't return the target the UI wants,
+                // re-request it and bail — the subsequent load will
+                // draw the chart.
+                if (want && want !== data.target_dt) {
+                    window.loadForecastTrajectory(false);
+                    return;
                 }
-                if (data.target_dt) sel.value = data.target_dt;
             }
 
             // Build trajectory dots: x = issued_at (local), y = predicted.
@@ -2229,11 +2576,8 @@ window.showTab = function(el) {
                 },
             ];
 
-            // Horizontal actual line if we have one.
             if (data.actual !== null && data.actual !== undefined && xs.length) {
                 var xMin = xs[0], xMax = xs[xs.length - 1];
-                // Extend the actual line a little past the last forecast
-                // so the "target landed" moment is visible.
                 var targetTs = toLocalDate(data.target_dt);
                 if (targetTs && targetTs > xMax) xMax = targetTs;
                 traces.push({
@@ -2243,7 +2587,6 @@ window.showTab = function(el) {
                     line: { color: '#e0e0e0', width: 2, dash: 'solid' },
                     hovertemplate: 'Actual %{y:.3f}<extra></extra>',
                 });
-                // Vertical marker at the target_dt, if within range.
                 if (targetTs) {
                     traces.push({
                         x: [targetTs, targetTs],
@@ -2277,45 +2620,47 @@ window.showTab = function(el) {
         });
     };
 
-    window.reloadForecastTrajectory = function() {
-        window.loadForecastTrajectory();
+    // Two different paths through the reload:
+    //   - sort-mode change: re-sort, jump to top-of-list target
+    //   - target-dt change: fetch that specific target, keep dropdown
+    window.reloadForecastTrajectory = function(pickDefault) {
+        window.loadForecastTrajectory(!!pickDefault);
     };
 
-    // Model stability — cross-cycle std of predictions for the same
-    // future target. Complements the accuracy view: even a biased
-    // model can be stable, and a well-calibrated model can be unstable.
+    // Stability fetch — cached so the Layer 1 verdict chip can render
+    // without waiting for the accordion to open. Charts defer to
+    // _renderStabilityCharts once the wrapper is visible.
     window.loadForecastStability = function() {
-        fetch(BASE + '/experiment/' + EXP_NAME + '/forecast-stability?days=30')
+        fetch(BASE + '/experiment/' + EXP_NAME + '/forecast-stability?days=' + _accuracyDays())
         .then(function(r) { return r.json(); })
         .then(function(data) {
-            var wrap = document.getElementById('accuracy-stability-wrapper');
             if (data.error || !data.per_timestep || !data.per_timestep.target_dt.length) {
-                if (wrap) wrap.style.display = 'none';
+                _lastStabilityData = null;
+                _renderVerdict();
                 return;
             }
-            if (wrap) wrap.style.display = '';
+            _lastStabilityData = data;
+            _renderVerdict();
 
+            // Populate the summary tiles & plain-English sentence now —
+            // they're visible inside the Layer 3 wrapper, but cheap.
             var s = data.summary || {};
-
-            // Colour-code the CV headline values: green <10%, amber
-            // <25%, red otherwise. Matches the conventions a DS would
-            // use when eyeballing a stability report.
-            function cvColor(cv) {
-                if (cv === null || cv === undefined) return 'var(--text-secondary)';
-                if (cv < 10) return 'var(--success, #6ee7b7)';
-                if (cv < 25) return '#f0b429';
-                return 'var(--error, #ff6b6b)';
-            }
             var stepCv = s.median_step_cv_pct;
             var dailyCv = s.median_daily_cv_pct;
+            function cvColor(cv) {
+                if (cv === null || cv === undefined) return 'var(--text-secondary)';
+                if (cv < 10) return 'var(--success)';
+                if (cv < 25) return 'var(--warning)';
+                return 'var(--error)';
+            }
             var stepEl = document.getElementById('stability-step-cv');
             if (stepEl) {
-                stepEl.textContent = stepCv.toFixed(1) + '%';
+                stepEl.textContent = '±' + stepCv.toFixed(1) + '%';
                 stepEl.style.color = cvColor(stepCv);
             }
             var dailyEl = document.getElementById('stability-daily-cv');
             if (dailyEl) {
-                dailyEl.textContent = (dailyCv === null ? '—' : dailyCv.toFixed(1) + '%');
+                dailyEl.textContent = (dailyCv === null ? '—' : '±' + dailyCv.toFixed(1) + '%');
                 dailyEl.style.color = cvColor(dailyCv);
             }
             var cyclesEl = document.getElementById('stability-total-cycles');
@@ -2323,95 +2668,127 @@ window.showTab = function(el) {
             var stepsEl = document.getElementById('stability-steps');
             if (stepsEl) stepsEl.textContent = (s.steps_analysed || 0).toLocaleString();
 
-            // Per-timestep cross-cycle std chart. Convert UTC strings
-            // to Date objects so Plotly renders in local TZ.
-            var pt = data.per_timestep;
-            var ptDates = toLocalDates(pt.target_dt);
-            var traces = [{
-                x: ptDates,
-                y: pt.std,
-                type: 'scatter', mode: 'lines',
-                line: { color: '#f0b429', width: 2 },
-                fill: 'tozeroy', fillcolor: 'rgba(240,180,41,0.15)',
-                customdata: pt.target_dt.map(function(_, i) {
-                    return [pt.mean[i], pt.cv_pct[i], pt.n_cycles[i]];
+            // Plain-English one-liner — the whole point of the card for
+            // a non-DS reader. "Typical run-to-run spread is ±X%…"
+            var sentence = document.getElementById('stab-plain-sentence');
+            if (sentence) {
+                if (!isFinite(stepCv)) {
+                    sentence.textContent = 'Not enough cycles to measure run-to-run disagreement yet.';
+                } else {
+                    var verdict = stepCv < 10 ? 'consistent'
+                                : stepCv < 25 ? 'a little jittery'
+                                : 'noticeably unstable';
+                    var parts = ['Forecasts for the same future moment typically disagree by <strong>±'
+                        + stepCv.toFixed(1) + '%</strong> between runs — <em>' + verdict + '</em>.'];
+                    if (dailyCv !== null && isFinite(dailyCv)) {
+                        parts.push(' Daily totals move by <strong>±' + dailyCv.toFixed(1)
+                            + '%</strong> run-over-run.');
+                    }
+                    sentence.innerHTML = parts.join('');
+                }
+            }
+
+            // Show the wrapper now that we have data; chart rendering
+            // is deferred to _renderStabilityCharts when the accordion
+            // opens (avoids Plotly sizing into a display:none parent).
+            var wrap = document.getElementById('accuracy-stability-wrapper');
+            if (wrap) wrap.style.display = '';
+            if (_diagOpened) _renderStabilityCharts(data);
+        })
+        .catch(function(err) {
+            console.error('Forecast stability load failed:', err);
+            _lastStabilityData = null;
+            _renderVerdict();
+        });
+    };
+
+    function _renderStabilityCharts(data) {
+        function cvColor(cv) {
+            if (cv === null || cv === undefined) return 'var(--text-secondary)';
+            if (cv < 10) return '#2ecc71';
+            if (cv < 25) return '#f39c12';
+            return '#e74c3c';
+        }
+        var pt = data.per_timestep;
+        var ptDates = toLocalDates(pt.target_dt);
+        var traces = [{
+            x: ptDates,
+            y: pt.std,
+            type: 'scatter', mode: 'lines',
+            line: { color: '#f0b429', width: 2 },
+            fill: 'tozeroy', fillcolor: 'rgba(240,180,41,0.15)',
+            customdata: pt.target_dt.map(function(_, i) {
+                return [pt.mean[i], pt.cv_pct[i], pt.n_cycles[i]];
+            }),
+            hovertemplate: '<b>%{x|%d %b %H:%M}</b>'
+                         + '<br>std across runs: %{y:.3f}'
+                         + '<br>mean prediction: %{customdata[0]:.3f}'
+                         + '<br>disagreement: ±%{customdata[1]:.1f}%'
+                         + '<br>runs: %{customdata[2]}'
+                         + '<extra></extra>',
+            name: 'Cross-run std',
+        }];
+        var tzName = '';
+        try {
+            var tzPart = new Date().toLocaleTimeString('en-GB', { timeZoneName: 'short' }).split(' ').pop();
+            tzName = tzPart || '';
+        } catch (e) { tzName = ''; }
+        var layout = {
+            xaxis: {
+                title: { text: 'Target time' + (tzName ? ' (' + tzName + ')' : ' (local)'), font: { size: 12 } },
+                color: '#b0b0b0', gridcolor: '#2d3561', type: 'date',
+            },
+            yaxis: {
+                title: { text: 'Run-to-run spread (std of predictions)', font: { size: 12 } },
+                color: '#b0b0b0', gridcolor: '#2d3561',
+                rangemode: 'tozero',
+            },
+            plot_bgcolor: 'rgba(0,0,0,0)',
+            paper_bgcolor: 'rgba(0,0,0,0)',
+            font: { color: '#e0e0e0' },
+            showlegend: false,
+            margin: { t: 20, r: 30, l: 70, b: 50 },
+            hovermode: 'closest',
+        };
+        Plotly.newPlot('stability-std-chart', traces, layout, { responsive: true });
+
+        var dailyChart = document.getElementById('stability-daily-chart');
+        if (dailyChart && data.daily_totals && data.daily_totals.length) {
+            var days = data.daily_totals.map(function(d) { return d.day; });
+            var cvs  = data.daily_totals.map(function(d) { return d.cv_pct; });
+            var means = data.daily_totals.map(function(d) { return d.mean_total; });
+            var stdsT = data.daily_totals.map(function(d) { return d.std_total; });
+            var nCycs = data.daily_totals.map(function(d) { return d.n_cycles; });
+            var colors = cvs.map(cvColor);
+            var barTrace = [{
+                x: days, y: cvs,
+                type: 'bar',
+                marker: { color: colors },
+                customdata: days.map(function(_, i) {
+                    return [means[i], stdsT[i], nCycs[i]];
                 }),
-                hovertemplate: '<b>%{x|%d %b %H:%M}</b>'
-                             + '<br>std across cycles: %{y:.3f}'
-                             + '<br>mean prediction: %{customdata[0]:.3f}'
-                             + '<br>CV: %{customdata[1]:.1f}%'
-                             + '<br>n cycles: %{customdata[2]}'
+                hovertemplate: '<b>%{x}</b>'
+                             + '<br>disagreement: ±%{y:.1f}%'
+                             + '<br>mean daily total: %{customdata[0]:.2f}'
+                             + '<br>std: %{customdata[1]:.2f}'
+                             + '<br>runs: %{customdata[2]}'
                              + '<extra></extra>',
-                name: 'Cross-cycle std',
             }];
-            var tzName = '';
-            try {
-                var tzPart = new Date().toLocaleTimeString('en-GB', { timeZoneName: 'short' }).split(' ').pop();
-                tzName = tzPart || '';
-            } catch (e) { tzName = ''; }
-            var layout = {
-                xaxis: {
-                    title: { text: 'Target time' + (tzName ? ' (' + tzName + ')' : ' (local)'), font: { size: 12 } },
-                    color: '#b0b0b0', gridcolor: '#2d3561', type: 'date',
-                },
-                yaxis: {
-                    title: { text: 'Std of predictions across cycles', font: { size: 12 } },
-                    color: '#b0b0b0', gridcolor: '#2d3561',
-                    rangemode: 'tozero',
-                },
+            var barLayout = {
+                xaxis: { title: { text: 'Day', font: { size: 11 } },
+                         color: '#b0b0b0', gridcolor: '#2d3561', type: 'category' },
+                yaxis: { title: { text: '± % of daily total', font: { size: 11 } },
+                         color: '#b0b0b0', gridcolor: '#2d3561', rangemode: 'tozero' },
                 plot_bgcolor: 'rgba(0,0,0,0)',
                 paper_bgcolor: 'rgba(0,0,0,0)',
                 font: { color: '#e0e0e0' },
                 showlegend: false,
-                margin: { t: 20, r: 30, l: 70, b: 50 },
-                hovermode: 'closest',
+                margin: { t: 10, r: 30, l: 70, b: 60 },
+                bargap: 0.3,
             };
-            Plotly.newPlot('stability-std-chart', traces, layout, { responsive: true });
-
-            // Daily-total CV bar chart (cumulative-source experiments only)
-            var dailyChart = document.getElementById('stability-daily-chart');
-            if (dailyChart && data.daily_totals && data.daily_totals.length) {
-                var days = data.daily_totals.map(function(d) { return d.day; });
-                var cvs  = data.daily_totals.map(function(d) { return d.cv_pct; });
-                var means = data.daily_totals.map(function(d) { return d.mean_total; });
-                var stdsT = data.daily_totals.map(function(d) { return d.std_total; });
-                var nCycs = data.daily_totals.map(function(d) { return d.n_cycles; });
-                var colors = cvs.map(cvColor);
-                var barTrace = [{
-                    x: days, y: cvs,
-                    type: 'bar',
-                    marker: { color: colors },
-                    customdata: days.map(function(_, i) {
-                        return [means[i], stdsT[i], nCycs[i]];
-                    }),
-                    hovertemplate: '<b>%{x}</b>'
-                                 + '<br>CV: %{y:.1f}%'
-                                 + '<br>mean daily total: %{customdata[0]:.2f}'
-                                 + '<br>std: %{customdata[1]:.2f}'
-                                 + '<br>n cycles: %{customdata[2]}'
-                                 + '<extra></extra>',
-                }];
-                var barLayout = {
-                    xaxis: { title: { text: 'Day', font: { size: 11 } },
-                             color: '#b0b0b0', gridcolor: '#2d3561', type: 'category' },
-                    yaxis: { title: { text: 'CV % of daily total', font: { size: 11 } },
-                             color: '#b0b0b0', gridcolor: '#2d3561', rangemode: 'tozero' },
-                    plot_bgcolor: 'rgba(0,0,0,0)',
-                    paper_bgcolor: 'rgba(0,0,0,0)',
-                    font: { color: '#e0e0e0' },
-                    showlegend: false,
-                    margin: { t: 10, r: 30, l: 70, b: 60 },
-                    bargap: 0.3,
-                };
-                Plotly.newPlot('stability-daily-chart', barTrace, barLayout, { responsive: true });
-            }
-        })
-        .catch(function(err) {
-            console.error('Forecast stability load failed:', err);
-            var wrap = document.getElementById('accuracy-stability-wrapper');
-            if (wrap) wrap.style.display = 'none';
-        });
-    };
+            Plotly.newPlot('stability-daily-chart', barTrace, barLayout, { responsive: true });
+        }
+    }
     {% endif %}
 
     // ======== Feature importance charts ========

@@ -1523,7 +1523,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception as e:
             return JSONResponse(content={"error": str(e)}, status_code=500)
 
-        days = int(request.query_params.get("days", "30"))
+        try:
+            days = int(request.query_params.get("days", "30"))
+        except (TypeError, ValueError):
+            days = 30
+        days = max(1, min(365, days))
         # Default to increment-based evaluation for cumulative sensors —
         # raw-value MAE/RMSE on a daily-resetting cumulative sensor mostly
         # reflects the sensor's shape through the day rather than model
@@ -1533,11 +1537,29 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             evaluation_mode = mode_param
         else:
             evaluation_mode = "increment" if exp_cfg.source_is_cumulative else "raw"
+        # Restrict to the currently-selected model so a mid-window champion
+        # swap doesn't mix residuals from two different models. UI can
+        # override (or request "all") via ?model=<name>.
+        exp_status = app.state.appstate.experiment_statuses.get(name)
+        default_model = (
+            getattr(exp_status, "selected_model", None)
+            or getattr(exp_status, "best_model", None)
+            if exp_status else None
+        )
+        model_param = request.query_params.get("model")
+        if model_param == "all":
+            model_name = None
+        elif model_param:
+            model_name = model_param
+        else:
+            model_name = default_model
         result = db.get_forecast_accuracy(
             name, actuals_table, max_age_days=days,
             interval_minutes=exp_cfg.interval_minutes,
             evaluation_mode=evaluation_mode,
+            model_name=model_name,
         )
+        result["model_name"] = model_name
         # Merge empirical interval coverage. Always on raw values (that's
         # what the published entities are); independent of evaluation_mode.
         try:
@@ -1545,6 +1567,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 name, actuals_table,
                 interval_minutes=exp_cfg.interval_minutes,
                 max_age_days=days,
+                model_name=model_name,
             )
             result["coverage"] = coverage
             result["nominal_interval_level"] = 0.8

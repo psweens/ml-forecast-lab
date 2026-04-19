@@ -294,6 +294,7 @@ class HistoryDB:
         max_age_days: int = 30,
         interval_minutes: int = 30,
         evaluation_mode: str = "raw",
+        model_name: Optional[str] = None,
     ) -> dict:
         """
         Compute forecast accuracy by lead time.
@@ -320,6 +321,10 @@ class HistoryDB:
             diff of both forecasts and actuals). Only meaningful for
             cumulative sensors where raw-value errors mostly reflect the
             sensor's shape through the day rather than model skill.
+        model_name : str, optional
+            Restrict to predictions from one model. Without this, a
+            champion swap mid-window mixes old and new model residuals
+            and misattributes the transition to either model.
 
         Returns
         -------
@@ -343,6 +348,10 @@ class HistoryDB:
         interval_sec = interval_minutes * 60
         bucket_min = max(1, int(interval_minutes))
         increment = evaluation_mode == "increment"
+        # Optional model filter, spliced directly into forecast_vals so
+        # both the lead-time curve and revision query apply it.
+        model_filter_sql = " AND model_name = ?" if model_name else ""
+        model_filter_param = (model_name,) if model_name else ()
 
         # Build value-extraction CTEs according to mode. In "raw" mode we
         # just pass the stored value through; in "increment" mode we take
@@ -353,22 +362,42 @@ class HistoryDB:
         # negative increment (e.g. 0 - 85 = -85). Increment mode filters
         # `value >= 0` at the join to drop those rows; this is only safe
         # because the mode is gated on source_is_cumulative upstream.
+        #
+        # We also null out the delta when the previous grid row is not
+        # exactly one interval earlier — otherwise an HA outage causes
+        # e.g. a 2-hour span to be treated as a single-interval demand,
+        # inflating MAE with data-availability artefacts rather than
+        # model error. The adjacency check compares unix-epoch seconds
+        # of the stringified grid_dt.
         if increment:
             actuals_vals_cte = (
                 "actuals_vals AS ("
                 "  SELECT grid_dt,"
-                "         value - LAG(value) OVER (ORDER BY grid_dt) AS value"
+                "    CASE"
+                "      WHEN CAST(strftime('%s', grid_dt) AS INTEGER)"
+                "           - CAST(strftime('%s', LAG(grid_dt) OVER (ORDER BY grid_dt)) AS INTEGER)"
+                "           = ?"
+                "      THEN value - LAG(value) OVER (ORDER BY grid_dt)"
+                "      ELSE NULL"
+                "    END AS value"
                 "  FROM actuals_grid"
                 ")"
             )
             forecast_vals_cte = (
                 "forecast_vals AS ("
                 "  SELECT experiment, model_name, issued_at, target_dt, lead_minutes,"
-                "         predicted - LAG(predicted) OVER ("
-                "             PARTITION BY issued_at ORDER BY target_dt"
-                "         ) AS value"
+                "    CASE"
+                "      WHEN CAST(strftime('%s', target_dt) AS INTEGER)"
+                "           - CAST(strftime('%s', LAG(target_dt) OVER ("
+                "               PARTITION BY issued_at ORDER BY target_dt)) AS INTEGER)"
+                "           = ?"
+                "      THEN predicted - LAG(predicted) OVER ("
+                "          PARTITION BY issued_at ORDER BY target_dt)"
+                "      ELSE NULL"
+                "    END AS value"
                 "  FROM forecast_log"
                 "  WHERE experiment = ? AND target_dt <= ? AND issued_at >= ?"
+                f"  {model_filter_sql}"
                 ")"
             )
             mode_filter = (
@@ -385,9 +414,24 @@ class HistoryDB:
                 "         predicted AS value"
                 "  FROM forecast_log"
                 "  WHERE experiment = ? AND target_dt <= ? AND issued_at >= ?"
+                f"  {model_filter_sql}"
                 ")"
             )
             mode_filter = ""
+
+        # Parameter prefixes for the value-extraction CTEs. Increment
+        # mode takes an adjacency interval for each LAG (actuals and
+        # forecasts); raw mode takes neither.
+        if increment:
+            actuals_vals_params = (interval_sec,)
+            forecast_vals_params = (
+                interval_sec, experiment, now_str, cutoff_str, *model_filter_param,
+            )
+        else:
+            actuals_vals_params = ()
+            forecast_vals_params = (
+                experiment, now_str, cutoff_str, *model_filter_param,
+            )
 
         # --- Lead-time accuracy curve ---
         # Bucket lead_minutes into `interval_minutes`-sized bins so the
@@ -425,7 +469,8 @@ class HistoryDB:
                 ORDER BY lead_bucket
             """, (
                 interval_sec, interval_sec,
-                experiment, now_str, cutoff_str,
+                *actuals_vals_params,
+                *forecast_vals_params,
                 bucket_min, bucket_min,
             ))
             lead_rows = cursor.fetchall()
@@ -498,7 +543,8 @@ class HistoryDB:
                 FROM first_last
             """, (
                 interval_sec, interval_sec,
-                experiment, now_str, cutoff_str,
+                *actuals_vals_params,
+                *forecast_vals_params,
             ))
             rev_row = cursor.fetchone()
         except sqlite3.Error as e:
@@ -522,16 +568,62 @@ class HistoryDB:
         # --- Summary stats ---
         cursor.execute(
             "SELECT COUNT(*), MIN(issued_at), MAX(issued_at) "
-            "FROM forecast_log WHERE experiment = ? AND issued_at >= ?",
-            (experiment, cutoff_str),
+            f"FROM forecast_log WHERE experiment = ? AND issued_at >= ?{model_filter_sql}",
+            (experiment, cutoff_str, *model_filter_param),
         )
         stats_row = cursor.fetchone()
+
+        # --- Normalisation baseline ---
+        # Mean |actual| across the same window in evaluation_mode. Used by
+        # the UI to report MAE as a % of "typical interval demand" without
+        # needing the caller to know units. In increment mode we diff
+        # actuals with the same adjacency guard as the accuracy query so
+        # the baseline matches what errors are measured against.
+        typical = None
+        try:
+            if increment:
+                cursor.execute(f"""
+                    WITH actuals_grid AS (
+                        SELECT
+                            strftime('%Y-%m-%d %H:%M:%S',
+                                (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                                'unixepoch') AS grid_dt,
+                            AVG(value) AS value
+                        FROM {actuals_table}
+                        WHERE SUBSTR(ds, 1, 19) >= ?
+                        GROUP BY grid_dt
+                    ),
+                    deltas AS (
+                        SELECT
+                            CASE
+                              WHEN CAST(strftime('%s', grid_dt) AS INTEGER)
+                                 - CAST(strftime('%s', LAG(grid_dt) OVER (ORDER BY grid_dt)) AS INTEGER)
+                                 = ?
+                              THEN value - LAG(value) OVER (ORDER BY grid_dt)
+                              ELSE NULL
+                            END AS d
+                        FROM actuals_grid
+                    )
+                    SELECT AVG(ABS(d)) FROM deltas WHERE d IS NOT NULL AND d >= 0
+                """, (interval_sec, interval_sec, cutoff_str, interval_sec))
+            else:
+                cursor.execute(
+                    f"SELECT AVG(ABS(value)) FROM {actuals_table} "
+                    "WHERE SUBSTR(ds, 1, 19) >= ?",
+                    (cutoff_str,),
+                )
+            row = cursor.fetchone()
+            if row and row[0] is not None:
+                typical = round(float(row[0]), 4)
+        except sqlite3.Error as e:
+            logger.warning(f"Typical-demand baseline query failed: {e}")
 
         return {
             "experiment": experiment,
             "evaluation_mode": "increment" if increment else "raw",
             "lead_time_curve": lead_time_curve,
             "revision_improvement": revision,
+            "typical_interval_demand": typical,
             "total_logged": stats_row[0] if stats_row else 0,
             "date_range": {
                 "from": stats_row[1] if stats_row else None,
@@ -596,17 +688,24 @@ class HistoryDB:
         # actual value on the grid AND >=2 distinct issuances. These are
         # the ones where a trajectory plot is meaningful (one-shot
         # targets give a single dot and teach nothing).
+        # We also compute max |predicted − actual| across all issuances
+        # for each target so the UI can offer "sort by worst miss" —
+        # the most instructive view for diagnostic browsing.
         try:
             cursor.execute(f"""
                 WITH actuals_grid AS (
                     SELECT
                         strftime('%Y-%m-%d %H:%M:%S',
                             (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                            'unixepoch') AS grid_dt
+                            'unixepoch') AS grid_dt,
+                        AVG(value) AS value
                     FROM {actuals_table}
                     GROUP BY grid_dt
                 )
-                SELECT fl.target_dt, COUNT(DISTINCT fl.issued_at) AS n_iss
+                SELECT fl.target_dt,
+                       COUNT(DISTINCT fl.issued_at) AS n_iss,
+                       MAX(ABS(fl.predicted - ag.value)) AS max_abs_err,
+                       MAX(ag.value) AS actual
                 FROM forecast_log fl
                 INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
                 WHERE fl.experiment = ?
@@ -623,6 +722,15 @@ class HistoryDB:
             return {"error": str(e)}
 
         available_targets = [r[0] for r in candidate_rows]
+        target_meta = [
+            {
+                "target_dt": r[0],
+                "n_issuances": int(r[1]),
+                "max_abs_error": round(float(r[2]), 4) if r[2] is not None else None,
+                "actual": round(float(r[3]), 4) if r[3] is not None else None,
+            }
+            for r in candidate_rows
+        ]
         if not available_targets:
             return {
                 "experiment": experiment,
@@ -630,6 +738,7 @@ class HistoryDB:
                 "actual": None,
                 "forecasts": [],
                 "available_targets": [],
+                "target_meta": [],
             }
 
         # If caller didn't pick a target, default to the most recent one
@@ -686,6 +795,7 @@ class HistoryDB:
             "actual": actual,
             "forecasts": forecasts,
             "available_targets": available_targets,
+            "target_meta": target_meta,
         }
 
     def get_conformal_quantiles(
@@ -847,6 +957,7 @@ class HistoryDB:
         actuals_table: str,
         interval_minutes: int = 30,
         max_age_days: int = 30,
+        model_name: Optional[str] = None,
     ) -> dict:
         """
         Compute empirical coverage of published interval forecasts.
@@ -884,6 +995,11 @@ class HistoryDB:
         if not cursor.fetchone():
             return {"by_lead": {"lead_minutes": [], "coverage": [], "n": []}, "overall": {}}
 
+        # Optional model filter — coverage of a rotated-out model tells
+        # the user little about the current champion's calibration.
+        model_filter_sql = " AND fl.model_name = ?" if model_name else ""
+        model_filter_param = (model_name,) if model_name else ()
+
         try:
             cursor.execute(f"""
                 WITH actuals_grid AS (
@@ -907,12 +1023,14 @@ class HistoryDB:
                   AND fl.issued_at >= ?
                   AND fl.upper IS NOT NULL
                   AND fl.lower IS NOT NULL
+                  {model_filter_sql}
                 GROUP BY lead_bucket
                 ORDER BY lead_bucket
             """, (
                 interval_sec, interval_sec,
                 bucket_min, bucket_min,
                 experiment, now_str, cutoff_str,
+                *model_filter_param,
             ))
             by_lead_rows = cursor.fetchall()
         except sqlite3.Error as e:
@@ -947,9 +1065,11 @@ class HistoryDB:
                   AND fl.issued_at >= ?
                   AND fl.upper IS NOT NULL
                   AND fl.lower IS NOT NULL
+                  {model_filter_sql}
             """, (
                 interval_sec, interval_sec,
                 experiment, now_str, cutoff_str,
+                *model_filter_param,
             ))
             overall_row = cursor.fetchone()
         except sqlite3.Error as e:
@@ -1184,7 +1304,19 @@ class HistoryDB:
         for target_dt, mean_p, std_p, n_cycles in rows:
             mean_p = float(mean_p or 0)
             std_p = float(std_p or 0)
-            cv = (100.0 * std_p / abs(mean_p)) if abs(mean_p) > 1e-9 else 0.0
+            # CV undefined when mean ≈ 0. If std is also ≈ 0 the
+            # forecast is genuinely flat and stable (CV = 0). If std
+            # is non-zero we have predictions oscillating around zero,
+            # which the CV ratio can't describe — skip those rows so
+            # they don't pollute the median and don't surface as a
+            # misleading "perfectly stable" point.
+            if abs(mean_p) < 1e-9:
+                if std_p < 1e-9:
+                    cv = 0.0
+                else:
+                    continue
+            else:
+                cv = 100.0 * std_p / abs(mean_p)
             target_dts.append(target_dt)
             means.append(round(mean_p, 4))
             stds.append(round(std_p, 4))

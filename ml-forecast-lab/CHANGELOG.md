@@ -1,5 +1,101 @@
 # Changelog
 
+## 2.22.0
+
+### Added
+
+- **Three-layer Forecast Accuracy UI** aimed at HA end-users, not
+  just data scientists. The tab now opens on a **verdict card** with
+  a plain-English headline ("Looking healthy" / "Something looks
+  off") plus three colour chips for Accuracy / Calibration /
+  Stability, each reporting good / fair / poor with a one-word
+  detail. Three headline tiles show typical next-step error (absolute
+  + % of typical demand), interval coverage vs the 80% target, and
+  run-to-run swing. Below the verdict, Layer 2 surfaces the drivers
+  — a re-worded "Does re-forecasting help?" sentence plus a
+  simplified lead-time chart (MAE only by default, RMSE/bias behind
+  a toggle). Layer 3 is a collapsed `<details>` accordion holding
+  the existing convergence, trajectory, and stability diagnostics
+  for deeper debugging.
+- **Normalised headline error**: `get_forecast_accuracy()` now
+  returns `typical_interval_demand` (mean |actual| over the window,
+  mode-aware) so the verdict card can report *"0.4 kWh — 8% of
+  typical"* without the client needing to know units or scales.
+- **Forecast convergence as a fan chart**: replaces the
+  12-coloured-lines overlay with a shaded band (min/max across
+  recent runs), a dotted median line, a bright yellow line for the
+  latest run, and white for measured. Communicates "how much the
+  forecast wobbles between runs, and does the latest land on the
+  actual" at a glance.
+- **"Biggest miss" sort for forecast trajectory**: the target-picker
+  now defaults to the largest `|predicted − actual|` in the window
+  rather than the most recent timestamp. Server returns a new
+  `target_meta` array with per-target `max_abs_error` and `actual`
+  so the UI can sort client-side without a round trip. "Most recent"
+  is still available via a dropdown.
+- **Plain-English stability**: the run-to-run card now leads with
+  *"Forecasts for the same future moment typically disagree by ±X%
+  between runs — consistent / a little jittery / noticeably
+  unstable"* rather than showing bare CV numbers. Tiles re-labelled
+  ("Per-moment swing", "Runs analysed") to match.
+- **Window selector** (7 / 30 / 90 days) at the top of the tab that
+  cascades to every endpoint on the page, so accuracy, coverage,
+  revision, and stability all share the same lookback. Replaces the
+  previous hard-coded 30 days.
+- **Model badge** in the top controls shows which model the metrics
+  filter to — relevant now that the queries restrict to a single
+  model by default (see Fixed below). Overridable via `?model=all`.
+- **Cold-start aware empty states**: the empty state now
+  distinguishes "waiting for HA actuals" vs "no forecasts logged
+  yet" vs "nothing in this window", each with its own hint.
+
+### Changed
+
+- **Lead-time chart is MAE-only by default**. A "Show RMSE & bias"
+  checkbox reveals the additional series for the DS view.
+  Low-sample buckets (n < 10) render as open circles so a 3-sample
+  bucket no longer looks as authoritative as a 300-sample one.
+- **Revision card rewritten** around a single plain-English sentence
+  (*"Errors dropped 18% between first and latest forecast"*) rather
+  than a colour-coded `+X%` / `-X%` tile whose direction was
+  ambiguous. Each MAE tile now labels its evaluation mode so the
+  units aren't lost.
+- **Stability charts deferred**: rendered on first accordion open so
+  the initial accuracy-tab paint is fast even when there's a lot of
+  stability data to plot.
+
+### Fixed
+
+- **`accuracyMode` defaulted to `'raw'` for cumulative sensors at
+  script load** because `var EXP_SOURCE_CUMULATIVE` was hoisted but
+  not initialised when the ternary read it. The UI silently reported
+  raw-value MAE on a cumulative sensor (where 23:30 errors look huge
+  purely because the number is huge) while showing "Per-interval
+  demand" as the active toggle. Declarations moved ahead of the
+  initialiser.
+- **Increment mode diffed across actuals gaps**. `value - LAG(value)
+  OVER (ORDER BY grid_dt)` assumed the previous row was one interval
+  earlier; a 2h HA outage made the delta look like a single-interval
+  demand of 2h worth, inflating MAE with data-availability
+  artefacts rather than model error. Added an adjacency guard:
+  delta is null unless `grid_dt − LAG(grid_dt) = interval`. Applied
+  to both the actuals and forecast LAG pointers.
+- **No `model_name` filter on accuracy / coverage / revision
+  queries**. After a champion swap, metrics aggregated across both
+  models until the retention window rolled.
+  `get_forecast_accuracy()` and `get_forecast_coverage()` now accept
+  an optional `model_name`; the endpoint defaults to the
+  experiment's selected/best model and exposes `?model=<name>` or
+  `?model=all` for overrides.
+- **Unguarded `int()` on `?days=`** in the forecast-accuracy
+  endpoint returned 500 on a bad value. Now guarded + clamped to
+  [1, 365], matching the stability endpoint.
+- **Stability CV = 0 when mean ≈ 0**: low-demand timesteps with
+  non-zero prediction std were reported as "perfectly stable"
+  because the CV ratio collapsed. Those rows are now skipped from
+  the per-timestep series and the median-CV aggregate rather than
+  polluting the chart with false zeros.
+
 ## 2.21.0
 
 ### Added
