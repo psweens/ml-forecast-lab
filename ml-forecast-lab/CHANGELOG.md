@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.22.2
+
+### Fixed
+
+- **Daily-total stability metric inflated by a coverage artefact, not
+  model disagreement.** `get_forecast_stability()` computed
+  `SUM(predicted)` per `(issued_at, day)` and called the spread across
+  cycles "daily-total CV". But each issuance covers a different
+  *fraction* of any given day — an 08:00 run covers ≈32 bins of
+  today, a 22:00 run covers 2 bins of today, a prior-day run covers
+  all 48. Comparing a 2-bin SUM against a 48-bin SUM as "model
+  disagreement" is just reading the coverage gap with extra steps,
+  and on a Mixergy-style sensor where overnight carries most of the
+  demand the artefact alone can produce 50–70% CV. The
+  `per_cycle_day` pipeline now has a `day_max` sub-CTE and keeps only
+  cycles whose `n_bins` equals the day's maximum — apples-to-apples
+  across cycles. On a seeded three-cycle test (two full, one
+  partial) this drops reported CV from 29.93% to 2.44% (~12×), with
+  the reduction being entirely artefact.
+
 ## 2.22.1
 
 ### Fixed

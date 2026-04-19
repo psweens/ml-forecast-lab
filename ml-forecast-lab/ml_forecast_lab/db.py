@@ -1407,6 +1407,17 @@ class HistoryDB:
         # --- Daily-total stability (cumulative-source experiments only) ---
         daily_totals: list = []
         if source_is_cumulative:
+            # Full-coverage gate: a cycle only contributes to a day's
+            # daily-total spread if it forecast EVERY bin of that day.
+            # Otherwise a 08:00 issuance (covers Mon 08:30→23:30, ≈32
+            # bins of Mon) gets compared against a prior-day issuance
+            # that covered all 48 bins of Mon — the partial cycle's
+            # SUM is mechanically smaller, and that coverage gap
+            # masquerades as model disagreement. For a Mixergy-style
+            # sensor where overnight carries most of the demand, this
+            # artefact alone can produce 50–70% CV. Gating to cycles
+            # with n_bins = MAX(n_bins) for that day keeps only the
+            # apples-to-apples comparisons.
             try:
                 cursor.execute(
                     f"""
@@ -1421,6 +1432,18 @@ class HistoryDB:
                           AND issued_at >= ?
                           {model_filter_sql}
                         GROUP BY issued_at, day
+                    ),
+                    day_max AS (
+                        SELECT day, MAX(n_bins) AS max_bins
+                        FROM per_cycle_day
+                        GROUP BY day
+                    ),
+                    full_cov AS (
+                        SELECT pcd.*
+                        FROM per_cycle_day pcd
+                        INNER JOIN day_max dm
+                          ON dm.day = pcd.day
+                         AND pcd.n_bins = dm.max_bins
                     )
                     SELECT
                         day,
@@ -1428,7 +1451,7 @@ class HistoryDB:
                         AVG(daily_total * daily_total)   AS mean_tt,
                         COUNT(DISTINCT issued_at)         AS n_cycles,
                         MAX(n_bins)                       AS max_bins_in_day
-                    FROM per_cycle_day
+                    FROM full_cov
                     GROUP BY day
                     HAVING n_cycles >= 2
                     ORDER BY day ASC
