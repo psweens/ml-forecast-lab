@@ -1119,7 +1119,7 @@
                 <button type="button" id="accuracy-mode-increment" class="toggle-btn active" onclick="setAccuracyMode('increment')" style="padding:0.35rem 0.75rem;background:var(--accent-secondary);color:#fff;border:none;cursor:pointer;font-size:0.85rem;">Per-interval demand</button>
                 <button type="button" id="accuracy-mode-raw" class="toggle-btn" onclick="setAccuracyMode('raw')" style="padding:0.35rem 0.75rem;background:transparent;color:var(--text-secondary);border:none;cursor:pointer;font-size:0.85rem;">Cumulative value</button>
             </div>
-            <span class="acc-hint">Recommended — avoids mistaking "big numbers late in the day" for poor forecasts.</span>
+            <span class="info-tip">?<span class="tip-text">Cumulative sensors reset at midnight, so raw-value errors mostly reflect the shape of the day — 23:30 errors look big just because the number is big. Per-interval demand evaluates <code>value[t] − value[t−1]</code>, so errors at 03:00 and 18:00 are directly comparable. Recommended for this sensor.</span></span>
         </div>
         <div class="acc-control acc-model-badge" id="acc-model-badge" style="display:none;">
             <span>Model:</span>
@@ -1268,8 +1268,8 @@
         <!-- Forecast trajectory — sort by worst error by default -->
         <div class="settings-group" id="accuracy-trajectory-wrapper">
             <h3 class="settings-group-title">
-                One moment, every prediction of it
-                <span class="info-tip">?<span class="tip-text">For a single future moment: every forecast ever issued of it, plotted at the time it was issued. The horizontal line is the actual. A well-behaved model walks toward the line as the target approaches.</span></span>
+                How predictions converge on a single moment
+                <span class="info-tip">?<span class="tip-text">Pick one future moment; every forecast ever issued of it is plotted at the time it was issued. The horizontal line is the measured actual. A well-behaved model walks toward the line as the target approaches; oscillation or drift is diagnostic.</span></span>
             </h3>
             <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
                 Default shows the biggest miss in the window — the most instructive moments for debugging.
@@ -2065,11 +2065,22 @@ window.showTab = function(el) {
             document.getElementById('accuracy-empty').style.display = 'none';
             _lastAccuracyData = data;
 
-            // Surface which model the metrics are for
+            // Surface which model the metrics are for, and whether the
+            // server had to fall back from the current champion because
+            // it has no logged forecasts in the window.
             var modelBadge = document.getElementById('acc-model-badge');
-            if (data.model_name) {
+            var modelNameEl = document.getElementById('acc-model-name');
+            if (data.model_fallback) {
                 modelBadge.style.display = '';
-                document.getElementById('acc-model-name').textContent = data.model_name;
+                modelNameEl.textContent = 'all (fallback)';
+                modelNameEl.title = 'Requested "' + data.model_fallback.requested
+                    + '" but no forecasts logged for it in this window — showing all models.';
+                modelNameEl.style.color = 'var(--warning)';
+            } else if (data.model_name) {
+                modelBadge.style.display = '';
+                modelNameEl.textContent = data.model_name;
+                modelNameEl.title = '';
+                modelNameEl.style.color = '';
             } else {
                 modelBadge.style.display = 'none';
             }
@@ -2198,6 +2209,9 @@ window.showTab = function(el) {
         document.getElementById('verdict-card').style.display = 'none';
         document.getElementById('accuracy-revision-card').style.display = 'none';
         document.getElementById('accuracy-empty').style.display = 'block';
+        // Clear the lead-time chart container so it doesn't linger
+        // looking like it's still loading.
+        try { Plotly.purge('accuracy-lead-chart'); } catch (e) {}
         var title = document.getElementById('accuracy-empty-title');
         var hint = document.getElementById('accuracy-empty-hint');
         if (data && data.error && /table|actuals/i.test(data.error)) {
@@ -2580,12 +2594,15 @@ window.showTab = function(el) {
                 var xMin = xs[0], xMax = xs[xs.length - 1];
                 var targetTs = toLocalDate(data.target_dt);
                 if (targetTs && targetTs > xMax) xMax = targetTs;
+                var actualLabel = (data.actual_space === 'delta')
+                    ? 'Actual (per-interval demand)'
+                    : 'Actual';
                 traces.push({
                     x: [xMin, xMax], y: [data.actual, data.actual],
-                    name: 'Actual',
+                    name: actualLabel,
                     type: 'scatter', mode: 'lines',
                     line: { color: '#e0e0e0', width: 2, dash: 'solid' },
-                    hovertemplate: 'Actual %{y:.3f}<extra></extra>',
+                    hovertemplate: actualLabel + ' %{y:.3f}<extra></extra>',
                 });
                 if (targetTs) {
                     traces.push({

@@ -1553,13 +1553,38 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             model_name = model_param
         else:
             model_name = default_model
+
+        model_fallback = None
         result = db.get_forecast_accuracy(
             name, actuals_table, max_age_days=days,
             interval_minutes=exp_cfg.interval_minutes,
             evaluation_mode=evaluation_mode,
             model_name=model_name,
         )
+        # If the champion filter returns no rows but the experiment has
+        # logged forecasts under other models in this window, fall back
+        # to unfiltered and flag it for the UI — otherwise users who
+        # switched models mid-window see a blank chart with no
+        # explanation.
+        empty = not result.get("lead_time_curve", {}).get("lead_minutes")
+        if empty and model_name and not model_param:
+            unfiltered = db.get_forecast_accuracy(
+                name, actuals_table, max_age_days=days,
+                interval_minutes=exp_cfg.interval_minutes,
+                evaluation_mode=evaluation_mode,
+                model_name=None,
+            )
+            if unfiltered.get("lead_time_curve", {}).get("lead_minutes"):
+                model_fallback = {
+                    "requested": model_name,
+                    "used": None,
+                    "reason": "No forecasts logged for this model in the selected window.",
+                }
+                result = unfiltered
+                model_name = None
         result["model_name"] = model_name
+        if model_fallback:
+            result["model_fallback"] = model_fallback
         # Merge empirical interval coverage. Always on raw values (that's
         # what the published entities are); independent of evaluation_mode.
         try:
@@ -1600,11 +1625,47 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"error": str(e)}, status_code=500)
 
         target_dt = request.query_params.get("target_dt") or None
+        # Same model-filter contract as /forecast-accuracy
+        exp_status = app.state.appstate.experiment_statuses.get(name)
+        default_model = (
+            getattr(exp_status, "selected_model", None)
+            or getattr(exp_status, "best_model", None)
+            if exp_status else None
+        )
+        model_param = request.query_params.get("model")
+        if model_param == "all":
+            model_name = None
+        elif model_param:
+            model_name = model_param
+        else:
+            model_name = default_model
+
         result = db.get_forecast_trajectory(
             name, actuals_table,
             target_dt=target_dt,
             interval_minutes=exp_cfg.interval_minutes,
+            source_is_cumulative=bool(exp_cfg.source_is_cumulative),
+            model_name=model_name,
         )
+        # Fall back to unfiltered if the champion filter empties the list
+        empty = not result.get("available_targets")
+        if empty and model_name and not model_param:
+            unfiltered = db.get_forecast_trajectory(
+                name, actuals_table,
+                target_dt=target_dt,
+                interval_minutes=exp_cfg.interval_minutes,
+                source_is_cumulative=bool(exp_cfg.source_is_cumulative),
+                model_name=None,
+            )
+            if unfiltered.get("available_targets"):
+                result = unfiltered
+                result["model_fallback"] = {
+                    "requested": model_name,
+                    "used": None,
+                    "reason": "No forecasts logged for this model in the selected window.",
+                }
+                model_name = None
+        result["model_name"] = model_name
         return JSONResponse(content=result)
 
     @app.get("/experiment/{name}/forecast-evolution")
@@ -1682,11 +1743,47 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             days = 30
         days = max(1, min(90, days))
 
+        # Mirror the accuracy endpoint: default to the currently-selected
+        # model so tinker-era runs don't inflate the disagreement metric.
+        exp_status = app.state.appstate.experiment_statuses.get(name)
+        default_model = (
+            getattr(exp_status, "selected_model", None)
+            or getattr(exp_status, "best_model", None)
+            if exp_status else None
+        )
+        model_param = request.query_params.get("model")
+        if model_param == "all":
+            model_name = None
+        elif model_param:
+            model_name = model_param
+        else:
+            model_name = default_model
+
         result = db.get_forecast_stability(
             name,
             max_age_days=days,
             source_is_cumulative=bool(exp_cfg.source_is_cumulative),
+            model_name=model_name,
         )
+        # If the champion filter empties the result but the experiment
+        # has data from other models in the window, fall back and flag.
+        empty = not result.get("per_timestep", {}).get("target_dt")
+        if empty and model_name and not model_param:
+            unfiltered = db.get_forecast_stability(
+                name,
+                max_age_days=days,
+                source_is_cumulative=bool(exp_cfg.source_is_cumulative),
+                model_name=None,
+            )
+            if unfiltered.get("per_timestep", {}).get("target_dt"):
+                result = unfiltered
+                result["model_fallback"] = {
+                    "requested": model_name,
+                    "used": None,
+                    "reason": "No forecasts logged for this model in the selected window.",
+                }
+                model_name = None
+        result["model_name"] = model_name
         return JSONResponse(content=result)
 
     @app.post("/experiment/{name}/toggle-mode")

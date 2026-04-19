@@ -638,6 +638,8 @@ class HistoryDB:
         target_dt: Optional[str] = None,
         interval_minutes: int = 30,
         max_age_days: int = 14,
+        source_is_cumulative: bool = False,
+        model_name: Optional[str] = None,
     ) -> dict:
         """
         Return every forecast ever issued for a single target_dt, plus
@@ -658,17 +660,31 @@ class HistoryDB:
             Actuals are snapped to this grid before matching target_dt.
         max_age_days : int
             Only consider forecasts/targets within this window.
+        source_is_cumulative : bool
+            When True, the model predicts per-interval deltas even
+            though the underlying sensor stores cumulative values. The
+            raw stored actual (e.g. 17% fill) is then in a different
+            space from the predicted delta (≈0–1%/interval) and
+            plotting them together is misleading. This flag tells the
+            query to return the actual as a per-interval delta
+            (``value − value[t−interval]``, adjacency-guarded) so both
+            series live on the same axis.
+        model_name : str, optional
+            Restrict forecast candidates to one model. Matches the
+            accuracy / stability endpoints.
 
         Returns
         -------
         dict with keys:
             ``target_dt``: the target being shown (ISO string)
-            ``actual``: float or None
+            ``actual``: float or None — in the prediction space
             ``forecasts``: [{issued_at, predicted, lead_minutes, model_name}, ...]
                            ordered by issued_at ascending
             ``available_targets``: list of recent target_dts that have an
                            actual + >=2 issuances, newest first — populates
                            the dropdown in the UI.
+            ``actual_space``: "delta" or "raw" — labels the units of
+                           ``actual`` and ``target_meta[i].actual``.
         """
         cursor = self.conn.cursor()
         interval_sec = max(60, int(interval_minutes) * 60)
@@ -684,13 +700,45 @@ class HistoryDB:
         if not cursor.fetchone():
             return {"error": "No actuals data available yet"}
 
+        model_filter_sql = " AND fl.model_name = ?" if model_name else ""
+        model_filter_param = (model_name,) if model_name else ()
+
+        # Build the actuals_vals CTE according to source type. For
+        # cumulative sources we need to diff so the actual lives in the
+        # same space as the per-interval predictions stored in
+        # forecast_log. The adjacency guard (delta only when prior grid
+        # row is exactly one interval earlier) mirrors the increment-
+        # mode logic in get_forecast_accuracy.
+        if source_is_cumulative:
+            actuals_vals_cte = (
+                "actuals_vals AS ("
+                "  SELECT grid_dt,"
+                "    CASE"
+                "      WHEN CAST(strftime('%s', grid_dt) AS INTEGER)"
+                "           - CAST(strftime('%s', LAG(grid_dt) OVER (ORDER BY grid_dt)) AS INTEGER)"
+                "           = ?"
+                "      THEN value - LAG(value) OVER (ORDER BY grid_dt)"
+                "      ELSE NULL"
+                "    END AS value"
+                "  FROM actuals_grid"
+                ")"
+            )
+            actuals_vals_params = (interval_sec,)
+            actual_space = "delta"
+        else:
+            actuals_vals_cte = (
+                "actuals_vals AS (SELECT grid_dt, value FROM actuals_grid)"
+            )
+            actuals_vals_params = ()
+            actual_space = "raw"
+
         # Candidate targets for the dropdown: recent targets with an
         # actual value on the grid AND >=2 distinct issuances. These are
         # the ones where a trajectory plot is meaningful (one-shot
         # targets give a single dot and teach nothing).
         # We also compute max |predicted − actual| across all issuances
-        # for each target so the UI can offer "sort by worst miss" —
-        # the most instructive view for diagnostic browsing.
+        # for each target — now in the same (delta / raw) space so
+        # "biggest miss" sort is meaningful for cumulative sensors.
         try:
             cursor.execute(f"""
                 WITH actuals_grid AS (
@@ -701,21 +749,29 @@ class HistoryDB:
                         AVG(value) AS value
                     FROM {actuals_table}
                     GROUP BY grid_dt
-                )
+                ),
+                {actuals_vals_cte}
                 SELECT fl.target_dt,
                        COUNT(DISTINCT fl.issued_at) AS n_iss,
-                       MAX(ABS(fl.predicted - ag.value)) AS max_abs_err,
-                       MAX(ag.value) AS actual
+                       MAX(ABS(fl.predicted - av.value)) AS max_abs_err,
+                       MAX(av.value) AS actual
                 FROM forecast_log fl
-                INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
+                INNER JOIN actuals_vals av ON av.grid_dt = fl.target_dt
                 WHERE fl.experiment = ?
                   AND fl.target_dt <= ?
                   AND fl.issued_at >= ?
+                  AND av.value IS NOT NULL
+                  {model_filter_sql}
                 GROUP BY fl.target_dt
                 HAVING n_iss >= 2
                 ORDER BY fl.target_dt DESC
                 LIMIT 48
-            """, (interval_sec, interval_sec, experiment, now_str, cutoff_str))
+            """, (
+                interval_sec, interval_sec,
+                *actuals_vals_params,
+                experiment, now_str, cutoff_str,
+                *model_filter_param,
+            ))
             candidate_rows = cursor.fetchall()
         except sqlite3.Error as e:
             logger.error(f"Trajectory candidates query failed: {e}")
@@ -739,6 +795,7 @@ class HistoryDB:
                 "forecasts": [],
                 "available_targets": [],
                 "target_meta": [],
+                "actual_space": actual_space,
             }
 
         # If caller didn't pick a target, default to the most recent one
@@ -751,9 +808,9 @@ class HistoryDB:
             cursor.execute(
                 "SELECT issued_at, predicted, lead_minutes, model_name "
                 "FROM forecast_log "
-                "WHERE experiment = ? AND target_dt = ? "
+                f"WHERE experiment = ? AND target_dt = ?{(' AND model_name = ?' if model_name else '')} "
                 "ORDER BY issued_at ASC",
-                (experiment, target_dt),
+                (experiment, target_dt, *model_filter_param),
             )
             forecast_rows = cursor.fetchall()
         except sqlite3.Error as e:
@@ -770,14 +827,26 @@ class HistoryDB:
             for r in forecast_rows
         ]
 
-        # Fetch the actual for this target (grid-aligned average).
+        # Fetch the actual for this target (in the prediction space).
         try:
             cursor.execute(f"""
-                SELECT AVG(value) FROM {actuals_table}
-                WHERE strftime('%Y-%m-%d %H:%M:%S',
-                        (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                        'unixepoch') = ?
-            """, (interval_sec, interval_sec, target_dt))
+                WITH actuals_grid AS (
+                    SELECT
+                        strftime('%Y-%m-%d %H:%M:%S',
+                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                            'unixepoch') AS grid_dt,
+                        AVG(value) AS value
+                    FROM {actuals_table}
+                    GROUP BY grid_dt
+                ),
+                {actuals_vals_cte}
+                SELECT av.value FROM actuals_vals av
+                WHERE av.grid_dt = ?
+            """, (
+                interval_sec, interval_sec,
+                *actuals_vals_params,
+                target_dt,
+            ))
             actual_row = cursor.fetchone()
         except sqlite3.Error as e:
             logger.warning(f"Trajectory actual lookup failed: {e}")
@@ -796,6 +865,7 @@ class HistoryDB:
             "forecasts": forecasts,
             "available_targets": available_targets,
             "target_meta": target_meta,
+            "actual_space": actual_space,
         }
 
     def get_conformal_quantiles(
@@ -1222,6 +1292,7 @@ class HistoryDB:
         experiment: str,
         max_age_days: int = 30,
         source_is_cumulative: bool = False,
+        model_name: Optional[str] = None,
     ) -> dict:
         """
         Return self-consistency metrics across forecast issuances.
@@ -1243,6 +1314,10 @@ class HistoryDB:
             When True, also compute per-day-total stability by summing
             per-interval deltas within each cycle × calendar-day pair.
             For instantaneous sources this doesn't make physical sense.
+        model_name : str, optional
+            Restrict to one model. Without this, runs from a rotated-
+            out model mix with the current champion and inflate the
+            cross-run disagreement metric.
 
         Returns
         -------
@@ -1258,6 +1333,8 @@ class HistoryDB:
         cutoff_str = (
             datetime.utcnow() - pd.Timedelta(days=max_age_days)
         ).strftime("%Y-%m-%d %H:%M:%S")
+        model_filter_sql = " AND model_name = ?" if model_name else ""
+        model_filter_param = (model_name,) if model_name else ()
 
         # --- Per-timestep cross-cycle stability ---
         # SQLite has no STDDEV; compute it via the sum-of-squares
@@ -1266,7 +1343,7 @@ class HistoryDB:
         # float rounding, so clamp before SQRT.
         try:
             cursor.execute(
-                """
+                f"""
                 WITH per_target AS (
                     SELECT
                         target_dt,
@@ -1276,6 +1353,7 @@ class HistoryDB:
                     FROM forecast_log
                     WHERE experiment = ?
                       AND issued_at >= ?
+                      {model_filter_sql}
                     GROUP BY target_dt
                     HAVING n_cycles >= 2
                 )
@@ -1289,7 +1367,7 @@ class HistoryDB:
                 FROM per_target
                 ORDER BY target_dt ASC
                 """,
-                (experiment, cutoff_str),
+                (experiment, cutoff_str, *model_filter_param),
             )
             rows = cursor.fetchall()
         except sqlite3.Error as e:
@@ -1331,7 +1409,7 @@ class HistoryDB:
         if source_is_cumulative:
             try:
                 cursor.execute(
-                    """
+                    f"""
                     WITH per_cycle_day AS (
                         SELECT
                             issued_at,
@@ -1341,6 +1419,7 @@ class HistoryDB:
                         FROM forecast_log
                         WHERE experiment = ?
                           AND issued_at >= ?
+                          {model_filter_sql}
                         GROUP BY issued_at, day
                     )
                     SELECT
@@ -1354,7 +1433,7 @@ class HistoryDB:
                     HAVING n_cycles >= 2
                     ORDER BY day ASC
                     """,
-                    (experiment, cutoff_str),
+                    (experiment, cutoff_str, *model_filter_param),
                 )
                 for day, mean_total, mean_tt, n_cycles, max_bins in cursor.fetchall():
                     mean_total = float(mean_total or 0)
@@ -1379,8 +1458,8 @@ class HistoryDB:
         try:
             cursor.execute(
                 "SELECT COUNT(DISTINCT issued_at), MIN(issued_at), MAX(issued_at) "
-                "FROM forecast_log WHERE experiment = ? AND issued_at >= ?",
-                (experiment, cutoff_str),
+                f"FROM forecast_log WHERE experiment = ? AND issued_at >= ?{model_filter_sql}",
+                (experiment, cutoff_str, *model_filter_param),
             )
             cyc_row = cursor.fetchone()
         except sqlite3.Error:

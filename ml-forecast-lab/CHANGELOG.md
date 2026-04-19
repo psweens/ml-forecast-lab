@@ -1,5 +1,57 @@
 # Changelog
 
+## 2.22.1
+
+### Fixed
+
+- **Trajectory chart compared predictions to raw cumulative actuals**
+  for cumulative sensors. `forecast_log.predicted` stores per-interval
+  deltas (that's what the model is trained to emit), but the old
+  trajectory query returned the actual as the raw grid-aligned value
+  (e.g. 17% fill) — so the "Actual" line sat impossibly high above
+  the per-interval forecast dots, turning a useful debugging view
+  into a misleading one. `get_forecast_trajectory()` now takes
+  `source_is_cumulative` and computes the actual as
+  `value − value[t−interval]` (adjacency-guarded, matching the
+  increment-mode logic in `get_forecast_accuracy`). `max_abs_error`
+  used for the "biggest miss" sort is now in the same space too.
+  The UI labels the series *"Actual (per-interval demand)"* on
+  cumulative sensors so the units are self-describing.
+- **Run-to-run disagreement pooled across every model ever logged**.
+  `get_forecast_stability()` had no `model_name` filter, so tinker-era
+  runs under rotated-out model names inflated the CV metric. On a
+  seeded test series this flipped the reported swing from ±99% (all
+  models mixed) to ±3.5% (current champion). The function and the
+  `/forecast-stability` endpoint now take `model_name`, default to
+  the experiment's selected/best model, and honour `?model=all`.
+- **Lead-time chart silently rendered empty when the model filter had
+  no data for the current champion**. After a champion swap mid-
+  window, filtering the v2.22.0 queries to `selected_model` returned
+  zero rows and the chart area stayed blank with no explanation.
+  The `/forecast-accuracy`, `/forecast-stability`, and
+  `/forecast-trajectory` endpoints now detect "filter empties the
+  result but the window has data from other models" and fall back to
+  unfiltered, returning a `model_fallback` flag. The UI surfaces this
+  as `all (fallback)` in amber on the model badge with a hover
+  tooltip explaining why. `Plotly.purge()` is also called on the
+  lead-time container in the empty-state branch so the panel visibly
+  clears instead of looking like it's still loading.
+- **Top controls row layout**: the `Window:` dropdown was inheriting
+  `.setting-input { width: 100% }` from the settings page, stretching
+  full-width and forcing the `Evaluate as:` toggle onto a new line.
+  `select.setting-input` inside `.acc-top-controls` is now
+  `width: auto; min-width: 10rem` so both controls sit on the same
+  row. Gap and margin tightened.
+
+### Changed
+
+- **Trajectory section renamed** from "One moment, every prediction
+  of it" (awkward) to **"How predictions converge on a single
+  moment"** — describes the plot's purpose directly.
+- **Evaluation-mode hint is now an info-tip** matching the rest of
+  the page, replacing the inline *"Recommended — avoids mistaking…"*
+  sentence that was noisy and stylistically out of place.
+
 ## 2.22.0
 
 ### Added
