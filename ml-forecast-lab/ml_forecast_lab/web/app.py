@@ -1524,8 +1524,62 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"error": str(e)}, status_code=500)
 
         days = int(request.query_params.get("days", "30"))
+        # Default to increment-based evaluation for cumulative sensors —
+        # raw-value MAE/RMSE on a daily-resetting cumulative sensor mostly
+        # reflects the sensor's shape through the day rather than model
+        # skill. UI can override via ?mode=raw.
+        mode_param = request.query_params.get("mode")
+        if mode_param in ("raw", "increment"):
+            evaluation_mode = mode_param
+        else:
+            evaluation_mode = "increment" if exp_cfg.source_is_cumulative else "raw"
         result = db.get_forecast_accuracy(
             name, actuals_table, max_age_days=days,
+            interval_minutes=exp_cfg.interval_minutes,
+            evaluation_mode=evaluation_mode,
+        )
+        # Merge empirical interval coverage. Always on raw values (that's
+        # what the published entities are); independent of evaluation_mode.
+        try:
+            coverage = db.get_forecast_coverage(
+                name, actuals_table,
+                interval_minutes=exp_cfg.interval_minutes,
+                max_age_days=days,
+            )
+            result["coverage"] = coverage
+            result["nominal_interval_level"] = 0.8
+        except Exception as e:
+            result["coverage"] = {"error": str(e)}
+        return JSONResponse(content=result)
+
+    @app.get("/experiment/{name}/forecast-trajectory")
+    async def forecast_trajectory(name: str, request: Request):
+        """Return every forecast ever issued for one target_dt + the actual."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        db = app.state.appstate.history_db
+        if not db:
+            return JSONResponse(content={"error": "Database not available"}, status_code=503)
+
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"error": "Config not found"}, status_code=503)
+
+        from ml_forecast_lab.config import load_config
+        try:
+            cfg = load_config(config_path)
+            exp_cfg = next((e for e in cfg.experiments if e.name == name), None)
+            if not exp_cfg:
+                return JSONResponse(content={"error": "Experiment not in config"}, status_code=404)
+            actuals_table = db.safe_table_name(exp_cfg.target_entity)
+        except Exception as e:
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+        target_dt = request.query_params.get("target_dt") or None
+        result = db.get_forecast_trajectory(
+            name, actuals_table,
+            target_dt=target_dt,
             interval_minutes=exp_cfg.interval_minutes,
         )
         return JSONResponse(content=result)

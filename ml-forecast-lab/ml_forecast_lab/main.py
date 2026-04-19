@@ -2454,6 +2454,9 @@ class MLForecastLabApp:
         model_name: str,
         last_trained_iso: str,
         extra_main_attrs: Optional[dict] = None,
+        y_pred_upper: Optional[np.ndarray] = None,
+        y_pred_lower: Optional[np.ndarray] = None,
+        interval_level: Optional[float] = None,
     ) -> None:
         """Publish forecast sensors to Home Assistant.
 
@@ -2467,6 +2470,8 @@ class MLForecastLabApp:
         - ``_daily_cumulative``: cumsum that resets at local midnight, seeded
           with the current actual value of the target sensor when applicable
           so the curve is continuous with the cumulative source sensor.
+        - ``_upper_{pct}`` / ``_lower_{pct}``: conformal interval bounds when
+          ``y_pred_upper`` / ``y_pred_lower`` are provided (pct = level*100).
         """
         if not self.ha_interface or len(y_pred) == 0:
             return
@@ -2498,6 +2503,84 @@ class MLForecastLabApp:
         ]
         next_val = round(float(y_pred[0]), 4)
 
+        # Auto-compute conformal 80% interval bands when bounds aren't
+        # provided explicitly and we have a residual history. Adaptive
+        # (online) conformal — quantiles come from deployed forecast /
+        # actual pairs in forecast_log, no extra model fit required.
+        # Cold-start returns no quantiles → bands stay absent until the
+        # residual buffer fills, which surfaces naturally as "point-only
+        # forecast" in the UI.
+        if (
+            y_pred_upper is None
+            and y_pred_lower is None
+            and self.history_db
+            and exp_cfg.mode == "production"
+        ):
+            try:
+                actuals_table = self.history_db.safe_table_name(
+                    exp_cfg.target_entity
+                )
+                target_level = interval_level if interval_level is not None else 0.8
+                cq = self.history_db.get_conformal_quantiles(
+                    exp_cfg.name,
+                    actuals_table,
+                    level=target_level,
+                    model_name=model_name,
+                    interval_minutes=exp_cfg.interval_minutes,
+                )
+                quantiles = cq.get("quantiles") or {}
+                fallback = cq.get("fallback_quantile")
+                if fallback is not None:
+                    bucket_min = max(1, int(exp_cfg.interval_minutes))
+                    # Lead-minutes w.r.t. the effective issuance time
+                    # (one interval before ds_future[0]); matches the
+                    # convention used by log_forecast's lead computation
+                    # to within a retrieval-cycle of clock skew.
+                    issued_ref = ds_future[0] - pd.Timedelta(
+                        minutes=exp_cfg.interval_minutes
+                    )
+                    lead_min_arr = np.array([
+                        int((ts - issued_ref).total_seconds() / 60)
+                        for ts in ds_future
+                    ], dtype=int)
+                    lead_buckets = (lead_min_arr // bucket_min) * bucket_min
+                    q_vec = np.array([
+                        quantiles.get(int(b), fallback)
+                        for b in lead_buckets
+                    ], dtype=float)
+                    y_pred_upper = (y_pred + q_vec).astype(np.float32)
+                    y_pred_lower = (y_pred - q_vec).astype(np.float32)
+                    if getattr(exp_cfg, "source_is_cumulative", False):
+                        y_pred_lower = np.maximum(y_pred_lower, 0.0)
+                    interval_level = target_level
+                    logger.info(
+                        f"  Conformal {int(target_level*100)}% band: "
+                        f"n={cq.get('total_samples', 0)} residuals, "
+                        f"median width={float(np.median(q_vec*2)):.3f}"
+                    )
+            except Exception as e:
+                logger.warning(f"  Conformal band computation failed: {e}")
+
+        # Optional conformal interval lists. Both arrays must be present
+        # and sized to y_pred to be considered valid.
+        have_intervals = (
+            y_pred_upper is not None
+            and y_pred_lower is not None
+            and len(y_pred_upper) == len(y_pred)
+            and len(y_pred_lower) == len(y_pred)
+        )
+        upper_list: list = []
+        lower_list: list = []
+        if have_intervals:
+            upper_list = [
+                {"datetime": ts.isoformat(), "value": round(float(val), 4)}
+                for ts, val in zip(ds_future_aware, y_pred_upper)
+            ]
+            lower_list = [
+                {"datetime": ts.isoformat(), "value": round(float(val), 4)}
+                for ts, val in zip(ds_future_aware, y_pred_lower)
+            ]
+
         if forecast_list:
             vals = [p["value"] for p in forecast_list]
             logger.debug(
@@ -2521,6 +2604,12 @@ class MLForecastLabApp:
                     predictions=y_pred.tolist(),
                     model_name=model_name,
                     forecast_type=forecast_type,
+                    upper_bounds=(
+                        y_pred_upper.tolist() if have_intervals else None
+                    ),
+                    lower_bounds=(
+                        y_pred_lower.tolist() if have_intervals else None
+                    ),
                 )
             except Exception as e:
                 logger.warning(f"Failed to log forecast evolution: {e}")
@@ -2537,6 +2626,11 @@ class MLForecastLabApp:
             "last_trained": last_trained_iso,
             "forecast": forecast_list,
         }
+        if have_intervals:
+            main_attrs["forecast_upper"] = upper_list
+            main_attrs["forecast_lower"] = lower_list
+            if interval_level is not None:
+                main_attrs["interval_level"] = interval_level
         main_attrs.update(extra_main_attrs)
         try:
             await self.ha_interface.set_state(
@@ -2671,6 +2765,49 @@ class MLForecastLabApp:
                 logger.warning(
                     f"  Failed to publish {base_entity}_daily_cumulative: {e}"
                 )
+
+        # --- 4b. Conformal interval sensors ---------------------------------
+        # Separate upper/lower entities let the user graph the band in HA
+        # directly (ApexCharts area-between-series, etc) without having
+        # to unpack the `forecast_upper` / `forecast_lower` attrs on the
+        # main sensor. Name the level in the entity slug so dashboards
+        # don't silently rescale if we ever switch to e.g. 95%.
+        if have_intervals:
+            lvl_pct = (
+                int(round(interval_level * 100))
+                if interval_level is not None else 80
+            )
+            upper_state = round(float(y_pred_upper[0]), 4)
+            lower_state = round(float(y_pred_lower[0]), 4)
+            upper_attrs = {
+                "friendly_name": f"{publish_name} Forecast Upper {lvl_pct}%",
+                "unit_of_measurement": units,
+                "icon": "mdi:arrow-expand-up",
+                "state_class": "measurement",
+                "model": model_name,
+                "interval_level": interval_level,
+                "forecast": upper_list,
+            }
+            lower_attrs = {
+                "friendly_name": f"{publish_name} Forecast Lower {lvl_pct}%",
+                "unit_of_measurement": units,
+                "icon": "mdi:arrow-expand-down",
+                "state_class": "measurement",
+                "model": model_name,
+                "interval_level": interval_level,
+                "forecast": lower_list,
+            }
+            try:
+                await self.ha_interface.set_state(
+                    f"{base_entity}_upper_{lvl_pct}",
+                    str(upper_state), upper_attrs,
+                )
+                await self.ha_interface.set_state(
+                    f"{base_entity}_lower_{lvl_pct}",
+                    str(lower_state), lower_attrs,
+                )
+            except Exception as e:
+                logger.warning(f"  Failed to publish interval bounds: {e}")
 
         # --- 5. Forecast accuracy sensor (lead-time curve) -------------------
         if self.history_db and exp_cfg.mode == "production":

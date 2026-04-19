@@ -1,5 +1,89 @@
 # Changelog
 
+## 2.21.0
+
+### Added
+
+- **Signed bias (ME)** alongside MAE/RMSE in the lead-time accuracy
+  curve. A third trace (dashed green, zero-reference line) reveals
+  whether the model systematically over- or under-predicts — a
+  dimension that absolute-error metrics collapse. Surfaced at the
+  lead-time bucket level and in the revision summary
+  (`first_forecast_me`, `latest_forecast_me` sit beneath each MAE).
+- **Forecast trajectory plot** — a new "Forecast trajectory" section
+  renders every forecast ever issued for a chosen `target_dt` as dots
+  on the `issued_at` axis, with the actual as a horizontal reference
+  line and the target moment as a dotted vertical marker. Answers "did
+  the prediction walk smoothly toward truth, oscillate, or drift?" —
+  shape information the first-vs-last revision metric collapses to two
+  numbers. Backed by `HistoryDB.get_forecast_trajectory()` and a
+  `/experiment/{name}/forecast-trajectory` endpoint; the dropdown is
+  auto-populated with recent targets that have an actual AND >=2
+  distinct issuances (single-forecast targets teach nothing so they're
+  filtered out).
+- **Increment-based evaluation mode** for cumulative sensors. When
+  `source_is_cumulative=True`,
+  `get_forecast_accuracy(..., evaluation_mode="increment")` uses LAG
+  window functions to diff both forecasts and actuals before joining,
+  filters midnight-reset rows (negative increments on daily-resetting
+  sensors), and computes MAE/RMSE/ME on per-interval demand rather
+  than raw cumulative value. Errors become comparable across the day
+  instead of being dominated by the sensor's shape. The UI exposes a
+  "Evaluate on: Per-interval demand / Cumulative value" toggle, which
+  defaults to increment for cumulative targets and is hidden otherwise.
+- **Conformal 80% prediction intervals** via online/adaptive conformal.
+  `HistoryDB.get_conformal_quantiles()` computes per-lead-bucket 90th
+  percentiles of absolute residuals from recent `forecast_log` rows vs
+  the actuals table; `_publish_forecast_sensors` auto-applies these to
+  produce upper/lower bands around each point forecast. New HA
+  entities `sensor.{prefix}{exp}_upper_80` and `_lower_80` expose the
+  band in their `forecast` attribute; the main forecast sensor also
+  carries `forecast_upper` / `forecast_lower` arrays for in-chart
+  shading. No additional model fit required — residual quantiles are
+  learned from deployed forecast/actual pairs, so bands appear
+  automatically once the residual buffer fills and stay absent during
+  cold-start.
+- **Interval coverage diagnostic**: `HistoryDB.get_forecast_coverage()`
+  joins `forecast_log` rows that carry both bounds against actuals and
+  reports the fraction inside `[lower, upper]`, per lead-bucket and
+  overall. Surfaced as a calibration card on the accuracy tab —
+  empirical coverage vs nominal 80%, colour-coded green within +/-5pp,
+  amber within +/-10pp, red beyond, with a plain-English diagnosis
+  ("Well calibrated", "Bands are wider than needed", "Bands are too
+  tight").
+
+### Changed
+
+- `forecast_log` schema gained nullable `upper`, `lower` columns with
+  an auto-migration path: `ensure_forecast_log_table` now runs
+  `PRAGMA table_info` and appends the columns with `ALTER TABLE ADD
+  COLUMN` when missing. Point-only legacy rows remain supported — the
+  coverage query filters to rows with non-null bounds.
+- `HistoryDB.log_forecast()` accepts optional `upper_bounds` /
+  `lower_bounds` lists (same length as `predictions`); existing
+  callers unchanged.
+- `_publish_forecast_sensors()` signature gained optional
+  `y_pred_upper`, `y_pred_lower`, `interval_level` params; when
+  omitted and a residual history is available, bands are auto-computed
+  inside the helper so both the full-retrain production path and the
+  cached-forecast path get intervals without caller-side changes.
+- `/experiment/{name}/forecast-accuracy` accepts `?mode=raw|increment`
+  (defaults to `increment` for cumulative sensors) and merges the
+  coverage result into its JSON payload alongside `lead_time_curve`
+  and `revision_improvement`.
+
+### Notes
+
+- Conformal calibration is online/adaptive rather than split-conformal:
+  residual exchangeability is approximate (temporal drift, model
+  retrains), so coverage guarantees are empirical rather than
+  finite-sample. The coverage card exists precisely to surface
+  deviations from the nominal 80%, so the user can tell when bands
+  drift and need recalibration.
+- Cold-start: coverage card stays hidden and bands stay absent until
+  `forecast_log` has accumulated enough residuals per lead bucket. The
+  system silently falls back to point-only forecasts in the meantime.
+
 ## 2.20.0
 
 ### Added

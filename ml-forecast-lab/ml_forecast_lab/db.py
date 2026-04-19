@@ -192,9 +192,19 @@ class HistoryDB:
                 target_dt    TEXT    NOT NULL,
                 lead_minutes INTEGER NOT NULL,
                 predicted    REAL    NOT NULL,
-                forecast_type TEXT   NOT NULL DEFAULT 'cached'
+                forecast_type TEXT   NOT NULL DEFAULT 'cached',
+                upper        REAL,
+                lower        REAL
             )
         """)
+        # Migrate pre-existing tables that don't have the upper/lower
+        # columns. PRAGMA table_info returns rows (cid, name, type, ...).
+        cursor.execute("PRAGMA table_info(forecast_log)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+        if "upper" not in existing_cols:
+            cursor.execute("ALTER TABLE forecast_log ADD COLUMN upper REAL")
+        if "lower" not in existing_cols:
+            cursor.execute("ALTER TABLE forecast_log ADD COLUMN lower REAL")
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_flog_exp_target "
             "ON forecast_log(experiment, target_dt)"
@@ -214,6 +224,8 @@ class HistoryDB:
         predictions: list,
         model_name: str,
         forecast_type: str = "cached",
+        upper_bounds: Optional[list] = None,
+        lower_bounds: Optional[list] = None,
     ) -> int:
         """
         Bulk-insert a forecast snapshot into the log.
@@ -232,6 +244,11 @@ class HistoryDB:
             Name of the model that produced the forecast.
         forecast_type : str
             'retrain' or 'cached'.
+        upper_bounds, lower_bounds : list of float, optional
+            Conformal interval bounds (same length as predictions).
+            Pass None when no intervals are available — stored as NULL
+            so the coverage query can tell calibrated rows from legacy
+            point-only rows.
 
         Returns
         -------
@@ -239,20 +256,28 @@ class HistoryDB:
             Number of rows inserted.
         """
         issued_str = issued_at.strftime("%Y-%m-%d %H:%M:%S")
+        n = len(targets)
+        if upper_bounds is not None and len(upper_bounds) != n:
+            raise ValueError("upper_bounds length must match targets")
+        if lower_bounds is not None and len(lower_bounds) != n:
+            raise ValueError("lower_bounds length must match targets")
         rows = []
-        for ts, val in zip(targets, predictions):
+        for i, (ts, val) in enumerate(zip(targets, predictions)):
             target_str = ts.strftime("%Y-%m-%d %H:%M:%S")
             lead_min = int((ts - issued_at).total_seconds() / 60)
+            upper_val = float(upper_bounds[i]) if upper_bounds is not None else None
+            lower_val = float(lower_bounds[i]) if lower_bounds is not None else None
             rows.append((
                 experiment, model_name, issued_str, target_str,
-                lead_min, float(val), forecast_type,
+                lead_min, float(val), forecast_type, upper_val, lower_val,
             ))
         cursor = self.conn.cursor()
         try:
             cursor.executemany(
                 "INSERT INTO forecast_log "
-                "(experiment, model_name, issued_at, target_dt, lead_minutes, predicted, forecast_type) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(experiment, model_name, issued_at, target_dt, lead_minutes, "
+                "predicted, forecast_type, upper, lower) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
             self.conn.commit()
@@ -268,12 +293,13 @@ class HistoryDB:
         actuals_table: str,
         max_age_days: int = 30,
         interval_minutes: int = 30,
+        evaluation_mode: str = "raw",
     ) -> dict:
         """
         Compute forecast accuracy by lead time.
 
         Joins forecast_log predictions against the actuals table and
-        returns MAE/RMSE grouped by lead-time buckets, plus revision
+        returns MAE/RMSE/ME grouped by lead-time buckets, plus revision
         improvement data (first vs last forecast for each target).
 
         Parameters
@@ -288,6 +314,12 @@ class HistoryDB:
             Resampling grid interval in minutes. Raw actuals are snapped
             to the nearest grid boundary before joining against forecast
             targets (which are already grid-aligned).
+        evaluation_mode : str
+            "raw" — evaluate against stored cumulative/point values.
+            "increment" — evaluate against per-interval deltas (LAG-based
+            diff of both forecasts and actuals). Only meaningful for
+            cumulative sensors where raw-value errors mostly reflect the
+            sensor's shape through the day rather than model skill.
 
         Returns
         -------
@@ -309,6 +341,53 @@ class HistoryDB:
             return {"error": "No actuals data available yet"}
 
         interval_sec = interval_minutes * 60
+        bucket_min = max(1, int(interval_minutes))
+        increment = evaluation_mode == "increment"
+
+        # Build value-extraction CTEs according to mode. In "raw" mode we
+        # just pass the stored value through; in "increment" mode we take
+        # LAG-based diffs so error reflects per-interval demand rather
+        # than cumulative shape. The same actuals_grid CTE feeds both.
+        #
+        # Midnight resets on daily-cumulative sensors produce a large
+        # negative increment (e.g. 0 - 85 = -85). Increment mode filters
+        # `value >= 0` at the join to drop those rows; this is only safe
+        # because the mode is gated on source_is_cumulative upstream.
+        if increment:
+            actuals_vals_cte = (
+                "actuals_vals AS ("
+                "  SELECT grid_dt,"
+                "         value - LAG(value) OVER (ORDER BY grid_dt) AS value"
+                "  FROM actuals_grid"
+                ")"
+            )
+            forecast_vals_cte = (
+                "forecast_vals AS ("
+                "  SELECT experiment, model_name, issued_at, target_dt, lead_minutes,"
+                "         predicted - LAG(predicted) OVER ("
+                "             PARTITION BY issued_at ORDER BY target_dt"
+                "         ) AS value"
+                "  FROM forecast_log"
+                "  WHERE experiment = ? AND target_dt <= ? AND issued_at >= ?"
+                ")"
+            )
+            mode_filter = (
+                "AND fv.value IS NOT NULL AND av.value IS NOT NULL"
+                "  AND fv.value >= 0 AND av.value >= 0"
+            )
+        else:
+            actuals_vals_cte = (
+                "actuals_vals AS (SELECT grid_dt, value FROM actuals_grid)"
+            )
+            forecast_vals_cte = (
+                "forecast_vals AS ("
+                "  SELECT experiment, model_name, issued_at, target_dt, lead_minutes,"
+                "         predicted AS value"
+                "  FROM forecast_log"
+                "  WHERE experiment = ? AND target_dt <= ? AND issued_at >= ?"
+                ")"
+            )
+            mode_filter = ""
 
         # --- Lead-time accuracy curve ---
         # Bucket lead_minutes into `interval_minutes`-sized bins so the
@@ -319,7 +398,6 @@ class HistoryDB:
         # Actuals are stored with raw irregular HA timestamps, while
         # forecast targets are grid-aligned. Snap actuals to the grid
         # (floor to nearest interval boundary) and average before joining.
-        bucket_min = max(1, int(interval_minutes))
         try:
             cursor.execute(f"""
                 WITH actuals_grid AS (
@@ -330,24 +408,25 @@ class HistoryDB:
                         AVG(value) AS value
                     FROM {actuals_table}
                     GROUP BY grid_dt
-                )
+                ),
+                {actuals_vals_cte},
+                {forecast_vals_cte}
                 SELECT
-                    CAST((fl.lead_minutes / ?) * ? AS INTEGER) AS lead_bucket,
-                    AVG(ABS(fl.predicted - ag.value)) AS mae,
-                    SQRT(AVG((fl.predicted - ag.value) * (fl.predicted - ag.value))) AS rmse,
+                    CAST((fv.lead_minutes / ?) * ? AS INTEGER) AS lead_bucket,
+                    AVG(ABS(fv.value - av.value)) AS mae,
+                    SQRT(AVG((fv.value - av.value) * (fv.value - av.value))) AS rmse,
+                    AVG(fv.value - av.value) AS me,
                     COUNT(*) AS n
-                FROM forecast_log fl
-                INNER JOIN actuals_grid ag
-                    ON ag.grid_dt = fl.target_dt
-                WHERE fl.experiment = ?
-                  AND fl.target_dt <= ?
-                  AND fl.issued_at >= ?
+                FROM forecast_vals fv
+                INNER JOIN actuals_vals av
+                    ON av.grid_dt = fv.target_dt
+                WHERE 1=1 {mode_filter}
                 GROUP BY lead_bucket
                 ORDER BY lead_bucket
             """, (
                 interval_sec, interval_sec,
-                bucket_min, bucket_min,
                 experiment, now_str, cutoff_str,
+                bucket_min, bucket_min,
             ))
             lead_rows = cursor.fetchall()
         except sqlite3.Error as e:
@@ -358,7 +437,8 @@ class HistoryDB:
             "lead_minutes": [r[0] for r in lead_rows],
             "mae": [round(r[1], 4) for r in lead_rows],
             "rmse": [round(r[2], 4) for r in lead_rows],
-            "sample_count": [r[3] for r in lead_rows],
+            "me": [round(r[3], 4) for r in lead_rows],
+            "sample_count": [r[4] for r in lead_rows],
         }
 
         # --- Revision improvement ---
@@ -382,21 +462,21 @@ class HistoryDB:
                     FROM {actuals_table}
                     GROUP BY grid_dt
                 ),
+                {actuals_vals_cte},
+                {forecast_vals_cte},
                 ranked AS (
                     SELECT
-                        fl.target_dt,
-                        fl.lead_minutes,
-                        fl.predicted,
-                        ag.value AS actual,
-                        ROW_NUMBER() OVER (PARTITION BY fl.target_dt ORDER BY fl.issued_at ASC) AS rn_first,
-                        ROW_NUMBER() OVER (PARTITION BY fl.target_dt ORDER BY fl.issued_at DESC) AS rn_last,
-                        COUNT(*) OVER (PARTITION BY fl.target_dt) AS n_forecasts
-                    FROM forecast_log fl
-                    INNER JOIN actuals_grid ag
-                        ON ag.grid_dt = fl.target_dt
-                    WHERE fl.experiment = ?
-                      AND fl.target_dt <= ?
-                      AND fl.issued_at >= ?
+                        fv.target_dt,
+                        fv.lead_minutes,
+                        fv.value AS predicted,
+                        av.value AS actual,
+                        ROW_NUMBER() OVER (PARTITION BY fv.target_dt ORDER BY fv.issued_at ASC) AS rn_first,
+                        ROW_NUMBER() OVER (PARTITION BY fv.target_dt ORDER BY fv.issued_at DESC) AS rn_last,
+                        COUNT(*) OVER (PARTITION BY fv.target_dt) AS n_forecasts
+                    FROM forecast_vals fv
+                    INNER JOIN actuals_vals av
+                        ON av.grid_dt = fv.target_dt
+                    WHERE 1=1 {mode_filter}
                 ),
                 first_last AS (
                     SELECT target_dt,
@@ -412,24 +492,31 @@ class HistoryDB:
                 SELECT
                     AVG(ABS(first_pred - actual)) AS first_mae,
                     AVG(ABS(last_pred  - actual)) AS last_mae,
+                    AVG(first_pred - actual) AS first_me,
+                    AVG(last_pred  - actual) AS last_me,
                     COUNT(*) AS n
                 FROM first_last
-            """, (interval_sec, interval_sec, experiment, now_str, cutoff_str))
+            """, (
+                interval_sec, interval_sec,
+                experiment, now_str, cutoff_str,
+            ))
             rev_row = cursor.fetchone()
         except sqlite3.Error as e:
             logger.warning(f"Revision improvement query failed: {e}")
             rev_row = None
 
         revision = {}
-        if rev_row and rev_row[2] > 0:
+        if rev_row and rev_row[4] > 0:
             first_mae = round(rev_row[0], 4)
             last_mae = round(rev_row[1], 4)
             improvement = round((1 - last_mae / first_mae) * 100, 1) if first_mae > 0 else 0
             revision = {
                 "first_forecast_mae": first_mae,
                 "latest_forecast_mae": last_mae,
+                "first_forecast_me": round(rev_row[2], 4),
+                "latest_forecast_me": round(rev_row[3], 4),
                 "improvement_pct": improvement,
-                "sample_count": rev_row[2],
+                "sample_count": rev_row[4],
             }
 
         # --- Summary stats ---
@@ -442,6 +529,7 @@ class HistoryDB:
 
         return {
             "experiment": experiment,
+            "evaluation_mode": "increment" if increment else "raw",
             "lead_time_curve": lead_time_curve,
             "revision_improvement": revision,
             "total_logged": stats_row[0] if stats_row else 0,
@@ -450,6 +538,432 @@ class HistoryDB:
                 "to": stats_row[2] if stats_row else None,
             },
         }
+
+    def get_forecast_trajectory(
+        self,
+        experiment: str,
+        actuals_table: str,
+        target_dt: Optional[str] = None,
+        interval_minutes: int = 30,
+        max_age_days: int = 14,
+    ) -> dict:
+        """
+        Return every forecast ever issued for a single target_dt, plus
+        the actual value at that target, so the UI can plot a
+        "prediction walking toward truth" trajectory.
+
+        Parameters
+        ----------
+        experiment : str
+        actuals_table : str
+            SQL-safe table name for the actuals.
+        target_dt : str or None
+            Target timestamp (YYYY-MM-DD HH:MM:SS). If None, picks the
+            most recent target with an actual value AND at least two
+            distinct forecast issuances — that's the one most worth
+            plotting.
+        interval_minutes : int
+            Actuals are snapped to this grid before matching target_dt.
+        max_age_days : int
+            Only consider forecasts/targets within this window.
+
+        Returns
+        -------
+        dict with keys:
+            ``target_dt``: the target being shown (ISO string)
+            ``actual``: float or None
+            ``forecasts``: [{issued_at, predicted, lead_minutes, model_name}, ...]
+                           ordered by issued_at ascending
+            ``available_targets``: list of recent target_dts that have an
+                           actual + >=2 issuances, newest first — populates
+                           the dropdown in the UI.
+        """
+        cursor = self.conn.cursor()
+        interval_sec = max(60, int(interval_minutes) * 60)
+        cutoff_str = (
+            datetime.utcnow() - pd.Timedelta(days=max_age_days)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (actuals_table,),
+        )
+        if not cursor.fetchone():
+            return {"error": "No actuals data available yet"}
+
+        # Candidate targets for the dropdown: recent targets with an
+        # actual value on the grid AND >=2 distinct issuances. These are
+        # the ones where a trajectory plot is meaningful (one-shot
+        # targets give a single dot and teach nothing).
+        try:
+            cursor.execute(f"""
+                WITH actuals_grid AS (
+                    SELECT
+                        strftime('%Y-%m-%d %H:%M:%S',
+                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                            'unixepoch') AS grid_dt
+                    FROM {actuals_table}
+                    GROUP BY grid_dt
+                )
+                SELECT fl.target_dt, COUNT(DISTINCT fl.issued_at) AS n_iss
+                FROM forecast_log fl
+                INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
+                WHERE fl.experiment = ?
+                  AND fl.target_dt <= ?
+                  AND fl.issued_at >= ?
+                GROUP BY fl.target_dt
+                HAVING n_iss >= 2
+                ORDER BY fl.target_dt DESC
+                LIMIT 48
+            """, (interval_sec, interval_sec, experiment, now_str, cutoff_str))
+            candidate_rows = cursor.fetchall()
+        except sqlite3.Error as e:
+            logger.error(f"Trajectory candidates query failed: {e}")
+            return {"error": str(e)}
+
+        available_targets = [r[0] for r in candidate_rows]
+        if not available_targets:
+            return {
+                "experiment": experiment,
+                "target_dt": None,
+                "actual": None,
+                "forecasts": [],
+                "available_targets": [],
+            }
+
+        # If caller didn't pick a target, default to the most recent one
+        # we have a useful trajectory for.
+        if not target_dt or target_dt not in available_targets:
+            target_dt = available_targets[0]
+
+        # Fetch all forecasts for the chosen target.
+        try:
+            cursor.execute(
+                "SELECT issued_at, predicted, lead_minutes, model_name "
+                "FROM forecast_log "
+                "WHERE experiment = ? AND target_dt = ? "
+                "ORDER BY issued_at ASC",
+                (experiment, target_dt),
+            )
+            forecast_rows = cursor.fetchall()
+        except sqlite3.Error as e:
+            logger.error(f"Trajectory fetch failed: {e}")
+            return {"error": str(e)}
+
+        forecasts = [
+            {
+                "issued_at": r[0],
+                "predicted": round(float(r[1]), 4),
+                "lead_minutes": int(r[2]),
+                "model_name": r[3],
+            }
+            for r in forecast_rows
+        ]
+
+        # Fetch the actual for this target (grid-aligned average).
+        try:
+            cursor.execute(f"""
+                SELECT AVG(value) FROM {actuals_table}
+                WHERE strftime('%Y-%m-%d %H:%M:%S',
+                        (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                        'unixepoch') = ?
+            """, (interval_sec, interval_sec, target_dt))
+            actual_row = cursor.fetchone()
+        except sqlite3.Error as e:
+            logger.warning(f"Trajectory actual lookup failed: {e}")
+            actual_row = None
+
+        actual = (
+            round(float(actual_row[0]), 4)
+            if actual_row and actual_row[0] is not None
+            else None
+        )
+
+        return {
+            "experiment": experiment,
+            "target_dt": target_dt,
+            "actual": actual,
+            "forecasts": forecasts,
+            "available_targets": available_targets,
+        }
+
+    def get_conformal_quantiles(
+        self,
+        experiment: str,
+        actuals_table: str,
+        level: float = 0.8,
+        model_name: Optional[str] = None,
+        interval_minutes: int = 30,
+        max_age_days: int = 14,
+        min_samples: int = 10,
+    ) -> dict:
+        """
+        Compute per-lead-time conformal nonconformity quantiles from
+        historical forecasts vs actuals in forecast_log.
+
+        For a symmetric (1−α) band with α = 1−level, we take the
+        (1−α/2)-th quantile of |residual| at each lead bucket. For an
+        80%-band (level=0.8), that is the 90th percentile.
+
+        Using deployed forecast/actual pairs as the calibration sample
+        (adaptive / online conformal) avoids the cost of refitting the
+        model on a held-out window every production cycle. The tradeoff
+        is that residuals aren't strictly exchangeable (temporal drift,
+        model retrains), so finite-sample coverage is approximate rather
+        than guaranteed. For diagnostic intervals on a home-automation
+        sensor this is an acceptable simplification.
+
+        Parameters
+        ----------
+        experiment : str
+        actuals_table : str
+        level : float
+            Desired coverage, in (0, 1). 0.8 produces the 90th-percentile
+            absolute-residual band.
+        model_name : str, optional
+            Restrict to residuals from one model (usually the current
+            champion) so interval width reflects its behaviour, not a
+            different model's.
+        interval_minutes : int
+            Grid for aligning actuals to target_dt and bucketing leads.
+        max_age_days : int
+            Residual lookback window.
+        min_samples : int
+            Minimum residuals per lead bucket before reporting a
+            quantile; buckets below this are omitted and the caller
+            falls back (see ``fallback_quantile`` in the return dict).
+
+        Returns
+        -------
+        dict with keys:
+            ``quantiles``: {lead_bucket (int, minutes): q (float)}
+            ``fallback_quantile``: float or None — use when a lead bucket
+                is missing from ``quantiles`` (the ``level``-quantile
+                computed across ALL buckets, giving a safe default).
+            ``sample_counts``: {lead_bucket: int}
+            ``total_samples``: int
+            ``level``: float (echoed)
+        """
+        cursor = self.conn.cursor()
+        interval_sec = max(60, int(interval_minutes) * 60)
+        bucket_min = max(1, int(interval_minutes))
+        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        cutoff_str = (
+            datetime.utcnow() - pd.Timedelta(days=max_age_days)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (actuals_table,),
+        )
+        if not cursor.fetchone():
+            return {
+                "quantiles": {},
+                "fallback_quantile": None,
+                "sample_counts": {},
+                "total_samples": 0,
+                "level": level,
+            }
+
+        params = [interval_sec, interval_sec, bucket_min, bucket_min,
+                  experiment, now_str, cutoff_str]
+        model_filter = ""
+        if model_name:
+            model_filter = "AND fl.model_name = ?"
+            params.append(model_name)
+
+        try:
+            cursor.execute(f"""
+                WITH actuals_grid AS (
+                    SELECT
+                        strftime('%Y-%m-%d %H:%M:%S',
+                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                            'unixepoch') AS grid_dt,
+                        AVG(value) AS value
+                    FROM {actuals_table}
+                    GROUP BY grid_dt
+                )
+                SELECT
+                    CAST((fl.lead_minutes / ?) * ? AS INTEGER) AS lead_bucket,
+                    ABS(fl.predicted - ag.value) AS abs_residual
+                FROM forecast_log fl
+                INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
+                WHERE fl.experiment = ?
+                  AND fl.target_dt <= ?
+                  AND fl.issued_at >= ?
+                  {model_filter}
+            """, tuple(params))
+            rows = cursor.fetchall()
+        except sqlite3.Error as e:
+            logger.error(f"Conformal quantile query failed: {e}")
+            return {
+                "quantiles": {},
+                "fallback_quantile": None,
+                "sample_counts": {},
+                "total_samples": 0,
+                "level": level,
+            }
+
+        if not rows:
+            return {
+                "quantiles": {},
+                "fallback_quantile": None,
+                "sample_counts": {},
+                "total_samples": 0,
+                "level": level,
+            }
+
+        df = pd.DataFrame(rows, columns=["lead_bucket", "abs_residual"])
+        df = df.dropna()
+
+        alpha = max(0.0, min(1.0, 1.0 - level))
+        q = 1.0 - alpha / 2.0
+
+        counts = df.groupby("lead_bucket").size()
+        # Usable buckets have enough samples to estimate a stable
+        # quantile; buckets below min_samples fall back to the global
+        # quantile so short-lead predictions still get a band.
+        usable = counts[counts >= min_samples].index
+        quantiles = (
+            df[df["lead_bucket"].isin(usable)]
+            .groupby("lead_bucket")["abs_residual"]
+            .quantile(q)
+            .to_dict()
+        )
+        fallback = float(df["abs_residual"].quantile(q)) if len(df) > 0 else None
+
+        return {
+            "quantiles": {int(k): float(v) for k, v in quantiles.items()},
+            "fallback_quantile": fallback,
+            "sample_counts": {int(k): int(v) for k, v in counts.items()},
+            "total_samples": int(len(df)),
+            "level": level,
+        }
+
+    def get_forecast_coverage(
+        self,
+        experiment: str,
+        actuals_table: str,
+        interval_minutes: int = 30,
+        max_age_days: int = 30,
+    ) -> dict:
+        """
+        Compute empirical coverage of published interval forecasts.
+
+        Coverage is the fraction of actuals that fell inside
+        [lower, upper] among forecast_log rows with both bounds stored.
+        A well-calibrated 80% band should land at ~0.80; systematic
+        deviation is the user-visible signal that intervals need
+        recalibration.
+
+        Only rows with non-NULL upper AND lower are considered — legacy
+        point-only rows are excluded automatically.
+
+        Returns
+        -------
+        dict with keys:
+            ``by_lead``: {lead_minutes: [...], coverage: [...], n: [...]}
+            ``overall``: {coverage: float, n: int} or empty dict
+            ``level``: float (nominal level read from ``level`` kwarg
+                of the conformal run; here inferred by the caller and
+                echoed in the UI).
+        """
+        cursor = self.conn.cursor()
+        interval_sec = max(60, int(interval_minutes) * 60)
+        bucket_min = max(1, int(interval_minutes))
+        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        cutoff_str = (
+            datetime.utcnow() - pd.Timedelta(days=max_age_days)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (actuals_table,),
+        )
+        if not cursor.fetchone():
+            return {"by_lead": {"lead_minutes": [], "coverage": [], "n": []}, "overall": {}}
+
+        try:
+            cursor.execute(f"""
+                WITH actuals_grid AS (
+                    SELECT
+                        strftime('%Y-%m-%d %H:%M:%S',
+                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                            'unixepoch') AS grid_dt,
+                        AVG(value) AS value
+                    FROM {actuals_table}
+                    GROUP BY grid_dt
+                )
+                SELECT
+                    CAST((fl.lead_minutes / ?) * ? AS INTEGER) AS lead_bucket,
+                    AVG(CASE WHEN ag.value BETWEEN fl.lower AND fl.upper
+                             THEN 1.0 ELSE 0.0 END) AS coverage,
+                    COUNT(*) AS n
+                FROM forecast_log fl
+                INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
+                WHERE fl.experiment = ?
+                  AND fl.target_dt <= ?
+                  AND fl.issued_at >= ?
+                  AND fl.upper IS NOT NULL
+                  AND fl.lower IS NOT NULL
+                GROUP BY lead_bucket
+                ORDER BY lead_bucket
+            """, (
+                interval_sec, interval_sec,
+                bucket_min, bucket_min,
+                experiment, now_str, cutoff_str,
+            ))
+            by_lead_rows = cursor.fetchall()
+        except sqlite3.Error as e:
+            logger.error(f"Coverage query failed: {e}")
+            return {"by_lead": {"lead_minutes": [], "coverage": [], "n": []}, "overall": {}}
+
+        by_lead = {
+            "lead_minutes": [int(r[0]) for r in by_lead_rows],
+            "coverage": [round(float(r[1]), 4) for r in by_lead_rows],
+            "n": [int(r[2]) for r in by_lead_rows],
+        }
+
+        try:
+            cursor.execute(f"""
+                WITH actuals_grid AS (
+                    SELECT
+                        strftime('%Y-%m-%d %H:%M:%S',
+                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                            'unixepoch') AS grid_dt,
+                        AVG(value) AS value
+                    FROM {actuals_table}
+                    GROUP BY grid_dt
+                )
+                SELECT
+                    AVG(CASE WHEN ag.value BETWEEN fl.lower AND fl.upper
+                             THEN 1.0 ELSE 0.0 END) AS coverage,
+                    COUNT(*) AS n
+                FROM forecast_log fl
+                INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
+                WHERE fl.experiment = ?
+                  AND fl.target_dt <= ?
+                  AND fl.issued_at >= ?
+                  AND fl.upper IS NOT NULL
+                  AND fl.lower IS NOT NULL
+            """, (
+                interval_sec, interval_sec,
+                experiment, now_str, cutoff_str,
+            ))
+            overall_row = cursor.fetchone()
+        except sqlite3.Error as e:
+            logger.warning(f"Overall coverage query failed: {e}")
+            overall_row = None
+
+        overall = {}
+        if overall_row and overall_row[1]:
+            overall = {
+                "coverage": round(float(overall_row[0]), 4),
+                "n": int(overall_row[1]),
+            }
+
+        return {"by_lead": by_lead, "overall": overall}
 
     def get_forecast_evolution(
         self,

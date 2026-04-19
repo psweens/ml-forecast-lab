@@ -1100,17 +1100,52 @@
         How prediction accuracy changes with lead time, and whether re-forecasting improves results.
     </p>
 
+    <!-- Evaluation mode toggle (shown only for cumulative sensors) -->
+    <div id="accuracy-mode-wrapper" style="display:none;margin-bottom:1rem;">
+        <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;">
+            <label style="color:var(--text-secondary);font-size:0.85rem;">Evaluate on:</label>
+            <div class="toggle-group" style="display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+                <button type="button" id="accuracy-mode-increment" class="toggle-btn active" onclick="setAccuracyMode('increment')" style="padding:0.35rem 0.75rem;background:var(--accent-secondary);color:#fff;border:none;cursor:pointer;font-size:0.85rem;">Per-interval demand</button>
+                <button type="button" id="accuracy-mode-raw" class="toggle-btn" onclick="setAccuracyMode('raw')" style="padding:0.35rem 0.75rem;background:transparent;color:var(--text-secondary);border:none;cursor:pointer;font-size:0.85rem;">Cumulative value</button>
+            </div>
+            <span class="info-tip">?<span class="tip-text">Cumulative sensors (resets at midnight) make raw-value errors mostly reflect the shape of the day — 23:30 errors look big just because the number is big. Per-interval demand evaluates error on <code>value[t] − value[t−1]</code>, so the error at 03:00 and 18:00 are directly comparable.</span></span>
+        </div>
+    </div>
+
+    <!-- Interval calibration card (shown when conformal bands exist) -->
+    <div id="accuracy-coverage-card" style="display:none;margin-bottom:1rem;">
+        <div class="settings-group" style="display:flex;gap:2rem;flex-wrap:wrap;align-items:center;">
+            <div style="text-align:center;flex:1;min-width:160px;">
+                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">
+                    Interval coverage
+                    <span class="info-tip">?<span class="tip-text">The fraction of actuals that fell inside the published 80% band. A well-calibrated model sits near 80%. Consistently higher = bands are wider than needed; lower = bands are too tight and under-sell uncertainty.</span></span>
+                </div>
+                <div id="cov-value" style="font-size:1.5rem;font-weight:700;">—</div>
+                <div style="font-size:0.72rem;color:var(--text-secondary);">target <span id="cov-target">80%</span></div>
+            </div>
+            <div style="text-align:center;flex:1;min-width:120px;">
+                <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Samples</div>
+                <div id="cov-samples" style="font-size:1.5rem;font-weight:700;color:var(--text-secondary);">—</div>
+            </div>
+            <div style="flex:2;min-width:220px;color:var(--text-secondary);font-size:0.85rem;">
+                <div id="cov-diagnosis">—</div>
+            </div>
+        </div>
+    </div>
+
     <!-- Revision summary card -->
     <div id="accuracy-revision-card" style="display:none;margin-bottom:1.5rem;">
         <div class="settings-group" style="display:flex;gap:2rem;flex-wrap:wrap;align-items:center;">
             <div style="text-align:center;flex:1;min-width:140px;">
                 <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">First forecast MAE</div>
                 <div id="rev-first-mae" style="font-size:1.5rem;font-weight:700;color:var(--text-primary);">—</div>
+                <div id="rev-first-me" style="font-size:0.75rem;color:var(--text-secondary);margin-top:0.15rem;">bias —</div>
             </div>
             <div style="font-size:1.5rem;color:var(--text-secondary);">→</div>
             <div style="text-align:center;flex:1;min-width:140px;">
                 <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Latest forecast MAE</div>
                 <div id="rev-last-mae" style="font-size:1.5rem;font-weight:700;color:var(--text-primary);">—</div>
+                <div id="rev-last-me" style="font-size:0.75rem;color:var(--text-secondary);margin-top:0.15rem;">bias —</div>
             </div>
             <div style="text-align:center;flex:1;min-width:140px;">
                 <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.25rem;">Improvement</div>
@@ -1125,7 +1160,10 @@
 
     <!-- Lead-time vs accuracy chart -->
     <div class="settings-group">
-        <h3 class="settings-group-title">Accuracy by lead time</h3>
+        <h3 class="settings-group-title">
+            Accuracy by lead time
+            <span class="info-tip">?<span class="tip-text">MAE/RMSE grow with lead time as the forecast horizon extends. Signed bias (ME, dashed green) shows whether the model systematically over- (positive) or under-predicts (negative). A well-calibrated model sits near zero.</span></span>
+        </h3>
         <div id="accuracy-lead-chart" style="width:100%;height:380px;"></div>
     </div>
 
@@ -1160,6 +1198,27 @@
             {% endif %}
         </div>
         <div id="accuracy-evolution-chart" style="width:100%;height:420px;"></div>
+    </div>
+
+    <!-- Forecast trajectory — one target, every prediction of it -->
+    <div class="settings-group" id="accuracy-trajectory-wrapper">
+        <h3 class="settings-group-title">
+            Forecast trajectory
+            <span class="info-tip">?<span class="tip-text">Pick a past timestamp. Each dot is one forecast that predicted this moment, plotted on the horizontal axis at the time it was issued. The horizontal line is the measured value. A well-behaved model walks toward the line as the target approaches — oscillation or drift here is diagnostic.</span></span>
+        </h3>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
+            For one target timestamp: every forecast ever issued of that moment, ordered by when it was issued. The horizontal line is the actual.
+        </p>
+        <div style="display:flex;gap:0.5rem;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;">
+            <label style="color:var(--text-secondary);font-size:0.85rem;">Target:</label>
+            <select id="trajectory-target-select" class="setting-input" style="width:auto;min-width:220px;" onchange="reloadForecastTrajectory()">
+                <option value="">Loading…</option>
+            </select>
+        </div>
+        <div id="trajectory-empty" style="display:none;color:var(--text-secondary);font-size:0.9rem;padding:1rem 0;">
+            No targets yet — need at least two forecasts of the same future moment plus a measured actual.
+        </div>
+        <div id="accuracy-trajectory-chart" style="width:100%;height:360px;"></div>
     </div>
 
     <!-- Model stability -->
@@ -1747,14 +1806,21 @@ window.showTab = function(el) {
 
     // ======== Forecast accuracy chart ========
     {% if experiment.mode == 'production' %}
-    queueChart('sec-forecast-accuracy', function() {
-        fetch(BASE + '/experiment/' + EXP_NAME + '/forecast-accuracy')
+    // Mode state: "increment" defaults for cumulative sensors (raw value
+    // errors mostly reflect the day's shape, not model skill), "raw"
+    // otherwise. User can flip via the toggle buttons.
+    var accuracyMode = EXP_SOURCE_CUMULATIVE ? 'increment' : 'raw';
+
+    function loadForecastAccuracy() {
+        var url = BASE + '/experiment/' + EXP_NAME + '/forecast-accuracy?mode=' + accuracyMode;
+        fetch(url)
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (data.error || !data.lead_time_curve || !data.lead_time_curve.lead_minutes.length) {
                 document.getElementById('accuracy-empty').style.display = 'block';
                 return;
             }
+            document.getElementById('accuracy-empty').style.display = 'none';
 
             // Lead-time vs accuracy chart
             var ltc = data.lead_time_curve;
@@ -1775,10 +1841,21 @@ window.showTab = function(el) {
                     marker: { size: 4 },
                     hovertemplate: '%{y:.3f}<extra>RMSE</extra>',
                 },
+                {
+                    x: xHours, y: ltc.me, name: 'Bias (ME)',
+                    type: 'scatter', mode: 'lines+markers',
+                    line: { color: '#6dd67c', width: 2, dash: 'dash' },
+                    marker: { size: 4 },
+                    hovertemplate: '%{y:.3f}<extra>Bias</extra>',
+                },
             ];
             var layout = {
                 xaxis: { title: 'Lead time (hours)', color: '#b0b0b0', gridcolor: '#2d3561' },
-                yaxis: { title: 'Error{{ " (" + units + ")" if units else "" }}', color: '#b0b0b0', gridcolor: '#2d3561' },
+                yaxis: {
+                    title: 'Error{{ " (" + units + ")" if units else "" }}',
+                    color: '#b0b0b0', gridcolor: '#2d3561',
+                    zeroline: true, zerolinecolor: '#4a5178', zerolinewidth: 1,
+                },
                 plot_bgcolor: 'rgba(0,0,0,0)',
                 paper_bgcolor: 'rgba(0,0,0,0)',
                 font: { color: '#e0e0e0' },
@@ -1788,12 +1865,50 @@ window.showTab = function(el) {
             };
             Plotly.newPlot('accuracy-lead-chart', traces, layout, { responsive: true });
 
+            // Interval coverage card (only if we have calibrated bands)
+            var cov = data.coverage && data.coverage.overall;
+            var nominal = (data.nominal_interval_level != null) ? data.nominal_interval_level : 0.8;
+            var covCard = document.getElementById('accuracy-coverage-card');
+            if (cov && typeof cov.coverage === 'number' && cov.n > 0) {
+                covCard.style.display = 'block';
+                var covPct = cov.coverage * 100;
+                var targetPct = nominal * 100;
+                var covEl = document.getElementById('cov-value');
+                covEl.textContent = covPct.toFixed(1) + '%';
+                // Colour: green within ±5pp of target, amber within
+                // ±10pp, red beyond. These bands match the "is the
+                // model well-calibrated?" quick-glance heuristic.
+                var delta = Math.abs(covPct - targetPct);
+                covEl.style.color = delta <= 5 ? 'var(--success)'
+                                  : delta <= 10 ? 'var(--warning, #f0ad4e)'
+                                  : 'var(--error)';
+                document.getElementById('cov-target').textContent = targetPct.toFixed(0) + '%';
+                document.getElementById('cov-samples').textContent = cov.n.toLocaleString();
+                var diag;
+                if (delta <= 5) {
+                    diag = 'Well calibrated — empirical coverage is within ±5pp of the target.';
+                } else if (covPct > targetPct) {
+                    diag = 'Bands are wider than needed (over-covering). Intervals are conservative.';
+                } else {
+                    diag = 'Bands are too tight (under-covering). Intervals under-sell uncertainty — consider waiting for more residuals or a recalibration.';
+                }
+                document.getElementById('cov-diagnosis').textContent = diag;
+            } else {
+                covCard.style.display = 'none';
+            }
+
             // Revision improvement card
             var rev = data.revision_improvement;
             if (rev && rev.sample_count > 0) {
                 document.getElementById('accuracy-revision-card').style.display = 'block';
                 document.getElementById('rev-first-mae').textContent = rev.first_forecast_mae.toFixed(3);
                 document.getElementById('rev-last-mae').textContent = rev.latest_forecast_mae.toFixed(3);
+                function fmtBias(v) {
+                    if (v === null || v === undefined) return 'bias —';
+                    return 'bias ' + (v >= 0 ? '+' : '') + v.toFixed(3);
+                }
+                document.getElementById('rev-first-me').textContent = fmtBias(rev.first_forecast_me);
+                document.getElementById('rev-last-me').textContent = fmtBias(rev.latest_forecast_me);
                 var impEl = document.getElementById('rev-improvement');
                 impEl.textContent = (rev.improvement_pct > 0 ? '+' : '') + rev.improvement_pct.toFixed(1) + '%';
                 impEl.style.color = rev.improvement_pct > 0 ? 'var(--success)' : 'var(--error)';
@@ -1812,9 +1927,34 @@ window.showTab = function(el) {
             console.error('Forecast accuracy load failed:', err);
             document.getElementById('accuracy-empty').style.display = 'block';
         });
+    }
+
+    window.setAccuracyMode = function(mode) {
+        if (mode !== 'raw' && mode !== 'increment') return;
+        accuracyMode = mode;
+        var incBtn = document.getElementById('accuracy-mode-increment');
+        var rawBtn = document.getElementById('accuracy-mode-raw');
+        function apply(btn, active) {
+            btn.classList.toggle('active', active);
+            btn.style.background = active ? 'var(--accent-secondary)' : 'transparent';
+            btn.style.color = active ? '#fff' : 'var(--text-secondary)';
+        }
+        apply(incBtn, mode === 'increment');
+        apply(rawBtn, mode === 'raw');
+        loadForecastAccuracy();
+    };
+
+    queueChart('sec-forecast-accuracy', function() {
+        // Show mode toggle only for cumulative sensors (increment
+        // evaluation is meaningful only when the target accumulates).
+        if (EXP_SOURCE_CUMULATIVE) {
+            document.getElementById('accuracy-mode-wrapper').style.display = 'block';
+        }
+        loadForecastAccuracy();
 
         // Render evolution overlay alongside the lead-time chart.
         loadForecastEvolution();
+        loadForecastTrajectory();
         loadForecastStability();
     });
 
@@ -2027,6 +2167,118 @@ window.showTab = function(el) {
 
     window.reloadForecastEvolution = function() {
         window.loadForecastEvolution();
+    };
+
+    // Forecast trajectory — all forecasts of one target_dt plotted by
+    // issued_at, with the actual as a horizontal reference. Shows the
+    // *shape* of revision behaviour (converging / oscillating / drifting)
+    // that the single first-vs-last revision metric collapses.
+    window.loadForecastTrajectory = function() {
+        var sel = document.getElementById('trajectory-target-select');
+        var chosen = sel && sel.value ? sel.value : '';
+        var url = BASE + '/experiment/' + EXP_NAME + '/forecast-trajectory'
+            + (chosen ? '?target_dt=' + encodeURIComponent(chosen) : '');
+        fetch(url)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var wrap = document.getElementById('accuracy-trajectory-wrapper');
+            var empty = document.getElementById('trajectory-empty');
+            if (data.error || !data.available_targets || !data.available_targets.length) {
+                if (empty) empty.style.display = 'block';
+                Plotly.purge('accuracy-trajectory-chart');
+                if (sel) { sel.innerHTML = '<option value="">No eligible targets</option>'; }
+                return;
+            }
+            if (empty) empty.style.display = 'none';
+
+            // Populate dropdown if empty or stale. Compare against current
+            // option set to avoid clobbering user's selection on reload.
+            if (sel) {
+                var currentValues = Array.prototype.map.call(sel.options, function(o) { return o.value; });
+                var want = data.available_targets;
+                var needsRebuild = currentValues.length !== want.length ||
+                    want.some(function(v, i) { return currentValues[i] !== v; });
+                if (needsRebuild) {
+                    sel.innerHTML = '';
+                    want.forEach(function(t) {
+                        var opt = document.createElement('option');
+                        opt.value = t;
+                        // Display in local time, matching toLocalDate
+                        // conventions elsewhere on the page.
+                        var d = toLocalDate(t);
+                        opt.textContent = d ? d.toLocaleString() : t;
+                        sel.appendChild(opt);
+                    });
+                }
+                if (data.target_dt) sel.value = data.target_dt;
+            }
+
+            // Build trajectory dots: x = issued_at (local), y = predicted.
+            var xs = data.forecasts.map(function(f) { return toLocalDate(f.issued_at); });
+            var ys = data.forecasts.map(function(f) { return f.predicted; });
+            var leads = data.forecasts.map(function(f) { return (f.lead_minutes / 60).toFixed(1) + 'h'; });
+
+            var traces = [
+                {
+                    x: xs, y: ys, name: 'Forecasts',
+                    type: 'scatter', mode: 'lines+markers',
+                    line: { color: '#4d96ff', width: 2 },
+                    marker: { size: 7, color: '#4d96ff' },
+                    customdata: leads,
+                    hovertemplate: 'Issued %{x|%d %b %H:%M}<br>Predicted %{y:.3f}<br>Lead: %{customdata}<extra></extra>',
+                },
+            ];
+
+            // Horizontal actual line if we have one.
+            if (data.actual !== null && data.actual !== undefined && xs.length) {
+                var xMin = xs[0], xMax = xs[xs.length - 1];
+                // Extend the actual line a little past the last forecast
+                // so the "target landed" moment is visible.
+                var targetTs = toLocalDate(data.target_dt);
+                if (targetTs && targetTs > xMax) xMax = targetTs;
+                traces.push({
+                    x: [xMin, xMax], y: [data.actual, data.actual],
+                    name: 'Actual',
+                    type: 'scatter', mode: 'lines',
+                    line: { color: '#e0e0e0', width: 2, dash: 'solid' },
+                    hovertemplate: 'Actual %{y:.3f}<extra></extra>',
+                });
+                // Vertical marker at the target_dt, if within range.
+                if (targetTs) {
+                    traces.push({
+                        x: [targetTs, targetTs],
+                        y: [Math.min(data.actual, Math.min.apply(null, ys)),
+                            Math.max(data.actual, Math.max.apply(null, ys))],
+                        name: 'Target time',
+                        type: 'scatter', mode: 'lines',
+                        line: { color: '#6dd67c', width: 1, dash: 'dot' },
+                        hoverinfo: 'skip',
+                        showlegend: true,
+                    });
+                }
+            }
+
+            var layout = {
+                xaxis: { title: 'Forecast issued at (local time)', color: '#b0b0b0', gridcolor: '#2d3561' },
+                yaxis: { title: 'Predicted value{{ " (" + units + ")" if units else "" }}', color: '#b0b0b0', gridcolor: '#2d3561' },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#e0e0e0' },
+                legend: { x: 0.02, y: 0.98 },
+                margin: { t: 20, r: 30 },
+                colorway: PLOT_COLORWAY,
+            };
+            Plotly.newPlot('accuracy-trajectory-chart', traces, layout, { responsive: true });
+        })
+        .catch(function(err) {
+            console.error('Forecast trajectory load failed:', err);
+            var empty = document.getElementById('trajectory-empty');
+            if (empty) empty.style.display = 'block';
+        });
+    };
+
+    window.reloadForecastTrajectory = function() {
+        window.loadForecastTrajectory();
     };
 
     // Model stability — cross-cycle std of predictions for the same
