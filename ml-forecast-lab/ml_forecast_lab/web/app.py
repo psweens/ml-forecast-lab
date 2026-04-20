@@ -392,9 +392,21 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             or getattr(exp_status, "best_model", None)
             if exp_status else None
         )
-        default_version = (
-            getattr(exp_status, "model_version", None) if exp_status else None
-        )
+        # `status.model_version` is a single field — it tracks whichever
+        # model was *last retrained*, not the user's UI selection. If
+        # the user has selected a non-champion model (e.g. they picked
+        # lightgbm but the pipeline is training xgboost), applying
+        # status.model_version as the version filter yields an
+        # impossible combo: (lightgbm, xgboost's training timestamp)
+        # never has rows. Only apply the version default when
+        # selected_model matches the model whose version we're
+        # tracking — i.e. the current champion. Otherwise fall back to
+        # "all versions of that model", which is the right semantic
+        # given we don't currently track per-model versions.
+        best_model = getattr(exp_status, "best_model", None) if exp_status else None
+        default_version = None
+        if exp_status and default_model and default_model == best_model:
+            default_version = getattr(exp_status, "model_version", None)
 
         model_param = request.query_params.get("model")
         version_param = request.query_params.get("version")
@@ -1747,9 +1759,12 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             or getattr(exp_status, "best_model", None)
             if exp_status else None
         )
-        default_version = (
-            getattr(exp_status, "model_version", None) if exp_status else None
-        )
+        # Keep in sync with _resolve_model_filter: the version default
+        # only applies when selected_model matches best_model.
+        best_model = getattr(exp_status, "best_model", None) if exp_status else None
+        default_version = None
+        if exp_status and default_model and default_model == best_model:
+            default_version = getattr(exp_status, "model_version", None)
 
         try:
             cur = db.conn.cursor()
@@ -1811,11 +1826,44 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             logger.error(f"forecast-log-stats failed for {name}: {e}")
             return JSONResponse(content={"error": str(e)}, status_code=500)
 
+        # Surface common diagnostic conditions so future debugging
+        # doesn't require re-deriving them from the raw cohorts.
+        notes: list = []
+        if default_model and best_model and default_model != best_model:
+            notes.append(
+                f"selected_model={default_model!r} differs from "
+                f"best_model={best_model!r}. The version filter would "
+                "be spurious (status.model_version tracks the last "
+                "retrained model) so it's been suppressed automatically. "
+                "To see metrics for the current champion, re-select "
+                f"{best_model!r} in the UI or set "
+                f"production_model: {best_model} in mlfl.yaml."
+            )
+        if default_model and default_version:
+            matched = any(
+                c["model_name"] == default_model
+                and c["model_version"] == default_version
+                for c in cohorts
+            )
+            if not matched:
+                notes.append(
+                    "current_default_filter points to a "
+                    "(model_name, model_version) combination with zero "
+                    "rows. The endpoint will fall back to all versions "
+                    "of this model (and then to all models) until the "
+                    "cohort accumulates rows."
+                )
+
         return JSONResponse(content={
             "experiment": name,
             "current_default_filter": {
                 "model_name": default_model,
                 "model_version": default_version,
+            },
+            "selected_vs_best": {
+                "selected_model": getattr(exp_status, "selected_model", None) if exp_status else None,
+                "best_model": best_model,
+                "matches": default_model == best_model,
             },
             "totals": {
                 "rows": int(total_row[0]) if total_row else 0,
@@ -1824,12 +1872,13 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             },
             "targets_with_multi_issuances_under_default_filter": targets_with_multi_issuances,
             "cohorts": cohorts,
+            "notes": notes,
             "hint": (
                 "If 'cohorts' has a row matching current_default_filter with rows>=96 "
                 "and targets_with_multi_issuances>=1, the fallback should stop firing "
                 "within a cycle or two. If rows=0 under the current filter but other "
-                "cohorts have data, check whether log_forecast is receiving the "
-                "current model_version from the cached model dict."
+                "cohorts have data, check 'notes' and 'selected_vs_best' — the usual "
+                "cause is a selected_model that isn't the current champion."
             ),
         })
 

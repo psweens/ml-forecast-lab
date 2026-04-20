@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.25.2
+
+### Fixed
+
+- **Version-filter mismatch when `selected_model` ≠ `best_model`.**
+  `ExperimentStatus.model_version` is a single field that tracks
+  *whichever model was last retrained*. When a user had manually
+  selected a non-champion model via the UI (e.g. picked `lightgbm`
+  from a promote action, but the pipeline subsequently started
+  retraining `xgboost`), the default filter the endpoint applied
+  was `(model_name=lightgbm, model_version=<xgboost's timestamp>)` —
+  an impossible combination that never has rows, forcing the
+  fallback ladder to fire on every cycle and display stale
+  pre-upgrade data. `_resolve_model_filter()` now only applies the
+  version default when `default_model == best_model`; otherwise the
+  name filter runs alone ("all versions of that model"), which is
+  the correct semantic since no version info is tracked for
+  non-champion models in the current schema. The same guard is
+  mirrored in `/forecast-log-stats` so its reported
+  `current_default_filter` matches what the analytics endpoints
+  actually send.
+
+### Added
+
+- **Diagnostic fields on `/forecast-log-stats`**:
+  - `selected_vs_best` showing `selected_model`, `best_model`, and
+    `matches` — makes the exact mismatch condition above
+    immediately visible.
+  - `notes` array flagging common conditions: the
+    selected-vs-champion drift above, or a default filter that
+    points to a cohort with zero rows. Both are written as
+    actionable sentences ("re-select `xgboost` in the UI or set
+    `production_model: xgboost` in mlfl.yaml").
+
 ## 2.25.1
 
 ### Added
