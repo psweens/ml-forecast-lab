@@ -1241,6 +1241,19 @@
             <span style="color:var(--text-secondary);font-size:0.85rem;font-weight:400;"> — for deeper debugging</span>
         </summary>
 
+        <!-- Forecast-log inspector (raw state of the metrics DB) -->
+        <div class="settings-group">
+            <h3 class="settings-group-title">
+                Forecast-log contents
+                <span class="info-tip">?<span class="tip-text">Raw state of forecast_log for this experiment, broken down by (model_name, model_version). Use this to verify the pipeline is actually writing rows under the current model version, diagnose "why is my chart empty?" situations, and check whether the current cohort has enough cycles (≥2 per target) for stability to populate.</span></span>
+            </h3>
+            <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
+                Raw summary of <code>forecast_log</code>. Useful when the Accuracy chart looks empty or the verdict doesn't match expectations.
+            </p>
+            <button type="button" class="btn-secondary" onclick="loadForecastLogStats()" style="padding:0.4rem 0.9rem;">Load log summary</button>
+            <pre id="forecast-log-stats-out" style="display:none;margin-top:0.75rem;padding:0.75rem;background:rgba(0,0,0,0.25);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.8rem;white-space:pre-wrap;max-height:420px;overflow:auto;"></pre>
+        </div>
+
         <!-- Forecast convergence (fan) -->
         <div class="settings-group" id="accuracy-evolution-wrapper">
             <h3 class="settings-group-title">
@@ -2515,6 +2528,24 @@ window.showTab = function(el) {
             sel.appendChild(opt);
         });
     })();
+
+    // Forecast-log inspector — on-demand fetch of the debug endpoint
+    // for the current experiment. Output is pretty-printed JSON into
+    // the <pre> so the user can copy-paste it back when diagnosing.
+    window.loadForecastLogStats = function() {
+        var out = document.getElementById('forecast-log-stats-out');
+        if (!out) return;
+        out.style.display = 'block';
+        out.textContent = 'Loading…';
+        fetch(BASE + '/experiment/' + EXP_NAME + '/forecast-log-stats')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            out.textContent = JSON.stringify(data, null, 2);
+        })
+        .catch(function(err) {
+            out.textContent = 'Failed to load: ' + err;
+        });
+    };
 
     window.setAccuracyTz = function(tz) {
         if (tz !== 'ha' && tz !== 'browser' && tz !== 'utc') return;

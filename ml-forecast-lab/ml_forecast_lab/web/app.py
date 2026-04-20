@@ -1720,6 +1720,119 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             result["coverage"] = {"error": str(e)}
         return JSONResponse(content=result)
 
+    @app.get("/experiment/{name}/forecast-log-stats")
+    async def forecast_log_stats(name: str, request: Request):
+        """
+        Diagnostic endpoint — summarises what's actually in forecast_log
+        for this experiment. Used to debug "why is my Forecast Accuracy
+        tab empty?" without needing shell access to the add-on.
+
+        Returns a by-(model_name, model_version) breakdown plus the
+        filter the UI would apply by default, so the user can tell at
+        a glance whether:
+          - log_forecast is writing at all,
+          - the new model_version tag is being stamped,
+          - the current champion+version cohort actually has enough
+            cycles for stability (≥2 per target).
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        db = app.state.appstate.history_db
+        if not db:
+            return JSONResponse(content={"error": "Database not available"}, status_code=503)
+
+        exp_status = app.state.appstate.experiment_statuses.get(name)
+        default_model = (
+            getattr(exp_status, "selected_model", None)
+            or getattr(exp_status, "best_model", None)
+            if exp_status else None
+        )
+        default_version = (
+            getattr(exp_status, "model_version", None) if exp_status else None
+        )
+
+        try:
+            cur = db.conn.cursor()
+            # Per-cohort row counts + range, newest first.
+            cur.execute(
+                """
+                SELECT model_name,
+                       COALESCE(model_version, '(null)') AS mv,
+                       COUNT(*) AS n,
+                       MIN(issued_at) AS first_issued_at,
+                       MAX(issued_at) AS last_issued_at,
+                       MAX(target_dt) AS last_target_dt
+                FROM forecast_log
+                WHERE experiment = ?
+                GROUP BY model_name, model_version
+                ORDER BY last_issued_at DESC
+                """,
+                (name,),
+            )
+            cohorts = [
+                {
+                    "model_name": r[0],
+                    "model_version": None if r[1] == "(null)" else r[1],
+                    "rows": int(r[2]),
+                    "first_issued_at": r[3],
+                    "last_issued_at": r[4],
+                    "last_target_dt": r[5],
+                }
+                for r in cur.fetchall()
+            ]
+            # Total rows for the experiment — sanity check vs cohorts.
+            cur.execute(
+                "SELECT COUNT(*), MIN(issued_at), MAX(issued_at) "
+                "FROM forecast_log WHERE experiment = ?",
+                (name,),
+            )
+            total_row = cur.fetchone()
+            # For the current-champion cohort, count how many target_dts
+            # have ≥2 distinct issuances — if 0 or 1, the stability
+            # fallback will fire even though rows exist.
+            targets_with_multi_issuances = None
+            if default_model and default_version:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) FROM (
+                        SELECT target_dt
+                        FROM forecast_log
+                        WHERE experiment = ?
+                          AND model_name = ?
+                          AND model_version = ?
+                        GROUP BY target_dt
+                        HAVING COUNT(DISTINCT issued_at) >= 2
+                    )
+                    """,
+                    (name, default_model, default_version),
+                )
+                targets_with_multi_issuances = int(cur.fetchone()[0])
+        except Exception as e:
+            logger.error(f"forecast-log-stats failed for {name}: {e}")
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+        return JSONResponse(content={
+            "experiment": name,
+            "current_default_filter": {
+                "model_name": default_model,
+                "model_version": default_version,
+            },
+            "totals": {
+                "rows": int(total_row[0]) if total_row else 0,
+                "first_issued_at": total_row[1] if total_row else None,
+                "last_issued_at": total_row[2] if total_row else None,
+            },
+            "targets_with_multi_issuances_under_default_filter": targets_with_multi_issuances,
+            "cohorts": cohorts,
+            "hint": (
+                "If 'cohorts' has a row matching current_default_filter with rows>=96 "
+                "and targets_with_multi_issuances>=1, the fallback should stop firing "
+                "within a cycle or two. If rows=0 under the current filter but other "
+                "cohorts have data, check whether log_forecast is receiving the "
+                "current model_version from the cached model dict."
+            ),
+        })
+
     @app.get("/experiment/{name}/forecast-trajectory")
     async def forecast_trajectory(name: str, request: Request):
         """Return every forecast ever issued for one target_dt + the actual."""

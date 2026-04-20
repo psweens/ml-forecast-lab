@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.25.1
+
+### Added
+
+- **Forecast-log inspector** in the Layer 3 "Diagnostic tools"
+  accordion on the Forecast Accuracy tab. A single "Load log summary"
+  button fetches a new
+  `GET /experiment/{name}/forecast-log-stats` endpoint and
+  pretty-prints the JSON in-place, so users without shell access
+  can debug "why is my chart empty?" situations directly from the
+  web UI. The summary covers: total rows, the default filter the
+  UI would apply, a per-`(model_name, model_version)` cohort
+  breakdown with row counts and issued/target ranges, and the
+  number of targets with ≥2 distinct issuances under the current
+  champion+version filter (the stability query's minimum
+  requirement). A hint sentence at the bottom explains how to
+  interpret the three likely states.
+
 ## 2.25.0
 
 ### Added
