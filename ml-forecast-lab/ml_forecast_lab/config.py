@@ -253,15 +253,6 @@ class ExperimentCfg:
     publish_prefix: str = 'mlfl_'
     """Prefix for published Home Assistant sensor entities."""
 
-    publish_interval: bool = True
-    """Whether to publish interval values (for cumulative inputs)."""
-
-    publish_cumulative: bool = False
-    """Whether to publish reconstructed cumulative values."""
-
-    publish_daily_cumulative: bool = False
-    """Whether to publish daily cumulative totals."""
-
     country: Optional[str] = None
     """Country code for holiday features ('GB', 'US', etc.); None = no holidays."""
 

@@ -2523,16 +2523,19 @@ class MLForecastLabApp:
     ) -> None:
         """Publish forecast sensors to Home Assistant.
 
-        Always publishes ``sensor.{prefix}{name}_forecast`` (per-interval values
-        in the ``forecast`` attribute, plus metadata). Honours the experiment's
-        ``publish_interval``, ``publish_cumulative`` and ``publish_daily_cumulative``
-        flags to optionally publish:
+        Always publishes:
 
-        - ``_interval``: per-interval increments (same data, dedicated sensor)
-        - ``_cumulative``: running cumsum across the whole forecast horizon
-        - ``_daily_cumulative``: cumsum that resets at local midnight, seeded
-          with the current actual value of the target sensor when applicable
-          so the curve is continuous with the cumulative source sensor.
+        - ``_forecast``: per-interval forecast curve (main sensor)
+        - ``_cumulative``: integrated forecast. Semantics derived from the
+          experiment config — if ``source_is_cumulative`` and ``reset_daily``
+          are both set, resets at local midnight and is seeded with the
+          current target value so the curve stays continuous with actuals.
+          Otherwise a running ``cumsum`` from zero across the horizon.
+
+        Conditionally publishes:
+
+        - ``_interval``: per-interval increments (only when
+          ``source_is_cumulative`` — otherwise duplicates ``_forecast``).
         - ``_upper_{pct}`` / ``_lower_{pct}``: conformal interval bounds when
           ``y_pred_upper`` / ``y_pred_lower`` are provided (pct = level*100).
         """
@@ -2761,8 +2764,11 @@ class MLForecastLabApp:
         except Exception as e:
             logger.warning(f"  Failed to publish {base_entity}_forecast: {e}")
 
-        # --- 2. Interval sensor ----------------------------------------------
-        if getattr(exp_cfg, "publish_interval", True):
+        # --- 2. Interval sensor (only when source is cumulative) ------------
+        # When the source is already per-interval, _interval duplicates the
+        # main _forecast sensor. Only meaningful when the forecast values
+        # are interval deltas reconstructed from a cumulative source.
+        if exp_cfg.source_is_cumulative:
             interval_attrs = {
                 "friendly_name": f"{publish_name} Interval Forecast",
                 "unit_of_measurement": units,
@@ -2779,8 +2785,79 @@ class MLForecastLabApp:
             except Exception as e:
                 logger.warning(f"  Failed to publish {base_entity}_interval: {e}")
 
-        # --- 3. Running cumulative across the whole horizon ------------------
-        if getattr(exp_cfg, "publish_cumulative", False):
+        # --- 3. Cumulative sensor (always published) ------------------------
+        # Behaviour is derived from source semantics rather than a separate
+        # flag:
+        #   source_is_cumulative + reset_daily → resets at local midnight
+        #     and is seeded with the current target value so the forecast
+        #     meets actuals at the join point, mirroring today-style HA
+        #     energy sensors.
+        #   otherwise → plain cumsum across the horizon anchored at zero
+        #     (end-of-horizon projection, not a monotonic counter).
+        if exp_cfg.source_is_cumulative and exp_cfg.reset_daily:
+            try:
+                from zoneinfo import ZoneInfo
+                tz_name = (self.config.timezone if self.config else None) or "UTC"
+                local_tz = ZoneInfo(tz_name)
+            except Exception:
+                local_tz = timezone.utc
+
+            today_seed = 0.0
+            if exp_cfg.target_entity:
+                try:
+                    raw = await self.ha_interface.get_state(
+                        exp_cfg.target_entity, default=None,
+                    )
+                    if raw not in (None, "", "unknown", "unavailable"):
+                        today_seed = float(raw)
+                except Exception:
+                    today_seed = 0.0
+
+            now_local_date = datetime.now(timezone.utc).astimezone(local_tz).date()
+            running_by_day: dict = {}
+            cum_list = []
+            # Headline state = the projected end-of-today total (last forecast
+            # point still within today's local date). Keeps the sensor's state
+            # directly comparable to sensor.<target>_today at midnight rather
+            # than landing mid-way through day-after-tomorrow.
+            end_of_today_value = today_seed
+            for ts, val in zip(ds_future_aware, y_pred):
+                local_ts = ts.tz_convert(local_tz)
+                day_key = local_ts.date()
+                if day_key not in running_by_day:
+                    running_by_day[day_key] = (
+                        today_seed if day_key == now_local_date else 0.0
+                    )
+                running_by_day[day_key] += float(val)
+                cum_value = round(running_by_day[day_key], 4)
+                if day_key == now_local_date:
+                    end_of_today_value = cum_value
+                cum_list.append({
+                    "datetime": ts.isoformat(),
+                    "value": cum_value,
+                })
+
+            cum_state = round(end_of_today_value, 4)
+            cum_attrs = {
+                "friendly_name": f"{publish_name} Cumulative Forecast",
+                "unit_of_measurement": units,
+                "icon": "mdi:chart-timeline-variant",
+                # measurement (not total_increasing) — the state is a
+                # per-cycle projection of today's end total, which fluctuates
+                # as the seed grows and the remaining-forecast shrinks. It is
+                # NOT a monotonic counter and should not be processed by HA's
+                # long-term statistics engine as one.
+                "state_class": "measurement",
+                "model": model_name,
+                "forecast": cum_list,
+                "resets_daily": True,
+                "seeded_with": round(today_seed, 4),
+                "end_of_today_value": cum_state,
+                "end_of_horizon_value": (
+                    round(cum_list[-1]["value"], 4) if cum_list else cum_state
+                ),
+            }
+        else:
             cum_vals = np.cumsum(y_pred)
             cum_list = [
                 {"datetime": ts.isoformat(), "value": round(float(v), 4)}
@@ -2798,94 +2875,15 @@ class MLForecastLabApp:
                 "state_class": "measurement",
                 "model": model_name,
                 "forecast": cum_list,
+                "resets_daily": False,
             }
-            try:
-                await self.ha_interface.set_state(
-                    f"{base_entity}_cumulative", str(cum_state), cum_attrs,
-                )
-            except Exception as e:
-                logger.warning(f"  Failed to publish {base_entity}_cumulative: {e}")
 
-        # --- 4. Daily cumulative (resets at local midnight, seeded) ----------
-        if getattr(exp_cfg, "publish_daily_cumulative", False):
-            try:
-                from zoneinfo import ZoneInfo
-                tz_name = (self.config.timezone if self.config else None) or "UTC"
-                local_tz = ZoneInfo(tz_name)
-            except Exception:
-                local_tz = timezone.utc
-
-            # Seed with the current value of the cumulative source sensor so
-            # the forecast meets the actuals at the join point. Only meaningful
-            # for sources that are themselves daily-cumulative.
-            today_seed = 0.0
-            if (
-                getattr(exp_cfg, "source_is_cumulative", False)
-                and getattr(exp_cfg, "reset_daily", False)
-                and getattr(exp_cfg, "target_entity", None)
-            ):
-                try:
-                    raw = await self.ha_interface.get_state(
-                        exp_cfg.target_entity, default=None,
-                    )
-                    if raw not in (None, "", "unknown", "unavailable"):
-                        today_seed = float(raw)
-                except Exception:
-                    today_seed = 0.0
-
-            now_local_date = datetime.now(timezone.utc).astimezone(local_tz).date()
-            running_by_day: dict = {}
-            daily_cum_list = []
-            # Headline state = the projected end-of-today total (last forecast
-            # point still within today's local date). This makes the sensor's
-            # state directly comparable to sensor.<target>_today at midnight,
-            # rather than being the post-reset value at the end of the 48h
-            # horizon (which would sit mid-way through day-after-tomorrow).
-            end_of_today_value = today_seed
-            for ts, val in zip(ds_future_aware, y_pred):
-                local_ts = ts.tz_convert(local_tz)
-                day_key = local_ts.date()
-                if day_key not in running_by_day:
-                    running_by_day[day_key] = (
-                        today_seed if day_key == now_local_date else 0.0
-                    )
-                running_by_day[day_key] += float(val)
-                cum_value = round(running_by_day[day_key], 4)
-                if day_key == now_local_date:
-                    end_of_today_value = cum_value
-                daily_cum_list.append({
-                    "datetime": ts.isoformat(),
-                    "value": cum_value,
-                })
-
-            state = round(end_of_today_value, 4)
-            daily_attrs = {
-                "friendly_name": f"{publish_name} Daily Cumulative Forecast",
-                "unit_of_measurement": units,
-                "icon": "mdi:chart-timeline-variant",
-                # measurement (not total_increasing) — the state is a
-                # per-cycle projection of today's end total, which fluctuates
-                # as the seed grows and the remaining-forecast shrinks. It is
-                # NOT a monotonic counter and should not be processed by HA's
-                # long-term statistics engine as one.
-                "state_class": "measurement",
-                "model": model_name,
-                "forecast": daily_cum_list,
-                "seeded_with": round(today_seed, 4),
-                "end_of_today_value": state,
-                "end_of_horizon_value": (
-                    round(daily_cum_list[-1]["value"], 4)
-                    if daily_cum_list else state
-                ),
-            }
-            try:
-                await self.ha_interface.set_state(
-                    f"{base_entity}_daily_cumulative", str(state), daily_attrs,
-                )
-            except Exception as e:
-                logger.warning(
-                    f"  Failed to publish {base_entity}_daily_cumulative: {e}"
-                )
+        try:
+            await self.ha_interface.set_state(
+                f"{base_entity}_cumulative", str(cum_state), cum_attrs,
+            )
+        except Exception as e:
+            logger.warning(f"  Failed to publish {base_entity}_cumulative: {e}")
 
         # --- 4b. Conformal interval sensors ---------------------------------
         # Separate upper/lower entities let the user graph the band in HA

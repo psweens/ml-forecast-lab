@@ -102,9 +102,16 @@ For sensors reporting cumulative values (e.g. energy meters):
 #### Publishing
 
 - **publish_prefix** (str, default 'mlfl_'): Entity name prefix.
-- **publish_interval** (bool): Publish interval values (if cumulative input).
-- **publish_cumulative** (bool): Publish reconstructed cumulative.
-- **publish_daily_cumulative** (bool): Publish daily totals.
+
+Sensors are published automatically from a single model:
+
+- `{prefix}{name}_forecast` — per-interval forecast curve (always).
+- `{prefix}{name}_cumulative` — integrated forecast (always). Resets at
+  local midnight and is seeded with the current target value when
+  `source_is_cumulative` and `reset_daily` are both true; otherwise a
+  plain `cumsum` across the horizon anchored at zero.
+- `{prefix}{name}_interval` — per-interval increments, only published
+  when `source_is_cumulative` is true (otherwise identical to `_forecast`).
 
 #### Example
 
@@ -156,7 +163,6 @@ exp = ExperimentCfg(
 
     # Publishing
     publish_prefix='mlfl_',
-    publish_interval=True,
 )
 ```
 
@@ -236,9 +242,6 @@ experiments:
 
     # Publishing
     publish_prefix: mlfl_
-    publish_interval: true
-    publish_cumulative: false
-    publish_daily_cumulative: false
 
     # Covariates
     covariates:

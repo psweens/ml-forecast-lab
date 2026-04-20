@@ -105,9 +105,6 @@ experiments:
     production_model: null          # null = auto-select best from last benchmark
     publish_prefix: "mlfl_"
     publish_name: "mixergy_demand"
-    publish_interval: true
-    publish_cumulative: true
-    publish_daily_cumulative: true
     units: "%"
     output_units: "%"
     country: "GB"
@@ -163,9 +160,6 @@ experiments:
   #
   #   publish_prefix: "mlfl_"
   #   publish_name: "mixergy_heat_energy"
-  #   publish_interval: true
-  #   publish_cumulative: true
-  #   publish_daily_cumulative: true
   #   units: "kWh"
   #   output_units: "kWh"
   #   country: "GB"

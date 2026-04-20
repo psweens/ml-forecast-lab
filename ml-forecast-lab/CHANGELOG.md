@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.26.0
+
+### Changed (breaking)
+
+- **Publish sensors automatically, derive semantics from target config.**
+  `publish_interval`, `publish_cumulative`, and `publish_daily_cumulative`
+  have been removed from `ExperimentCfg`. The publishing path now always
+  emits `_forecast` and `_cumulative`, and conditionally emits `_interval`
+  when `source_is_cumulative` is true (otherwise it would just duplicate
+  `_forecast`). The `_cumulative` sensor's behaviour is derived from the
+  target's own semantics: if `source_is_cumulative` and `reset_daily` are
+  both set, it resets at local midnight and is seeded with the current
+  target value so the forecast meets actuals at the join point; otherwise
+  it is a plain `cumsum` from zero across the horizon. A `resets_daily`
+  attribute on the sensor exposes which branch was taken so downstream
+  consumers (Predbat, chart cards) can adapt without parsing config.
+
+  Migration: remove the three flags from your `mlfl.yaml` experiments —
+  `source_is_cumulative` / `reset_daily` (which already exist to describe
+  the target) now control the publishing behaviour too. The old
+  `{prefix}{name}_daily_cumulative` entity has been consolidated into
+  `{prefix}{name}_cumulative`; update any dashboards or automations that
+  reference it.
+
 ## 2.25.5
 
 ### Fixed

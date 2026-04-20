@@ -95,7 +95,7 @@ def _cumulative_chart(exp_name: str, prefix: str, units: str) -> dict:
         "yaxis": [{"id": "main", "decimals": 1}],
         "series": [
             {
-                "entity": f"{base}_daily_cumulative",
+                "entity": f"{base}_cumulative",
                 "name": f"Cumulative ({units})",
                 "stroke_width": 2,
                 "curve": "stepline",
@@ -224,7 +224,9 @@ def generate_dashboard(experiments: list, output_path: Path) -> None:
             _prediction_curve_chart(exp.name, prefix, units),
         ]
 
-        if hasattr(exp, "publish_daily_cumulative") and exp.publish_daily_cumulative:
+        # _cumulative is always published, but the daily-reset chart only
+        # makes sense when the source itself is a daily-cumulative sensor.
+        if getattr(exp, "source_is_cumulative", False) and getattr(exp, "reset_daily", False):
             cards.append(_cumulative_chart(exp.name, prefix, units))
 
         cards.append(_benchmark_table(exp.name))
