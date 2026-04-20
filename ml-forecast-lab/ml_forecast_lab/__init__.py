@@ -10,13 +10,6 @@ from .ha_interface import (
     parse_timestamp,
     state_to_float,
 )
-from .publishing import (
-    daily_cumulative_series,
-    dict_from_series,
-    energy_already_used_today,
-    make_entity_name,
-    publish_forecasts,
-)
 
 # Core modules: configuration, preprocessing, and features
 from .config import AppConfig, CovariateCfg, ExperimentCfg, SubtractCfg, load_config
@@ -40,7 +33,7 @@ from .preprocessing import (
     subtract_series,
 )
 
-__version__ = "2.21.0"
+__version__ = "2.26.0"
 
 __all__ = [
     # Legacy
@@ -51,11 +44,6 @@ __all__ = [
     "ensure_utc",
     "normalise_history",
     "state_to_float",
-    "make_entity_name",
-    "dict_from_series",
-    "daily_cumulative_series",
-    "energy_already_used_today",
-    "publish_forecasts",
     # Core config
     "AppConfig",
     "CovariateCfg",
