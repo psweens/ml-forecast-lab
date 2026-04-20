@@ -200,12 +200,17 @@ class HistoryDB:
         """)
         # Migrate pre-existing tables that don't have the upper/lower
         # columns. PRAGMA table_info returns rows (cid, name, type, ...).
+        # Each ALTER is logged at INFO so the operator can correlate
+        # schema bumps with version upgrades in the add-on log.
         cursor.execute("PRAGMA table_info(forecast_log)")
         existing_cols = {row[1] for row in cursor.fetchall()}
+        migrated: list = []
         if "upper" not in existing_cols:
             cursor.execute("ALTER TABLE forecast_log ADD COLUMN upper REAL")
+            migrated.append("upper")
         if "lower" not in existing_cols:
             cursor.execute("ALTER TABLE forecast_log ADD COLUMN lower REAL")
+            migrated.append("lower")
         # `model_version` distinguishes weight regimes of a model that
         # keeps the same name across retrains. Without it, the stability
         # metric silently pools predictions from weights v1 and v2 under
@@ -216,6 +221,11 @@ class HistoryDB:
         if "model_version" not in existing_cols:
             cursor.execute(
                 "ALTER TABLE forecast_log ADD COLUMN model_version TEXT"
+            )
+            migrated.append("model_version")
+        if migrated:
+            logger.info(
+                f"Migrated forecast_log: added column(s) {migrated}"
             )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_flog_exp_target "
@@ -1355,6 +1365,7 @@ class HistoryDB:
         source_is_cumulative: bool = False,
         model_name: Optional[str] = None,
         model_version: Optional[str] = None,
+        day_offset_hours: Optional[float] = None,
     ) -> dict:
         """
         Return self-consistency metrics across forecast issuances.
@@ -1492,15 +1503,38 @@ class HistoryDB:
             # artefact alone can produce 50–70% CV. Gating to cycles
             # with n_bins = MAX(n_bins) for that day keeps only the
             # apples-to-apples comparisons.
+            #
+            # Day boundary follows HA's local midnight, not UTC — the
+            # physical reset happens at HA local midnight (because
+            # that's when the `_today` counter resets), so "day X"
+            # should integrate 00:00→24:00 local. We approximate the
+            # local day by shifting target_dt by `day_offset_hours`
+            # (computed in Python from the HA time zone) before taking
+            # the YYYY-MM-DD prefix. A static offset is exact away from
+            # DST transitions and ±1h off for the transition day only,
+            # which is an acceptable trade for keeping the bucketing in
+            # pure SQLite.
+            off = float(day_offset_hours or 0.0)
+            off_seconds = int(off * 3600)
+            if off_seconds == 0:
+                day_expr = "SUBSTR(target_dt, 1, 10)"
+                day_params: tuple = ()
+            else:
+                day_expr = (
+                    "strftime('%Y-%m-%d',"
+                    " CAST(strftime('%s', target_dt) AS INTEGER) + ?,"
+                    " 'unixepoch')"
+                )
+                day_params = (off_seconds,)
             try:
                 cursor.execute(
                     f"""
                     WITH per_cycle_day AS (
                         SELECT
                             issued_at,
-                            SUBSTR(target_dt, 1, 10)  AS day,
-                            SUM(predicted)            AS daily_total,
-                            COUNT(*)                  AS n_bins
+                            {day_expr}                   AS day,
+                            SUM(predicted)               AS daily_total,
+                            COUNT(*)                     AS n_bins
                         FROM forecast_log
                         WHERE experiment = ?
                           AND issued_at >= ?
@@ -1530,7 +1564,7 @@ class HistoryDB:
                     HAVING n_cycles >= 2
                     ORDER BY day ASC
                     """,
-                    (experiment, cutoff_str, *model_filter_param),
+                    (*day_params, experiment, cutoff_str, *model_filter_param),
                 )
                 for day, mean_total, mean_tt, n_cycles, max_bins in cursor.fetchall():
                     mean_total = float(mean_total or 0)

@@ -1,5 +1,51 @@
 # Changelog
 
+## 2.25.0
+
+### Added
+
+- **Time-zone toggle on the Forecast Accuracy tab** (HA server /
+  Browser / UTC). Remote users managing an HA instance in a
+  different country (e.g. a California viewer of a UK HA) no longer
+  have to mentally shift "the spike at Apr 16 02:00 PDT is
+  actually UK mid-morning". On load the add-on reads HA's
+  `time_zone` from `/api/config` and the toggle defaults to
+  **HA server** so axis labels match when events physically
+  happened. Chart tick labels are rendered via `Intl.DateTimeFormat`
+  in the chosen TZ, with a TZ abbreviation baked into each axis
+  title (e.g. "Target time (BST)"). Selection persists per
+  experiment in `localStorage`.
+- **HA-local day bucketing for the daily-total stability metric.**
+  `SUBSTR(target_dt, 1, 10)` previously took a UTC-day prefix — on
+  a BST-hosted HA instance the UK day boundary is UTC 23:00, so
+  about an hour of UK-Monday demand was being filed under "Sunday"
+  in the bar chart. `get_forecast_stability()` now accepts
+  `day_offset_hours`, populated by the endpoint from
+  `zoneinfo.ZoneInfo(tz).utcoffset()`, and the SQL shifts the
+  timestamp by that offset before taking the day prefix. Correct
+  everywhere except the single day containing a DST transition
+  (where it's an hour off for that day only).
+- **Add-on logging for the Forecast Accuracy pipeline.** Previously
+  the whole Forecast-Accuracy write path was silent on success —
+  there was no way to tell from the add-on logs whether
+  `forecast_log` was actually accumulating rows, whether a schema
+  migration had just run, or whether a UI chart was empty because
+  of a version-fallback. Three new INFO-level log lines:
+  - One per successful forecast cycle, e.g.
+    `Logged 96 forecast_log rows for mixergy_demand
+    (model=lgb, cached, v=2026-04-20T07:00:00Z, bands)`.
+  - One per analytics fallback on `/forecast-accuracy`,
+    `/forecast-stability`, `/forecast-trajectory`, naming the
+    requested (model, version) and what the query widened to.
+  - One per `ALTER TABLE` run inside `ensure_forecast_log_table`,
+    listing the columns that were just added to legacy DBs.
+- **`EXP_HA_TIME_ZONE` passed through to the experiment template**
+  so Jinja doesn't need to assume anything about where the viewer
+  is. Falls back to `null` when `/api/config` is unreachable.
+- **Tests** — two new cases in
+  `TestModelVersion::test_ha_local_day_bucketing_*` (shifts day
+  labels correctly for BST; no-op for offset=0).
+
 ## 2.24.0
 
 ### Added

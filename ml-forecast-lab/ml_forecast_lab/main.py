@@ -549,6 +549,21 @@ class MLForecastLabApp:
             self.web_app.state.appstate.stop_training_callback = _stop_training_trigger
             self.web_app.state.appstate.history_db = self.history_db
 
+            # Pull HA's configured time zone so the Forecast Accuracy tab
+            # can render charts in the TZ where events physically happen,
+            # not the viewer's browser TZ. Needed when the user is
+            # remote (e.g. on holiday, or living in a different country
+            # from the HA instance). Best-effort — if the fetch fails
+            # the frontend falls back to browser local.
+            try:
+                ha_cfg = await self.ha_interface.get_config()
+                tz_name = ha_cfg.get("time_zone") if isinstance(ha_cfg, dict) else None
+                if tz_name:
+                    self.web_app.state.appstate.ha_time_zone = tz_name
+                    logger.info(f"HA time zone: {tz_name}")
+            except Exception as e:
+                logger.warning(f"Could not read HA time_zone from /api/config: {e}")
+
             # Run in a background task
             asyncio.create_task(self.server.serve())
             logger.info(f"Web server started successfully on {host}:{port}")
@@ -2642,7 +2657,7 @@ class MLForecastLabApp:
                 # retrain cycles under the same model_name.
                 cached = self._cached_models.get(exp_cfg.name) or {}
                 model_version = cached.get("model_version")
-                self.history_db.log_forecast(
+                n_logged = self.history_db.log_forecast(
                     experiment=exp_cfg.name,
                     issued_at=datetime.now(timezone.utc),
                     targets=ds_future_aware.tolist(),
@@ -2657,6 +2672,21 @@ class MLForecastLabApp:
                     ),
                     model_version=model_version,
                 )
+                # One INFO line per cycle so the operator can see
+                # forecast_log actually accumulating — without this,
+                # "why is my Forecast Accuracy chart empty?" had no
+                # observable signal in the add-on logs. Keep it concise;
+                # runs 48x/day/experiment at 30-min cadence.
+                if n_logged:
+                    extras = [f"model={model_name}", forecast_type]
+                    if model_version:
+                        extras.append(f"v={model_version}")
+                    if have_intervals:
+                        extras.append("bands")
+                    logger.info(
+                        f"  Logged {n_logged} forecast_log rows "
+                        f"for {exp_cfg.name} ({', '.join(extras)})"
+                    )
             except Exception as e:
                 logger.warning(f"Failed to log forecast evolution: {e}")
 

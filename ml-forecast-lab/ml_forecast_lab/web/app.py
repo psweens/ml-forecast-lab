@@ -253,6 +253,12 @@ class AppState:
         self.history_db = None  # Set by main app for forecast accuracy queries
         self.last_update: Optional[datetime] = None
         self.next_update_seconds: Optional[int] = None
+        # HA's configured time zone (IANA name, e.g. "Europe/London").
+        # Populated on startup by the main app via HAInterface.get_config().
+        # None until set — frontend falls back to browser TZ in that case.
+        # Matters for Californian users managing a UK HA: charts render in
+        # HA-local time so axis labels match when events physically happened.
+        self.ha_time_zone: Optional[str] = None
 
     def start_benchmark(self, experiment_name: str):
         """Mark benchmark as running."""
@@ -917,6 +923,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "model_catalog": MODEL_CATALOG,
                 "exp_models_enabled": exp_models_enabled,
                 "exp_config": exp_config,
+                "ha_time_zone": app.state.appstate.ha_time_zone,
                 "tuning_result": app.state.appstate.tuning_results.get(name),
                 "param_defaults": {m: {p: s["default"] for p, s in schema.items()}
                                    for m, schema in MODEL_PARAM_SCHEMA.items()},
@@ -1657,6 +1664,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 model_name=model_name, model_version=None,
             )
             if not _empty(relaxed):
+                logger.info(
+                    f"/forecast-accuracy fallback for {name}: "
+                    f"no cycles for {model_name!r} v={model_version!r}; "
+                    f"widening to all versions of this model."
+                )
                 model_fallback = {
                     "requested_model": model_name,
                     "requested_version": model_version,
@@ -1674,6 +1686,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 model_name=None, model_version=None,
             )
             if not _empty(relaxed):
+                logger.info(
+                    f"/forecast-accuracy fallback for {name}: "
+                    f"no cycles for {model_name!r}; widening to all models."
+                )
                 model_fallback = {
                     "requested_model": model_name,
                     "requested_version": model_version,
@@ -1749,6 +1765,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if _empty(result) and model_version and not version_param:
             relaxed = _fetch(model_name, None)
             if not _empty(relaxed):
+                logger.info(
+                    f"/forecast-trajectory fallback for {name}: no targets "
+                    f"for {model_name!r} v={model_version!r}; widening to all versions."
+                )
                 result = relaxed
                 result["model_fallback"] = {
                     "requested_model": model_name,
@@ -1761,6 +1781,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if _empty(result) and model_name and not model_param:
             relaxed = _fetch(None, None)
             if not _empty(relaxed):
+                logger.info(
+                    f"/forecast-trajectory fallback for {name}: no targets "
+                    f"for {model_name!r}; widening to all models."
+                )
                 result = relaxed
                 result["model_fallback"] = {
                     "requested_model": model_name,
@@ -1854,12 +1878,31 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         model_param = request.query_params.get("model")
         version_param = request.query_params.get("version")
 
+        # Compute the UTC→HA-local hour offset so daily-total bucketing
+        # aligns with the physical "_today" sensor reset (at HA local
+        # midnight). Best-effort — falls back to UTC-day buckets when
+        # zoneinfo or the HA TZ is unavailable. Approximated from
+        # utcnow; off by 1h for ~24h per DST transition, no-op otherwise.
+        day_offset_hours: Optional[float] = None
+        tz_name = app.state.appstate.ha_time_zone
+        if tz_name:
+            try:
+                from zoneinfo import ZoneInfo
+                from datetime import datetime as _dt, timezone as _tz
+                now_utc = _dt.now(_tz.utc)
+                offset = now_utc.astimezone(ZoneInfo(tz_name)).utcoffset()
+                if offset is not None:
+                    day_offset_hours = offset.total_seconds() / 3600.0
+            except Exception as e:
+                logger.debug(f"Could not compute day offset for {tz_name}: {e}")
+
         def _fetch(mn, mv):
             return db.get_forecast_stability(
                 name,
                 max_age_days=days,
                 source_is_cumulative=bool(exp_cfg.source_is_cumulative),
                 model_name=mn, model_version=mv,
+                day_offset_hours=day_offset_hours,
             )
 
         result = _fetch(model_name, model_version)
@@ -1868,6 +1911,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if _empty(result) and model_version and not version_param:
             relaxed = _fetch(model_name, None)
             if not _empty(relaxed):
+                logger.info(
+                    f"/forecast-stability fallback for {name}: no cycles "
+                    f"for {model_name!r} v={model_version!r}; widening to all versions."
+                )
                 result = relaxed
                 result["model_fallback"] = {
                     "requested_model": model_name,
@@ -1880,6 +1927,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if _empty(result) and model_name and not model_param:
             relaxed = _fetch(None, None)
             if not _empty(relaxed):
+                logger.info(
+                    f"/forecast-stability fallback for {name}: no cycles "
+                    f"for {model_name!r}; widening to all models."
+                )
                 result = relaxed
                 result["model_fallback"] = {
                     "requested_model": model_name,

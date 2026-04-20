@@ -1121,6 +1121,12 @@
             </div>
             <span class="info-tip">?<span class="tip-text">Cumulative sensors reset at midnight, so raw-value errors mostly reflect the shape of the day — 23:30 errors look big just because the number is big. Per-interval demand evaluates <code>value[t] − value[t−1]</code>, so errors at 03:00 and 18:00 are directly comparable. Recommended for this sensor.</span></span>
         </div>
+        <div class="acc-control" id="acc-tz-wrapper">
+            <label for="accuracy-tz">Times in:</label>
+            <select id="accuracy-tz" class="setting-input" onchange="setAccuracyTz(this.value)">
+                <!-- Options populated by JS once EXP_HA_TIME_ZONE is read -->
+            </select>
+        </div>
         <div class="acc-control acc-model-badge" id="acc-model-badge" style="display:none;">
             <span>Model:</span>
             <strong id="acc-model-name">—</strong>
@@ -1887,6 +1893,12 @@ window.showTab = function(el) {
     var EXP_RESET_DAILY       = {% if exp_config and exp_config.reset_daily %}true{% else %}false{% endif %};
     var EXP_UNITS             = {{ units | tojson if units else '""' }};
     var EXP_INTERVAL_MIN      = {{ exp_config.interval_minutes if exp_config else 30 }};
+    // HA server's configured IANA timezone. Used by the Forecast
+    // Accuracy TZ toggle to render charts in the TZ where events
+    // physically happen (HA's location), not the viewer's browser TZ.
+    // null when the backend couldn't read /api/config or when no value
+    // was returned — frontend falls back to browser local.
+    var EXP_HA_TIME_ZONE = {{ ha_time_zone | tojson if ha_time_zone else 'null' }};
     // stability_focus drives which run-to-run CV the Layer 1 verdict
     // chip reads. "per_moment" (default) uses cross-cycle std of
     // predictions at the same target moment — right for setpoint /
@@ -2373,16 +2385,34 @@ window.showTab = function(el) {
     });
 
     // Timestamps in forecast_log are stored as naive UTC strings
-    // ("YYYY-MM-DD HH:MM:SS" — see HistoryDB.log_forecast). When we
-    // hand them to Plotly as bare strings it treats them as UTC and
-    // displays in UTC — so a BST user sees resets at 01:00 instead of
-    // 00:00 local. Convert to Date (parsed as UTC by appending 'Z')
-    // and Plotly will render in the browser's local TZ. The sensor
-    // itself resets at local midnight (HA "_today" convention), so
-    // local-time display is the one that lines up with reality.
+    // ("YYYY-MM-DD HH:MM:SS" — see HistoryDB.log_forecast). Parse them
+    // as UTC and expose helpers that render/bucket them in whichever
+    // TZ the user has selected via the `accuracy-tz` dropdown. Three
+    // modes:
+    //   'ha'      — HA server's configured IANA TZ (default when known)
+    //   'browser' — browser's local TZ (previous behaviour)
+    //   'utc'     — raw UTC
+    // The selection is persisted per-experiment in localStorage.
+    var _TZ_STORAGE_KEY = 'mlfl.accuracyTz.' + EXP_NAME;
+    var accuracyTz = (function() {
+        try {
+            var saved = localStorage.getItem(_TZ_STORAGE_KEY);
+            if (saved === 'ha' || saved === 'browser' || saved === 'utc') return saved;
+        } catch (e) {}
+        return EXP_HA_TIME_ZONE ? 'ha' : 'browser';
+    })();
+
+    function _effectiveTzName() {
+        if (accuracyTz === 'utc') return 'UTC';
+        if (accuracyTz === 'ha' && EXP_HA_TIME_ZONE) return EXP_HA_TIME_ZONE;
+        return undefined;  // => browser default
+    }
+
+    // Parse the naive-UTC string into a Date. The Date object itself
+    // is tz-agnostic (stores epoch millis); rendering happens in the
+    // chosen TZ via Intl.DateTimeFormat in the helpers below.
     function toLocalDate(utcStr) {
         if (!utcStr) return null;
-        // Accept "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DDTHH:MM:SS"
         var iso = utcStr.length >= 19
             ? utcStr.slice(0, 10) + 'T' + utcStr.slice(11, 19) + 'Z'
             : utcStr;
@@ -2391,13 +2421,114 @@ window.showTab = function(el) {
     function toLocalDates(utcStrings) {
         return (utcStrings || []).map(toLocalDate);
     }
+
+    // Year-Month-Day key in the active TZ. Used by the cumulative-
+    // reconstruction logic so "reset at midnight" aligns with the HA-
+    // local day when HA mode is selected.
+    var _dayKeyFmt = null;
+    function _getDayKeyFmt() {
+        var tz = _effectiveTzName();
+        if (_dayKeyFmt && _dayKeyFmt._tz === tz) return _dayKeyFmt;
+        _dayKeyFmt = new Intl.DateTimeFormat('en-CA', {
+            timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+        });
+        _dayKeyFmt._tz = tz;
+        return _dayKeyFmt;
+    }
     function localDayKey(d) {
         if (!d) return '';
-        var y = d.getFullYear();
-        var m = (d.getMonth() + 1).toString().padStart(2, '0');
-        var day = d.getDate().toString().padStart(2, '0');
-        return y + '-' + m + '-' + day;
+        // en-CA gives "YYYY-MM-DD" natively — no zero-padding bookkeeping.
+        return _getDayKeyFmt().format(d);
     }
+
+    // Short TZ abbreviation (e.g. "BST", "PDT") for axis labels. Falls
+    // back to the IANA name when the locale can't produce a short form.
+    function _tzAbbrev() {
+        var tz = _effectiveTzName();
+        try {
+            var parts = new Intl.DateTimeFormat('en-GB', {
+                timeZone: tz, timeZoneName: 'short',
+            }).formatToParts(new Date());
+            for (var i = 0; i < parts.length; i++) {
+                if (parts[i].type === 'timeZoneName') return parts[i].value;
+            }
+        } catch (e) {}
+        return tz || 'local';
+    }
+
+    // Per-axis "datefmt" string Plotly honours on date axes. Plotly's
+    // built-in TZ support is thin; the cleanest path is to pre-format
+    // the x-axis ticks as strings in the chosen TZ and feed them as
+    // categorical strings for the rare case TZ is non-browser — but
+    // that loses date-axis affordances (zoom, tick density). Practical
+    // compromise: leave the data as Date objects but rewrite the axis
+    // tickformat via a tick callback that formats each tick in the
+    // chosen TZ. Implemented via `xaxis.tickvals` + `ticktext` at plot
+    // time — see _tzTicks() below.
+    function _tzTicks(dates) {
+        if (!dates || !dates.length) return null;
+        var tz = _effectiveTzName();
+        if (!tz) return null;  // browser mode — let Plotly auto-tick
+        // Pick ~6-10 tick candidates uniformly spaced through the range.
+        var first = dates[0].getTime();
+        var last = dates[dates.length - 1].getTime();
+        if (last <= first) return null;
+        var n = 8;
+        var vals = [], text = [];
+        var fmt = new Intl.DateTimeFormat('en-GB', {
+            timeZone: tz, day: '2-digit', month: 'short',
+            hour: '2-digit', minute: '2-digit', hour12: false,
+        });
+        for (var i = 0; i < n; i++) {
+            var t = new Date(first + (last - first) * i / (n - 1));
+            vals.push(t.toISOString());
+            text.push(fmt.format(t));
+        }
+        return { tickvals: vals, ticktext: text };
+    }
+
+    // Convenience: one-shot tick formatter to use in axis titles so
+    // readers know which TZ the axis is in.
+    function _axisTzSuffix() {
+        return ' (' + _tzAbbrev() + ')';
+    }
+
+    // Populate the TZ dropdown and react to changes.
+    (function _initTzControl() {
+        var sel = document.getElementById('accuracy-tz');
+        if (!sel) return;
+        var options = [];
+        if (EXP_HA_TIME_ZONE) {
+            options.push({
+                value: 'ha',
+                label: 'HA server (' + EXP_HA_TIME_ZONE + ')',
+            });
+        }
+        options.push({ value: 'browser', label: 'Browser local' });
+        options.push({ value: 'utc', label: 'UTC' });
+        sel.innerHTML = '';
+        options.forEach(function(o) {
+            var opt = document.createElement('option');
+            opt.value = o.value;
+            opt.textContent = o.label;
+            if (o.value === accuracyTz) opt.selected = true;
+            sel.appendChild(opt);
+        });
+    })();
+
+    window.setAccuracyTz = function(tz) {
+        if (tz !== 'ha' && tz !== 'browser' && tz !== 'utc') return;
+        accuracyTz = tz;
+        _dayKeyFmt = null;  // bust the Intl formatter cache
+        try { localStorage.setItem(_TZ_STORAGE_KEY, tz); } catch (e) {}
+        // Re-render everything that cares about axis TZ.
+        loadForecastAccuracy();
+        if (_diagOpened) {
+            loadForecastEvolution();
+            loadForecastTrajectory(false);
+            if (_lastStabilityData) _renderStabilityCharts(_lastStabilityData);
+        }
+    };
 
     // Reconstruct a cumulative series from per-interval deltas.
     // Resets to zero whenever the *local* calendar day changes (if
@@ -2543,18 +2674,22 @@ window.showTab = function(el) {
                 yTitle = expName + ' (' + EXP_UNITS + ')';
             }
 
-            var tzName = '';
-            try {
-                var tzPart = new Date().toLocaleTimeString('en-GB', { timeZoneName: 'short' }).split(' ').pop();
-                tzName = tzPart || '';
-            } catch (e) { tzName = ''; }
-            var xTitle = 'Target time' + (tzName ? ' (' + tzName + ')' : ' (local)');
-
+            var xTitle = 'Target time' + _axisTzSuffix();
+            var xAxis = {
+                title: { text: xTitle, font: { size: 12 } },
+                color: '#b0b0b0', gridcolor: '#2d3561', type: 'date',
+            };
+            // Override auto-ticks with pre-formatted labels in the
+            // chosen TZ when it isn't the browser's default.
+            var evTicks = _tzTicks(toLocalDates([].concat(
+                fanX, (data.actuals && data.actuals.targets) || []
+            )));
+            if (evTicks) {
+                xAxis.tickvals = evTicks.tickvals;
+                xAxis.ticktext = evTicks.ticktext;
+            }
             var layout = {
-                xaxis: {
-                    title: { text: xTitle, font: { size: 12 } },
-                    color: '#b0b0b0', gridcolor: '#2d3561', type: 'date',
-                },
+                xaxis: xAxis,
                 yaxis: {
                     title: { text: yTitle, font: { size: 12 } },
                     color: '#b0b0b0', gridcolor: '#2d3561',
@@ -2701,8 +2836,17 @@ window.showTab = function(el) {
                 }
             }
 
+            var trajXAxis = {
+                title: 'Forecast issued at' + _axisTzSuffix(),
+                color: '#b0b0b0', gridcolor: '#2d3561', type: 'date',
+            };
+            var trajTicks = _tzTicks(xs);
+            if (trajTicks) {
+                trajXAxis.tickvals = trajTicks.tickvals;
+                trajXAxis.ticktext = trajTicks.ticktext;
+            }
             var layout = {
-                xaxis: { title: 'Forecast issued at (local time)', color: '#b0b0b0', gridcolor: '#2d3561' },
+                xaxis: trajXAxis,
                 yaxis: { title: 'Predicted value{{ " (" + units + ")" if units else "" }}', color: '#b0b0b0', gridcolor: '#2d3561' },
                 plot_bgcolor: 'rgba(0,0,0,0)',
                 paper_bgcolor: 'rgba(0,0,0,0)',
@@ -2828,16 +2972,17 @@ window.showTab = function(el) {
                          + '<extra></extra>',
             name: 'Cross-run std',
         }];
-        var tzName = '';
-        try {
-            var tzPart = new Date().toLocaleTimeString('en-GB', { timeZoneName: 'short' }).split(' ').pop();
-            tzName = tzPart || '';
-        } catch (e) { tzName = ''; }
+        var stabXAxis = {
+            title: { text: 'Target time' + _axisTzSuffix(), font: { size: 12 } },
+            color: '#b0b0b0', gridcolor: '#2d3561', type: 'date',
+        };
+        var stabTicks = _tzTicks(ptDates);
+        if (stabTicks) {
+            stabXAxis.tickvals = stabTicks.tickvals;
+            stabXAxis.ticktext = stabTicks.ticktext;
+        }
         var layout = {
-            xaxis: {
-                title: { text: 'Target time' + (tzName ? ' (' + tzName + ')' : ' (local)'), font: { size: 12 } },
-                color: '#b0b0b0', gridcolor: '#2d3561', type: 'date',
-            },
+            xaxis: stabXAxis,
             yaxis: {
                 title: { text: 'Run-to-run spread (std of predictions)', font: { size: 12 } },
                 color: '#b0b0b0', gridcolor: '#2d3561',

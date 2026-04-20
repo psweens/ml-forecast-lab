@@ -657,6 +657,81 @@ class TestModelVersion:
         assert v2_only["summary"]["total_cycles"] == 2
         assert v2_only["summary"]["median_step_cv_pct"] < 5
 
+    def test_ha_local_day_bucketing_shifts_day_labels(self, db):
+        """
+        `day_offset_hours` shifts target_dt by the HA-local offset
+        before taking the YYYY-MM-DD prefix, so daily-total buckets
+        align with the HA-local day (when the `_today` sensor
+        actually resets) rather than UTC. In BST (UTC+1) a day spans
+        UTC 23:00 prev-day → UTC 22:30 this-day.
+
+        Test: 48 half-hour targets covering BST Apr 16 exactly. With
+        offset=+1h they sit in a single "2024-04-16" bucket — the
+        physically-correct one. With offset=0 they straddle two UTC
+        days ("2024-04-15" and "2024-04-16") because the first two
+        bins spill into UTC Apr 15. The semantic difference is what
+        the fix addresses — a California-based user looking at their
+        UK-hosted Mixergy now sees "Apr 16" meaning BST Apr 16.
+        """
+        # BST Apr 16 00:00→23:30 = UTC Apr 15 23:00 → UTC Apr 16 22:30
+        day_targets = [
+            datetime(2024, 4, 15, 23, 0) + timedelta(minutes=30 * i)
+            for i in range(48)
+        ]
+        _log_cycle(db, "exp", datetime(2024, 4, 15, 12, 0),
+                   day_targets, [1.00] * 48, "lgb")
+        _log_cycle(db, "exp", datetime(2024, 4, 15, 13, 0),
+                   day_targets, [1.10] * 48, "lgb")
+
+        naive = db.get_forecast_stability(
+            "exp", max_age_days=GENEROUS_WINDOW,
+            source_is_cumulative=True, model_name="lgb",
+        )
+        naive_days = {d["day"] for d in naive["daily_totals"]}
+        # Naive UTC bucketing splits the physical-BST-day-16 across
+        # "2024-04-15" (2 bins) and "2024-04-16" (46 bins).
+        assert "2024-04-15" in naive_days
+        assert "2024-04-16" in naive_days
+
+        shifted = db.get_forecast_stability(
+            "exp", max_age_days=GENEROUS_WINDOW,
+            source_is_cumulative=True, model_name="lgb",
+            day_offset_hours=1.0,
+        )
+        shifted_days = {d["day"] for d in shifted["daily_totals"]}
+        # BST bucketing unifies the physical day into one bucket and
+        # eliminates the spurious Apr-15 tail.
+        assert shifted_days == {"2024-04-16"}
+        apr16 = next(d for d in shifted["daily_totals"] if d["day"] == "2024-04-16")
+        assert apr16["n_cycles"] == 2
+        # 48-bin daily total: {48.00, 52.80} → CV ≈ 4.76%.
+        assert apr16["cv_pct"] == pytest.approx(4.76, abs=0.1)
+
+    def test_ha_local_day_bucketing_ignored_when_offset_zero(self, db):
+        """Offset=0 or None should be a no-op — preserves the
+        existing UTC-day bucketing on deployments without HA TZ info."""
+        day_targets = [
+            datetime(2024, 6, 15, 0, 30) + timedelta(minutes=30 * i)
+            for i in range(48)
+        ]
+        _log_cycle(db, "exp", datetime(2024, 6, 14, 20, 0),
+                   day_targets, [1.0] * 48, "lgb")
+        _log_cycle(db, "exp", datetime(2024, 6, 14, 21, 0),
+                   day_targets, [1.05] * 48, "lgb")
+        ref = db.get_forecast_stability(
+            "exp", max_age_days=GENEROUS_WINDOW,
+            source_is_cumulative=True, model_name="lgb",
+        )
+        zero = db.get_forecast_stability(
+            "exp", max_age_days=GENEROUS_WINDOW,
+            source_is_cumulative=True, model_name="lgb",
+            day_offset_hours=0.0,
+        )
+        assert [d["day"] for d in ref["daily_totals"]] == \
+               [d["day"] for d in zero["daily_totals"]]
+        assert [d["cv_pct"] for d in ref["daily_totals"]] == \
+               [d["cv_pct"] for d in zero["daily_totals"]]
+
     def test_accuracy_coverage_trajectory_all_honour_version(
         self, db, actuals_monotonic
     ):
