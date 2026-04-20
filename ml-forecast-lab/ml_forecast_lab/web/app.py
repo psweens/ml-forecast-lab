@@ -1032,12 +1032,16 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             for model in benchmark_result.models:
                 model.is_production = model.name == model_name
 
-        # Persist to YAML so promotion survives restarts
+        # Persist to YAML so promotion survives restarts. Also write
+        # selected_model so the Results-tab UI highlights match after
+        # a restart (promote implicitly aligns the selection with the
+        # new champion).
         from ml_forecast_lab.config import load_config, save_experiment_field
         config_path = _find_config_path()
         if config_path:
             try:
                 save_experiment_field(config_path, name, "production_model", model_name)
+                save_experiment_field(config_path, name, "selected_model", model_name)
                 save_experiment_field(config_path, name, "mode", "production")
             except Exception as e:
                 logger.warning(f"Failed to persist promotion to YAML: {e}")
@@ -1096,7 +1100,24 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"success": False, "error": "Model not in results"})
 
         app.state.appstate.experiment_statuses[name].selected_model = model_name
-        return JSONResponse(content={"success": True, "selected_model": model_name})
+        # Persist to YAML so the selection survives add-on restarts.
+        # Without this, `status.selected_model` resets to None at startup
+        # and the next benchmark auto-promotes its top-ranked model —
+        # which users experience as "I chose X but the page forgets".
+        persisted = False
+        try:
+            from ml_forecast_lab.config import save_experiment_field
+            config_path = _find_config_path()
+            if config_path:
+                save_experiment_field(config_path, name, "selected_model", model_name)
+                persisted = True
+        except Exception as e:
+            logger.warning(f"Failed to persist selected_model to YAML: {e}")
+        return JSONResponse(content={
+            "success": True,
+            "selected_model": model_name,
+            "persisted": persisted,
+        })
 
     @app.post("/experiment/{name}/apply-covariate-best")
     async def apply_covariate_best(name: str):

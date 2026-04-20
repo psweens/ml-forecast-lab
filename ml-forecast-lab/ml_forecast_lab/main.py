@@ -356,10 +356,23 @@ class MLForecastLabApp:
                 from ml_forecast_lab.web.app import ExperimentStatus
 
                 _pub_name = exp_cfg.publish_name or exp_cfg.name
+                # Restore the user's UI selection from YAML so
+                # `/select-model` clicks survive add-on restarts. Before
+                # this field existed, selected_model was re-initialised to
+                # None on every boot and the next benchmark auto-picked
+                # its top-ranked model — which users experienced as "the
+                # Results tab forgets which model I picked". Fall back
+                # to production_model when selected_model is unset so
+                # legacy configs still get a sensible default.
+                _selected = (
+                    getattr(exp_cfg, "selected_model", None)
+                    or getattr(exp_cfg, "production_model", None)
+                )
                 status = ExperimentStatus(
                     name=exp_cfg.name,
                     target_entity=exp_cfg.target_entity,
                     mode=exp_cfg.mode,
+                    selected_model=_selected,
                     last_benchmark_status="pending",
                     next_forecast_in_seconds=self.config.forecast_every_minutes * 60,
                     next_retrain_in_seconds=int(self.config.retrain_every_hours * 3600),

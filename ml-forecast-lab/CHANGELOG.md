@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.25.4
+
+### Fixed
+
+- **Results-tab model selection not surviving add-on restarts.**
+  `/select-model` only updated in-memory state
+  (`exp_status.selected_model`), never wrote to YAML. When the
+  add-on restarted (which it does daily under the typical retrain
+  cadence), `experiment_statuses` was re-initialised with
+  `selected_model=None` and the next benchmark auto-promoted its
+  top-ranked model. Users experienced this as "I picked XGBoost,
+  reloaded the page, and it's showing LightGBM again."
+
+  Three coordinated changes:
+  - New `selected_model: Optional[str]` field on `ExperimentCfg`
+    (YAML schema).
+  - `/select-model` endpoint now persists to YAML via
+    `save_experiment_field`, mirroring how `/promote` handles
+    `production_model`. Response body includes `persisted: bool`
+    so the frontend knows whether it saved.
+  - Startup in main.py reads `exp_cfg.selected_model` into
+    `ExperimentStatus.selected_model`, with fallback to
+    `exp_cfg.production_model` for legacy configs that don't have
+    the new field.
+  - `/promote` also writes `selected_model` to YAML so the Results
+    highlight stays in sync with the production switch across
+    restarts.
+
+### Tests
+
+- New `TestSelectedModel` class (3 assertions) covering default
+  value, explicit assignment, and YAML roundtrip.
+
 ## 2.25.3
 
 ### Fixed

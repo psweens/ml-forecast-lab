@@ -237,6 +237,16 @@ class ExperimentCfg:
     production_model: Optional[str] = None
     """Which model to use in production; if None, auto-select best by production_metric."""
 
+    selected_model: Optional[str] = None
+    """Model the Results-tab UI highlights and the Forecast Accuracy analytics
+    filter to by default. Persisted across add-on restarts so a user's
+    ``/select-model`` click survives reboots. Distinct from
+    ``production_model``: the latter drives what actually gets retrained and
+    published to HA; this only drives what the UI shows. Without this field,
+    the in-memory selection was lost on every restart and fell back to
+    whichever model the next benchmark cycle ranked first, which
+    appeared to users as "I chose XGBoost but the page forgets"."""
+
     production_metric: str = 'rmse'
     """Metric to use for automatic model selection."""
 

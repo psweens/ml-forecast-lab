@@ -29,6 +29,34 @@ class TestExperimentCfg:
             cfg.__post_init__()
 
 
+class TestSelectedModel:
+    """Persistence field for the Results-tab UI selection across restarts."""
+
+    def test_default_is_none(self):
+        cfg = ExperimentCfg(name="t", target_entity="sensor.t")
+        assert cfg.selected_model is None
+
+    def test_accepts_explicit_value(self):
+        cfg = ExperimentCfg(
+            name="t", target_entity="sensor.t",
+            selected_model="xgboost",
+        )
+        assert cfg.selected_model == "xgboost"
+
+    def test_roundtrips_through_yaml(self, tmp_path):
+        import yaml
+        config_data = {
+            "experiments": [{
+                "name": "t", "target_entity": "sensor.t",
+                "selected_model": "xgboost",
+            }],
+        }
+        p = tmp_path / "mlfl.yaml"
+        p.write_text(yaml.dump(config_data))
+        cfg = load_config(p)
+        assert cfg.experiments[0].selected_model == "xgboost"
+
+
 class TestStabilityFocus:
     def test_default_is_per_moment(self):
         cfg = ExperimentCfg(name="t", target_entity="sensor.t")
