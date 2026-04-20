@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `preprocessing` module provides a unified pipeline for time series data cleaning and transformation. It consolidates PredAI's four separate cumulative-to-interval paths into one flexible function, plus utilities for resampling, outlier handling, and feature transformations.
+The `preprocessing` module provides a unified pipeline for time series data cleaning and transformation. It consolidates four separate cumulative-to-interval paths into one flexible function, plus utilities for resampling, outlier handling, and feature transformations.
 
 ## Key Principle
 

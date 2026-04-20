@@ -1,5 +1,81 @@
 # Changelog
 
+## 2.26.4
+
+### Added
+
+- **Publish manifest log per cycle.** `_publish_forecast_sensors` now
+  emits a single INFO line summarising every expected sensor's outcome
+  — `published=N/total`, plus a `skipped` list with reason codes
+  (`source_not_cumulative`, `no_conformal_bands`) and a `failed` list
+  with per-entity exception context. Diagnoses the "`sensor.X
+  last_updated = 3h ago` but the log says publish succeeded" symptom
+  by making silent conditional skips visible: if a sensor has been
+  out of the payload for hours, every cycle's manifest now shows
+  exactly why. Replaces the old split "Published X/N sensors … / Failed
+  to publish …" pair with one coherent report.
+
+- **`_forecast_accuracy` sensor is always published.** Previously
+  gated on `self.history_db and exp_cfg.mode == "production" and
+  ltc.get("lead_minutes")`, so the HA entity didn't exist at all
+  during cold start, in lab mode, or when the forecast_log query
+  returned no matches yet — forcing dashboards to check for entity
+  existence before binding. The sensor now lands in HA from day one
+  with `state=0`, empty `lead_hours` / `mae` / `rmse` /
+  `sample_count` arrays, and a new `status` attribute whose value
+  names the current readiness state: `accumulating` (cold start),
+  `no_history_db`, `lab_mode`, `error` (query failed), or `ready`
+  once `lead_time_curve` has samples. Transitions to
+  `status=ready` populate the arrays in place, so a dashboard
+  binding survives the entire lifecycle without conditional logic.
+
+### Changed
+
+- **Add-on permissions tightened in `config.yaml`.** Removed
+  `hassio_api: true`, `hassio_role: admin`, and `auth_api: true` —
+  the add-on never calls the Supervisor or auth APIs and does not
+  need admin role to publish sensors via the Core REST API, which is
+  covered by `homeassistant_api: true`. `map` is narrowed from
+  `homeassistant_config:rw`, `media:rw`, `share:rw`, `ssl:rw` to a
+  single `homeassistant_config:ro` (alongside the existing
+  `addon_config:rw` used for the persistent cache and logs). The
+  add-on never wrote outside `/data` under the old mapping, so
+  dropping write access is a no-op for behaviour but a meaningful
+  narrowing of blast radius. Added `stage: stable` so HA surfaces it
+  correctly in the add-on store.
+
+- **Removed unused `models` add-on option.** The `options.models`
+  list and its `schema` entry in `config.yaml` were legacy scaffolding
+  from before the `mlfl.yaml` experiment-config model was introduced;
+  nothing reads them. Removed both; add-on options UI now shows only
+  the live `log_level` setting.
+
+- **Docs moved to top-level `docs/`.** `CONFIG_GUIDE.md`,
+  `FEATURES_GUIDE.md`, and `PREPROCESSING_GUIDE.md` have migrated
+  from `ml-forecast-lab/ml_forecast_lab/` (Python package dir) to
+  the repo's top-level `docs/` directory so they are a) no longer
+  bundled into the Docker image, b) linkable directly on GitHub
+  without going three levels deep. Deleted the stale
+  `CORE_MODULES_README.md`, `CREATION_REPORT.md`, `INDEX.md`,
+  `MODULES.md`, and `README_MODULES.md` files that had drifted out
+  of sync with the current architecture (still referenced
+  NeuralProphet, 5-backend counts, legacy `publishing.py`, pre-2.26
+  sensor names).
+
+- **`repository.yaml` url / maintainer corrected.** URL pointed at
+  the archived `psweens/ha-addons` repo; now points at
+  `psweens/ml-forecast-lab`. Maintainer name normalised to `Dr Paul
+  W. Sweeney` to match the footer and git config.
+
+- **README.md refreshed.** Model count corrected from 15 → 14
+  (NeuralProphet removed in 2.24.0 but the count wasn't caught
+  across the feature table, config example comment, architecture
+  diagram, and dependencies list). Added feature sections for
+  uncertainty intervals (conformal bands), forecast accuracy
+  tracking with revision improvement, and load_subtract. Noted
+  that neural backends' loss function (MSE / MAE / Huber) is
+  configurable per experiment.
+
 ## 2.26.3
 
 ### Added

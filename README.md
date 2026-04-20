@@ -6,7 +6,7 @@ ML Forecast Lab lets you train, compare, and deploy time-series forecasting mode
 
 ## Features
 
-**15 model backends**, benchmarked on identical data splits:
+**14 model backends**, benchmarked on identical data splits:
 
 | Family | Models |
 |--------|--------|
@@ -16,9 +16,8 @@ ML Forecast Lab lets you train, compare, and deploy time-series forecasting mode
 | Linear / MLP | DLinear, TSMixer, TiDE, SparseTSF |
 | N-BEATS family | N-BEATS, N-HiTS |
 | Transformer | PatchTST, iTransformer, Crossformer |
-| Probabilistic | NeuralProphet |
 
-All neural backends use PyTorch and support multi-horizon dense outputs with residual prediction (predict deltas, not absolute values) for stable forecasts.
+All neural backends use PyTorch and support multi-horizon dense outputs with residual prediction (predict deltas, not absolute values) for stable forecasts. Loss function (MSE / MAE / Huber) is configurable per experiment.
 
 **Rigorous evaluation:**
 
@@ -41,6 +40,12 @@ All neural backends use PyTorch and support multi-horizon dense outputs with res
 **Hyperparameter tuning** — Bayesian optimisation (Optuna TPE) per-model with composite-rank trial selection. Default vs tuned holdout comparison plot included.
 
 **Ensembles** — combine multiple models with simple averaging, inverse-metric weighting, or stacking. Re-runnable without retraining.
+
+**Uncertainty intervals** — conformal prediction 80% bands published as companion `_upper_80` / `_lower_80` HA sensors, calibrated on held-out residuals.
+
+**Forecast accuracy tracking** — every prediction is logged with its model version and compared against actuals as ground truth arrives. Three-layer diagnostic UI shows bias, trajectory drift, and per-horizon error; the log auto-clears on retrain so a new model's accuracy isn't contaminated by the old one's.
+
+**Load subtract** — optionally subtract one HA sensor from another before modelling (e.g., net-of-solar demand) with a robustness layer to handle missing covariate data and an audit log of subtraction events.
 
 **Covariate analysis** — automatically test every covariate combination across all enabled models to discover which external features genuinely improve forecasts.
 
@@ -104,9 +109,8 @@ experiments:
       - xgboost
       - lstm
       - cnn
-      # 11 more neural backends available: dlinear, nbeats, nhits, tide,
-      # tsmixer, sparsetsf, patchtst, itransformer, crossformer, timesnet,
-      # neuralprophet
+      # 10 more neural backends available: dlinear, nbeats, nhits, tide,
+      # tsmixer, sparsetsf, patchtst, itransformer, crossformer, timesnet
 
     cv_strategy: walk_forward
     cv_folds: 5
@@ -126,7 +130,7 @@ experiments:
 | `future_periods` | Number of future steps to forecast | `48` |
 | `forecast_every_minutes` | How often to run cached-model inference | `30` |
 | `retrain_every_hours` | How often to retrain the model from scratch | `24` |
-| `models_enabled` | Which backends to benchmark (15 available) | LightGBM, XGBoost |
+| `models_enabled` | Which backends to benchmark (14 available) | LightGBM, XGBoost |
 | `cv_strategy` | `walk_forward` or `sliding_window` | `walk_forward` |
 | `cv_folds` | Number of CV folds | `5` |
 | `cv_embargo_periods` | Gap between train/test splits | `2` |
@@ -169,7 +173,7 @@ The web UI exposes a JSON API for status, benchmark results, forecasts, model se
                 ▼                      ▼                      │
        ┌─────────────────┐   ┌─────────────────┐               │
        │ Cross-Validator │   │ Model Registry  │               │
-       │ walk-fwd or SW  │   │ 15 backends     │               │
+       │ walk-fwd or SW  │   │ 14 backends     │               │
        └────────┬────────┘   │ tree + neural   │               │
                 │            └─────────────────┘               │
                 ▼                                              │
@@ -216,7 +220,7 @@ Each experiment trains and evaluates models independently.
 
 Core: numpy, pandas, scikit-learn, scipy, FastAPI, uvicorn, Jinja2, Plotly.
 Tree models: LightGBM, XGBoost.
-Neural models: PyTorch (LSTM, CNN, DLinear, N-BEATS, N-HiTS, TiDE, TSMixer, SparseTSF, PatchTST, iTransformer, Crossformer, TimesNet), NeuralProphet.
+Neural models: PyTorch (LSTM, CNN, DLinear, N-BEATS, N-HiTS, TiDE, TSMixer, SparseTSF, PatchTST, iTransformer, Crossformer, TimesNet).
 Hyperparameter tuning: Optuna.
 
 ## Licence
@@ -225,4 +229,4 @@ MIT
 
 ## Credits
 
-Built by [Paul Sweeney](https://github.com/psweens), University of Cambridge.
+Created by [Dr Paul W. Sweeney](https://github.com/psweens), University of Cambridge.

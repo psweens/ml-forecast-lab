@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `features` module provides unified temporal feature engineering shared across all model backends (LightGBM, XGBoost, LSTM, CNN). It generates lag features, rolling statistics, temporal cyclical encodings, and prepares cross-validation splits with proper temporal embargo to prevent look-ahead bias.
+The `features` module provides unified temporal feature engineering shared across all 14 model backends (tree and neural). It generates lag features, rolling statistics, temporal cyclical encodings, and prepares cross-validation splits with proper temporal embargo to prevent look-ahead bias.
 
 ## Core Functions
 

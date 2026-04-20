@@ -14,7 +14,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -2784,7 +2784,14 @@ class MLForecastLabApp:
         # Build (entity_id, state, attrs) payloads synchronously; the
         # actual HTTP POSTs are fired together at the end so every sensor
         # lands at effectively the same HA last_updated.
+        #
+        # `skipped_sensors` captures conditionally-omitted entities with a
+        # reason code so the end-of-cycle manifest log explains why an
+        # entity's HA `last_updated` is stale ("no _upper_80 in the
+        # payload this cycle → bands unavailable"), rather than leaving
+        # the operator to guess between "failed" and "never attempted".
         payloads: list[tuple[str, str, dict]] = []
+        skipped_sensors: list[tuple[str, str]] = []
 
         # --- 1. Main forecast sensor (always published) ----------------------
         main_attrs = {
@@ -2822,6 +2829,8 @@ class MLForecastLabApp:
             payloads.append(
                 (f"{base_entity}_interval", str(next_val), interval_attrs)
             )
+        else:
+            skipped_sensors.append(("_interval", "source_not_cumulative"))
 
         # --- 3. Cumulative sensor (always published) ------------------------
         # Behaviour is derived from source semantics rather than a separate
@@ -2958,11 +2967,40 @@ class MLForecastLabApp:
                 (f"{base_entity}_lower_{lvl_pct}",
                  str(lower_state), lower_attrs)
             )
+        else:
+            # Band sensors share the cold-start reason: either no
+            # conformal quantiles are calibrated yet, or the residual
+            # query errored earlier in this cycle. The level defaults
+            # to 80 so the skip name matches what will eventually land.
+            skipped_sensors.append(("_upper_80", "no_conformal_bands"))
+            skipped_sensors.append(("_lower_80", "no_conformal_bands"))
 
-        # --- 5. Forecast accuracy sensor (lead-time curve) -------------------
-        # DB read stays synchronous-ish inside this block; only the actual
-        # publish is deferred to the parallel gather below.
-        if self.history_db and exp_cfg.mode == "production":
+        # --- 5. Forecast accuracy sensor (always published) -----------------
+        # Publishes from day one so the HA entity exists in the registry
+        # immediately and dashboards can bind to it without conditional
+        # glue. On cold start (no forecast_log rows yet, lab mode, DB
+        # unavailable, or query failure) the state is 0 with empty
+        # arrays and a `status` attribute naming the reason; state
+        # transitions to "ready" once `lead_time_curve` has samples.
+        acc_state: Union[int, float] = 0
+        acc_attrs = {
+            "friendly_name": f"{publish_name} Forecast Accuracy",
+            "unit_of_measurement": units,
+            "icon": "mdi:chart-scatter-plot",
+            "state_class": "measurement",
+            "lead_hours": [],
+            "mae": [],
+            "rmse": [],
+            "sample_count": [],
+            "total_logged": 0,
+            "status": "accumulating",
+            **common_attrs,
+        }
+        if not self.history_db:
+            acc_attrs["status"] = "no_history_db"
+        elif exp_cfg.mode != "production":
+            acc_attrs["status"] = "lab_mode"
+        else:
             try:
                 actuals_table = self.history_db.safe_table_name(
                     exp_cfg.target_entity
@@ -2973,41 +3011,37 @@ class MLForecastLabApp:
                 )
                 ltc = accuracy.get("lead_time_curve", {})
                 rev = accuracy.get("revision_improvement", {})
+                acc_attrs["total_logged"] = accuracy.get("total_logged", 0)
                 if ltc.get("lead_minutes"):
-                    lead_hours = [round(m / 60, 2) for m in ltc["lead_minutes"]]
+                    acc_attrs["lead_hours"] = [
+                        round(m / 60, 2) for m in ltc["lead_minutes"]
+                    ]
+                    acc_attrs["mae"] = ltc["mae"]
+                    acc_attrs["rmse"] = ltc["rmse"]
+                    acc_attrs["sample_count"] = ltc["sample_count"]
+                    acc_attrs["status"] = "ready"
                     acc_state = round(ltc["mae"][0], 4) if ltc["mae"] else 0
-                    acc_attrs = {
-                        "friendly_name": f"{publish_name} Forecast Accuracy",
-                        "unit_of_measurement": units,
-                        "icon": "mdi:chart-scatter-plot",
-                        "state_class": "measurement",
-                        "lead_hours": lead_hours,
-                        "mae": ltc["mae"],
-                        "rmse": ltc["rmse"],
-                        "sample_count": ltc["sample_count"],
-                        "total_logged": accuracy.get("total_logged", 0),
-                        **common_attrs,
-                    }
-                    if rev:
-                        acc_attrs["revision_first_mae"] = rev.get(
-                            "first_forecast_mae"
-                        )
-                        acc_attrs["revision_latest_mae"] = rev.get(
-                            "latest_forecast_mae"
-                        )
-                        acc_attrs["revision_improvement_pct"] = rev.get(
-                            "improvement_pct"
-                        )
-                    payloads.append((
-                        f"{base_entity}_forecast_accuracy",
-                        str(acc_state),
-                        acc_attrs,
-                    ))
+                if rev:
+                    acc_attrs["revision_first_mae"] = rev.get(
+                        "first_forecast_mae"
+                    )
+                    acc_attrs["revision_latest_mae"] = rev.get(
+                        "latest_forecast_mae"
+                    )
+                    acc_attrs["revision_improvement_pct"] = rev.get(
+                        "improvement_pct"
+                    )
             except Exception as e:
+                acc_attrs["status"] = "error"
                 logger.warning(
                     f"  Forecast accuracy prep failed for {exp_cfg.name}: {e}",
                     exc_info=True,
                 )
+        payloads.append((
+            f"{base_entity}_forecast_accuracy",
+            str(acc_state),
+            acc_attrs,
+        ))
 
         # --- Parallel publish ------------------------------------------------
         # Fire every set_state concurrently so all sensors for this
@@ -3036,17 +3070,43 @@ class MLForecastLabApp:
         succeeded = [eid for eid, ok, _ in results if ok]
         failed = [(eid, err) for eid, ok, err in results if not ok]
 
-        if succeeded:
-            band_note = f", bands=±{int(interval_level*100)}%" if have_intervals and interval_level else ""
-            logger.info(
-                f"  Published {len(succeeded)}/{len(payloads)} sensors "
-                f"for {exp_cfg.name} (next={next_val}{unit_str}{band_note}): "
-                f"{', '.join(e.split('.')[-1] for e in succeeded)}"
-            )
+        # Publish manifest — one line per cycle summarising every
+        # expected sensor's outcome (published, skipped with reason,
+        # failed with reason). Makes "sensor.X last_updated = 3h ago"
+        # directly explainable from the log: either the entity was
+        # skipped each cycle (reason visible), or it failed (reason
+        # visible), or it published and HA dropped it internally.
+        total_expected = len(payloads) + len(skipped_sensors)
+        published_items = [
+            f"{eid.split('.')[-1]}={s}"
+            for eid, s, _ in payloads
+            if eid in succeeded
+        ]
+        failed_items = [
+            f"{eid.split('.')[-1]}({repr(err) if err else 'set_state=False'})"
+            for eid, err in failed
+        ]
+        skipped_items = [f"{suffix}({reason})" for suffix, reason in skipped_sensors]
+
+        manifest_parts = [
+            f"published={len(succeeded)}/{total_expected}"
+        ]
+        if skipped_items:
+            manifest_parts.append(f"skipped={len(skipped_items)}")
+        if failed_items:
+            manifest_parts.append(f"failed={len(failed_items)}")
+
+        logger.info(
+            f"  Publish manifest for {exp_cfg.name} "
+            f"({', '.join(manifest_parts)}): "
+            f"[{', '.join(published_items)}]"
+        )
+        if skipped_items:
+            logger.info(f"    skipped: {', '.join(skipped_items)}")
         for eid, err in failed:
             reason = repr(err) if err else "set_state returned False"
             logger.warning(
-                f"  Failed to publish {eid}: {reason}",
+                f"    failed: {eid.split('.')[-1]} — {reason}",
                 exc_info=err if err else False,
             )
 
@@ -3056,7 +3116,7 @@ class MLForecastLabApp:
             )
             if status:
                 status.last_error = (
-                    f"Publish: {len(failed)}/{len(payloads)} sensors failed "
+                    f"Publish: {len(failed)}/{total_expected} sensors failed "
                     f"({', '.join(e.split('.')[-1] for e, _ in failed)})"
                 )
 
