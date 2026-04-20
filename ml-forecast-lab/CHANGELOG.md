@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.26.1
+
+### Removed
+
+- **Dead `publishing.py` module.** The legacy `publish_forecasts`
+  helper and its friends (`make_entity_name`, `dict_from_series`,
+  `daily_cumulative_series`, `energy_already_used_today`) were
+  exported from the package but had no callers — the real publishing
+  path is `_publish_forecast_sensors` in `main.py`. After the 2.26.0
+  refactor consolidated `_daily_cumulative` into `_cumulative`, the
+  stale module was also emitting the old entity with the pre-refactor
+  attribute shape (`cumulative.timestamps/values` dict vs the new
+  `forecast` list of `{datetime, value}` dicts), which would have
+  diverged further over time. Deleted the module, cleaned up
+  `__init__.py` imports/exports, and updated `MODULES.md` and
+  `README_MODULES.md` to match. No behaviour change for users.
+
 ## 2.26.0
 
 ### Changed (breaking)
