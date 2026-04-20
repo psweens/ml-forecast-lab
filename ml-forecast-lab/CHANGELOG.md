@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.25.5
+
+### Fixed
+
+- **Conformal-band sensors silently stopped updating** after the
+  v2.24.0 upgrade introduced a `model_version` filter on
+  `get_conformal_quantiles`. With the fresh version tag, only the
+  handful of residuals written *since the latest retrain* matched
+  the filter — far below the `min_samples` threshold the quantile
+  estimator needs. `fallback_quantile` came back None, so
+  `y_pred_upper` / `y_pred_lower` stayed None, `have_intervals`
+  stayed False, and the `_upper_{pct}` / `_lower_{pct}` entities
+  (plus the `forecast_upper` / `forecast_lower` attributes on the
+  main `_forecast` sensor) stopped being written. HA continued
+  showing their stale pre-upgrade values — matching the "some
+  forecast sensors aren't updating" symptom while the main state
+  value kept ticking over.
+
+  Fix: after the version-filtered conformal query, check whether
+  it returned a usable fallback quantile + ≥ 10 total residuals.
+  If not, re-query pooled across all versions of this model so
+  bands keep publishing during the post-retrain cold-start
+  window. Logs one `Conformal bands: falling back to all-versions
+  pool` INFO line per cycle when this kicks in, for visibility.
+
 ## 2.25.4
 
 ### Fixed

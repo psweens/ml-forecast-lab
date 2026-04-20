@@ -2584,18 +2584,50 @@ class MLForecastLabApp:
                     exp_cfg.target_entity
                 )
                 target_level = interval_level if interval_level is not None else 0.8
-                # Pin residual quantiles to the current model_version so
-                # conformal bands don't widen after a retrain just
-                # because old-weights residuals are pooled in.
+                # Pin residual quantiles to the current model_version
+                # when we have enough calibrated residuals for it;
+                # otherwise pool across all weight regimes of this
+                # model so bands still get published during the
+                # cold-start period right after a retrain.
+                #
+                # Without this fallback, v2.24.0 introduced a
+                # regression where the conformal query filtered so
+                # strictly to the fresh (hours-old) model_version that
+                # it returned zero usable quantiles. `have_intervals`
+                # then stayed False, so the _upper_{pct} / _lower_{pct}
+                # sensors stopped being written at all — HA kept
+                # showing their stale pre-retrain values and the user
+                # saw "some forecast sensors aren't updating".
                 cached = self._cached_models.get(exp_cfg.name) or {}
+                current_version = cached.get("model_version")
                 cq = self.history_db.get_conformal_quantiles(
                     exp_cfg.name,
                     actuals_table,
                     level=target_level,
                     model_name=model_name,
-                    model_version=cached.get("model_version"),
+                    model_version=current_version,
                     interval_minutes=exp_cfg.interval_minutes,
                 )
+                if (
+                    current_version
+                    and (cq.get("fallback_quantile") is None
+                         or cq.get("total_samples", 0) < 10)
+                ):
+                    cq_all = self.history_db.get_conformal_quantiles(
+                        exp_cfg.name,
+                        actuals_table,
+                        level=target_level,
+                        model_name=model_name,
+                        model_version=None,
+                        interval_minutes=exp_cfg.interval_minutes,
+                    )
+                    if cq_all.get("fallback_quantile") is not None:
+                        logger.info(
+                            f"  Conformal bands: falling back to all-versions "
+                            f"pool for {exp_cfg.name} (current version has "
+                            f"{cq.get('total_samples', 0)} residuals, need >=10)"
+                        )
+                        cq = cq_all
                 quantiles = cq.get("quantiles") or {}
                 fallback = cq.get("fallback_quantile")
                 if fallback is not None:
