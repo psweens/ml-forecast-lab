@@ -1250,7 +1250,10 @@
             <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
                 Raw summary of <code>forecast_log</code>. Useful when the Accuracy chart looks empty or the verdict doesn't match expectations.
             </p>
-            <button type="button" class="btn-secondary" onclick="loadForecastLogStats()" style="padding:0.4rem 0.9rem;">Load log summary</button>
+            <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
+                <button type="button" class="btn-secondary" onclick="try{loadForecastLogStats()}catch(e){var o=document.getElementById('forecast-log-stats-out');if(o){o.style.display='block';o.textContent='Button handler failed: '+(e && e.message ? e.message : e)+'. Try the direct link to the right →';}}" style="padding:0.4rem 0.9rem;">Load log summary</button>
+                <a href="{{ base_path }}/experiment/{{ experiment.name }}/forecast-log-stats" target="_blank" rel="noopener" style="color:var(--accent-secondary);font-size:0.85rem;">open in new tab</a>
+            </div>
             <pre id="forecast-log-stats-out" style="display:none;margin-top:0.75rem;padding:0.75rem;background:rgba(0,0,0,0.25);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.8rem;white-space:pre-wrap;max-height:420px;overflow:auto;"></pre>
         </div>
 

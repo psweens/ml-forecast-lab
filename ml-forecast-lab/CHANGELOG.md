@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.25.3
+
+### Fixed
+
+- **"Load log summary" button silently doing nothing on some
+  experiments.** Rendering the template through Jinja with both
+  cumulative and instantaneous contexts produced structurally-
+  identical JS (only `EXP_NAME` / `EXP_SOURCE_CUMULATIVE` /
+  `expName` / `entityId` differed), so the root cause isn't in
+  the template and is likely client-side (browser cache, ingress
+  middleware, localStorage state on some setups). Rather than
+  keep blind-debugging, added two defensive measures:
+  - **Inline try/catch on the button's `onclick`** that writes the
+    thrown error message into the `<pre>` output element, so the
+    failure is visible without opening DevTools.
+  - **"open in new tab" link** next to the button pointing at the
+    `/forecast-log-stats` endpoint directly. Pure `<a href>` — no
+    JavaScript required, works even if the button handler is
+    broken by whatever the client-side state issue is.
+
 ## 2.25.2
 
 ### Fixed
