@@ -49,24 +49,6 @@ Covariate fetching and resampling with intelligent binary detection.
 
 Binary detection and resampling logic is centralised in private methods (no duplication).
 
-## publishing.py
-
-Forecast publishing to Home Assistant with multiple entity types and aggregation strategies.
-
-**Functions:**
-- `async publish_forecasts(experiment_cfg, iface, app_config, ds_future, yhat_interval, yhat_level, metrics, hist_cum_df)`: Publish all forecast entities:
-  - Point forecast
-  - Interval bounds (upper/lower at specified confidence level)
-  - Cumulative forecast
-  - Daily cumulative with offset
-  - Horizon scalar entities (+2h, +8h, etc.)
-  - Prediction curve (historical + forecast)
-
-- `make_entity_name(publish_prefix, experiment_name, suffix)`: Construct entity names
-- `dict_from_series(series, max_points)`: Serialise Series to dict for HA attribute
-- `daily_cumulative_series(forecast_series, reference_date)`: Group by date and cumulate within each day
-- `energy_already_used_today(iface, entity_id)`: Fetch energy used so far today
-
 ## Key Features
 
 - **British spelling** in all comments and docstrings

@@ -4,11 +4,10 @@ Production-ready Python modules for Home Assistant time-series forecasting integ
 
 ## Overview
 
-Four core modules (1,066 lines of code) providing:
+Three core modules providing:
 - Async Home Assistant API client with robust parsing
 - SQLite history caching with bulk operations
 - Intelligent covariate resolution and resampling
-- Multi-format forecast publishing to Home Assistant
 
 All modules use **British spelling**, comprehensive **type hints**, and **production-ready error handling**.
 
@@ -196,89 +195,6 @@ Strategies (in order):
 
 ---
 
-## 4. publishing.py (342 lines)
-
-### Purpose
-Publish forecast results to Home Assistant as sensor entities.
-
-### Main Function
-
-**`async publish_forecasts(experiment_cfg: dict, iface: HAInterface, app_config: dict, ds_future: pd.DatetimeIndex, yhat_interval: pd.DataFrame, yhat_level: float, metrics: Optional[dict] = None, hist_cum_df: Optional[pd.DataFrame] = None) -> bool`**
-
-Publishes 7 entity types to Home Assistant. `experiment_cfg` keys:
-- `name` (required): experiment identifier
-- `publish_prefix` (default `'mlfl_'`): entity prefix
-- `publish_entity_id` (optional): override base entity name
-- `horizons_to_publish` (optional): list of horizon strings (e.g. `['+2h', '+8h']`)
-
-Input data:
-- `ds_future`: DatetimeIndex of forecast periods
-- `yhat_interval`: DataFrame with `['ds', 'yhat', 'upper', 'lower']` (minimum `['ds', 'yhat']`)
-- `yhat_level`: confidence level (e.g. 0.95 for 95%)
-- `metrics`: optional dict of forecast metrics
-- `hist_cum_df`: optional historical data for curve visualisation
-
-**Entities Created:**
-
-1. **Point Forecast** (`sensor.mlfl_<exp>_point`)
-   - State: latest point forecast value
-   - Attribute `forecast`: time-series dict
-
-2. **Upper Interval** (`sensor.mlfl_<exp>_upper_95`)
-   - State: latest upper bound
-   - Attribute `forecast`: time-series dict
-
-3. **Lower Interval** (`sensor.mlfl_<exp>_lower_95`)
-   - State: latest lower bound
-   - Attribute `forecast`: time-series dict
-
-4. **Cumulative** (`sensor.mlfl_<exp>_cumulative`)
-   - Cumulative sum of point forecast
-   - Attribute `cumulative`: time-series dict
-
-5. **Daily Cumulative** (`sensor.mlfl_<exp>_daily_cumulative`)
-   - Cumulative within each day (useful for energy forecasts)
-   - Resets at midnight
-
-6. **Horizon Scalars** (`sensor.mlfl_<exp>_horizon_2h`, etc.)
-   - Individual entities for key forecast horizons
-   - State: single float value at that horizon
-
-7. **Prediction Curve** (`sensor.mlfl_<exp>_curve`)
-   - Combined historical + forecast data
-   - Useful for visualisation dashboards
-
-Returns True if all publishes succeeded, False if any failed (logs all errors).
-
-### Helper Functions
-
-**`make_entity_name(publish_prefix: str, experiment_name: str, suffix: str) -> str`**
-- Construct HA entity name
-- Example: `make_entity_name('mlfl_', 'solar', 'point')` → `'mlfl_solar_point'`
-
-**`dict_from_series(series: pd.Series, max_points: int = 100) -> dict[str, Any]`**
-- Serialise Series to dict for HA attribute storage
-- Automatically samples if >max_points (samples evenly)
-- Returns:
-  ```python
-  {
-      "timestamps": ["2024-01-15 10:30", "2024-01-15 11:30", ...],
-      "values": [100.5, 102.3, ...],
-  }
-  ```
-
-**`daily_cumulative_series(forecast_series: pd.Series, reference_date: Optional[datetime] = None) -> pd.Series`**
-- Group forecast by date and cumulate within each day
-- Resets cumulative at midnight
-- Useful for energy/flow forecasts with daily metrics
-
-**`energy_already_used_today(iface: HAInterface, entity_id: str) -> float`**
-- Fetch total energy used so far today
-- Returns 0.0 if unavailable
-- Placeholder: actual implementation depends on async context
-
----
-
 ## Configuration Examples
 
 ### Covariate Configuration
@@ -385,7 +301,7 @@ Typical usage in forecast pipeline:
 ```python
 import asyncio
 from ml_forecast_lab import (
-    HAInterface, HistoryDB, CovariateResolver, publish_forecasts
+    HAInterface, HistoryDB, CovariateResolver, normalise_history
 )
 
 async def main():
@@ -393,37 +309,23 @@ async def main():
     iface = HAInterface(ha_url="http://supervisor/core")
     db = HistoryDB("/config/mlfl.db")
     resolver = CovariateResolver(iface, covariate_configs)
-    
+
     # 2. Fetch data
     history = await iface.get_history("sensor.solar_power", start, end)
     df_history = normalise_history(history)
     db.store_history("sensor_solar_power", df_history)
-    
+
     # 3. Fetch covariates
     cov_temp = await resolver.fetch_history(
         {"entity_id": "sensor.temperature"},
         start, end, "1H"
     )
-    
+
     # 4. Run forecast (your ML model here)
     # ...
-    
-    # 5. Publish results
-    success = await publish_forecasts(
-        experiment_cfg={
-            "name": "solar",
-            "publish_prefix": "mlfl_",
-            "horizons_to_publish": ["+2h", "+8h"],
-        },
-        iface=iface,
-        app_config={},
-        ds_future=forecast_index,
-        yhat_interval=forecast_df,
-        yhat_level=0.95,
-        metrics={"rmse": 0.42},
-        hist_cum_df=history_cumulative,
-    )
-    
+
+    # 5. Publishing is handled by main.py via _publish_forecast_sensors
+
     # 6. Cleanup
     await iface.close()
     db.close()
