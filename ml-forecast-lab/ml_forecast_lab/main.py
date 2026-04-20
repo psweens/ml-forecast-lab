@@ -141,7 +141,12 @@ class MLForecastLabApp:
         self.server = None
         self.running = False
         self._update_running = False
-        self._forecast_running = False
+        # Per-experiment forecast lock. Using a global flag meant two
+        # experiments scheduled in the same main_loop tick could both pass
+        # the `not running` check (create_task doesn't execute eagerly),
+        # and later the one that finishes first would flip the flag False
+        # while the other was still running — breaking the guarantee.
+        self._forecast_running: Dict[str, bool] = {}
         self.last_update = None
         self.benchmarks_to_run = set()
         # Cached trained models for fast forecast cycles
@@ -2298,7 +2303,7 @@ class MLForecastLabApp:
         if exp_cfg.name not in self._cached_models:
             logger.debug(f"  No cached model for {exp_cfg.name} — waiting for retrain")
             return
-        self._forecast_running = True
+        self._forecast_running[exp_cfg.name] = True
         try:
             await self._forecast_with_cached(exp_cfg.name)
         except Exception as e:
@@ -2311,7 +2316,7 @@ class MLForecastLabApp:
                     status.last_benchmark_status = "failed"
                     status.last_error = f"Forecast: {e}"
         finally:
-            self._forecast_running = False
+            self._forecast_running[exp_cfg.name] = False
 
     async def _run_retrain_cycle(self):
         """[Legacy] Bulk retrain for all experiments (kept for backward compat)."""
@@ -2491,7 +2496,6 @@ class MLForecastLabApp:
         Forecast cycle: use cached models for fast inference + publish sensors.
         If no cached model exists, skip (retrain cycle will create one).
         """
-        self._forecast_running = True
         try:
             await self.load_config()
             for exp_cfg in self.config.experiments:
@@ -2500,14 +2504,15 @@ class MLForecastLabApp:
                 if exp_cfg.name not in self._cached_models:
                     logger.debug(f"  No cached model for {exp_cfg.name} — waiting for retrain")
                     continue
+                self._forecast_running[exp_cfg.name] = True
                 try:
                     await self._forecast_with_cached(exp_cfg.name)
                 except Exception as e:
                     logger.error(f"Forecast failed for {exp_cfg.name}: {e}", exc_info=True)
+                finally:
+                    self._forecast_running[exp_cfg.name] = False
         except Exception as e:
             logger.error(f"Error in forecast cycle: {e}", exc_info=True)
-        finally:
-            self._forecast_running = False
 
     async def _publish_forecast_sensors(
         self,
@@ -2539,8 +2544,26 @@ class MLForecastLabApp:
         - ``_upper_{pct}`` / ``_lower_{pct}``: conformal interval bounds when
           ``y_pred_upper`` / ``y_pred_lower`` are provided (pct = level*100).
         """
-        if not self.ha_interface or len(y_pred) == 0:
+        if not self.ha_interface:
+            logger.warning(
+                f"  Skipping sensor publish for {exp_cfg.name}: no HA interface"
+            )
             return
+        if len(y_pred) == 0:
+            logger.warning(
+                f"  Skipping sensor publish for {exp_cfg.name}: "
+                f"forecast array is empty"
+            )
+            return
+
+        # One timestamp shared across log_forecast, every sensor's attrs,
+        # and the cumulative sensor's "today" partition — so within a single
+        # publish cycle every downstream consumer sees the same issuance
+        # instant. Without this the forecast_log's issued_at, the cumulative
+        # reset-daily boundary, and each sensor's HA last_updated all drift
+        # apart by the time the sequential awaits complete.
+        issued_at = datetime.now(timezone.utc)
+        issued_at_iso = issued_at.isoformat()
 
         units = exp_cfg.units or ""
         publish_name = exp_cfg.publish_name or exp_cfg.name
@@ -2707,7 +2730,7 @@ class MLForecastLabApp:
                 model_version = cached.get("model_version")
                 n_logged = self.history_db.log_forecast(
                     experiment=exp_cfg.name,
-                    issued_at=datetime.now(timezone.utc),
+                    issued_at=issued_at,
                     targets=ds_future_aware.tolist(),
                     predictions=y_pred.tolist(),
                     model_name=model_name,
@@ -2738,17 +2761,31 @@ class MLForecastLabApp:
             except Exception as e:
                 logger.warning(f"Failed to log forecast evolution: {e}")
 
+        # Common attrs applied to every sensor in this cycle. Sharing
+        # last_trained + issued_at lets the dashboard correlate bounds,
+        # cumulative, and accuracy back to the same forecast issuance
+        # even though HA assigns each entity its own last_updated.
+        common_attrs = {
+            "model": model_name,
+            "last_trained": last_trained_iso,
+            "issued_at": issued_at_iso,
+        }
+
+        # Build (entity_id, state, attrs) payloads synchronously; the
+        # actual HTTP POSTs are fired together at the end so every sensor
+        # lands at effectively the same HA last_updated.
+        payloads: list[tuple[str, str, dict]] = []
+
         # --- 1. Main forecast sensor (always published) ----------------------
         main_attrs = {
             "friendly_name": f"{publish_name} Forecast",
             "unit_of_measurement": units,
             "icon": "mdi:chart-timeline-variant-shimmer",
             "state_class": "measurement",
-            "model": model_name,
             "forecast_periods": future_periods,
             "interval_minutes": exp_cfg.interval_minutes,
-            "last_trained": last_trained_iso,
             "forecast": forecast_list,
+            **common_attrs,
         }
         if have_intervals:
             main_attrs["forecast_upper"] = upper_list
@@ -2756,13 +2793,7 @@ class MLForecastLabApp:
             if interval_level is not None:
                 main_attrs["interval_level"] = interval_level
         main_attrs.update(extra_main_attrs)
-        try:
-            await self.ha_interface.set_state(
-                f"{base_entity}_forecast", str(next_val), main_attrs,
-            )
-            logger.info(f"  Published forecast curve to {base_entity}_forecast")
-        except Exception as e:
-            logger.warning(f"  Failed to publish {base_entity}_forecast: {e}")
+        payloads.append((f"{base_entity}_forecast", str(next_val), main_attrs))
 
         # --- 2. Interval sensor (only when source is cumulative) ------------
         # When the source is already per-interval, _interval duplicates the
@@ -2774,16 +2805,13 @@ class MLForecastLabApp:
                 "unit_of_measurement": units,
                 "icon": "mdi:chart-bar",
                 "state_class": "measurement",
-                "model": model_name,
                 "interval_minutes": exp_cfg.interval_minutes,
                 "forecast": forecast_list,
+                **common_attrs,
             }
-            try:
-                await self.ha_interface.set_state(
-                    f"{base_entity}_interval", str(next_val), interval_attrs,
-                )
-            except Exception as e:
-                logger.warning(f"  Failed to publish {base_entity}_interval: {e}")
+            payloads.append(
+                (f"{base_entity}_interval", str(next_val), interval_attrs)
+            )
 
         # --- 3. Cumulative sensor (always published) ------------------------
         # Behaviour is derived from source semantics rather than a separate
@@ -2813,7 +2841,7 @@ class MLForecastLabApp:
                 except Exception:
                     today_seed = 0.0
 
-            now_local_date = datetime.now(timezone.utc).astimezone(local_tz).date()
+            now_local_date = issued_at.astimezone(local_tz).date()
             running_by_day: dict = {}
             cum_list = []
             # Headline state = the projected end-of-today total (last forecast
@@ -2848,7 +2876,6 @@ class MLForecastLabApp:
                 # NOT a monotonic counter and should not be processed by HA's
                 # long-term statistics engine as one.
                 "state_class": "measurement",
-                "model": model_name,
                 "forecast": cum_list,
                 "resets_daily": True,
                 "seeded_with": round(today_seed, 4),
@@ -2856,6 +2883,7 @@ class MLForecastLabApp:
                 "end_of_horizon_value": (
                     round(cum_list[-1]["value"], 4) if cum_list else cum_state
                 ),
+                **common_attrs,
             }
         else:
             cum_vals = np.cumsum(y_pred)
@@ -2873,19 +2901,15 @@ class MLForecastLabApp:
                 # counter. Using total_* would make HA accumulate it in
                 # long-term statistics and suggest it for the Energy dashboard.
                 "state_class": "measurement",
-                "model": model_name,
                 "forecast": cum_list,
                 "resets_daily": False,
+                **common_attrs,
             }
+        payloads.append(
+            (f"{base_entity}_cumulative", str(cum_state), cum_attrs)
+        )
 
-        try:
-            await self.ha_interface.set_state(
-                f"{base_entity}_cumulative", str(cum_state), cum_attrs,
-            )
-        except Exception as e:
-            logger.warning(f"  Failed to publish {base_entity}_cumulative: {e}")
-
-        # --- 4b. Conformal interval sensors ---------------------------------
+        # --- 4. Conformal interval sensors ----------------------------------
         # Separate upper/lower entities let the user graph the band in HA
         # directly (ApexCharts area-between-series, etc) without having
         # to unpack the `forecast_upper` / `forecast_lower` attrs on the
@@ -2903,32 +2927,31 @@ class MLForecastLabApp:
                 "unit_of_measurement": units,
                 "icon": "mdi:arrow-expand-up",
                 "state_class": "measurement",
-                "model": model_name,
                 "interval_level": interval_level,
                 "forecast": upper_list,
+                **common_attrs,
             }
             lower_attrs = {
                 "friendly_name": f"{publish_name} Forecast Lower {lvl_pct}%",
                 "unit_of_measurement": units,
                 "icon": "mdi:arrow-expand-down",
                 "state_class": "measurement",
-                "model": model_name,
                 "interval_level": interval_level,
                 "forecast": lower_list,
+                **common_attrs,
             }
-            try:
-                await self.ha_interface.set_state(
-                    f"{base_entity}_upper_{lvl_pct}",
-                    str(upper_state), upper_attrs,
-                )
-                await self.ha_interface.set_state(
-                    f"{base_entity}_lower_{lvl_pct}",
-                    str(lower_state), lower_attrs,
-                )
-            except Exception as e:
-                logger.warning(f"  Failed to publish interval bounds: {e}")
+            payloads.append(
+                (f"{base_entity}_upper_{lvl_pct}",
+                 str(upper_state), upper_attrs)
+            )
+            payloads.append(
+                (f"{base_entity}_lower_{lvl_pct}",
+                 str(lower_state), lower_attrs)
+            )
 
         # --- 5. Forecast accuracy sensor (lead-time curve) -------------------
+        # DB read stays synchronous-ish inside this block; only the actual
+        # publish is deferred to the parallel gather below.
         if self.history_db and exp_cfg.mode == "production":
             try:
                 actuals_table = self.history_db.safe_table_name(
@@ -2953,6 +2976,7 @@ class MLForecastLabApp:
                         "rmse": ltc["rmse"],
                         "sample_count": ltc["sample_count"],
                         "total_logged": accuracy.get("total_logged", 0),
+                        **common_attrs,
                     }
                     if rev:
                         acc_attrs["revision_first_mae"] = rev.get(
@@ -2964,16 +2988,62 @@ class MLForecastLabApp:
                         acc_attrs["revision_improvement_pct"] = rev.get(
                             "improvement_pct"
                         )
-                    await self.ha_interface.set_state(
+                    payloads.append((
                         f"{base_entity}_forecast_accuracy",
                         str(acc_state),
                         acc_attrs,
-                    )
-                    logger.info(
-                        f"  Published accuracy to {base_entity}_forecast_accuracy"
-                    )
+                    ))
             except Exception as e:
-                logger.warning(f"  Failed to publish forecast accuracy: {e}")
+                logger.warning(
+                    f"  Forecast accuracy prep failed for {exp_cfg.name}: {e}"
+                )
+
+        # --- Parallel publish ------------------------------------------------
+        # Fire every set_state concurrently so all sensors for this
+        # experiment land at effectively the same HA last_updated. Sequential
+        # awaits otherwise spread them across ~300ms–1s — enough for a
+        # dashboard to render "updated X seconds ago" inconsistently across
+        # sensors that ought to share a cycle.
+        #
+        # Each publish is wrapped so one failure doesn't cancel the rest
+        # (gather with return_exceptions=False would abort the sibling
+        # tasks on the first raise). We also check set_state's bool return
+        # value — it silently swallows HA errors and returns False instead
+        # of raising, so the outer try/except alone would log success when
+        # the POST actually failed.
+        async def _publish_one(entity_id: str, state: str, attrs: dict):
+            try:
+                ok = await self.ha_interface.set_state(entity_id, state, attrs)
+                return entity_id, bool(ok), None
+            except Exception as err:
+                return entity_id, False, err
+
+        results = await asyncio.gather(*[
+            _publish_one(eid, s, a) for eid, s, a in payloads
+        ])
+
+        succeeded = [eid for eid, ok, _ in results if ok]
+        failed = [(eid, err) for eid, ok, err in results if not ok]
+
+        if succeeded:
+            logger.info(
+                f"  Published {len(succeeded)}/{len(payloads)} sensors "
+                f"for {exp_cfg.name}: "
+                f"{', '.join(e.split('.')[-1] for e in succeeded)}"
+            )
+        for eid, err in failed:
+            reason = repr(err) if err else "set_state returned False"
+            logger.warning(f"  Failed to publish {eid}: {reason}")
+
+        if failed and self.web_app:
+            status = self.web_app.state.appstate.experiment_statuses.get(
+                exp_cfg.name
+            )
+            if status:
+                status.last_error = (
+                    f"Publish: {len(failed)}/{len(payloads)} sensors failed "
+                    f"({', '.join(e.split('.')[-1] for e, _ in failed)})"
+                )
 
     async def _forecast_with_cached(self, experiment_name: str):
         """Run inference with a cached model and publish sensors.
@@ -4308,8 +4378,12 @@ class MLForecastLabApp:
 
                     # Forecast this experiment
                     if (now >= self._next_forecast_per_exp[exp_cfg.name]
-                            and not self._forecast_running):
+                            and not self._forecast_running.get(exp_cfg.name, False)):
                         self._next_forecast_per_exp[exp_cfg.name] = now + timedelta(seconds=fc_mins * 60)
+                        # Reserve the slot synchronously so a second scheduler
+                        # tick can't double-fire this experiment before the
+                        # task body runs and sets the flag itself.
+                        self._forecast_running[exp_cfg.name] = True
                         asyncio.create_task(self._forecast_single(exp_cfg))
 
                 # Update UI countdowns

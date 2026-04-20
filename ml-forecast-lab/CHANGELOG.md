@@ -1,5 +1,62 @@
 # Changelog
 
+## 2.26.2
+
+### Fixed
+
+- **Sensors within an experiment no longer drift apart in publish time.**
+  `_publish_forecast_sensors` used to await each `set_state` call
+  sequentially — `_forecast`, `_interval`, `_cumulative`, `_upper_{pct}`,
+  `_lower_{pct}`, `_forecast_accuracy` — so HA stamped each entity with
+  its own `last_updated`, spread across ~300 ms–1 s per cycle (worst
+  when the accuracy sensor's DB read landed before its publish). All
+  six set_state calls are now collected into a `payloads` list and
+  fired together via `asyncio.gather`, so every sensor for one
+  experiment lands at effectively the same HA `last_updated`.
+
+- **Upper/lower interval bounds shared a single `try/except`.** If the
+  upper publish raised, lower was silently skipped for that cycle,
+  leaving the band one-sided until the next forecast. Each publish is
+  now wrapped in its own `_publish_one` coroutine; a failure on one
+  entity never suppresses its sibling.
+
+- **`set_state` failures logged as successes.** `HAInterface.set_state`
+  catches `RuntimeError` internally and returns `False` instead of
+  raising. The publisher discarded that return value, so any failed
+  POST (timeout, 5xx, stale SUPERVISOR_TOKEN) still emitted
+  `"Published forecast curve to …"` at INFO. Return values are now
+  checked; failures log `"Failed to publish …"` at WARNING and the
+  experiment's `last_error` surfaces the count/list of missing
+  sensors.
+
+- **Three independent `datetime.now()` calls per publish cycle.** The
+  forecast_log `issued_at`, the cumulative sensor's local-midnight
+  boundary, and each sensor's implicit HA `last_updated` all came from
+  separate clock reads. A single `issued_at` is now captured at the
+  top of `_publish_forecast_sensors` and reused for `log_forecast`,
+  the reset-daily partition, and as a new `issued_at` attribute on
+  every sensor — so the full cycle has one consistent issuance time.
+
+- **`last_trained` attribute only on `_forecast`.** It's now carried
+  on every sensor (main, interval, cumulative, upper/lower, accuracy)
+  via a shared `common_attrs` dict, alongside `model` and the new
+  `issued_at`. Dashboards can correlate any sensor back to its
+  training epoch without reading from the main entity.
+
+- **Global `_forecast_running` flag allowed a same-tick double-fire
+  race.** Because `asyncio.create_task` doesn't execute eagerly, two
+  experiments scheduled in the same main-loop iteration could both
+  pass the `not running` check before either task body set the flag;
+  conversely, the one that finished first would flip the flag False
+  while the other was still running. Replaced with a per-experiment
+  `Dict[str, bool]` and a synchronous slot reservation in the
+  scheduler before `create_task`, so each experiment's lock is
+  independent.
+
+- **Silent early-return when `ha_interface` was None or `y_pred` was
+  empty.** Zero sensors published and the logs had no explanation.
+  Now logs a WARNING naming which condition fired.
+
 ## 2.26.1
 
 ### Removed
