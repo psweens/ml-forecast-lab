@@ -151,7 +151,7 @@ class CovariateResolver:
             return resampled
 
         except Exception as e:
-            logger.error(f"Error fetching covariate {entity_id}: {e}")
+            logger.error(f"Error fetching covariate {entity_id}: {e}", exc_info=True)
             return pd.Series(dtype=float, name=name)
 
     async def fetch_future(

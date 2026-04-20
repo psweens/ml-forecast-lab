@@ -83,9 +83,46 @@ def _parse_log_level(raw):
 LOG_DIR = Path("/data/ml_forecast_lab/logs")
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "mlfl.log"
-LOG_FORMAT = "%(asctime)s %(levelname)-5s %(message)s"
-LOG_FORMAT_FILE = "%(asctime)s %(levelname)-5s [%(name)s] %(message)s"
+LOG_FORMAT = "%(asctime)s %(levelname)-5s %(phase)-7s %(message)s"
+LOG_FORMAT_FILE = "%(asctime)s %(levelname)-5s %(phase)-7s [%(name)s] %(message)s"
 LOG_LEVEL = _parse_log_level(os.getenv("LOG_LEVEL"))
+
+
+# Phase tags derived from module name so every log line is greppable by
+# subsystem (e.g. `grep '\[BENCH\]' mlfl.log`). Keep tags <=5 chars so the
+# padded column stays at 7 including brackets.
+_PHASE_PREFIX_MAP = (
+    ("ml_forecast_lab.benchmark", "BENCH"),
+    ("ml_forecast_lab.models",    "MODEL"),
+    ("ml_forecast_lab.web",       "WEB"),
+    ("ml_forecast_lab.ha_interface", "HA"),
+    ("ml_forecast_lab.preprocessing", "PREP"),
+    ("ml_forecast_lab.features",  "FEAT"),
+    ("ml_forecast_lab.covariates", "COV"),
+    ("ml_forecast_lab.publishing", "PUB"),
+    ("ml_forecast_lab.solar_physics", "SOLAR"),
+    ("ml_forecast_lab.training_events", "TRAIN"),
+    ("ml_forecast_lab.dashboard", "DASH"),
+    ("ml_forecast_lab.config",    "CFG"),
+    ("ml_forecast_lab.db",        "DB"),
+    ("ml_forecast_lab.main",      "APP"),
+)
+
+
+class _PhaseFormatter(logging.Formatter):
+    """Formatter that injects a short [PHASE] tag derived from the logger name."""
+
+    def format(self, record):
+        record.phase = _phase_for(record.name)
+        return super().format(record)
+
+
+def _phase_for(name: str) -> str:
+    for prefix, tag in _PHASE_PREFIX_MAP:
+        if name == prefix or name.startswith(prefix + "."):
+            return f"[{tag}]"
+    return "[MLFL]"
+
 
 # Root logger setup
 root_logger = logging.getLogger()
@@ -93,7 +130,7 @@ root_logger.setLevel(LOG_LEVEL)
 
 # Console handler — short format for HA addon logs
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt="%H:%M:%S"))
+console_handler.setFormatter(_PhaseFormatter(LOG_FORMAT, datefmt="%H:%M:%S"))
 root_logger.addHandler(console_handler)
 
 # Rotating file handler — detailed format with module name for debugging
@@ -103,7 +140,7 @@ file_handler = logging.handlers.RotatingFileHandler(
     backupCount=5,
     encoding="utf-8",
 )
-file_handler.setFormatter(logging.Formatter(LOG_FORMAT_FILE, datefmt="%Y-%m-%d %H:%M:%S"))
+file_handler.setFormatter(_PhaseFormatter(LOG_FORMAT_FILE, datefmt="%Y-%m-%d %H:%M:%S"))
 root_logger.addHandler(file_handler)
 
 logger = logging.getLogger(__name__)
@@ -124,7 +161,7 @@ async def main():
         await app.run()
 
     except ImportError as e:
-        logger.error(f"Failed to import main application: {e}")
+        logger.error(f"Failed to import main application: {e}", exc_info=True)
         logger.info("Running in stub mode with basic HTTP server...")
         await stub_server()
 

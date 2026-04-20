@@ -304,11 +304,13 @@ class BenchmarkRunner:
             Aggregated results across folds.
         """
         model_result = ModelResult(model_name=model.name)
+        n_folds = len(fold_indices)
 
         for fold_idx, (train_idx, test_idx) in enumerate(fold_indices):
-            logger.debug(
-                f'Processing fold {fold_idx + 1}/{len(fold_indices)} '
-                f'for model {model.name}'
+            fold_start_time = time.time()
+            logger.info(
+                f'  [fold {fold_idx + 1}/{n_folds}] {model.name}: '
+                f'train={len(train_idx)} test={len(test_idx)}'
             )
 
             # Capture DatetimeIndex BEFORE the reset so we can group test
@@ -335,7 +337,10 @@ class BenchmarkRunner:
                     df_test, self.experiment_cfg, purpose='test'
                 )
             except Exception as e:
-                logger.error(f'Feature building failed for fold {fold_idx}: {e}')
+                logger.error(
+                    f'Feature building failed for model={model.name} fold={fold_idx + 1}/{len(fold_indices)}: {e}',
+                    exc_info=True,
+                )
                 model_result.fold_metrics.append({})
                 model_result.train_times.append(np.nan)
                 model_result.inference_times.append(np.nan)
@@ -452,7 +457,10 @@ class BenchmarkRunner:
                           epoch_callback=fold_cb,
                           **sequence_kwargs)
             except Exception as e:
-                logger.error(f'Model training failed for fold {fold_idx}: {e}')
+                logger.error(
+                    f'Model training failed for model={model.name} fold={fold_idx + 1}/{len(fold_indices)}: {e}',
+                    exc_info=True,
+                )
                 model_result.fold_metrics.append({})
                 model_result.train_times.append(np.nan)
                 model_result.inference_times.append(np.nan)
@@ -519,7 +527,10 @@ class BenchmarkRunner:
                 else:
                     y_pred = model.predict(X_test)
             except Exception as e:
-                logger.error(f'Model prediction failed for fold {fold_idx}: {e}')
+                logger.error(
+                    f'Model prediction failed for model={model.name} fold={fold_idx + 1}/{len(fold_indices)}: {e}',
+                    exc_info=True,
+                )
                 model_result.fold_metrics.append({})
                 model_result.train_times.append(train_time)
                 model_result.inference_times.append(np.nan)
@@ -615,6 +626,14 @@ class BenchmarkRunner:
                         'val_loss': [float(v) for v in vl],
                     }
 
+            fold_metric_val = fold_metrics.get(self.production_metric, np.nan)
+            logger.info(
+                f'  [fold {fold_idx + 1}/{n_folds}] {model.name} done: '
+                f'{self.production_metric}={fold_metric_val:.4f} '
+                f'(train={train_time:.1f}s, infer={inference_time:.2f}s, '
+                f'total={time.time() - fold_start_time:.1f}s)'
+            )
+
         # Aggregate across folds — compute mean for all metrics
         if model_result.fold_metrics:
             metrics_to_compute = list(set(self.metrics + [self.production_metric]))
@@ -695,12 +714,19 @@ class BenchmarkRunner:
             metric_used=self.production_metric,
         )
 
-        for model_name, model in models.items():
+        n_models = len(models)
+        for model_idx, (model_name, model) in enumerate(models.items(), start=1):
+            logger.info(f'[model {model_idx}/{n_models}] Running {model_name}')
+            model_start = time.time()
             try:
                 model_result = self.run_single_model(df, model, fold_indices)
                 result.model_results[model_name] = model_result
+                logger.info(
+                    f'[model {model_idx}/{n_models}] {model_name} finished '
+                    f'in {time.time() - model_start:.1f}s'
+                )
             except Exception as e:
-                logger.error(f'Benchmark failed for model {model_name}: {e}')
+                logger.error(f'Benchmark failed for model {model_name}: {e}', exc_info=True)
                 result.model_results[model_name] = ModelResult(model_name=model_name)
 
         # Composite ranking across folds (Demšar 2006). Computed twice:

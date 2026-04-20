@@ -117,7 +117,7 @@ class HistoryDB:
             logger.debug(f"Inserted {inserted} records into {table_name}")
             return inserted
         except sqlite3.Error as e:
-            logger.error(f"Error inserting into {table_name}: {e}")
+            logger.error(f"Error inserting into {table_name}: {e}", exc_info=True)
             self.conn.rollback()
             return 0
 
@@ -172,7 +172,7 @@ class HistoryDB:
             logger.info(f"Deleted {deleted} old records from {table_name}")
             return deleted
         except sqlite3.Error as e:
-            logger.error(f"Error cleaning up {table_name}: {e}")
+            logger.error(f"Error cleaning up {table_name}: {e}", exc_info=True)
             self.conn.rollback()
             return 0
 
@@ -318,7 +318,7 @@ class HistoryDB:
             self.conn.commit()
             return cursor.rowcount
         except sqlite3.Error as e:
-            logger.error(f"Error logging forecast for {experiment}: {e}")
+            logger.error(f"Error logging forecast for {experiment}: {e}", exc_info=True)
             self.conn.rollback()
             return 0
 
@@ -520,7 +520,7 @@ class HistoryDB:
             ))
             lead_rows = cursor.fetchall()
         except sqlite3.Error as e:
-            logger.error(f"Forecast accuracy query failed: {e}")
+            logger.error(f"Forecast accuracy query failed: {e}", exc_info=True)
             return {"error": str(e)}
 
         lead_time_curve = {
@@ -828,7 +828,7 @@ class HistoryDB:
             ))
             candidate_rows = cursor.fetchall()
         except sqlite3.Error as e:
-            logger.error(f"Trajectory candidates query failed: {e}")
+            logger.error(f"Trajectory candidates query failed: {e}", exc_info=True)
             return {"error": str(e)}
 
         available_targets = [r[0] for r in candidate_rows]
@@ -870,7 +870,7 @@ class HistoryDB:
             )
             forecast_rows = cursor.fetchall()
         except sqlite3.Error as e:
-            logger.error(f"Trajectory fetch failed: {e}")
+            logger.error(f"Trajectory fetch failed: {e}", exc_info=True)
             return {"error": str(e)}
 
         forecasts = [
@@ -1037,7 +1037,7 @@ class HistoryDB:
             """, tuple(params))
             rows = cursor.fetchall()
         except sqlite3.Error as e:
-            logger.error(f"Conformal quantile query failed: {e}")
+            logger.error(f"Conformal quantile query failed: {e}", exc_info=True)
             return {
                 "quantiles": {},
                 "fallback_quantile": None,
@@ -1175,7 +1175,7 @@ class HistoryDB:
             ))
             by_lead_rows = cursor.fetchall()
         except sqlite3.Error as e:
-            logger.error(f"Coverage query failed: {e}")
+            logger.error(f"Coverage query failed: {e}", exc_info=True)
             return {"by_lead": {"lead_minutes": [], "coverage": [], "n": []}, "overall": {}}
 
         by_lead = {
@@ -1633,7 +1633,7 @@ class HistoryDB:
                 logger.info(f"Pruned {deleted} old forecast_log rows for {experiment}")
             return deleted
         except sqlite3.Error as e:
-            logger.error(f"Error pruning forecast_log for {experiment}: {e}")
+            logger.error(f"Error pruning forecast_log for {experiment}: {e}", exc_info=True)
             self.conn.rollback()
             return 0
 
@@ -1647,7 +1647,7 @@ class HistoryDB:
             self.conn.commit()
             return cursor.rowcount
         except sqlite3.Error as e:
-            logger.error(f"Error deleting forecast_log for {experiment}: {e}")
+            logger.error(f"Error deleting forecast_log for {experiment}: {e}", exc_info=True)
             self.conn.rollback()
             return 0
 
@@ -1690,7 +1690,7 @@ class HistoryDB:
             self.conn.commit()
             logger.debug(f"Saved benchmark result for {experiment}")
         except sqlite3.Error as e:
-            logger.error(f"Error saving benchmark result for {experiment}: {e}")
+            logger.error(f"Error saving benchmark result for {experiment}: {e}", exc_info=True)
             self.conn.rollback()
 
     def load_all_benchmark_results(self) -> dict:
@@ -1707,7 +1707,7 @@ class HistoryDB:
             cursor.execute("SELECT experiment, data FROM benchmark_results")
             return {row[0]: row[1] for row in cursor.fetchall()}
         except sqlite3.Error as e:
-            logger.error(f"Error loading benchmark results: {e}")
+            logger.error(f"Error loading benchmark results: {e}", exc_info=True)
             return {}
 
     def delete_benchmark_result(self, experiment: str) -> None:
@@ -1720,7 +1720,7 @@ class HistoryDB:
             )
             self.conn.commit()
         except sqlite3.Error as e:
-            logger.error(f"Error deleting benchmark result for {experiment}: {e}")
+            logger.error(f"Error deleting benchmark result for {experiment}: {e}", exc_info=True)
             self.conn.rollback()
 
     def close(self) -> None:

@@ -798,7 +798,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             logger.info(f"Saved {len(overrides)} override(s) for {model_name}")
             return JSONResponse(content={"success": True, "overrides": overrides, "current": current})
         except Exception as e:
-            logger.error(f"Failed to save model params: {e}")
+            logger.error(f"Failed to save model params: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.post("/api/models/params/reset")
@@ -825,7 +825,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             logger.info(f"Reset {model_name} to defaults")
             return JSONResponse(content={"success": True, "defaults": defaults})
         except Exception as e:
-            logger.error(f"Failed to reset model params: {e}")
+            logger.error(f"Failed to reset model params: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.get("/experiment/{name}", response_class=Response)
@@ -1269,7 +1269,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             else:
                 return JSONResponse(content={"success": False, "error": "Covariate not found"})
         except Exception as e:
-            logger.error(f"Failed to remove covariate: {e}")
+            logger.error(f"Failed to remove covariate: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.post("/experiment/{name}/add-covariate")
@@ -1307,7 +1307,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except ValueError as e:
             return JSONResponse(content={"success": False, "error": str(e)})
         except Exception as e:
-            logger.error(f"Failed to add covariate: {e}")
+            logger.error(f"Failed to add covariate: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.post("/experiment/{name}/add-load-subtract")
@@ -1366,7 +1366,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             # SubtractCfg validation failure — message is user-actionable.
             return JSONResponse(content={"success": False, "error": str(e)})
         except Exception as e:
-            logger.error(f"Failed to add load_subtract: {e}")
+            logger.error(f"Failed to add load_subtract: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.post("/experiment/{name}/remove-load-subtract")
@@ -1411,7 +1411,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "success": False, "error": "load_subtract entry not found",
             })
         except Exception as e:
-            logger.error(f"Failed to remove load_subtract: {e}")
+            logger.error(f"Failed to remove load_subtract: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.post("/experiment/{name}/clear-load-subtract")
@@ -1439,7 +1439,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 content={"success": True, "removed": n_removed}
             )
         except Exception as e:
-            logger.error(f"Failed to clear load_subtract: {e}")
+            logger.error(f"Failed to clear load_subtract: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.post("/experiment/{name}/stop-training")
@@ -1465,7 +1465,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             else:
                 return JSONResponse(content={"success": False, "error": "No running task for this experiment"})
         except Exception as e:
-            logger.error(f"Failed to stop training for {name}: {e}")
+            logger.error(f"Failed to stop training for {name}: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.post("/experiment/{name}/retrain")
@@ -1525,7 +1525,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except ValueError as e:
             return JSONResponse(content={"success": False, "error": str(e)})
         except Exception as e:
-            logger.error(f"Failed to create experiment: {e}")
+            logger.error(f"Failed to create experiment: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": str(e)})
 
         # Register in-memory so it appears immediately
@@ -1555,7 +1555,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             if not removed:
                 return JSONResponse(content={"success": False, "error": "Experiment not found in config"})
         except Exception as e:
-            logger.error(f"Failed to delete experiment: {e}")
+            logger.error(f"Failed to delete experiment: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": str(e)})
 
         # Remove from in-memory state
@@ -1844,7 +1844,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 )
                 targets_with_multi_issuances = int(cur.fetchone()[0])
         except Exception as e:
-            logger.error(f"forecast-log-stats failed for {name}: {e}")
+            logger.error(f"forecast-log-stats failed for {name}: {e}", exc_info=True)
             return JSONResponse(content={"error": str(e)}, status_code=500)
 
         # Surface common diagnostic conditions so future debugging
@@ -2343,7 +2343,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "retraining": retrain_scheduled,
             })
         except Exception as e:
-            logger.error(f"Failed to apply tuning: {e}")
+            logger.error(f"Failed to apply tuning: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.get("/experiment/{name}/results")
@@ -2484,7 +2484,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"success": True})
 
         except Exception as e:
-            logger.error(f"Failed to toggle model: {e}")
+            logger.error(f"Failed to toggle model: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.post("/api/experiment/{exp_name}/models/toggle")
@@ -2534,7 +2534,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"success": True})
 
         except Exception as e:
-            logger.error(f"Failed to toggle model for {exp_name}: {e}")
+            logger.error(f"Failed to toggle model for {exp_name}: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.get("/settings")
@@ -2706,7 +2706,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"success": True})
 
         except Exception as e:
-            logger.error(f"Failed to save settings: {e}")
+            logger.error(f"Failed to save settings: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.post("/api/experiment-settings")
@@ -2835,7 +2835,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"success": True})
 
         except Exception as e:
-            logger.error(f"Failed to save experiment settings: {e}")
+            logger.error(f"Failed to save experiment settings: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": str(e)})
 
     @app.get("/api/log")

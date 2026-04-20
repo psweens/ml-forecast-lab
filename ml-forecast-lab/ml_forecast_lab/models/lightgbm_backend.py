@@ -401,7 +401,7 @@ class LightGBMModel(ForecastModel):
             logger.info(f"Model saved successfully to {path}")
 
         except Exception as e:
-            logger.error(f"Failed to save model: {e}")
+            logger.error(f"Failed to save model to {path}: {e}", exc_info=True)
             raise IOError(f"Failed to save model to {path}: {e}")
 
     def load(self, path: str) -> None:
@@ -434,5 +434,5 @@ class LightGBMModel(ForecastModel):
             logger.info(f"Model loaded successfully from {path}")
 
         except Exception as e:
-            logger.error(f"Failed to load model: {e}")
+            logger.error(f"Failed to load model from {path}: {e}", exc_info=True)
             raise IOError(f"Failed to load model from {path}: {e}")

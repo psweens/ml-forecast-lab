@@ -1,5 +1,69 @@
 # Changelog
 
+## 2.26.3
+
+### Added
+
+- **Phase-tag log formatter.** Every log line now carries a short `[BENCH]`,
+  `[MODEL]`, `[WEB]`, `[APP]`, `[HA]`, `[DB]`, `[PREP]`, `[FEAT]`, `[COV]`,
+  `[PUB]`, `[CFG]`, `[SOLAR]`, `[TRAIN]`, `[DASH]` or `[MLFL]` tag derived
+  from the logger's module name, so `mlfl.log` can be filtered per
+  subsystem with a simple grep. A new `_PhaseFormatter` in `__main__.py`
+  injects the tag and the two handler format strings (`LOG_FORMAT` /
+  `LOG_FORMAT_FILE`) left-align it in a 7-char column so the message
+  column stays vertically aligned. No new dependencies — stdlib only,
+  so the raw `mlfl.log` that the `/log` web endpoint streams back stays
+  readable as plain text (no ANSI junk).
+
+- **Per-fold and per-model progress markers in the benchmark runner.**
+  With 14 backends × 5 folds = 70 inner iterations, the previous log
+  went silent between `"Starting benchmark"` and the final leaderboard.
+  Each fold now emits a start line — `[fold 3/5] lstm: train=N test=N` —
+  and a completion line with the production metric plus train/infer
+  timings — `[fold 3/5] lstm done: mae=0.0834 (train=11.3s, infer=0.42s,
+  total=12.1s)`. The outer model loop adds a `[model 3/14] Running
+  lstm` banner and a matching `[model 3/14] lstm finished in Xs`
+  marker. Trial progress in the tuning path was already in shape and
+  is unchanged.
+
+- **Sensor-publish start line.** `_publish_forecast_sensors` now logs
+  a single INFO line before it begins building payloads, naming the
+  base entity, model, horizon (`N×Mmin (Xh)`), and the headline
+  `next` value with units. Pairs with the existing success summary so
+  a publish cycle has an obvious start and end in the log — previously
+  you only saw the summary after the fact.
+
+### Changed
+
+- **Benchmark error logs now name the model.** `Feature building
+  failed for fold N`, `Model training failed for fold N`, and `Model
+  prediction failed for fold N` used to print only the fold index, so
+  a 14-model run with one bad backend forced you to correlate timing
+  to figure out which model crashed. They now include `model=<name>
+  fold=<i>/<N>` so the failing backend is obvious.
+
+- **Sensor-publish completion summary surfaces `next` and band
+  width.** The `Published X/N sensors for <exp>` line now carries the
+  headline `next=<val> <units>` and — when conformal bounds landed —
+  `bands=±80%`, matching the start line so the pair brackets a
+  complete picture of what went to HA.
+
+### Fixed
+
+- **Exception handlers that swallowed tracebacks.** 27 `logger.error`
+  / `logger.warning` sites across `benchmark/runner.py` (4 fold/model
+  failure paths), `db.py` (13 query/IO errors), `web/app.py` (16 API
+  endpoint handlers), both tree model backends, `models/registry.py`,
+  `covariates.py`, `ha_interface.py`, the heartbeat, the conformal
+  band path, the forecast-accuracy prep, and a tuning trial-failure
+  warning — all interpolated `{e}` into the message but never passed
+  `exc_info=True`, so the actual stack trace was lost. All now
+  propagate the traceback, turning "Failed to publish / query / load"
+  warnings from one-liners into debuggable reports. The per-sensor
+  publish failure uses the captured exception instance via
+  `exc_info=err` so only failures with an exception print a traceback;
+  `set_state returned False` cases stay concise.
+
 ## 2.26.2
 
 ### Fixed

@@ -340,7 +340,7 @@ class HAInterface:
             logger.debug(f"State set: {entity_id} -> {state}")
             return True
         except RuntimeError as e:
-            logger.error(f"Failed to set state {entity_id}: {e}")
+            logger.error(f"Failed to set state {entity_id}: {e}", exc_info=True)
             return False
 
     async def get_config(self) -> dict:

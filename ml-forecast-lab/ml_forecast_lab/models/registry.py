@@ -210,7 +210,7 @@ class ModelRegistry:
                 results[name] = self.create(name, **kwargs)
                 logger.debug(f'Successfully created {name!r}')
             except Exception as e:
-                logger.error(f'Failed to create {name!r}: {e}')
+                logger.error(f'Failed to create {name!r}: {e}', exc_info=True)
                 failed.append((name, str(e)))
 
         if failed:

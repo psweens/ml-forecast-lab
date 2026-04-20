@@ -2592,6 +2592,16 @@ class MLForecastLabApp:
         ]
         next_val = round(float(y_pred[0]), 4)
 
+        unit_str = f" {units}" if units else ""
+        horizon_min = future_periods * exp_cfg.interval_minutes
+        horizon_hours = horizon_min / 60.0
+        logger.info(
+            f"Publishing forecast for {exp_cfg.name}: "
+            f"base={base_entity}, model={model_name}, "
+            f"horizon={future_periods}×{exp_cfg.interval_minutes}min "
+            f"({horizon_hours:.1f}h), next={next_val}{unit_str}"
+        )
+
         # Auto-compute conformal 80% interval bands when bounds aren't
         # provided explicitly and we have a residual history. Adaptive
         # (online) conformal — quantiles come from deployed forecast /
@@ -2685,7 +2695,7 @@ class MLForecastLabApp:
                         f"median width={float(np.median(q_vec*2)):.3f}"
                     )
             except Exception as e:
-                logger.warning(f"  Conformal band computation failed: {e}")
+                logger.warning(f"  Conformal band computation failed: {e}", exc_info=True)
 
         # Optional conformal interval lists. Both arrays must be present
         # and sized to y_pred to be considered valid.
@@ -2995,7 +3005,8 @@ class MLForecastLabApp:
                     ))
             except Exception as e:
                 logger.warning(
-                    f"  Forecast accuracy prep failed for {exp_cfg.name}: {e}"
+                    f"  Forecast accuracy prep failed for {exp_cfg.name}: {e}",
+                    exc_info=True,
                 )
 
         # --- Parallel publish ------------------------------------------------
@@ -3026,14 +3037,18 @@ class MLForecastLabApp:
         failed = [(eid, err) for eid, ok, err in results if not ok]
 
         if succeeded:
+            band_note = f", bands=±{int(interval_level*100)}%" if have_intervals and interval_level else ""
             logger.info(
                 f"  Published {len(succeeded)}/{len(payloads)} sensors "
-                f"for {exp_cfg.name}: "
+                f"for {exp_cfg.name} (next={next_val}{unit_str}{band_note}): "
                 f"{', '.join(e.split('.')[-1] for e in succeeded)}"
             )
         for eid, err in failed:
             reason = repr(err) if err else "set_state returned False"
-            logger.warning(f"  Failed to publish {eid}: {reason}")
+            logger.warning(
+                f"  Failed to publish {eid}: {reason}",
+                exc_info=err if err else False,
+            )
 
         if failed and self.web_app:
             status = self.web_app.state.appstate.experiment_statuses.get(
@@ -3681,7 +3696,7 @@ class MLForecastLabApp:
                 mase = result.metrics.get("mase", float("inf"))
                 status = "completed"
             except Exception as e:
-                logger.warning(f"  Trial {trial.number} failed: {e}")
+                logger.warning(f"  Trial {trial.number} failed: {e}", exc_info=True)
                 mae = float("inf")
                 rmse = float("inf")
                 mase = float("inf")
@@ -4294,7 +4309,7 @@ class MLForecastLabApp:
             )
 
         except Exception as e:
-            logger.error(f"Failed to publish heartbeat: {e}")
+            logger.error(f"Failed to publish heartbeat: {e}", exc_info=True)
 
     async def main_loop(self):
         """
