@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.26.5
+
+### Fixed
+
+- **`_forecast_running` flag leaked on early returns, freezing forecasts
+  for some experiments.** 2.26.2 moved the slot reservation synchronously
+  into the scheduler (`self._forecast_running[name] = True` before
+  `asyncio.create_task(self._forecast_single(exp_cfg))`) to close a
+  same-tick double-fire race, but `_forecast_single` still had two
+  early-return branches — non-production mode, and `name not in
+  _cached_models` — that returned *before* the `try/finally` that clears
+  the flag. In a multi-experiment setup, retrains are queued sequentially
+  via `_retrain_queue`, so at the first forecast tick only the
+  experiment whose retrain finished first has a cached model; the
+  others hit the `no cached model` return and their `_forecast_running`
+  flag stays `True` forever. From then on the scheduler's
+  `not self._forecast_running.get(name, False)` guard skips those
+  experiments on every tick, silently freezing their entire sensor
+  family (`_forecast`, `_cumulative`, `_upper_80`, `_lower_80`,
+  `_forecast_accuracy`) while other experiments keep updating — the
+  "next forecast doesn't always create a new forecast for some of the
+  sensors" symptom. The `try/finally` now wraps the full body so the
+  flag is always cleared, regardless of which exit path the task takes.
+
 ## 2.26.4
 
 ### Added
