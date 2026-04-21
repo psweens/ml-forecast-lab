@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.26.6
+
+### Fixed
+
+- **Forecast-log inspector button threw "Can't find variable:
+  loadForecastLogStats" under real-world conditions.** v2.25.3 added a
+  defensive try/catch around the button's onclick because the handler
+  sometimes silently did nothing, but couldn't reproduce the underlying
+  cause. The actual mechanism: `window.loadForecastLogStats` was assigned
+  ~1300 lines into the big IIFE in `{% block scripts %}`, so any earlier
+  throw during IIFE evaluation (bad Jinja-interpolated value, localStorage
+  access denied, missing `Intl` features, etc.) aborted execution before
+  the assignment, leaving the button's onclick referencing a symbol that
+  never came into existence. The handler is now defined in its own
+  `<script>` block right next to the button, with the URL rendered
+  directly via Jinja rather than relying on closure vars from the main
+  IIFE, so an unrelated failure elsewhere in the scripts block can't
+  take the diagnostic button out.
+- **Surface the root-cause error, not just the downstream symptom.** A
+  top-of-block `window.addEventListener('error', …)` now stashes the
+  first unhandled script error on `window.__mlflFirstError`. The
+  Forecast-log button's catch appends it when the handler is still
+  missing, so the next time this class of failure shows up we see the
+  actual throw — not just "Can't find variable: loadForecastLogStats".
+
 ## 2.26.5
 
 ### Fixed
