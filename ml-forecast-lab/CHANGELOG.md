@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.26.7
+
+### Fixed
+
+- **Root cause of the Forecast-log button failure: HTML autoescape on
+  the `EXP_UNITS` fallback emitted `var EXP_UNITS = &#34;&#34;;` for
+  any experiment without a `units:` value (the default — `units: str
+  = ''` in `ExperimentCfg`).** `experiment.html` had `var EXP_UNITS =
+  {{ units | tojson if units else '""' }};`. The truthy branch goes
+  through `|tojson`, which returns a Markup-safe string — autoescape
+  leaves it alone. The else branch returned a plain Jinja literal
+  `""`, which Jinja's HTML autoescape rewrote to `&#34;&#34;` on the
+  way into the `<script>`. The browser's JS parser does not decode
+  HTML entities inside `<script>`, so it threw `SyntaxError:
+  Unexpected token '&'` at that line, aborting the IIFE before any
+  of the `window.X = …` assignments below it ran — including
+  `window.loadForecastLogStats`. The button's onclick then hit a
+  `ReferenceError: Can't find variable: loadForecastLogStats`, which
+  the v2.25.3 defensive fallback faithfully rendered. Replaced the
+  conditional with `{{ (units or '') | tojson }}` so it always pipes
+  through the Markup-safe filter. v2.26.6's button colocation +
+  error capture turn out to be useful belt-and-braces for any future
+  variant of the same class of bug, but this fix kills the actual
+  trigger every existing user is hitting.
+
 ## 2.26.6
 
 ### Fixed

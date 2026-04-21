@@ -1945,7 +1945,16 @@ window.showTab = function(el) {
     // here and silently default cumulative sensors to 'raw' mode.
     var EXP_SOURCE_CUMULATIVE = {% if exp_config and exp_config.source_is_cumulative %}true{% else %}false{% endif %};
     var EXP_RESET_DAILY       = {% if exp_config and exp_config.reset_daily %}true{% else %}false{% endif %};
-    var EXP_UNITS             = {{ units | tojson if units else '""' }};
+    // Always pipe through |tojson — the filter returns a Markup-safe
+    // string, so autoescape leaves quotes alone. The previous
+    // `... if units else '""'` form fell into the else branch when
+    // units was empty (the default for experiments with no units:
+    // setting), and Jinja autoescape rewrote `""` to `&#34;&#34;`,
+    // which is invalid inside a <script> body — the JS parser does
+    // not decode HTML entities — and the resulting SyntaxError
+    // aborted the IIFE before `window.loadForecastLogStats` (and
+    // every other window.X assignment further down) was reached.
+    var EXP_UNITS             = {{ (units or '') | tojson }};
     var EXP_INTERVAL_MIN      = {{ exp_config.interval_minutes if exp_config else 30 }};
     // HA server's configured IANA timezone. Used by the Forecast
     // Accuracy TZ toggle to render charts in the TZ where events
