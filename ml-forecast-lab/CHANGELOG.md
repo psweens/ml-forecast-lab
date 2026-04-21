@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.26.4
+## 2.26.5
 
 ### Fixed
 
@@ -23,6 +23,8 @@
   "next forecast doesn't always create a new forecast for some of the
   sensors" symptom. The `try/finally` now wraps the full body so the
   flag is always cleared, regardless of which exit path the task takes.
+
+## 2.26.4
 
 ### Added
 
