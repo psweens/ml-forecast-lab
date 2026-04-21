@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.27.0
+
+### Added
+
+- **Eight new model backends, taking the catalogue from 14 to 22.** All
+  registered automatically and surfaced in the Models page, the
+  hyperparameter editor, and the Demšar composite ranking on equal footing
+  with the existing backends.
+
+  Tier 1 (state-of-the-art lightweight):
+  - **CatBoost** (`catboost`) — third tabular gradient boosting backend
+    alongside LightGBM and XGBoost. Ordered boosting + oblivious symmetric
+    trees often wins on noisy or covariate-rich smart-home signals.
+  - **NLinear** (`nlinear`) — companion to DLinear from Zeng et al. 2023.
+    Subtracts the last value, applies a single linear layer, adds it back.
+    Tiny but a top-tier baseline that's strange to ship without.
+  - **FITS** (`fits`) — frequency-domain low-pass complex linear, ICLR 2024
+    ("Modeling Time Series with 10k Parameters"). The lightest neural
+    backend in the catalogue.
+  - **TimeMixer** (`timemixer`) — multiscale season/trend mixing with
+    cross-scale interaction (Past-Decomposable-Mixing block), ICLR 2024.
+    Currently leading several long-horizon benchmarks.
+
+  Tier 2 (gold-standard baselines):
+  - **GRU** (`gru`) — lighter recurrent baseline than LSTM. Same temporal
+    attention + multi-horizon pipeline; ~25% fewer parameters per cell.
+  - **TFT** (`tft`) — compact Temporal Fusion Transformer (Lim et al. 2021)
+    with Variable Selection Network → LSTM encoder → interpretable
+    multi-head attention. Static / known-future covariate branches are
+    omitted (rare in HA sensor data).
+  - **Seasonal Naive** (`seasonal_naive`) — the reference baseline every
+    forecasting paper requires. ŷ[t+h] = y[t+h-period], no training. Now
+    that it's a registered backend it shows up in the Demšar ranking, so
+    every other model has to actually beat it to look good.
+  - **statsforecast classical baselines** (`arima`, `ets`, `theta`) —
+    AutoARIMA, AutoETS, AutoTheta from Nixtla's numba-JIT-compiled
+    statsforecast. The classical statistical reference points the academic
+    literature treats as mandatory comparisons.
+
+  New dependencies (auto-pulled by `requirements.txt`): `catboost>=1.2`,
+  `statsforecast>=1.7`. Each backend gracefully degrades to a clear
+  RuntimeError if its underlying library isn't available, matching the
+  existing optional-backend pattern.
+
 ## 2.26.7
 
 ### Fixed

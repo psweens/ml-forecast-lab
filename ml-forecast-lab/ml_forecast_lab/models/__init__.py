@@ -25,18 +25,28 @@ from .registry import ModelRegistry, get_registry
 _optional_imports = {
     'LightGBMModel': 'lightgbm_backend',
     'XGBoostModel': 'xgboost_backend',
+    'CatBoostModel': 'catboost_backend',
     'LSTMModel': 'lstm_backend',
+    'GRUModel': 'gru_backend',
     'CNNModel': 'cnn_backend',
     'DLinearModel': 'dlinear_backend',
+    'NLinearModel': 'nlinear_backend',
+    'FITSModel': 'fits_backend',
     'NBeatsModel': 'nbeats_backend',
     'NHiTSModel': 'nhits_backend',
     'TiDEModel': 'tide_backend',
     'TSMixerModel': 'tsmixer_backend',
+    'TimeMixerModel': 'timemixer_backend',
     'SparseTSFModel': 'sparsetsf_backend',
     'PatchTSTModel': 'patchtst_backend',
     'iTransformerModel': 'itransformer_backend',
     'CrossformerModel': 'crossformer_backend',
     'TimesNetModel': 'timesnet_backend',
+    'TFTModel': 'tft_backend',
+    'SeasonalNaiveModel': 'seasonal_naive_backend',
+    'ARIMAModel': 'statsforecast_backend',
+    'ETSModel': 'statsforecast_backend',
+    'ThetaModel': 'statsforecast_backend',
 }
 
 for _cls_name, _module in _optional_imports.items():

@@ -314,16 +314,26 @@ class MLForecastLabApp:
 
             # Register optional backends
             _optional_backends = [
+                ("catboost", "catboost_backend", "CatBoostModel"),
+                ("gru", "gru_backend", "GRUModel"),
                 ("dlinear", "dlinear_backend", "DLinearModel"),
+                ("nlinear", "nlinear_backend", "NLinearModel"),
+                ("fits", "fits_backend", "FITSModel"),
                 ("nbeats", "nbeats_backend", "NBeatsModel"),
                 ("nhits", "nhits_backend", "NHiTSModel"),
                 ("tide", "tide_backend", "TiDEModel"),
                 ("tsmixer", "tsmixer_backend", "TSMixerModel"),
+                ("timemixer", "timemixer_backend", "TimeMixerModel"),
                 ("sparsetsf", "sparsetsf_backend", "SparseTSFModel"),
                 ("patchtst", "patchtst_backend", "PatchTSTModel"),
                 ("itransformer", "itransformer_backend", "iTransformerModel"),
                 ("crossformer", "crossformer_backend", "CrossformerModel"),
                 ("timesnet", "timesnet_backend", "TimesNetModel"),
+                ("tft", "tft_backend", "TFTModel"),
+                ("seasonal_naive", "seasonal_naive_backend", "SeasonalNaiveModel"),
+                ("arima", "statsforecast_backend", "ARIMAModel"),
+                ("ets", "statsforecast_backend", "ETSModel"),
+                ("theta", "statsforecast_backend", "ThetaModel"),
             ]
             for _name, _module, _cls_name in _optional_backends:
                 try:
