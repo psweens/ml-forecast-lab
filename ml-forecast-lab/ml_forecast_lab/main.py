@@ -2297,14 +2297,21 @@ class MLForecastLabApp:
             self._retrain_consumer_running = False
 
     async def _forecast_single(self, exp_cfg):
-        """Run forecast for a single experiment (per-experiment timer)."""
-        if exp_cfg.mode != "production":
-            return
-        if exp_cfg.name not in self._cached_models:
-            logger.debug(f"  No cached model for {exp_cfg.name} — waiting for retrain")
-            return
-        self._forecast_running[exp_cfg.name] = True
+        """Run forecast for a single experiment (per-experiment timer).
+
+        The scheduler reserves `_forecast_running[name] = True` synchronously
+        before spawning this task, so the `finally` MUST run on every exit
+        path — including the early returns below. Otherwise the flag stays
+        True forever and the scheduler's `not running` guard skips this
+        experiment on every subsequent tick, silently freezing all of its
+        sensors while other experiments keep updating.
+        """
         try:
+            if exp_cfg.mode != "production":
+                return
+            if exp_cfg.name not in self._cached_models:
+                logger.debug(f"  No cached model for {exp_cfg.name} — waiting for retrain")
+                return
             await self._forecast_with_cached(exp_cfg.name)
         except Exception as e:
             logger.error(f"Forecast failed for {exp_cfg.name}: {e}", exc_info=True)
