@@ -1,5 +1,120 @@
 # Changelog
 
+## 2.27.1
+
+### Fixed
+
+- **HA API calls no longer cascade-fail when Home Assistant is slow.** A
+  single `total=30s` wall-clock budget in `HAInterface.api_call` covered
+  DNS, connect, send and full response read, so a slow recorder query for
+  `/api/history/period` (routine on benchmark loads with weeks of data)
+  burned the whole budget and triggered `asyncio.TimeoutError`. Once that
+  first call stalled the shared connector, concurrent `set_state` POSTs
+  fired by `_publish_one` then timed out at the DNS-resolution phase —
+  reported by users as a flurry of `mlfl_*` publish failures in the same
+  second.
+
+  Split into separate `sock_connect` (15s) and `sock_read` (30s default,
+  180s for history queries) budgets so a slow body can't starve the
+  connect phase, added exponential-backoff retry (3 attempts, 1s / 2s) for
+  `TimeoutError` / `ClientError` / 5xx, and made both timeouts and retry
+  count overridable per call. 4xx is treated as non-transient and is not
+  retried.
+
+## 2.27.0
+
+### Added
+
+- **Eight new model backends, taking the catalogue from 14 to 22.** All
+  registered automatically and surfaced in the Models page, the
+  hyperparameter editor, and the Demšar composite ranking on equal footing
+  with the existing backends.
+
+  Tier 1 (state-of-the-art lightweight):
+  - **CatBoost** (`catboost`) — third tabular gradient boosting backend
+    alongside LightGBM and XGBoost. Ordered boosting + oblivious symmetric
+    trees often wins on noisy or covariate-rich smart-home signals.
+  - **NLinear** (`nlinear`) — companion to DLinear from Zeng et al. 2023.
+    Subtracts the last value, applies a single linear layer, adds it back.
+    Tiny but a top-tier baseline that's strange to ship without.
+  - **FITS** (`fits`) — frequency-domain low-pass complex linear, ICLR 2024
+    ("Modeling Time Series with 10k Parameters"). The lightest neural
+    backend in the catalogue.
+  - **TimeMixer** (`timemixer`) — multiscale season/trend mixing with
+    cross-scale interaction (Past-Decomposable-Mixing block), ICLR 2024.
+    Currently leading several long-horizon benchmarks.
+
+  Tier 2 (gold-standard baselines):
+  - **GRU** (`gru`) — lighter recurrent baseline than LSTM. Same temporal
+    attention + multi-horizon pipeline; ~25% fewer parameters per cell.
+  - **TFT** (`tft`) — compact Temporal Fusion Transformer (Lim et al. 2021)
+    with Variable Selection Network → LSTM encoder → interpretable
+    multi-head attention. Static / known-future covariate branches are
+    omitted (rare in HA sensor data).
+  - **Seasonal Naive** (`seasonal_naive`) — the reference baseline every
+    forecasting paper requires. ŷ[t+h] = y[t+h-period], no training. Now
+    that it's a registered backend it shows up in the Demšar ranking, so
+    every other model has to actually beat it to look good.
+  - **statsforecast classical baselines** (`arima`, `ets`, `theta`) —
+    AutoARIMA, AutoETS, AutoTheta from Nixtla's numba-JIT-compiled
+    statsforecast. The classical statistical reference points the academic
+    literature treats as mandatory comparisons.
+
+  New dependencies (auto-pulled by `requirements.txt`): `catboost>=1.2`,
+  `statsforecast>=1.7`. Each backend gracefully degrades to a clear
+  RuntimeError if its underlying library isn't available, matching the
+  existing optional-backend pattern.
+
+## 2.26.7
+
+### Fixed
+
+- **Root cause of the Forecast-log button failure: HTML autoescape on
+  the `EXP_UNITS` fallback emitted `var EXP_UNITS = &#34;&#34;;` for
+  any experiment without a `units:` value (the default — `units: str
+  = ''` in `ExperimentCfg`).** `experiment.html` had `var EXP_UNITS =
+  {{ units | tojson if units else '""' }};`. The truthy branch goes
+  through `|tojson`, which returns a Markup-safe string — autoescape
+  leaves it alone. The else branch returned a plain Jinja literal
+  `""`, which Jinja's HTML autoescape rewrote to `&#34;&#34;` on the
+  way into the `<script>`. The browser's JS parser does not decode
+  HTML entities inside `<script>`, so it threw `SyntaxError:
+  Unexpected token '&'` at that line, aborting the IIFE before any
+  of the `window.X = …` assignments below it ran — including
+  `window.loadForecastLogStats`. The button's onclick then hit a
+  `ReferenceError: Can't find variable: loadForecastLogStats`, which
+  the v2.25.3 defensive fallback faithfully rendered. Replaced the
+  conditional with `{{ (units or '') | tojson }}` so it always pipes
+  through the Markup-safe filter. v2.26.6's button colocation +
+  error capture turn out to be useful belt-and-braces for any future
+  variant of the same class of bug, but this fix kills the actual
+  trigger every existing user is hitting.
+
+## 2.26.6
+
+### Fixed
+
+- **Forecast-log inspector button threw "Can't find variable:
+  loadForecastLogStats" under real-world conditions.** v2.25.3 added a
+  defensive try/catch around the button's onclick because the handler
+  sometimes silently did nothing, but couldn't reproduce the underlying
+  cause. The actual mechanism: `window.loadForecastLogStats` was assigned
+  ~1300 lines into the big IIFE in `{% block scripts %}`, so any earlier
+  throw during IIFE evaluation (bad Jinja-interpolated value, localStorage
+  access denied, missing `Intl` features, etc.) aborted execution before
+  the assignment, leaving the button's onclick referencing a symbol that
+  never came into existence. The handler is now defined in its own
+  `<script>` block right next to the button, with the URL rendered
+  directly via Jinja rather than relying on closure vars from the main
+  IIFE, so an unrelated failure elsewhere in the scripts block can't
+  take the diagnostic button out.
+- **Surface the root-cause error, not just the downstream symptom.** A
+  top-of-block `window.addEventListener('error', …)` now stashes the
+  first unhandled script error on `window.__mlflFirstError`. The
+  Forecast-log button's catch appends it when the handler is still
+  missing, so the next time this class of failure shows up we see the
+  actual throw — not just "Can't find variable: loadForecastLogStats".
+
 ## 2.26.5
 
 ### Fixed

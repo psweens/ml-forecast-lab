@@ -5,6 +5,7 @@ Provides a clean, type-safe interface to Home Assistant's REST API with
 robust error handling, timestamp parsing, and data normalisation.
 """
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -15,6 +16,19 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# Timeouts are split into connect and read so a slow response body can't eat
+# the budget a connect/DNS phase needs (the previous single total=30 budget
+# caused the whole call to fail at _resolve_host once HA was under load).
+DEFAULT_CONNECT_TIMEOUT = 15.0
+DEFAULT_READ_TIMEOUT = 30.0
+# HA's /api/history/period recorder query scales with range × entity churn;
+# benchmark loads with weeks of data routinely need >60s.
+HISTORY_READ_TIMEOUT = 180.0
+# Retry transient failures (timeouts, 5xx, connection errors) with
+# exponential backoff. 2 retries = 3 total attempts at 0s / 1s / 2s.
+DEFAULT_RETRIES = 2
+RETRY_BACKOFF_BASE = 1.0
 
 
 def parse_timestamp(ts_string: str) -> datetime:
@@ -208,6 +222,10 @@ class HAInterface:
         endpoint: str,
         params: Optional[dict] = None,
         json_data: Optional[dict] = None,
+        *,
+        connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
+        read_timeout: float = DEFAULT_READ_TIMEOUT,
+        retries: int = DEFAULT_RETRIES,
     ) -> Any:
         """
         Generic HTTP call to HA API with error handling.
@@ -217,6 +235,13 @@ class HAInterface:
             endpoint: API endpoint (e.g. '/api/history/period')
             params: URL parameters
             json_data: JSON request body
+            connect_timeout: Budget for DNS + TCP connect (seconds).
+            read_timeout: Budget between response bytes (seconds).
+                          Pass a larger value for slow endpoints like
+                          /api/history/period.
+            retries: Number of retry attempts on transient failures
+                     (TimeoutError, ClientError, 5xx). Total attempts
+                     = retries + 1.
 
         Returns:
             Response JSON or text
@@ -229,27 +254,57 @@ class HAInterface:
 
         url = f"{self.ha_url}{endpoint}"
         headers = {"Authorization": f"Bearer {self.ha_key}"}
+        timeout = aiohttp.ClientTimeout(
+            total=None,
+            sock_connect=connect_timeout,
+            sock_read=read_timeout,
+        )
 
-        try:
-            async with self.session.request(
-                method,
-                url,
-                headers=headers,
-                params=params,
-                json=json_data,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status in (200, 201):
-                    if "application/json" in resp.headers.get("content-type", ""):
-                        return await resp.json()
-                    return await resp.text()
+        last_err: Optional[BaseException] = None
+        attempts = retries + 1
 
-                error_text = await resp.text()
-                raise RuntimeError(
-                    f"HA API error {resp.status}: {error_text[:200]}"
+        for attempt in range(attempts):
+            try:
+                async with self.session.request(
+                    method,
+                    url,
+                    headers=headers,
+                    params=params,
+                    json=json_data,
+                    timeout=timeout,
+                ) as resp:
+                    if resp.status in (200, 201):
+                        if "application/json" in resp.headers.get("content-type", ""):
+                            return await resp.json()
+                        return await resp.text()
+
+                    error_text = await resp.text()
+                    # 4xx is a client contract error — retrying won't help.
+                    if resp.status < 500:
+                        raise RuntimeError(
+                            f"HA API error {resp.status}: {error_text[:200]}"
+                        )
+                    # 5xx: treat as transient.
+                    last_err = RuntimeError(
+                        f"HA API error {resp.status}: {error_text[:200]}"
+                    )
+            except asyncio.TimeoutError as e:
+                last_err = e
+            except aiohttp.ClientError as e:
+                last_err = e
+
+            if attempt < attempts - 1:
+                delay = RETRY_BACKOFF_BASE * (2 ** attempt)
+                logger.warning(
+                    f"HA {method} {endpoint} attempt {attempt + 1}/{attempts} "
+                    f"failed ({type(last_err).__name__}: {last_err}); "
+                    f"retrying in {delay:.1f}s"
                 )
-        except aiohttp.ClientError as e:
-            raise RuntimeError(f"HTTP request failed: {e}") from e
+                await asyncio.sleep(delay)
+
+        raise RuntimeError(
+            f"HA {method} {endpoint} failed after {attempts} attempts: {last_err}"
+        ) from last_err
 
     async def get_history(
         self,
@@ -278,7 +333,9 @@ class HAInterface:
             "minimal_response": "",
         }
 
-        result = await self.api_call("GET", endpoint, params=params)
+        result = await self.api_call(
+            "GET", endpoint, params=params, read_timeout=HISTORY_READ_TIMEOUT
+        )
 
         if isinstance(result, list) and len(result) > 0:
             return result[0]

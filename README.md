@@ -6,16 +6,19 @@ ML Forecast Lab lets you train, compare, and deploy time-series forecasting mode
 
 ## Features
 
-**14 model backends**, benchmarked on identical data splits:
+**22 model backends**, benchmarked on identical data splits:
 
 | Family | Models |
 |--------|--------|
-| Gradient boosting | LightGBM, XGBoost |
-| Recurrent | LSTM |
+| Gradient boosting | LightGBM, XGBoost, CatBoost |
+| Recurrent | LSTM, GRU |
 | Convolutional | CNN (WaveNet-style dilated causal), TimesNet |
-| Linear / MLP | DLinear, TSMixer, TiDE, SparseTSF |
+| Linear / MLP | DLinear, NLinear, TSMixer, TimeMixer, TiDE, SparseTSF |
+| Frequency-domain | FITS (~10k parameters) |
 | N-BEATS family | N-BEATS, N-HiTS |
-| Transformer | PatchTST, iTransformer, Crossformer |
+| Transformer | PatchTST, iTransformer, Crossformer, TFT |
+| Classical | AutoARIMA, AutoETS, AutoTheta (via statsforecast) |
+| Baseline | Seasonal Naive |
 
 All neural backends use PyTorch and support multi-horizon dense outputs with residual prediction (predict deltas, not absolute values) for stable forecasts. Loss function (MSE / MAE / Huber) is configurable per experiment.
 
@@ -109,8 +112,10 @@ experiments:
       - xgboost
       - lstm
       - cnn
-      # 10 more neural backends available: dlinear, nbeats, nhits, tide,
-      # tsmixer, sparsetsf, patchtst, itransformer, crossformer, timesnet
+      # 18 more backends available: catboost, gru, dlinear, nlinear, fits,
+      # nbeats, nhits, tide, tsmixer, timemixer, sparsetsf, patchtst,
+      # itransformer, crossformer, timesnet, tft, seasonal_naive,
+      # arima, ets, theta
 
     cv_strategy: walk_forward
     cv_folds: 5
@@ -130,7 +135,7 @@ experiments:
 | `future_periods` | Number of future steps to forecast | `48` |
 | `forecast_every_minutes` | How often to run cached-model inference | `30` |
 | `retrain_every_hours` | How often to retrain the model from scratch | `24` |
-| `models_enabled` | Which backends to benchmark (14 available) | LightGBM, XGBoost |
+| `models_enabled` | Which backends to benchmark (22 available) | LightGBM, XGBoost |
 | `cv_strategy` | `walk_forward` or `sliding_window` | `walk_forward` |
 | `cv_folds` | Number of CV folds | `5` |
 | `cv_embargo_periods` | Gap between train/test splits | `2` |
@@ -173,8 +178,8 @@ The web UI exposes a JSON API for status, benchmark results, forecasts, model se
                 ▼                      ▼                      │
        ┌─────────────────┐   ┌─────────────────┐               │
        │ Cross-Validator │   │ Model Registry  │               │
-       │ walk-fwd or SW  │   │ 14 backends     │               │
-       └────────┬────────┘   │ tree + neural   │               │
+       │ walk-fwd or SW  │   │ 22 backends     │               │
+       └────────┬────────┘   │ tree+neural+cls │               │
                 │            └─────────────────┘               │
                 ▼                                              │
       ┌──────────────────┐         ┌──────────────────┐
@@ -219,8 +224,9 @@ Each experiment trains and evaluates models independently.
 ## Dependencies
 
 Core: numpy, pandas, scikit-learn, scipy, FastAPI, uvicorn, Jinja2, Plotly.
-Tree models: LightGBM, XGBoost.
-Neural models: PyTorch (LSTM, CNN, DLinear, N-BEATS, N-HiTS, TiDE, TSMixer, SparseTSF, PatchTST, iTransformer, Crossformer, TimesNet).
+Tree models: LightGBM, XGBoost, CatBoost.
+Neural models: PyTorch (LSTM, GRU, CNN, DLinear, NLinear, FITS, N-BEATS, N-HiTS, TiDE, TSMixer, TimeMixer, SparseTSF, PatchTST, iTransformer, Crossformer, TimesNet, TFT).
+Classical baselines: statsforecast (AutoARIMA, AutoETS, AutoTheta).
 Hyperparameter tuning: Optuna.
 
 ## Licence

@@ -1251,10 +1251,31 @@
                 Raw summary of <code>forecast_log</code>. Useful when the Accuracy chart looks empty or the verdict doesn't match expectations.
             </p>
             <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
-                <button type="button" class="btn-secondary" onclick="try{loadForecastLogStats()}catch(e){var o=document.getElementById('forecast-log-stats-out');if(o){o.style.display='block';o.textContent='Button handler failed: '+(e && e.message ? e.message : e)+'. Try the direct link to the right →';}}" style="padding:0.4rem 0.9rem;">Load log summary</button>
+                <button type="button" class="btn-secondary" onclick="try{loadForecastLogStats()}catch(e){var o=document.getElementById('forecast-log-stats-out');if(o){o.style.display='block';var msg='Button handler failed: '+(e && e.message ? e.message : e);if(window.__mlflFirstError){msg+='\n\nRoot cause (first script error on this page):\n'+window.__mlflFirstError.message;if(window.__mlflFirstError.line){msg+=' (line '+window.__mlflFirstError.line+')';}}msg+='\n\nTry the direct link to the right →';o.textContent=msg;}}" style="padding:0.4rem 0.9rem;">Load log summary</button>
                 <a href="{{ base_path }}/experiment/{{ experiment.name }}/forecast-log-stats" target="_blank" rel="noopener" style="color:var(--accent-secondary);font-size:0.85rem;">open in new tab</a>
             </div>
             <pre id="forecast-log-stats-out" style="display:none;margin-top:0.75rem;padding:0.75rem;background:rgba(0,0,0,0.25);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.8rem;white-space:pre-wrap;max-height:420px;overflow:auto;"></pre>
+            <script>
+            // Defined right next to the button — outside the big IIFE
+            // lower in the template — so a throw elsewhere in that
+            // IIFE can't prevent this handler from existing. URL is
+            // embedded via Jinja so we don't depend on closure vars
+            // from the main script either.
+            window.loadForecastLogStats = function() {
+                var out = document.getElementById('forecast-log-stats-out');
+                if (!out) return;
+                out.style.display = 'block';
+                out.textContent = 'Loading…';
+                fetch({{ base_path | tojson }} + '/experiment/' + {{ experiment.name | tojson }} + '/forecast-log-stats')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    out.textContent = JSON.stringify(data, null, 2);
+                })
+                .catch(function(err) {
+                    out.textContent = 'Failed to load: ' + err;
+                });
+            };
+            </script>
         </div>
 
         <!-- Forecast convergence (fan) -->
@@ -1383,6 +1404,23 @@
 {% endblock %}
 
 {% block scripts %}
+<script>
+// Capture the first unhandled script error before any other handler
+// runs. When the big IIFE below throws mid-evaluation, later
+// `window.X = …` assignments are skipped and downstream UI sees
+// ReferenceErrors on symbols that should exist. The Forecast-log
+// button's fallback reads this to show the *root* cause, not just
+// the downstream symptom.
+window.__mlflFirstError = null;
+window.addEventListener('error', function(e) {
+    if (window.__mlflFirstError) return;
+    window.__mlflFirstError = {
+        message: (e && e.message) ? e.message : String(e),
+        source: (e && e.filename) ? e.filename : '',
+        line: (e && e.lineno) ? e.lineno : 0,
+    };
+}, true);
+</script>
 <script>
 // Server-embedded event history for training reconnect
 var EMBEDDED_HISTORY = {{ embedded_history | tojson }};
@@ -1907,7 +1945,16 @@ window.showTab = function(el) {
     // here and silently default cumulative sensors to 'raw' mode.
     var EXP_SOURCE_CUMULATIVE = {% if exp_config and exp_config.source_is_cumulative %}true{% else %}false{% endif %};
     var EXP_RESET_DAILY       = {% if exp_config and exp_config.reset_daily %}true{% else %}false{% endif %};
-    var EXP_UNITS             = {{ units | tojson if units else '""' }};
+    // Always pipe through |tojson — the filter returns a Markup-safe
+    // string, so autoescape leaves quotes alone. The previous
+    // `... if units else '""'` form fell into the else branch when
+    // units was empty (the default for experiments with no units:
+    // setting), and Jinja autoescape rewrote `""` to `&#34;&#34;`,
+    // which is invalid inside a <script> body — the JS parser does
+    // not decode HTML entities — and the resulting SyntaxError
+    // aborted the IIFE before `window.loadForecastLogStats` (and
+    // every other window.X assignment further down) was reached.
+    var EXP_UNITS             = {{ (units or '') | tojson }};
     var EXP_INTERVAL_MIN      = {{ exp_config.interval_minutes if exp_config else 30 }};
     // HA server's configured IANA timezone. Used by the Forecast
     // Accuracy TZ toggle to render charts in the TZ where events
@@ -2532,23 +2579,11 @@ window.showTab = function(el) {
         });
     })();
 
-    // Forecast-log inspector — on-demand fetch of the debug endpoint
-    // for the current experiment. Output is pretty-printed JSON into
-    // the <pre> so the user can copy-paste it back when diagnosing.
-    window.loadForecastLogStats = function() {
-        var out = document.getElementById('forecast-log-stats-out');
-        if (!out) return;
-        out.style.display = 'block';
-        out.textContent = 'Loading…';
-        fetch(BASE + '/experiment/' + EXP_NAME + '/forecast-log-stats')
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            out.textContent = JSON.stringify(data, null, 2);
-        })
-        .catch(function(err) {
-            out.textContent = 'Failed to load: ' + err;
-        });
-    };
+    // Forecast-log inspector handler is defined next to the button
+    // itself (see the Forecast Accuracy tab markup above), not in
+    // this IIFE, so that a throw here can't prevent it from being
+    // reachable — the button is a diagnostic, and a diagnostic that
+    // fails when other things fail isn't useful.
 
     window.setAccuracyTz = function(tz) {
         if (tz !== 'ha' && tz !== 'browser' && tz !== 'utc') return;
