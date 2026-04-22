@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.27.1
+
+### Fixed
+
+- **HA API calls no longer cascade-fail when Home Assistant is slow.** A
+  single `total=30s` wall-clock budget in `HAInterface.api_call` covered
+  DNS, connect, send and full response read, so a slow recorder query for
+  `/api/history/period` (routine on benchmark loads with weeks of data)
+  burned the whole budget and triggered `asyncio.TimeoutError`. Once that
+  first call stalled the shared connector, concurrent `set_state` POSTs
+  fired by `_publish_one` then timed out at the DNS-resolution phase —
+  reported by users as a flurry of `mlfl_*` publish failures in the same
+  second.
+
+  Split into separate `sock_connect` (15s) and `sock_read` (30s default,
+  180s for history queries) budgets so a slow body can't starve the
+  connect phase, added exponential-backoff retry (3 attempts, 1s / 2s) for
+  `TimeoutError` / `ClientError` / 5xx, and made both timeouts and retry
+  count overridable per call. 4xx is treated as non-transient and is not
+  retried.
+
 ## 2.27.0
 
 ### Added
