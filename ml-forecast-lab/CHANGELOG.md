@@ -1,5 +1,45 @@
 # Changelog
 
+## 2.27.2
+
+### Added
+
+- **Covariate manifest log per preprocess cycle.** `_fetch_and_preprocess`
+  now emits a single INFO block per experiment summarising every
+  covariate's contribution: traffic-light status (`✓` / `⚠` / `✗`),
+  configured role (`lagged` / `both` / `future` / `physics`), post-dropna
+  coverage %, staleness of the most recent raw value, and Pearson
+  correlation with the target on the aligned frame. A final `dropna:
+  A rows → B kept (C lost; biggest culprit: <col> N NaNs)` line names
+  the column whose NaNs deleted the most rows — the specific field
+  that pinpoints "the whole experiment returned zero samples because
+  one covariate is misconfigured". Solar physics features are included
+  under `role=physics` so the block is a complete record of what the
+  training frame actually contained. Mirrors the existing publish
+  manifest pattern from 2.26.4: scattered per-covariate `✓ raw → aligned`
+  INFO lines are kept for backwards compat, and the consolidated block
+  sits alongside them. Diagnostic shape:
+
+  ```
+  Covariate manifest for optimised_solar (9 configured, +2 physics):
+    ⚠ sensor.solcast_pv_forecast_forecast_today [future]  cov=100.0%  stale=6.2h  corr=+0.71  ← stale>interval×4
+    ✓ sensor.openweathermap_cloud_coverage [lagged]  cov=99.8%  stale=12m  corr=-0.34
+    ✗ sensor.carlton_green_south [both] — fetch failed: HTTP 500
+    dropna: 8,760 rows → 8,740 kept (20 lost; biggest culprit: clear_sky_ghi 14 NaNs)
+  ```
+
+- **TiDE surfaces when its future-covariate path is inactive.** The
+  existing `TiDE: future-covariate path active (N features × H horizons)`
+  INFO line only fired when the caller passed `future_covariates=`; the
+  silent `else` branch left users debugging "why is TiDE losing to
+  Seasonal Naive on a signal with `role: future` covariates?" with no
+  log evidence that the caller never wired the tensor up. An equivalent
+  INACTIVE log now fires, explicitly stating that `role=future`
+  covariates aren't being routed and that TiDE is degraded to a
+  past-only encoder-decoder. Lets the covariate manifest (which shows
+  `role=future` for Solcast/tariff sources) and the TiDE log sit
+  side-by-side so the gap is immediately visible.
+
 ## 2.27.1
 
 ### Fixed
