@@ -399,6 +399,19 @@ class TiDEModel(ForecastModel):
             )
         else:
             self._n_future_covariates = 0
+            # Surface the degraded mode so a user wondering why TiDE
+            # isn't beating Seasonal Naive on a signal with role=future
+            # covariates (Solcast, tariff forecasts) sees that the
+            # caller never passed `future_covariates` — running as a
+            # past-only encoder-decoder. This is TiDE's backwards-
+            # compatible fallback but it negates the paper's main win.
+            logger.info(
+                f"TiDE: future-covariate path INACTIVE — running as "
+                f"past-only encoder-decoder ({self._n_horizons} horizons). "
+                f"role=future covariates are not being routed; pass "
+                f"`future_covariates` to fit() to enable the temporal "
+                f"decoder's known-future branch."
+            )
 
         # Dataset-level channel normalisation is mutually exclusive with RevIN.
         if not self.use_revin:

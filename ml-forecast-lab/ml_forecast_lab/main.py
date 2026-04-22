@@ -993,6 +993,13 @@ class MLForecastLabApp:
         result = pd.DataFrame({"y": series}, index=series.index)
 
         # --- Fetch covariates ---
+        # `cov_stats` accumulates one row per covariate so the end-of-fetch
+        # manifest log can report role, coverage, staleness, and target
+        # correlation together instead of scattered across per-covariate
+        # INFO lines. Keeps the `[SOLAR]` physics features and fetch
+        # failures in the same manifest so "why did my forecast skip this
+        # cycle?" is answerable from one block.
+        cov_stats: list[dict] = []
         if exp_cfg.covariates and self.covariate_resolver:
             logger.info(f"  Fetching {len(exp_cfg.covariates)} covariate(s)...")
             for cov_cfg in exp_cfg.covariates:
@@ -1034,9 +1041,28 @@ class MLForecastLabApp:
                         f"{len(cov_series)} raw → {valid_count} aligned"
                         f"{f', scaled ×{cov_cfg.scale}' if cov_cfg.scale else ''}"
                     )
+                    cov_stats.append({
+                        "entity": cov_cfg.entity,
+                        "name": cov_name,
+                        "role": cov_cfg.role,
+                        "raw_count": len(cov_series),
+                        "aligned_count": int(valid_count),
+                        "last_ts": (
+                            cov_series.index[-1]
+                            if len(cov_series) else None
+                        ),
+                        "ok": True,
+                    })
 
                 except Exception as e:
                     logger.warning(f"    ✗ Failed to fetch {cov_cfg.entity}: {e}")
+                    cov_stats.append({
+                        "entity": cov_cfg.entity,
+                        "name": cov_cfg.entity.split(".")[-1],
+                        "role": cov_cfg.role,
+                        "ok": False,
+                        "error": str(e),
+                    })
 
         # --- Compute deterministic solar physics features ---
         if (
@@ -1057,6 +1083,15 @@ class MLForecastLabApp:
                     )
                     for col in solar_df.columns:
                         result[col] = solar_df[col].values
+                        cov_stats.append({
+                            "entity": col,
+                            "name": col,
+                            "role": "physics",
+                            "raw_count": len(solar_df),
+                            "aligned_count": int(result[col].notna().sum()),
+                            "last_ts": None,
+                            "ok": True,
+                        })
                     if len(solar_df.columns) > 0:
                         logger.info(
                             f"  ✓ Added solar physics features: {list(solar_df.columns)}"
@@ -1068,7 +1103,32 @@ class MLForecastLabApp:
                     "  Solar physics requested but site location unavailable"
                 )
 
+        # --- Covariate manifest -------------------------------------------
+        # Summarise every covariate's contribution BEFORE dropna so the
+        # user can see, in one log block per retrain/forecast cycle:
+        #   role, coverage %, staleness, target correlation, and the
+        #   dropna culprit (which column's NaNs deleted the most rows).
+        # The "future path routed to <model>" confirmation lives in the
+        # backends themselves — this block only covers the covariate
+        # assembly that happens here in `_fetch_and_preprocess`.
+        rows_before_dropna = len(result)
+        pre_drop_nan_counts = {
+            col: int(result[col].isna().sum())
+            for col in result.columns if col != "y"
+        }
+
         result = result.dropna()
+        rows_after_dropna = len(result)
+
+        self._log_covariate_manifest(
+            exp_cfg=exp_cfg,
+            cov_stats=cov_stats,
+            result=result,
+            now=now,
+            rows_before_dropna=rows_before_dropna,
+            rows_after_dropna=rows_after_dropna,
+            pre_drop_nan_counts=pre_drop_nan_counts,
+        )
 
         if len(result) == 0:
             logger.warning(
@@ -1099,6 +1159,141 @@ class MLForecastLabApp:
             )
 
         return result
+
+    def _log_covariate_manifest(
+        self,
+        exp_cfg,
+        cov_stats: list[dict],
+        result: pd.DataFrame,
+        now: datetime,
+        rows_before_dropna: int,
+        rows_after_dropna: int,
+        pre_drop_nan_counts: dict,
+    ) -> None:
+        """Emit a single log block summarising every covariate's state.
+
+        One row per covariate: traffic-light status, role, coverage %,
+        staleness, and Pearson correlation with the target. A final
+        `dropna` line names the biggest NaN contributor — the column
+        responsible for deleting the most rows in
+        `result.dropna()` — which is the single most useful field when
+        an experiment returns zero samples from preprocessing.
+
+        Staleness threshold is `interval_minutes × 4` (four missed ticks),
+        matching the "sensor stopped updating" heuristic used elsewhere.
+        Correlation magnitude cutoffs: |r|<0.05 noise, |r|<0.10 weak.
+        """
+        if not cov_stats and rows_before_dropna == rows_after_dropna:
+            return
+
+        stale_threshold = pd.Timedelta(minutes=exp_cfg.interval_minutes * 4)
+        now_naive = (
+            now.replace(tzinfo=None) if now.tzinfo is not None else now
+        )
+
+        configured = len(exp_cfg.covariates or [])
+        header = (
+            f"Covariate manifest for {exp_cfg.name} "
+            f"({configured} configured"
+            f"{f', +{len(cov_stats) - configured} physics' if len(cov_stats) > configured else ''}):"
+        )
+        lines = [header]
+
+        for cs in cov_stats:
+            if not cs.get("ok", False):
+                lines.append(
+                    f"  ✗ {cs['entity']} [{cs['role']}] — fetch failed: "
+                    f"{cs.get('error', '?')}"
+                )
+                continue
+
+            name = cs["name"]
+            role = cs["role"]
+            aligned = cs.get("aligned_count", 0)
+
+            # Coverage: fraction of post-dropna rows this column was
+            # non-NaN on. For a column that was part of the reason rows
+            # got dropped, this reads 100% (survivors are by definition
+            # non-NaN); the dropna-culprit line below captures the
+            # pre-dropna perspective.
+            if name in result.columns and rows_after_dropna > 0:
+                post_valid = int(result[name].notna().sum())
+                coverage_pct = 100.0 * post_valid / rows_after_dropna
+            else:
+                coverage_pct = (
+                    100.0 * aligned / rows_before_dropna
+                    if rows_before_dropna else 0.0
+                )
+
+            # Staleness: age of the most recent raw value.
+            stale_str = ""
+            flags = []
+            last_ts = cs.get("last_ts")
+            if last_ts is not None:
+                last_ts_naive = (
+                    last_ts.tz_convert(None)
+                    if getattr(last_ts, "tzinfo", None) is not None
+                    else last_ts
+                )
+                age = now_naive - pd.Timestamp(last_ts_naive)
+                if age.total_seconds() > 0:
+                    age_min = age.total_seconds() / 60
+                    if age_min < 120:
+                        stale_str = f"stale={int(age_min)}m"
+                    else:
+                        stale_str = f"stale={age_min/60:.1f}h"
+                    if age > stale_threshold:
+                        flags.append("stale>interval×4")
+
+            # Correlation with target on the post-dropna frame.
+            corr_str = ""
+            if name in result.columns and rows_after_dropna > 1:
+                col = result[name]
+                if col.std() > 1e-12 and result["y"].std() > 1e-12:
+                    r = float(col.corr(result["y"]))
+                    corr_str = f"corr={r:+.2f}"
+                    if abs(r) < 0.05:
+                        flags.append("|corr|<0.05 noise")
+                else:
+                    corr_str = "corr=const"
+
+            parts = [f"cov={coverage_pct:.1f}%"]
+            if stale_str:
+                parts.append(stale_str)
+            if corr_str:
+                parts.append(corr_str)
+            flag_str = f"  ← {', '.join(flags)}" if flags else ""
+            marker = "⚠" if flags else "✓"
+            lines.append(
+                f"  {marker} {cs['entity']} [{role}]  "
+                f"{'  '.join(parts)}{flag_str}"
+            )
+
+        # Dropna culprit — the column whose pre-dropna NaN count was the
+        # largest contributor to rows lost. When rows_lost is small this
+        # is noise; when it's the entire dataset it pinpoints the column
+        # that's killing the cycle.
+        rows_lost = rows_before_dropna - rows_after_dropna
+        if pre_drop_nan_counts:
+            culprit_col, culprit_nans = max(
+                pre_drop_nan_counts.items(), key=lambda kv: kv[1]
+            )
+        else:
+            culprit_col, culprit_nans = None, 0
+
+        dropna_line = (
+            f"  dropna: {rows_before_dropna} rows → {rows_after_dropna} kept"
+        )
+        if rows_lost > 0:
+            dropna_line += f" ({rows_lost} lost"
+            if culprit_col and culprit_nans > 0:
+                dropna_line += (
+                    f"; biggest culprit: {culprit_col} {culprit_nans} NaNs"
+                )
+            dropna_line += ")"
+        lines.append(dropna_line)
+
+        logger.info("\n".join(lines))
 
     def _update_web_benchmark(
         self, exp_cfg, model_results, rankings, best_model_name,
