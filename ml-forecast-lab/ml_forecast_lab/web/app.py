@@ -1175,6 +1175,17 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception as e:
             logger.warning(f"Forecast-log cleanup on promote failed: {e}")
 
+        # Fire the retrain callback so the promoted model is trained, cached,
+        # and its sensors start publishing on the same cycle — mirroring what
+        # /toggle-mode does when it flips lab → production. Without this the
+        # experiment sat in production with no cached model until the next
+        # scheduled retrain tick (up to retrain_every_hours later), which
+        # looked like "the Publish button didn't do anything".
+        if app.state.appstate.retrain_callback:
+            import asyncio as _aio
+            _aio.create_task(app.state.appstate.retrain_callback(name))
+            logger.info(f"Triggered immediate retrain for {name} after promotion")
+
         return JSONResponse(
             content={
                 "message": f"Model {model_name} promoted to production",

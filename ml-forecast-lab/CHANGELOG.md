@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.27.6
+
+### Fixed
+
+- **Publish button now triggers an immediate retrain.** The
+  `/experiment/{name}/promote/{model_name}` handler flipped the
+  experiment to `production` mode and persisted the choice to YAML,
+  but — unlike the sibling `/toggle-mode` handler — never fired
+  `retrain_callback`. The experiment sat in production with no cached
+  model until the next scheduled retrain tick (up to
+  `retrain_every_hours` later), so sensors didn't appear and the
+  Publish click looked like a no-op. Now fires the retrain callback
+  at the end of `promote_model`, matching `toggle_mode:2277-2280`.
+
 ## 2.27.5
 
 ### Fixed
