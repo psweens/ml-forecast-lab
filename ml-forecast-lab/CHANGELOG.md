@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.27.7
+
+### Changed
+
+- **Production cached models now survive restarts.** After every
+  `_retrain_and_cache`, the trained model is serialised to
+  `/data/ml_forecast_lab/models/<exp>/model.bin` (via the backend's
+  own `save()`) alongside a `cache_meta.json` holding
+  `feature_cols`, `trained_at`, `model_version`, `is_neural`, and
+  `window_size`. On startup, `_restore_cached_models` loads each
+  production experiment's cache before `main_loop` decides its
+  timers. If the restored cache is younger than
+  `retrain_every_hours`, the immediate startup retrain is skipped
+  and the next retrain is scheduled at `trained_at +
+  retrain_every_hours` instead. This eliminates the cascade of N
+  sequential retrains every restart used to run through before the
+  UI became responsive — the user experience on a clean restart
+  drops from "minutes of 'no best model' placeholders while each
+  production experiment retrains in turn" to "sensors publish on
+  the next forecast tick, UI shows the restored champion
+  immediately". Persistence failures and schema mismatches fall
+  back silently to the old cold-start behaviour.
+
+- **`_forecast_with_cached` no longer requires a cached training
+  frame.** Previously the fresh-fetch-failure branch reached into
+  `cache["combined"]` as a fallback; restored caches deliberately
+  don't carry that frame (too big to pickle, always re-fetchable),
+  so the code now `cache.get("combined")` and skips the cycle
+  cleanly when both fresh-fetch and cached-fallback are unavailable.
+
 ## 2.27.6
 
 ### Fixed

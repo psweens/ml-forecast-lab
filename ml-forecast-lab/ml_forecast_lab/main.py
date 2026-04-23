@@ -2700,8 +2700,173 @@ class MLForecastLabApp:
                 status.last_benchmark_status = "completed"
                 status.last_error = None  # Clear any previous error
 
+        # Persist to disk so a restart can skip the immediate retrain for
+        # this experiment and start publishing from the same weights.
+        self._persist_cached_model(exp_cfg.name)
+
         # Also run a forecast immediately after retrain
         await self._forecast_with_cached(exp_cfg.name)
+
+    @staticmethod
+    def _cached_model_dir(exp_name: str) -> Path:
+        """Return the per-experiment cache directory, slugifying the name
+        so odd characters in experiment IDs can't escape the base path."""
+        import re
+        safe = re.sub(r"[^A-Za-z0-9_-]", "_", exp_name)
+        return Path("/data/ml_forecast_lab/models") / safe
+
+    def _persist_cached_model(self, exp_name: str) -> None:
+        """Serialise the in-memory cached production model to disk.
+
+        Called at the tail of _retrain_and_cache. Writes two files to
+        /data/ml_forecast_lab/models/<exp>/:
+            model.bin       — backend-defined binary (pickle / torch.save)
+            cache_meta.json — feature_cols, trained_at, model_version,
+                              is_neural, window_size, addon_version
+
+        Swallows and logs all errors: a failed persist must never break
+        the retrain path. The live _cached_models dict is the source of
+        truth at runtime; disk is only read on startup.
+        """
+        import json
+        cache = self._cached_models.get(exp_name)
+        if not cache:
+            return
+        try:
+            from ml_forecast_lab import __version__
+            model_dir = self._cached_model_dir(exp_name)
+            model_dir.mkdir(parents=True, exist_ok=True)
+
+            model_bin = model_dir / "model.bin"
+            meta_file = model_dir / "cache_meta.json"
+
+            cache["model"].save(str(model_bin))
+
+            # window_size is only meaningful for neural backends that
+            # trained through the sliding-window path — derive it from
+            # the live seq_kwargs.sequence_data shape so we don't store
+            # redundant state.
+            is_neural = cache.get("is_neural", False)
+            seq_kwargs = cache.get("seq_kwargs", {})
+            window_size = None
+            if is_neural and "sequence_data" in seq_kwargs:
+                window_size = int(seq_kwargs["sequence_data"].shape[1])
+
+            meta = {
+                "schema_version": 1,
+                "addon_version": __version__,
+                "model_name": cache["model_name"],
+                "feature_cols": list(cache["feature_cols"]),
+                "trained_at": cache["trained_at"].isoformat(),
+                "model_version": cache["model_version"],
+                "is_neural": is_neural,
+                "window_size": window_size,
+            }
+            tmp = meta_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(meta, indent=2))
+            tmp.replace(meta_file)
+            logger.info(
+                f"  Persisted cached {cache['model_name']} for {exp_name} "
+                f"→ {model_dir}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"  Failed to persist cached model for {exp_name}: {e}",
+                exc_info=True,
+            )
+
+    def _restore_cached_models(self) -> None:
+        """On startup, reload any production models a previous run left
+        on disk so the first forecast cycle after restart can use them
+        immediately instead of waiting for a fresh retrain to finish.
+
+        Silently ignores missing / corrupt / schema-mismatched entries;
+        main_loop's cache-freshness check will schedule a cold-start
+        retrain for any experiment that didn't restore.
+        """
+        import json
+        if not self.config or not self.config.experiments:
+            return
+
+        base_dir = Path("/data/ml_forecast_lab/models")
+        if not base_dir.exists():
+            return
+
+        restored = 0
+        for exp_cfg in self.config.experiments:
+            if exp_cfg.mode != "production":
+                continue
+            model_dir = self._cached_model_dir(exp_cfg.name)
+            meta_file = model_dir / "cache_meta.json"
+            model_bin = model_dir / "model.bin"
+            if not meta_file.exists() or not model_bin.exists():
+                continue
+            try:
+                meta = json.loads(meta_file.read_text())
+                if meta.get("schema_version") != 1:
+                    logger.info(
+                        f"  Cached model for {exp_cfg.name} has schema "
+                        f"v{meta.get('schema_version')}, ignoring"
+                    )
+                    continue
+
+                model_name = meta["model_name"]
+                model = self.model_registry.create(model_name)
+                model.load(str(model_bin))
+
+                trained_at = datetime.fromisoformat(meta["trained_at"])
+                is_neural = meta.get("is_neural", False)
+                window_size = meta.get("window_size")
+
+                # Rebuild a minimal seq_kwargs so _forecast_with_cached
+                # can still read window_size from sequence_data.shape[1]
+                # without us having to persist the full training array.
+                seq_kwargs: Dict = {}
+                if is_neural and window_size:
+                    seq_kwargs["sequence_data"] = np.zeros(
+                        (1, window_size, 1), dtype=np.float32
+                    )
+
+                self._cached_models[exp_cfg.name] = {
+                    "model": model,
+                    "model_name": model_name,
+                    "feature_cols": meta["feature_cols"],
+                    "combined": None,  # re-fetched on first forecast
+                    "exp_cfg": exp_cfg,
+                    "trained_at": trained_at,
+                    "model_version": meta["model_version"],
+                    "is_neural": is_neural,
+                    "seq_kwargs": seq_kwargs,
+                }
+                # Also mirror into web status so the UI reflects the
+                # restored champion immediately, not "unknown" until the
+                # next retrain writes one.
+                if self.web_app:
+                    status = self.web_app.state.appstate.experiment_statuses.get(
+                        exp_cfg.name
+                    )
+                    if status:
+                        status.best_model = model_name
+                        status.model_version = meta["model_version"]
+                        status.last_benchmark_timestamp = meta["trained_at"]
+                age_m = (datetime.now(timezone.utc) - trained_at).total_seconds() / 60
+                logger.info(
+                    f"  Restored cached {model_name} for {exp_cfg.name} "
+                    f"(trained {age_m:.0f}m ago, addon "
+                    f"v{meta.get('addon_version', '?')})"
+                )
+                restored += 1
+            except Exception as e:
+                logger.warning(
+                    f"  Failed to restore cached model for {exp_cfg.name}: {e}",
+                    exc_info=True,
+                )
+
+        if restored:
+            logger.info(
+                f"Restored {restored} cached production model(s) from disk — "
+                f"skipping immediate retrain for these experiments"
+            )
 
     async def _run_forecast_cycle(self):
         """
@@ -3377,7 +3542,17 @@ class MLForecastLabApp:
             logger.debug(f"  Fresh data: {len(combined)} samples, last={combined.index[-1]}")
         except Exception as e:
             logger.warning(f"  Fresh data fetch failed, using cached data: {e}")
-            combined = cache["combined"]
+            combined = cache.get("combined")
+            if combined is None:
+                # _restore_cached_models deliberately doesn't persist the
+                # training frame — so after a restart, fresh data is the
+                # only source. If that also failed, skip this cycle and
+                # wait for the next forecast tick rather than crash.
+                logger.warning(
+                    f"  No cached data frame for {exp_cfg.name} after a "
+                    f"restore — skipping this forecast cycle"
+                )
+                return
 
         n_lags = 12
         last_ts = combined.index[-1]
@@ -4629,12 +4804,31 @@ class MLForecastLabApp:
             if exp_cfg.mode == "production":
                 # Production experiments retrain immediately on startup so
                 # cached models exist and forecast sensors get published
-                # right away — not after waiting hours for the schedule.
-                self._next_retrain_per_exp[exp_cfg.name] = now
-                logger.info(
-                    f"Timers for {exp_cfg.name}: forecast every {fc_mins}m, "
-                    f"retrain IMMEDIATELY (production, no cached model)"
-                )
+                # right away — unless _restore_cached_models already
+                # populated a fresh cache from disk, in which case defer
+                # to when the schedule would have fired next. Avoids
+                # thrashing through N sequential retrains on every restart.
+                cached = self._cached_models.get(exp_cfg.name)
+                cached_ts = cached.get("trained_at") if cached else None
+                if cached_ts is not None and (now - cached_ts).total_seconds() < rt_hrs * 3600:
+                    age_m = (now - cached_ts).total_seconds() / 60
+                    self._next_retrain_per_exp[exp_cfg.name] = cached_ts + timedelta(seconds=rt_hrs * 3600)
+                    logger.info(
+                        f"Timers for {exp_cfg.name}: forecast every {fc_mins}m, "
+                        f"retrain in {((self._next_retrain_per_exp[exp_cfg.name] - now).total_seconds() / 3600):.1f}h "
+                        f"(restored cache is {age_m:.0f}m old)"
+                    )
+                else:
+                    self._next_retrain_per_exp[exp_cfg.name] = now
+                    stale_reason = (
+                        f"cache {((now - cached_ts).total_seconds() / 3600):.1f}h old, stale"
+                        if cached_ts is not None
+                        else "no cached model"
+                    )
+                    logger.info(
+                        f"Timers for {exp_cfg.name}: forecast every {fc_mins}m, "
+                        f"retrain IMMEDIATELY ({stale_reason})"
+                    )
             else:
                 self._next_retrain_per_exp[exp_cfg.name] = now + timedelta(
                     seconds=rt_hrs * 3600
@@ -4759,6 +4953,10 @@ class MLForecastLabApp:
 
             # Initialise components
             await self.initialise_components()
+
+            # Restore any production models persisted by a previous run
+            # before main_loop decides whether to queue immediate retrains.
+            self._restore_cached_models()
 
             # Start web server
             await self.start_web_server()
