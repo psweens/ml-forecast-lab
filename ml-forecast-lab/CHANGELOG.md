@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.27.4
+
+### Fixed
+
+- **CatBoost tuning no longer looks stalled.** CatBoost emitted a single
+  end-of-training event, so the live training UI showed nothing at all
+  during each trial even while the model was iterating. Added a CatBoost
+  iteration callback (matching the LightGBM / XGBoost pattern) that
+  forwards per-tree RMSE plus a synthetic patience counter to the
+  training event bus.
+
+- **Tuning now has a 30 min wall-clock budget for every backend.** The
+  timeout previously only fired for neural models; tree tuning could
+  sit for an hour inside a single trial when Optuna picked a tiny
+  learning rate plus a large `n_estimators` (CatBoost in particular),
+  with no progress signal to distinguish "training slowly" from "hung".
+
+### Changed
+
+- **Model tabs render alphabetically.** Both the main Models page and
+  the per-experiment Models tab now order cards by display name,
+  regardless of the insertion order in `MODEL_CATALOG`. Baseline and
+  Classical models (Seasonal Naive, AutoARIMA / AutoETS / AutoTheta)
+  interleave cleanly with the neural backends.
+
 ## 2.27.3
 
 ### Fixed

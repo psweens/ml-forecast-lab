@@ -685,8 +685,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             },
         )
 
-    # Model catalog (shared between Models page and experiment detail)
-    MODEL_CATALOG = [
+    # Model catalog (shared between Models page and experiment detail).
+    # Sorted by display_name (case-insensitive) so cards render
+    # alphabetically in both the /models tab and the per-experiment
+    # Models tab, regardless of insertion order here.
+    MODEL_CATALOG = sorted([
         {"name": "cnn", "display_name": "CNN", "model_type": "PyTorch",
          "description": "WaveNet-style dilated causal convolutions with residual connections.",
          "speed": "🔶 Moderate", "best_for": "Periodic/seasonal signals"},
@@ -759,7 +762,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         {"name": "theta", "display_name": "AutoTheta", "model_type": "Classical",
          "description": "Theta-method decomposition (M3/M4 winner family).",
          "speed": "⚡ Fast", "best_for": "Strong seasonal univariate baseline"},
-    ]
+    ], key=lambda m: m["display_name"].lower())
 
     _MODEL_DISPLAY_NAMES = {m["name"]: m["display_name"] for m in MODEL_CATALOG}
 

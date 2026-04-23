@@ -4025,18 +4025,19 @@ class MLForecastLabApp:
             return composite
 
         # Create and run Optuna study.
-        # For neural models on constrained hardware (RPi5 etc.), cap the
-        # total wall-clock time to 30 minutes. Optuna will stop cleanly
-        # after the current trial finishes, so the best-so-far result is
-        # always available. Tree models are much faster per trial so they
-        # don't need a timeout.
+        # Cap total wall-clock time to 30 minutes for every backend.
+        # Optuna stops cleanly after the current trial finishes, so the
+        # best-so-far result is always available. Applies to trees as
+        # well: CatBoost with a small learning rate + large n_estimators
+        # can sit for many minutes inside a single trial before early
+        # stopping fires, which is indistinguishable from a stall.
         if strategy == "tpe":
             sampler = optuna.samplers.TPESampler(seed=42)
         else:
             sampler = optuna.samplers.RandomSampler(seed=42)
 
         study = optuna.create_study(direction="minimize", sampler=sampler)
-        study_timeout = 30 * 60 if _is_neural_model else None  # 30 min for neural
+        study_timeout = 30 * 60
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
