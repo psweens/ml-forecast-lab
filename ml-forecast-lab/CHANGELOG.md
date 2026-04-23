@@ -1,5 +1,45 @@
 # Changelog
 
+## 2.27.9
+
+### Changed
+
+- **Night-time solar forecasts now go to zero via the model, not a
+  post-hoc clamp.** Tree backends (CatBoost / LightGBM / XGBoost) do
+  recursive multi-step forecasting — each step's prediction feeds
+  forward as `y_lag_1` of the next step. A sunset step biased even
+  ~100 W leaks into the next step's lag, producing a feature vector
+  `(clear_sky_ghi=0, y_lag_1=150)` that training never saw (training
+  data cleanly had `y_lag_k=0` whenever the past step was night). The
+  tree then lands on a daytime leaf and predicts non-zero across the
+  whole overnight horizon. Fixed at the feature contract: when
+  `clear_sky_ghi` is present in the dataframe, `build_features` zeros
+  `y_lag_k` and `y_diff_1` values whose corresponding shifted GHI is
+  zero. The recursive inference paths
+  (`_forecast_with_cached._run_recursive_forecast` and
+  `_run_production_inference._run_recursive_forecast`) mirror the
+  invariant by pushing `0` into the lag buffer at night steps instead
+  of the raw prediction — so every future feature vector stays
+  in-distribution and the tree's own learned response drives the
+  published forecast down to near-zero through dusk, smoothly.
+
+- **Removed the v2.27.8 hard clamp in `_publish_forecast_sensors`.**
+  With the feature-contract fix above, the output-side clamp is no
+  longer needed and was creating a visible cliff at the exact moment
+  `clear_sky_ghi` crossed zero. Any residual non-zero at night after
+  the next retrain reflects a genuine model error (or a
+  non-solar-gated backend path) that shouldn't be hidden.
+
+- **Neural models are unaffected by this change.** They exclude
+  `y_lag_*` from their covariate set (see
+  [main.py](ml-forecast-lab/ml_forecast_lab/main.py) — the sliding-
+  window covariate cols subtract `y_lag_*`) and predict all horizons
+  in a single forward pass, so they don't have the recursive
+  drift pathology. Their inference already uses real history, which
+  is cleanly zero at night. If a neural backend shows a residual
+  night floor, that's the softplus output head — switchable via
+  `output_activation: relu` on the experiment.
+
 ## 2.27.8
 
 ### Fixed

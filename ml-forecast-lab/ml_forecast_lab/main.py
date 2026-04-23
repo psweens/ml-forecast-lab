@@ -2248,6 +2248,30 @@ class MLForecastLabApp:
                 for c in raw_cov_cols
             }
 
+            # Deterministic future solar values for the physics-gated
+            # lag buffer (mirrors _forecast_with_cached). When the user
+            # has `include_clear_sky_irradiance: true` on the
+            # experiment, future clear_sky_ghi is known a priori from
+            # pvlib — we use it below to zero the lag buffer at night
+            # steps, keeping the recursive feature vectors in the same
+            # distribution the tree saw during training.
+            prod_future_solar = None
+            if getattr(exp_cfg, "include_clear_sky_irradiance", False):
+                try:
+                    loc = await self._get_site_location()
+                    if loc is not None:
+                        lat, lon = loc
+                        from ml_forecast_lab.solar_physics import compute_solar_features
+                        prod_future_solar = compute_solar_features(
+                            future_index, latitude=lat, longitude=lon,
+                            include_elevation=False,
+                            include_clear_sky=True,
+                        )
+                except Exception as e:
+                    logger.debug(
+                        f"  _run_production_inference future solar compute failed: {e}"
+                    )
+
             # Lag buffer: chronological, grows with each prediction
             lag_buffer = list(y[-max(n_lags, steps_per_day * 2 + 1):])
 
@@ -2311,7 +2335,19 @@ class MLForecastLabApp:
                     pred = model.predict(X_row)
                     val = float(pred.ravel()[0] if hasattr(pred, 'ravel') else pred[0])
                     preds.append(val)
-                    lag_buffer.append(val)
+                    # Physics-gated lag buffer — same invariant as
+                    # build_features and _forecast_with_cached: night
+                    # steps push 0 into the buffer so downstream lag
+                    # features stay in-distribution even when the
+                    # model's raw prediction at a previous night step
+                    # was slightly positive.
+                    ghi_now = None
+                    if prod_future_solar is not None and ts in prod_future_solar.index:
+                        ghi_now = float(prod_future_solar.loc[ts, 'clear_sky_ghi'])
+                    if ghi_now is not None and ghi_now <= 0:
+                        lag_buffer.append(0.0)
+                    else:
+                        lag_buffer.append(val)
                 return np.array(preds, dtype=np.float32)
 
             y_pred = await asyncio.get_running_loop().run_in_executor(
@@ -2933,47 +2969,14 @@ class MLForecastLabApp:
             )
             return
 
-        # Physics gate for solar-linked targets: force prediction (and
-        # conformal bands) to exactly 0 where clear-sky GHI is 0. Tree
-        # ensembles can't output exact zero because any non-zero night
-        # samples in training (inverter idle draw, meter noise) leave a
-        # leaf bias the forest can't unlearn; softplus-headed neural
-        # models have a ln(2)-scale floor for the same visual effect.
-        # The user's `include_clear_sky_irradiance` toggle is the
-        # unambiguous signal that the target is solar-driven and the
-        # ground truth at night is exactly zero — non-solar experiments
-        # never set this and are unaffected. Sited here rather than in
-        # each forecast path so /retrain, /cached-forecast, and
-        # _run_production_inference all pick it up uniformly.
-        if getattr(exp_cfg, 'include_clear_sky_irradiance', False):
-            try:
-                loc = await self._get_site_location()
-                if loc is not None:
-                    lat, lon = loc
-                    from ml_forecast_lab.solar_physics import compute_solar_features
-                    gate_solar = compute_solar_features(
-                        ds_future, latitude=lat, longitude=lon,
-                        include_elevation=False,
-                        include_clear_sky=True,
-                    )
-                    ghi = gate_solar['clear_sky_ghi'].to_numpy()
-                    mask = ghi <= 0
-                    if mask.any():
-                        y_pred = np.where(mask, 0.0, y_pred).astype(np.float32)
-                        if y_pred_upper is not None:
-                            y_pred_upper = np.where(mask, 0.0, y_pred_upper).astype(np.float32)
-                        if y_pred_lower is not None:
-                            y_pred_lower = np.where(mask, 0.0, y_pred_lower).astype(np.float32)
-                        logger.info(
-                            f"  Physics gate for {exp_cfg.name}: zeroed "
-                            f"{int(mask.sum())}/{len(y_pred)} steps where "
-                            f"clear_sky_ghi=0 (night)"
-                        )
-            except Exception as e:
-                logger.debug(
-                    f"  Physics gate for {exp_cfg.name} skipped: {e}",
-                    exc_info=True,
-                )
+        # The post-hoc "clear_sky_ghi = 0 → y_pred = 0" hard clamp from
+        # v2.27.8 used to live here. It was removed in v2.27.9 after
+        # the train-/inference-side fix in features.build_features and
+        # _run_recursive_forecast: the model now sees physics-gated lag
+        # features during both training and recursive inference, so its
+        # own learned response produces near-zero at night — no
+        # post-processing needed. Leaving the clamp in would mask real
+        # model errors at dusk/dawn and create a visible cliff.
 
         # One timestamp shared across log_forecast, every sensor's attrs,
         # and the cumulative sensor's "today" partition — so within a single
@@ -3777,7 +3780,25 @@ class MLForecastLabApp:
                     y = model.predict(X_row)
                     val = float(y.ravel()[0] if hasattr(y, 'ravel') else y[0])
                     preds.append(val)
-                    lag_buffer.append(val)
+                    # Physics-gated lag buffer: mirror the train-side
+                    # gate in build_features so every future feature
+                    # vector stays in-distribution. When the current
+                    # step is at night (clear_sky_ghi = 0), push 0
+                    # into the buffer instead of the raw prediction;
+                    # training's y_lag_k at rows following a night
+                    # step was 0 by construction, so feeding 0 forward
+                    # keeps the recursive model inputs matching what
+                    # the tree actually saw at fit time. Leaves preds[]
+                    # untouched so the model's own learned response —
+                    # on in-distribution inputs — drives what gets
+                    # published.
+                    ghi_now = None
+                    if future_solar is not None and ts in future_solar.index:
+                        ghi_now = float(future_solar.loc[ts, 'clear_sky_ghi'])
+                    if ghi_now is not None and ghi_now <= 0:
+                        lag_buffer.append(0.0)
+                    else:
+                        lag_buffer.append(val)
                 return np.array(preds, dtype=np.float32)
 
             loop = asyncio.get_running_loop()
