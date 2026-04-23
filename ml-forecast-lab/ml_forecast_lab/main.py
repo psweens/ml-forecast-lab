@@ -2237,9 +2237,15 @@ class MLForecastLabApp:
                             if future_series is not None and not future_series.empty:
                                 if cov_cfg.scale is not None:
                                     future_series = future_series * cov_cfg.scale
-                                future_cov_values[cov_name] = future_series.reindex(
+                                aligned = future_series.reindex(
                                     future_index
                                 ).ffill().bfill()
+                                # Skip all-NaN future series (fetch_future
+                                # stub fallback); let carry-forward handle
+                                # those covariates instead of zero-ing
+                                # them via nan_to_num.
+                                if aligned.notna().any():
+                                    future_cov_values[cov_name] = aligned
                         except Exception as e:
                             logger.debug(f"Future fetch failed for {cov_name}: {e}")
 
@@ -3713,9 +3719,23 @@ class MLForecastLabApp:
                             if future_series is not None and not future_series.empty:
                                 if cov_cfg.scale is not None:
                                     future_series = future_series * cov_cfg.scale
-                                future_cov_values[cov_name] = future_series.reindex(
+                                aligned = future_series.reindex(
                                     future_index
                                 ).ffill().bfill()
+                                # fetch_future returns an all-NaN series
+                                # for entity types it can't resolve
+                                # (which is most of them until the
+                                # forecast-attribute parser lands).
+                                # Accepting NaN here would land the
+                                # covariate at 0 after nan_to_num and
+                                # starve the tree of its training-time
+                                # signal (see v2.27.10 regression).
+                                # Only keep the fetched series when it
+                                # actually contains real values;
+                                # otherwise fall back to last-observed
+                                # carry-forward below.
+                                if aligned.notna().any():
+                                    future_cov_values[cov_name] = aligned
                         except Exception as e:
                             logger.debug(
                                 f"  Future fetch failed for {cov_name}: {e}"

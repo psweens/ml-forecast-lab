@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.27.11
+
+### Fixed
+
+- **Hotfix for v2.27.10: don't poison future covariates with an
+  all-NaN series.** `CovariateResolver.fetch_future` at
+  [covariates.py:157](ml-forecast-lab/ml_forecast_lab/covariates.py:157)
+  is currently a stub — for every entity type except
+  `constant_value`, it returns `pd.Series(np.nan, ...)` and logs
+  `No future covariate data for ...`. v2.27.10 accepted those NaN
+  series into `future_cov_values`; `ffill().bfill()` on all-NaN
+  leaves NaN, and the downstream `np.nan_to_num` then slammed the
+  covariate to `0` for every horizon step. For solar experiments
+  that meant Solcast was being fed as 0-during-the-day to a tree
+  that trained on Solcast's actual time-varying readings — the
+  tree collapsed its forecast curve toward 0 across tomorrow's
+  daytime too, visibly worse than pre-v2.27.10. Now only keep the
+  fetched future series when it contains any non-NaN value;
+  otherwise fall back to the pre-v2.27.10 last-observed
+  carry-forward for that covariate. Applied in both
+  `_forecast_with_cached` and `_run_production_inference` (same
+  latent bug, different exposure).
+
+  Once `fetch_future` grows a real forecast-attribute parser
+  (Solcast's `detailed_forecast`, weather providers' hourly
+  payloads, etc.), the cached cycle will automatically start
+  using the time-varying values without further changes here.
+
 ## 2.27.10
 
 ### Fixed
