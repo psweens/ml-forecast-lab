@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.27.8
+
+### Fixed
+
+- **Solar forecasts no longer carry a noise floor at night.** Tree
+  ensembles (CatBoost, LightGBM, XGBoost) can't output exact zero —
+  any non-zero night samples in training history (inverter idle draw,
+  meter noise, single-digit watts) leave a leaf bias the forest can't
+  unlearn, so predictions hover around ~100-300 W even when
+  `clear_sky_ghi = 0` and actual PV is exactly 0. Softplus-headed
+  neural models have a ln(2)-scale floor for the same visual effect.
+  Added a physics gate in `_publish_forecast_sensors` that clamps
+  `y_pred` (plus conformal upper/lower bands) to exactly 0 on every
+  horizon step where pvlib's clear-sky GHI is 0. Activates only when
+  `include_clear_sky_irradiance: true` is set on the experiment — the
+  unambiguous signal that the target is solar-driven — so non-solar
+  signals are unaffected. Sited in the shared publish helper so
+  `/promote`, cached forecast cycles, and the full
+  `_run_production_inference` path all pick it up uniformly.
+
 ## 2.27.7
 
 ### Changed

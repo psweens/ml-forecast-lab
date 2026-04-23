@@ -2933,6 +2933,48 @@ class MLForecastLabApp:
             )
             return
 
+        # Physics gate for solar-linked targets: force prediction (and
+        # conformal bands) to exactly 0 where clear-sky GHI is 0. Tree
+        # ensembles can't output exact zero because any non-zero night
+        # samples in training (inverter idle draw, meter noise) leave a
+        # leaf bias the forest can't unlearn; softplus-headed neural
+        # models have a ln(2)-scale floor for the same visual effect.
+        # The user's `include_clear_sky_irradiance` toggle is the
+        # unambiguous signal that the target is solar-driven and the
+        # ground truth at night is exactly zero — non-solar experiments
+        # never set this and are unaffected. Sited here rather than in
+        # each forecast path so /retrain, /cached-forecast, and
+        # _run_production_inference all pick it up uniformly.
+        if getattr(exp_cfg, 'include_clear_sky_irradiance', False):
+            try:
+                loc = await self._get_site_location()
+                if loc is not None:
+                    lat, lon = loc
+                    from ml_forecast_lab.solar_physics import compute_solar_features
+                    gate_solar = compute_solar_features(
+                        ds_future, latitude=lat, longitude=lon,
+                        include_elevation=False,
+                        include_clear_sky=True,
+                    )
+                    ghi = gate_solar['clear_sky_ghi'].to_numpy()
+                    mask = ghi <= 0
+                    if mask.any():
+                        y_pred = np.where(mask, 0.0, y_pred).astype(np.float32)
+                        if y_pred_upper is not None:
+                            y_pred_upper = np.where(mask, 0.0, y_pred_upper).astype(np.float32)
+                        if y_pred_lower is not None:
+                            y_pred_lower = np.where(mask, 0.0, y_pred_lower).astype(np.float32)
+                        logger.info(
+                            f"  Physics gate for {exp_cfg.name}: zeroed "
+                            f"{int(mask.sum())}/{len(y_pred)} steps where "
+                            f"clear_sky_ghi=0 (night)"
+                        )
+            except Exception as e:
+                logger.debug(
+                    f"  Physics gate for {exp_cfg.name} skipped: {e}",
+                    exc_info=True,
+                )
+
         # One timestamp shared across log_forecast, every sensor's attrs,
         # and the cumulative sensor's "today" partition — so within a single
         # publish cycle every downstream consumer sees the same issuance
