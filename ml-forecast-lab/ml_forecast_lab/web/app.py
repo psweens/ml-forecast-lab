@@ -560,8 +560,16 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
         "catboost": {
-            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 10, "max": 5000},
-            "max_depth": {"type": "int", "default": 6, "label": "Max tree depth", "min": 1, "max": 16},
+            # CatBoost builds oblivious (symmetric) trees, so every
+            # depth level strictly doubles per-tree cost regardless of
+            # data. max_depth=16 runs ~1000x slower per tree than
+            # depth=6 and caused tuning trials to appear stalled —
+            # capped to CatBoost's practical range (docs recommend
+            # 6-10). n_estimators capped at 2000 so a pathological
+            # lr=0.001 trial that never triggers early-stopping still
+            # finishes within the study budget.
+            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 10, "max": 2000},
+            "max_depth": {"type": "int", "default": 6, "label": "Max tree depth", "min": 3, "max": 10},
             "learning_rate": {"type": "float", "default": 0.05, "label": "Learning rate", "min": 0.001, "max": 1.0, "step": 0.001},
             "l2_leaf_reg": {"type": "float", "default": 3.0, "label": "L2 leaf regularisation", "min": 0.0, "max": 30.0, "step": 0.1},
             "subsample": {"type": "float", "default": 0.8, "label": "Row subsample ratio", "min": 0.1, "max": 1.0, "step": 0.05},

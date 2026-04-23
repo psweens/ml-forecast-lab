@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.27.5
+
+### Fixed
+
+- **CatBoost tuning trials no longer appear to hang for tens of
+  minutes.** CatBoost builds oblivious (symmetric) trees, so every
+  depth level strictly doubles per-tree cost — `max_depth=16` is
+  ~1000x slower per tree than `max_depth=6`, and Optuna will happily
+  pick it. Tightened the CatBoost search space to match the library's
+  practical range (`max_depth` 3-10, `n_estimators` 10-2000) so a
+  single trial can't out-grow the 30 min study budget. Defaults are
+  unchanged (depth=6, n_estimators=500, lr=0.05) so existing results
+  aren't affected. The v2.27.4 iteration callback remains active and
+  drives the live training UI for the benchmark and production-training
+  paths — it's only the tuning path that never wired `epoch_callback`
+  through `runner.run_single_model`, which is why the callback alone
+  didn't surface in-trial progress.
+
+### Changed
+
+- **Tuning logs now emit a `Trial N starting: params=...` line per
+  trial.** Previously only the completion line logged, so an in-flight
+  trial was invisible in the log and indistinguishable from a hang.
+
 ## 2.27.4
 
 ### Fixed

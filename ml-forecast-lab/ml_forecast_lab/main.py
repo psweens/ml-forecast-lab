@@ -3959,6 +3959,16 @@ class MLForecastLabApp:
                 elif ptype == "bool":
                     params[pname] = trial.suggest_categorical(pname, [True, False])
 
+            # Emit a trial-start log line so the user can see an
+            # in-flight trial rather than waiting in silence for the
+            # completion line. The previous-trial composite is already
+            # logged on completion, so between that and this line the
+            # transition from one trial to the next is always visible.
+            logger.info(
+                f"  [{tuning_state.completed_trials}/{n_trials}] "
+                f"Trial {trial.number} starting: params={params}"
+            )
+
             model = None
             result = None
             try:
