@@ -3676,13 +3676,58 @@ class MLForecastLabApp:
             # grows as we append predictions.
             lag_buffer = list(y[-max(n_lags, steps_per_day * 2 + 1):])
 
-            # Last known covariate values (we treat covariates as constant
-            # going forward; real future values would require per-covariate
-            # forecasts which is out of scope here)
+            # Last known covariate values — used as the fallback when a
+            # covariate has no role=future entry (lagged-only signals)
+            # or its future fetch fails. The full tree feature row
+            # prefers future_cov_values[c] below when available.
             last_cov_vals = {
                 c: float(combined[c].iloc[-1]) if c in combined.columns else 0.0
                 for c in raw_cov_cols
             }
+
+            # Future covariate values for role='future' / role='both'
+            # entries — ported from _run_production_inference so the
+            # cached forecast cycle stops pinning Solcast-style forecast
+            # sensors to their last observed reading for all 48 horizon
+            # steps. Without this, training saw a time-varying Solcast
+            # column but inference saw one constant, which regresses
+            # peak predictions toward the mean. fetch_future knows how
+            # to handle each covariate type (Solcast forecast series,
+            # tariff schedules, weather-forecast sensors); its result
+            # is reindexed/ffill-bfill'd onto the forecast grid.
+            future_index = pd.date_range(
+                start=last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes),
+                periods=future_periods,
+                freq=f'{exp_cfg.interval_minutes}min',
+            )
+            future_cov_values: Dict = {}
+            if exp_cfg.covariates and self.covariate_resolver:
+                for cov_cfg in exp_cfg.covariates:
+                    cov_name = cov_cfg.entity.split(".")[-1]
+                    if cov_name in raw_cov_cols and cov_cfg.role in ('future', 'both'):
+                        try:
+                            cov_dict = {"entity_id": cov_cfg.entity, "name": cov_name}
+                            future_series = await self.covariate_resolver.fetch_future(
+                                cov_dict, future_index,
+                            )
+                            if future_series is not None and not future_series.empty:
+                                if cov_cfg.scale is not None:
+                                    future_series = future_series * cov_cfg.scale
+                                future_cov_values[cov_name] = future_series.reindex(
+                                    future_index
+                                ).ffill().bfill()
+                        except Exception as e:
+                            logger.debug(
+                                f"  Future fetch failed for {cov_name}: {e}"
+                            )
+            if future_cov_values:
+                logger.info(
+                    f"  Fetched future covariate series for "
+                    f"{len(future_cov_values)}/"
+                    f"{sum(1 for cc in (exp_cfg.covariates or []) if cc.role in ('future', 'both'))} "
+                    f"future-role covariates: "
+                    f"{list(future_cov_values.keys())}"
+                )
 
             # Pre-compute deterministic solar features for future timestamps.
             # Unlike other covariates, sun elevation and clear-sky irradiance
@@ -3698,14 +3743,10 @@ class MLForecastLabApp:
                 loc = await self._get_site_location()
                 if loc is not None:
                     lat, lon = loc
-                    future_idx = pd.DatetimeIndex([
-                        last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes * (i + 1))
-                        for i in range(future_periods)
-                    ])
                     try:
                         from ml_forecast_lab.solar_physics import compute_solar_features
                         future_solar = compute_solar_features(
-                            future_idx,
+                            future_index,
                             latitude=lat,
                             longitude=lon,
                             include_elevation="sun_elevation" in solar_cols,
@@ -3714,7 +3755,7 @@ class MLForecastLabApp:
                     except Exception as e:
                         logger.debug(f"Future solar pre-compute failed: {e}")
 
-            def _build_feature_row(ts: pd.Timestamp, buf: list) -> dict:
+            def _build_feature_row(ts: pd.Timestamp, buf: list, step_idx: int) -> dict:
                 """Construct a single feature row matching the training schema."""
                 row = {}
                 # Temporal
@@ -3750,8 +3791,17 @@ class MLForecastLabApp:
                         row[f'y_rolling_max_{w}'] = 0.0
                 # Rate of change
                 row['y_diff_1'] = float(buf[-1] - buf[-2]) if len(buf) >= 2 else 0.0
-                # Covariates (carried forward, except solar which has
-                # deterministic future values from pvlib)
+                # Covariates: preference order per value:
+                #   1. pvlib-computed future_solar for sun_elevation /
+                #      clear_sky_ghi (deterministic, always correct).
+                #   2. future_cov_values for user-configured
+                #      role=future / role=both entries (Solcast, tariff,
+                #      weather forecasts). This matches what the tree
+                #      saw at training time, where each row had the
+                #      current Solcast reading — not a single carried
+                #      value across all horizon steps.
+                #   3. last_cov_vals carry-forward fallback for
+                #      lagged-only covariates with no future source.
                 for c, v in last_cov_vals.items():
                     if (
                         future_solar is not None
@@ -3759,10 +3809,16 @@ class MLForecastLabApp:
                         and ts in future_solar.index
                     ):
                         row[c] = float(future_solar.loc[ts, c])
+                    elif c in future_cov_values:
+                        try:
+                            row[c] = float(future_cov_values[c].iloc[step_idx])
+                        except Exception:
+                            row[c] = v
                     else:
                         row[c] = v
-                # Interaction features — use row[c] so solar interactions
-                # reflect the true future covariate value, not the carried one.
+                # Interaction features — use row[c] so solar / future
+                # covariate interactions reflect the true future value,
+                # not the carried one.
                 for c in raw_cov_cols:
                     row[f'{c}_x_hour_sin'] = row.get(c, 0.0) * row['hour_sin']
                     row[f'{c}_x_hour_cos'] = row.get(c, 0.0) * row['hour_cos']
@@ -3772,7 +3828,7 @@ class MLForecastLabApp:
                 preds = []
                 for step in range(future_periods):
                     ts = last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes * (step + 1))
-                    row_dict = _build_feature_row(ts, lag_buffer)
+                    row_dict = _build_feature_row(ts, lag_buffer, step)
                     # Align to training feature order
                     row_vals = [row_dict.get(c, 0.0) for c in feature_cols]
                     X_row = np.array([row_vals], dtype=np.float32)

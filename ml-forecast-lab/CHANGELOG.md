@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.27.10
+
+### Fixed
+
+- **Cached forecast cycle now fetches future covariate values.** The
+  tree-model branch of `_forecast_with_cached` (the path that drives
+  the live publish cycle) was pinning every `role: future` / `role:
+  both` covariate — Solcast forecasts, tariff schedules, weather-
+  forecast sensors — to its last observed value for all 48 horizon
+  steps. Training, however, had each row's *time-current* Solcast
+  reading as the covariate value, so the model learned a mapping
+  from a time-varying signal but was being fed a single constant at
+  inference. The mismatch starved the tree of its most-informative
+  daytime covariate and was the dominant driver of peak under-
+  prediction on solar targets. Now mirrors
+  `_run_production_inference`:
+  `covariate_resolver.fetch_future(cov, future_index)` runs once per
+  role=future covariate, the returned series is reindexed onto the
+  forecast grid, and `_build_feature_row` uses each step's value at
+  the right horizon index (falling back to carry-forward only when
+  the future fetch fails or the covariate is lagged-only). Logged
+  per cycle so you can confirm which future covariates actually
+  resolved: `Fetched future covariate series for N/M future-role
+  covariates: [names]`.
+
 ## 2.27.9
 
 ### Changed
