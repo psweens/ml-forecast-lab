@@ -3217,9 +3217,15 @@ class MLForecastLabApp:
                 actuals_table = self.history_db.safe_table_name(
                     exp_cfg.target_entity
                 )
-                accuracy = self.history_db.get_forecast_accuracy(
-                    exp_cfg.name, actuals_table, max_age_days=30,
-                    interval_minutes=exp_cfg.interval_minutes,
+                # Offload the scan-heavy query — three CTE passes over
+                # the actuals table per call, multiplied by N experiments
+                # per publish cycle. Running inline would freeze the
+                # event loop for the full cycle duration, starving the
+                # web UI and the HA set_state HTTPX pool.
+                accuracy = await asyncio.to_thread(
+                    self.history_db.get_forecast_accuracy,
+                    exp_cfg.name, actuals_table, 30,
+                    exp_cfg.interval_minutes,
                 )
                 ltc = accuracy.get("lead_time_curve", {})
                 rev = accuracy.get("revision_improvement", {})

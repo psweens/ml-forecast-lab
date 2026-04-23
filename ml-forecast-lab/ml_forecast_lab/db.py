@@ -8,6 +8,7 @@ and automatic cleanup of old records.
 import logging
 import re
 import sqlite3
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -30,8 +31,19 @@ class HistoryDB:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.conn = sqlite3.connect(str(self.path))
+        # check_same_thread=False so asyncio.to_thread offloads can use
+        # the connection; writes are serialized by _lock. WAL lets the
+        # offloaded readers proceed while the publish-cycle writer owns
+        # the connection, which is the whole point of moving the big
+        # accuracy scans off the event loop.
+        self.conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        try:
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error as e:
+            logger.warning(f"Could not enable WAL mode: {e}")
+        self._lock = threading.RLock()
         logger.info(f"HistoryDB initialised at {self.path}")
 
     def safe_table_name(self, entity_id: str) -> str:
@@ -322,6 +334,56 @@ class HistoryDB:
             self.conn.rollback()
             return 0
 
+    def probe_forecast_rows(
+        self,
+        experiment: str,
+        model_name: Optional[str] = None,
+        model_version: Optional[str] = None,
+        max_age_days: int = 30,
+    ) -> bool:
+        """Cheap EXISTS check for forecast_log rows matching a filter.
+
+        Used by the web layer to pick the narrowest filter that has any
+        data *before* running the expensive accuracy query, instead of
+        calling the full query up to three times when the strict filter
+        returns empty. Served by idx_flog_exp_model_ver — O(log N).
+
+        False positives (rows exist in forecast_log but none land in
+        the accuracy INNER JOIN with actuals) still trigger one
+        redundant full query, but that was the baseline cost anyway.
+        """
+        cutoff_str = (
+            datetime.utcnow() - pd.Timedelta(days=max_age_days)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        where = ["experiment = ?", "issued_at >= ?"]
+        params: list = [experiment, cutoff_str]
+        if model_name:
+            where.append("model_name = ?")
+            params.append(model_name)
+        if model_version:
+            where.append("model_version = ?")
+            params.append(model_version)
+        try:
+            with self._lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "SELECT EXISTS(SELECT 1 FROM forecast_log WHERE "
+                    + " AND ".join(where) + ")",
+                    params,
+                )
+                row = cursor.fetchone()
+                return bool(row and row[0])
+        except sqlite3.Error as e:
+            logger.warning(
+                f"probe_forecast_rows({experiment}) failed: {e}",
+                exc_info=True,
+            )
+            # On probe failure, claim rows exist so the caller still
+            # runs the full query with the strict filter — falling
+            # back to a correctness-preserving path rather than
+            # silently widening the scope.
+            return True
+
     def get_forecast_accuracy(
         self,
         experiment: str,
@@ -367,6 +429,26 @@ class HistoryDB:
         dict with keys: lead_time_curve, revision_improvement,
               total_logged, actuals_matched, date_range
         """
+        # Serialize cursor use because this method may be called from a
+        # thread pool worker (asyncio.to_thread) while the event loop
+        # issues writes on the same connection. RLock so nested helpers
+        # that also lock don't deadlock.
+        with self._lock:
+            return self._get_forecast_accuracy_locked(
+                experiment, actuals_table, max_age_days, interval_minutes,
+                evaluation_mode, model_name, model_version,
+            )
+
+    def _get_forecast_accuracy_locked(
+        self,
+        experiment: str,
+        actuals_table: str,
+        max_age_days: int,
+        interval_minutes: int,
+        evaluation_mode: str,
+        model_name: Optional[str],
+        model_version: Optional[str],
+    ) -> dict:
         cursor = self.conn.cursor()
         now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         cutoff_str = (
@@ -478,6 +560,15 @@ class HistoryDB:
                 experiment, now_str, cutoff_str, *model_filter_param,
             )
 
+        # actuals_grid scan bound: the INNER JOIN only matches grid_dt to
+        # forecast target_dt, and target_dt >= issued_at >= cutoff_str
+        # (forecasts predict forward). Anything earlier than the forecast
+        # cutoff can never match, so filtering here short-circuits a full
+        # table scan + GROUP BY on ds that the idx_<table>_ds index can
+        # actually serve. Without this, the query grows linearly with
+        # actuals history regardless of max_age_days.
+        actuals_grid_params = (interval_sec, interval_sec, cutoff_str)
+
         # --- Lead-time accuracy curve ---
         # Bucket lead_minutes into `interval_minutes`-sized bins so the
         # chart resolution matches the forecast grid. Hardcoding a 30-min
@@ -496,6 +587,7 @@ class HistoryDB:
                             'unixepoch') AS grid_dt,
                         AVG(value) AS value
                     FROM {actuals_table}
+                    WHERE SUBSTR(ds, 1, 19) >= ?
                     GROUP BY grid_dt
                 ),
                 {actuals_vals_cte},
@@ -513,7 +605,7 @@ class HistoryDB:
                 GROUP BY lead_bucket
                 ORDER BY lead_bucket
             """, (
-                interval_sec, interval_sec,
+                *actuals_grid_params,
                 *actuals_vals_params,
                 *forecast_vals_params,
                 bucket_min, bucket_min,
@@ -550,6 +642,7 @@ class HistoryDB:
                             'unixepoch') AS grid_dt,
                         AVG(value) AS value
                     FROM {actuals_table}
+                    WHERE SUBSTR(ds, 1, 19) >= ?
                     GROUP BY grid_dt
                 ),
                 {actuals_vals_cte},
@@ -587,7 +680,7 @@ class HistoryDB:
                     COUNT(*) AS n
                 FROM first_last
             """, (
-                interval_sec, interval_sec,
+                *actuals_grid_params,
                 *actuals_vals_params,
                 *forecast_vals_params,
             ))

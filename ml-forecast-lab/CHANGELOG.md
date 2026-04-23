@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.27.3
+
+### Fixed
+
+- **Accuracy publish cycle no longer freezes the event loop.** Each
+  publish cycle called `get_forecast_accuracy` inline — a 3-CTE query
+  over the actuals table that blocked the web UI and the HA `set_state`
+  pool for the full scan duration. Now offloaded via
+  `asyncio.to_thread`, with the SQLite connection opened
+  `check_same_thread=False` behind an `RLock` and WAL journaling so the
+  offloaded reader doesn't contend with the publish-cycle writer.
+
+- **/forecast-accuracy skips empty-filter fallbacks up-front.** The
+  endpoint's fallback ladder could run the heavy accuracy query up to
+  three times when the strict `(model_name, model_version)` filter
+  returned empty. Added `HistoryDB.probe_forecast_rows()` — an
+  O(log N) `EXISTS` check served by the
+  `(experiment, model_name, model_version)` index — which picks the
+  narrowest filter with data first, so only one full accuracy query
+  runs per request.
+
 ## 2.27.2
 
 ### Added

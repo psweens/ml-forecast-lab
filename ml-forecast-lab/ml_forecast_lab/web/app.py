@@ -5,6 +5,7 @@ Provides dashboard and API endpoints for monitoring and managing forecasting
 experiments, model benchmarking, and production deployment.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -1765,67 +1766,79 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         model_param = request.query_params.get("model")
         version_param = request.query_params.get("version")
 
-        model_fallback = None
-        result = db.get_forecast_accuracy(
-            name, actuals_table, max_age_days=days,
-            interval_minutes=exp_cfg.interval_minutes,
-            evaluation_mode=evaluation_mode,
-            model_name=model_name,
-            model_version=model_version,
-        )
-        # Fallback ladder when the default (champion + latest version)
-        # filter empties the result:
-        #   1. Drop the version but keep the model_name — picks up
-        #      older weights of the same champion (pre-retrain).
-        #   2. Drop both filters — picks up rotated-out models too.
-        # Each step only runs if the user didn't explicitly pin the
-        # dimension we're about to relax.
-        def _empty(res):
-            return not res.get("lead_time_curve", {}).get("lead_minutes")
-        if _empty(result) and model_version and not version_param:
-            relaxed = db.get_forecast_accuracy(
-                name, actuals_table, max_age_days=days,
-                interval_minutes=exp_cfg.interval_minutes,
-                evaluation_mode=evaluation_mode,
-                model_name=model_name, model_version=None,
+        # Pick the narrowest filter that has forecast_log rows in the
+        # window *before* running the expensive accuracy query. Each
+        # full call scans the actuals table and does three CTE passes;
+        # the old ladder could run it three times when the strict filter
+        # came up empty. probe_forecast_rows uses the
+        # (experiment, model_name, model_version) index so each probe
+        # is sub-millisecond.
+        requested_model = model_name
+        requested_version = model_version
+        model_fallback: Optional[Dict[str, Any]] = None
+
+        if model_name or model_version:
+            has_strict = await asyncio.to_thread(
+                db.probe_forecast_rows,
+                name, model_name, model_version, days,
             )
-            if not _empty(relaxed):
-                logger.info(
-                    f"/forecast-accuracy fallback for {name}: "
-                    f"no cycles for {model_name!r} v={model_version!r}; "
-                    f"widening to all versions of this model."
+            if not has_strict and model_version and not version_param:
+                # Drop version, keep model name.
+                has_model = await asyncio.to_thread(
+                    db.probe_forecast_rows,
+                    name, model_name, None, days,
                 )
-                model_fallback = {
-                    "requested_model": model_name,
-                    "requested_version": model_version,
-                    "used_model": model_name,
-                    "used_version": None,
-                    "reason": "No forecasts logged for this version yet; showing all versions of this model.",
-                }
-                result = relaxed
-                model_version = None
-        if _empty(result) and model_name and not model_param:
-            relaxed = db.get_forecast_accuracy(
-                name, actuals_table, max_age_days=days,
-                interval_minutes=exp_cfg.interval_minutes,
-                evaluation_mode=evaluation_mode,
-                model_name=None, model_version=None,
-            )
-            if not _empty(relaxed):
+                if has_model:
+                    logger.info(
+                        f"/forecast-accuracy fallback for {name}: "
+                        f"no cycles for {model_name!r} v={model_version!r}; "
+                        f"widening to all versions of this model."
+                    )
+                    model_fallback = {
+                        "requested_model": requested_model,
+                        "requested_version": requested_version,
+                        "used_model": model_name,
+                        "used_version": None,
+                        "reason": "No forecasts logged for this version yet; showing all versions of this model.",
+                    }
+                    model_version = None
+                elif model_name and not model_param:
+                    logger.info(
+                        f"/forecast-accuracy fallback for {name}: "
+                        f"no cycles for {model_name!r}; widening to all models."
+                    )
+                    model_fallback = {
+                        "requested_model": requested_model,
+                        "requested_version": requested_version,
+                        "used_model": None,
+                        "used_version": None,
+                        "reason": "No forecasts logged for this model in the selected window.",
+                    }
+                    model_name = None
+                    model_version = None
+            elif not has_strict and model_name and not model_param:
                 logger.info(
                     f"/forecast-accuracy fallback for {name}: "
                     f"no cycles for {model_name!r}; widening to all models."
                 )
                 model_fallback = {
-                    "requested_model": model_name,
-                    "requested_version": model_version,
+                    "requested_model": requested_model,
+                    "requested_version": requested_version,
                     "used_model": None,
                     "used_version": None,
                     "reason": "No forecasts logged for this model in the selected window.",
                 }
-                result = relaxed
                 model_name = None
                 model_version = None
+
+        result = await asyncio.to_thread(
+            db.get_forecast_accuracy,
+            name, actuals_table, days,
+            exp_cfg.interval_minutes,
+            evaluation_mode,
+            model_name,
+            model_version,
+        )
         result["model_name"] = model_name
         result["model_version"] = model_version
         if model_fallback:
@@ -1833,12 +1846,13 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # Merge empirical interval coverage. Always on raw values (that's
         # what the published entities are); independent of evaluation_mode.
         try:
-            coverage = db.get_forecast_coverage(
+            coverage = await asyncio.to_thread(
+                db.get_forecast_coverage,
                 name, actuals_table,
-                interval_minutes=exp_cfg.interval_minutes,
-                max_age_days=days,
-                model_name=model_name,
-                model_version=model_version,
+                exp_cfg.interval_minutes,
+                days,
+                model_name,
+                model_version,
             )
             result["coverage"] = coverage
             result["nominal_interval_level"] = 0.8

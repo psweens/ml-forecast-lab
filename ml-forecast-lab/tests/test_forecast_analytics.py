@@ -262,6 +262,43 @@ class TestRevisionImprovement:
 
 
 # ---------------------------------------------------------------------
+# probe_forecast_rows — fast existence check used by the web layer to
+# pick the narrowest (model, version) filter that has data before
+# running the expensive accuracy query.
+# ---------------------------------------------------------------------
+
+class TestProbeForecastRows:
+    def test_strict_filter_matches_only_logged_combo(self, db, actuals_monotonic):
+        issued = datetime(2024, 6, 15, 8, 0)
+        t = _targets_30min(issued, 1)
+        _log_cycle(db, "exp", issued, t, [18.0],
+                   model_name="lgb", model_version="v1")
+        assert db.probe_forecast_rows(
+            "exp", "lgb", "v1", max_age_days=GENEROUS_WINDOW,
+        ) is True
+        assert db.probe_forecast_rows(
+            "exp", "lgb", "v2", max_age_days=GENEROUS_WINDOW,
+        ) is False
+        assert db.probe_forecast_rows(
+            "exp", "xgb", None, max_age_days=GENEROUS_WINDOW,
+        ) is False
+        # Widening to all models + all versions picks the row up.
+        assert db.probe_forecast_rows(
+            "exp", None, None, max_age_days=GENEROUS_WINDOW,
+        ) is True
+
+    def test_cutoff_excludes_stale_cycles(self, db, actuals_monotonic):
+        # Row older than the window should not register.
+        issued = datetime.utcnow() - timedelta(days=60)
+        t = [issued + timedelta(minutes=30)]
+        _log_cycle(db, "exp", issued, t, [0.0], model_name="lgb")
+        assert db.probe_forecast_rows("exp", "lgb", None, max_age_days=30) is False
+        assert db.probe_forecast_rows(
+            "exp", "lgb", None, max_age_days=GENEROUS_WINDOW,
+        ) is True
+
+
+# ---------------------------------------------------------------------
 # Coverage
 # ---------------------------------------------------------------------
 
