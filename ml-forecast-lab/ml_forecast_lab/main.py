@@ -931,6 +931,76 @@ class MLForecastLabApp:
             oldest = now - timedelta(days=exp_cfg.max_age)
             self.history_db.cleanup(table_name, oldest)
 
+        # --- Carry-forward when recorder has gone quiet -------------------
+        # HA's recorder dedups identical state writes, so a sensor whose
+        # value doesn't change for hours leaves no new history rows even
+        # though the entity is alive and reporting. Without this guard,
+        # `last_ts = df["ds"].max()` falls hours behind wall-clock and the
+        # downstream forecast horizon (`ds_future = last_ts + i*interval`)
+        # publishes timestamps in the past — the holiday/empty-tank case
+        # for a `cumulative` + `reset_daily` daily counter is the canonical
+        # trigger. Synthesise samples from `last_ts + interval` up to
+        # `now`, all carrying the live state, so `last_ts ≈ now` and the
+        # rest of the pipeline (lag features, cumulative seed, forecast
+        # anchoring) sees a frame consistent with current wall-clock.
+        # Synthetics are NOT persisted — they're regenerated from the
+        # live state each cycle so a real source resumption immediately
+        # supersedes them.
+        recorder_last_ts = pd.Timestamp(df["ds"].max())
+        if recorder_last_ts.tzinfo is not None:
+            recorder_last_ts = recorder_last_ts.tz_convert(None)
+        now_naive = pd.Timestamp(
+            now.replace(tzinfo=None) if now.tzinfo is not None else now
+        )
+        state_age = now_naive - recorder_last_ts
+        stale_threshold = pd.Timedelta(minutes=exp_cfg.interval_minutes * 2)
+        if state_age > stale_threshold:
+            try:
+                live_raw = await self.ha_interface.get_state(
+                    exp_cfg.target_entity, default=None,
+                )
+            except Exception as e:
+                live_raw = None
+                logger.debug(
+                    f"  Carry-forward: get_state failed for "
+                    f"{exp_cfg.target_entity}: {e}"
+                )
+            live_val: Optional[float] = None
+            if live_raw not in (None, "", "unknown", "unavailable"):
+                try:
+                    live_val = float(live_raw)
+                except (TypeError, ValueError):
+                    live_val = None
+
+            if live_val is not None:
+                synth_start = recorder_last_ts + pd.Timedelta(
+                    minutes=exp_cfg.interval_minutes
+                )
+                synth_index = pd.date_range(
+                    start=synth_start,
+                    end=now_naive,
+                    freq=f"{exp_cfg.interval_minutes}min",
+                )
+                if len(synth_index) > 0:
+                    synth_df = pd.DataFrame({
+                        "ds": synth_index,
+                        "value": float(live_val),
+                    })
+                    df = pd.concat([df, synth_df], ignore_index=True)
+                    age_secs = state_age.total_seconds()
+                    age_str = (
+                        f"{age_secs / 60:.0f}m"
+                        if age_secs < 7200
+                        else f"{age_secs / 3600:.1f}h"
+                    )
+                    logger.warning(
+                        f"  ⚠ {exp_cfg.target_entity} recorder gap "
+                        f"{age_str} (last={recorder_last_ts}, now="
+                        f"{now_naive.strftime('%H:%M')}) — carried forward "
+                        f"live value {live_val} for {len(synth_index)} "
+                        f"synthetic ticks (not persisted to cache)"
+                    )
+
         # --- Set DatetimeIndex ---
         df = df.set_index("ds").sort_index()
         series = df["value"]

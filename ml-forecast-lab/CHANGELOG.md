@@ -1,5 +1,45 @@
 # Changelog
 
+## 2.27.12
+
+### Fixed
+
+- **Forecast horizon anchored hours in the past when the source sensor's
+  recorder history goes quiet.** HA's recorder dedups identical state
+  writes, so a target sensor whose value doesn't change for hours
+  (canonical case: a `cumulative` + `reset_daily` daily-energy counter
+  during a holiday with zero usage — the entity is alive and reporting
+  but the value isn't varying, so the recorder writes nothing) leaves
+  no new history rows. `_fetch_and_preprocess` would then end at a
+  `last_ts` hours behind wall-clock; the downstream `ds_future =
+  last_ts + i*interval` placed the forecast attribute's first
+  timestamp in the past, the `_cumulative` sensor's `today_seed` came
+  from an outdated state, and the `_forecast`/`_interval` sensor
+  states landed on values identical cycle-to-cycle (so HA's
+  `last_changed` never advanced and any card displaying "X minutes
+  ago" looked stuck).
+
+  After the recorder fetch, `_fetch_and_preprocess` now checks whether
+  the most-recent recorded timestamp is more than `interval_minutes ×
+  2` behind `now`. If it is, it `get_state`s the live entity value via
+  `/api/states/{entity}` and synthesises samples at the configured
+  cadence from `last_ts + interval` up to `now`, all carrying that
+  live value. For cumulative sources the synthetic carry-forward
+  produces zero per-interval increments (correct: the source didn't
+  tick), so `cumulative_to_interval` and the rest of the pipeline see
+  a frame consistent with current wall-clock — the forecast horizon
+  starts at `now + interval`, the cumulative seed reflects the actual
+  current target value, and the model's lag features include the
+  recent flat period.
+
+  Synthetics are NOT persisted to the SQLite cache; they're
+  regenerated each cycle from the live state, so a real source
+  resumption immediately supersedes them with no cache contamination.
+  When the carry-forward kicks in, a single WARNING line names the
+  entity, the gap size, the live value carried, and the synthetic
+  tick count — so cycles where the source really did go quiet are
+  visibly distinct from cycles where it ticked normally.
+
 ## 2.27.11
 
 ### Fixed
