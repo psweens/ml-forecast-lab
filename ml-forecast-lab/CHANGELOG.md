@@ -1,5 +1,232 @@
 # Changelog
 
+## 2.27.11
+
+### Fixed
+
+- **Hotfix for v2.27.10: don't poison future covariates with an
+  all-NaN series.** `CovariateResolver.fetch_future` at
+  [covariates.py:157](ml-forecast-lab/ml_forecast_lab/covariates.py:157)
+  is currently a stub — for every entity type except
+  `constant_value`, it returns `pd.Series(np.nan, ...)` and logs
+  `No future covariate data for ...`. v2.27.10 accepted those NaN
+  series into `future_cov_values`; `ffill().bfill()` on all-NaN
+  leaves NaN, and the downstream `np.nan_to_num` then slammed the
+  covariate to `0` for every horizon step. For solar experiments
+  that meant Solcast was being fed as 0-during-the-day to a tree
+  that trained on Solcast's actual time-varying readings — the
+  tree collapsed its forecast curve toward 0 across tomorrow's
+  daytime too, visibly worse than pre-v2.27.10. Now only keep the
+  fetched future series when it contains any non-NaN value;
+  otherwise fall back to the pre-v2.27.10 last-observed
+  carry-forward for that covariate. Applied in both
+  `_forecast_with_cached` and `_run_production_inference` (same
+  latent bug, different exposure).
+
+  Once `fetch_future` grows a real forecast-attribute parser
+  (Solcast's `detailed_forecast`, weather providers' hourly
+  payloads, etc.), the cached cycle will automatically start
+  using the time-varying values without further changes here.
+
+## 2.27.10
+
+### Fixed
+
+- **Cached forecast cycle now fetches future covariate values.** The
+  tree-model branch of `_forecast_with_cached` (the path that drives
+  the live publish cycle) was pinning every `role: future` / `role:
+  both` covariate — Solcast forecasts, tariff schedules, weather-
+  forecast sensors — to its last observed value for all 48 horizon
+  steps. Training, however, had each row's *time-current* Solcast
+  reading as the covariate value, so the model learned a mapping
+  from a time-varying signal but was being fed a single constant at
+  inference. The mismatch starved the tree of its most-informative
+  daytime covariate and was the dominant driver of peak under-
+  prediction on solar targets. Now mirrors
+  `_run_production_inference`:
+  `covariate_resolver.fetch_future(cov, future_index)` runs once per
+  role=future covariate, the returned series is reindexed onto the
+  forecast grid, and `_build_feature_row` uses each step's value at
+  the right horizon index (falling back to carry-forward only when
+  the future fetch fails or the covariate is lagged-only). Logged
+  per cycle so you can confirm which future covariates actually
+  resolved: `Fetched future covariate series for N/M future-role
+  covariates: [names]`.
+
+## 2.27.9
+
+### Changed
+
+- **Night-time solar forecasts now go to zero via the model, not a
+  post-hoc clamp.** Tree backends (CatBoost / LightGBM / XGBoost) do
+  recursive multi-step forecasting — each step's prediction feeds
+  forward as `y_lag_1` of the next step. A sunset step biased even
+  ~100 W leaks into the next step's lag, producing a feature vector
+  `(clear_sky_ghi=0, y_lag_1=150)` that training never saw (training
+  data cleanly had `y_lag_k=0` whenever the past step was night). The
+  tree then lands on a daytime leaf and predicts non-zero across the
+  whole overnight horizon. Fixed at the feature contract: when
+  `clear_sky_ghi` is present in the dataframe, `build_features` zeros
+  `y_lag_k` and `y_diff_1` values whose corresponding shifted GHI is
+  zero. The recursive inference paths
+  (`_forecast_with_cached._run_recursive_forecast` and
+  `_run_production_inference._run_recursive_forecast`) mirror the
+  invariant by pushing `0` into the lag buffer at night steps instead
+  of the raw prediction — so every future feature vector stays
+  in-distribution and the tree's own learned response drives the
+  published forecast down to near-zero through dusk, smoothly.
+
+- **Removed the v2.27.8 hard clamp in `_publish_forecast_sensors`.**
+  With the feature-contract fix above, the output-side clamp is no
+  longer needed and was creating a visible cliff at the exact moment
+  `clear_sky_ghi` crossed zero. Any residual non-zero at night after
+  the next retrain reflects a genuine model error (or a
+  non-solar-gated backend path) that shouldn't be hidden.
+
+- **Neural models are unaffected by this change.** They exclude
+  `y_lag_*` from their covariate set (see
+  [main.py](ml-forecast-lab/ml_forecast_lab/main.py) — the sliding-
+  window covariate cols subtract `y_lag_*`) and predict all horizons
+  in a single forward pass, so they don't have the recursive
+  drift pathology. Their inference already uses real history, which
+  is cleanly zero at night. If a neural backend shows a residual
+  night floor, that's the softplus output head — switchable via
+  `output_activation: relu` on the experiment.
+
+## 2.27.8
+
+### Fixed
+
+- **Solar forecasts no longer carry a noise floor at night.** Tree
+  ensembles (CatBoost, LightGBM, XGBoost) can't output exact zero —
+  any non-zero night samples in training history (inverter idle draw,
+  meter noise, single-digit watts) leave a leaf bias the forest can't
+  unlearn, so predictions hover around ~100-300 W even when
+  `clear_sky_ghi = 0` and actual PV is exactly 0. Softplus-headed
+  neural models have a ln(2)-scale floor for the same visual effect.
+  Added a physics gate in `_publish_forecast_sensors` that clamps
+  `y_pred` (plus conformal upper/lower bands) to exactly 0 on every
+  horizon step where pvlib's clear-sky GHI is 0. Activates only when
+  `include_clear_sky_irradiance: true` is set on the experiment — the
+  unambiguous signal that the target is solar-driven — so non-solar
+  signals are unaffected. Sited in the shared publish helper so
+  `/promote`, cached forecast cycles, and the full
+  `_run_production_inference` path all pick it up uniformly.
+
+## 2.27.7
+
+### Changed
+
+- **Production cached models now survive restarts.** After every
+  `_retrain_and_cache`, the trained model is serialised to
+  `/data/ml_forecast_lab/models/<exp>/model.bin` (via the backend's
+  own `save()`) alongside a `cache_meta.json` holding
+  `feature_cols`, `trained_at`, `model_version`, `is_neural`, and
+  `window_size`. On startup, `_restore_cached_models` loads each
+  production experiment's cache before `main_loop` decides its
+  timers. If the restored cache is younger than
+  `retrain_every_hours`, the immediate startup retrain is skipped
+  and the next retrain is scheduled at `trained_at +
+  retrain_every_hours` instead. This eliminates the cascade of N
+  sequential retrains every restart used to run through before the
+  UI became responsive — the user experience on a clean restart
+  drops from "minutes of 'no best model' placeholders while each
+  production experiment retrains in turn" to "sensors publish on
+  the next forecast tick, UI shows the restored champion
+  immediately". Persistence failures and schema mismatches fall
+  back silently to the old cold-start behaviour.
+
+- **`_forecast_with_cached` no longer requires a cached training
+  frame.** Previously the fresh-fetch-failure branch reached into
+  `cache["combined"]` as a fallback; restored caches deliberately
+  don't carry that frame (too big to pickle, always re-fetchable),
+  so the code now `cache.get("combined")` and skips the cycle
+  cleanly when both fresh-fetch and cached-fallback are unavailable.
+
+## 2.27.6
+
+### Fixed
+
+- **Publish button now triggers an immediate retrain.** The
+  `/experiment/{name}/promote/{model_name}` handler flipped the
+  experiment to `production` mode and persisted the choice to YAML,
+  but — unlike the sibling `/toggle-mode` handler — never fired
+  `retrain_callback`. The experiment sat in production with no cached
+  model until the next scheduled retrain tick (up to
+  `retrain_every_hours` later), so sensors didn't appear and the
+  Publish click looked like a no-op. Now fires the retrain callback
+  at the end of `promote_model`, matching `toggle_mode:2277-2280`.
+
+## 2.27.5
+
+### Fixed
+
+- **CatBoost tuning trials no longer appear to hang for tens of
+  minutes.** CatBoost builds oblivious (symmetric) trees, so every
+  depth level strictly doubles per-tree cost — `max_depth=16` is
+  ~1000x slower per tree than `max_depth=6`, and Optuna will happily
+  pick it. Tightened the CatBoost search space to match the library's
+  practical range (`max_depth` 3-10, `n_estimators` 10-2000) so a
+  single trial can't out-grow the 30 min study budget. Defaults are
+  unchanged (depth=6, n_estimators=500, lr=0.05) so existing results
+  aren't affected. The v2.27.4 iteration callback remains active and
+  drives the live training UI for the benchmark and production-training
+  paths — it's only the tuning path that never wired `epoch_callback`
+  through `runner.run_single_model`, which is why the callback alone
+  didn't surface in-trial progress.
+
+### Changed
+
+- **Tuning logs now emit a `Trial N starting: params=...` line per
+  trial.** Previously only the completion line logged, so an in-flight
+  trial was invisible in the log and indistinguishable from a hang.
+
+## 2.27.4
+
+### Fixed
+
+- **CatBoost tuning no longer looks stalled.** CatBoost emitted a single
+  end-of-training event, so the live training UI showed nothing at all
+  during each trial even while the model was iterating. Added a CatBoost
+  iteration callback (matching the LightGBM / XGBoost pattern) that
+  forwards per-tree RMSE plus a synthetic patience counter to the
+  training event bus.
+
+- **Tuning now has a 30 min wall-clock budget for every backend.** The
+  timeout previously only fired for neural models; tree tuning could
+  sit for an hour inside a single trial when Optuna picked a tiny
+  learning rate plus a large `n_estimators` (CatBoost in particular),
+  with no progress signal to distinguish "training slowly" from "hung".
+
+### Changed
+
+- **Model tabs render alphabetically.** Both the main Models page and
+  the per-experiment Models tab now order cards by display name,
+  regardless of the insertion order in `MODEL_CATALOG`. Baseline and
+  Classical models (Seasonal Naive, AutoARIMA / AutoETS / AutoTheta)
+  interleave cleanly with the neural backends.
+
+## 2.27.3
+
+### Fixed
+
+- **Accuracy publish cycle no longer freezes the event loop.** Each
+  publish cycle called `get_forecast_accuracy` inline — a 3-CTE query
+  over the actuals table that blocked the web UI and the HA `set_state`
+  pool for the full scan duration. Now offloaded via
+  `asyncio.to_thread`, with the SQLite connection opened
+  `check_same_thread=False` behind an `RLock` and WAL journaling so the
+  offloaded reader doesn't contend with the publish-cycle writer.
+
+- **/forecast-accuracy skips empty-filter fallbacks up-front.** The
+  endpoint's fallback ladder could run the heavy accuracy query up to
+  three times when the strict `(model_name, model_version)` filter
+  returned empty. Added `HistoryDB.probe_forecast_rows()` — an
+  O(log N) `EXISTS` check served by the
+  `(experiment, model_name, model_version)` index — which picks the
+  narrowest filter with data first, so only one full accuracy query
+  runs per request.
+
 ## 2.27.2
 
 ### Added

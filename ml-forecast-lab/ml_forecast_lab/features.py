@@ -155,12 +155,38 @@ def build_features(
     features['dow_sin'] = np.sin(dow_rad)
     features['dow_cos'] = np.cos(dow_rad)
 
-    # Lag features
+    # Lag features.
+    #
+    # Physics gate for solar-driven targets: when `clear_sky_ghi` is
+    # present in the dataframe, the lag at row t of column y_lag_k is
+    # target[t-k] — which at night is already 0 for a clean sensor and
+    # so is unchanged by the gate. The gate matters at INFERENCE time,
+    # where the recursive multi-step forecaster in _forecast_with_cached
+    # feeds each step's prediction forward as lag_1 of the next step.
+    # A sunset step biased ~150 W leaks into the next step's lag_1 even
+    # though the corresponding past `clear_sky_ghi` is 0, producing a
+    # feature vector (ghi=0, lag_1=150) that training never saw; the
+    # tree then lands on a daytime leaf and predicts non-zero across
+    # the whole night. By encoding the "night lag = 0" invariant here
+    # and mirroring it in the inference path, both sides of the model
+    # contract agree: gated lags are always 0 when the past was night,
+    # regardless of whether the past value came from ground truth or a
+    # recursive prediction.
     target = df[target_col]
-    for lag in range(1, n_lags + 1):
-        features[f'y_lag_{lag}'] = target.shift(lag)
+    ghi_col = df['clear_sky_ghi'] if 'clear_sky_ghi' in df.columns else None
 
-    # Rolling statistics
+    def _gate_by_past_ghi(shifted: pd.Series, lag: int) -> pd.Series:
+        if ghi_col is None:
+            return shifted
+        ghi_shifted = ghi_col.shift(lag)
+        return shifted.where(ghi_shifted > 0, 0.0)
+
+    for lag in range(1, n_lags + 1):
+        features[f'y_lag_{lag}'] = _gate_by_past_ghi(target.shift(lag), lag)
+
+    # Rolling statistics (unchanged — training targets are already 0 at
+    # night for solar-driven sensors, so the rolling window naturally
+    # reflects the day+night mix and the model learns the pattern.)
     for window in lag_windows:
         features[f'y_rolling_mean_{window}'] = target.rolling(window=window).mean()
         features[f'y_rolling_std_{window}'] = target.rolling(window=window).std()
@@ -171,10 +197,19 @@ def build_features(
     for d in [1, 2]:
         lag_steps = steps_per_day * d
         if lag_steps <= len(target):
-            features[f'y_lag_{lag_steps}'] = target.shift(lag_steps)
+            features[f'y_lag_{lag_steps}'] = _gate_by_past_ghi(
+                target.shift(lag_steps), lag_steps
+            )
 
-    # Rate of change — first difference of consecutive lags
-    features['y_diff_1'] = target.shift(1) - target.shift(2)
+    # Rate of change — first difference of consecutive lags. Gating
+    # each shift separately keeps y_diff_1 physically consistent: at
+    # deep night both components are 0 (diff = 0), at the first night
+    # step after dusk the current-minus-previous is -dusk_val, which
+    # matches what the un-gated target would have produced anyway.
+    features['y_diff_1'] = (
+        _gate_by_past_ghi(target.shift(1), 1)
+        - _gate_by_past_ghi(target.shift(2), 2)
+    )
 
     # Interaction features — covariate × time-of-day
     cov_cols = [c for c in df.columns if c != target_col]

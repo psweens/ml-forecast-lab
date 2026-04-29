@@ -2237,9 +2237,15 @@ class MLForecastLabApp:
                             if future_series is not None and not future_series.empty:
                                 if cov_cfg.scale is not None:
                                     future_series = future_series * cov_cfg.scale
-                                future_cov_values[cov_name] = future_series.reindex(
+                                aligned = future_series.reindex(
                                     future_index
                                 ).ffill().bfill()
+                                # Skip all-NaN future series (fetch_future
+                                # stub fallback); let carry-forward handle
+                                # those covariates instead of zero-ing
+                                # them via nan_to_num.
+                                if aligned.notna().any():
+                                    future_cov_values[cov_name] = aligned
                         except Exception as e:
                             logger.debug(f"Future fetch failed for {cov_name}: {e}")
 
@@ -2247,6 +2253,30 @@ class MLForecastLabApp:
                 c: float(combined[c].iloc[-1]) if c in combined.columns else 0.0
                 for c in raw_cov_cols
             }
+
+            # Deterministic future solar values for the physics-gated
+            # lag buffer (mirrors _forecast_with_cached). When the user
+            # has `include_clear_sky_irradiance: true` on the
+            # experiment, future clear_sky_ghi is known a priori from
+            # pvlib — we use it below to zero the lag buffer at night
+            # steps, keeping the recursive feature vectors in the same
+            # distribution the tree saw during training.
+            prod_future_solar = None
+            if getattr(exp_cfg, "include_clear_sky_irradiance", False):
+                try:
+                    loc = await self._get_site_location()
+                    if loc is not None:
+                        lat, lon = loc
+                        from ml_forecast_lab.solar_physics import compute_solar_features
+                        prod_future_solar = compute_solar_features(
+                            future_index, latitude=lat, longitude=lon,
+                            include_elevation=False,
+                            include_clear_sky=True,
+                        )
+                except Exception as e:
+                    logger.debug(
+                        f"  _run_production_inference future solar compute failed: {e}"
+                    )
 
             # Lag buffer: chronological, grows with each prediction
             lag_buffer = list(y[-max(n_lags, steps_per_day * 2 + 1):])
@@ -2311,7 +2341,19 @@ class MLForecastLabApp:
                     pred = model.predict(X_row)
                     val = float(pred.ravel()[0] if hasattr(pred, 'ravel') else pred[0])
                     preds.append(val)
-                    lag_buffer.append(val)
+                    # Physics-gated lag buffer — same invariant as
+                    # build_features and _forecast_with_cached: night
+                    # steps push 0 into the buffer so downstream lag
+                    # features stay in-distribution even when the
+                    # model's raw prediction at a previous night step
+                    # was slightly positive.
+                    ghi_now = None
+                    if prod_future_solar is not None and ts in prod_future_solar.index:
+                        ghi_now = float(prod_future_solar.loc[ts, 'clear_sky_ghi'])
+                    if ghi_now is not None and ghi_now <= 0:
+                        lag_buffer.append(0.0)
+                    else:
+                        lag_buffer.append(val)
                 return np.array(preds, dtype=np.float32)
 
             y_pred = await asyncio.get_running_loop().run_in_executor(
@@ -2700,8 +2742,173 @@ class MLForecastLabApp:
                 status.last_benchmark_status = "completed"
                 status.last_error = None  # Clear any previous error
 
+        # Persist to disk so a restart can skip the immediate retrain for
+        # this experiment and start publishing from the same weights.
+        self._persist_cached_model(exp_cfg.name)
+
         # Also run a forecast immediately after retrain
         await self._forecast_with_cached(exp_cfg.name)
+
+    @staticmethod
+    def _cached_model_dir(exp_name: str) -> Path:
+        """Return the per-experiment cache directory, slugifying the name
+        so odd characters in experiment IDs can't escape the base path."""
+        import re
+        safe = re.sub(r"[^A-Za-z0-9_-]", "_", exp_name)
+        return Path("/data/ml_forecast_lab/models") / safe
+
+    def _persist_cached_model(self, exp_name: str) -> None:
+        """Serialise the in-memory cached production model to disk.
+
+        Called at the tail of _retrain_and_cache. Writes two files to
+        /data/ml_forecast_lab/models/<exp>/:
+            model.bin       — backend-defined binary (pickle / torch.save)
+            cache_meta.json — feature_cols, trained_at, model_version,
+                              is_neural, window_size, addon_version
+
+        Swallows and logs all errors: a failed persist must never break
+        the retrain path. The live _cached_models dict is the source of
+        truth at runtime; disk is only read on startup.
+        """
+        import json
+        cache = self._cached_models.get(exp_name)
+        if not cache:
+            return
+        try:
+            from ml_forecast_lab import __version__
+            model_dir = self._cached_model_dir(exp_name)
+            model_dir.mkdir(parents=True, exist_ok=True)
+
+            model_bin = model_dir / "model.bin"
+            meta_file = model_dir / "cache_meta.json"
+
+            cache["model"].save(str(model_bin))
+
+            # window_size is only meaningful for neural backends that
+            # trained through the sliding-window path — derive it from
+            # the live seq_kwargs.sequence_data shape so we don't store
+            # redundant state.
+            is_neural = cache.get("is_neural", False)
+            seq_kwargs = cache.get("seq_kwargs", {})
+            window_size = None
+            if is_neural and "sequence_data" in seq_kwargs:
+                window_size = int(seq_kwargs["sequence_data"].shape[1])
+
+            meta = {
+                "schema_version": 1,
+                "addon_version": __version__,
+                "model_name": cache["model_name"],
+                "feature_cols": list(cache["feature_cols"]),
+                "trained_at": cache["trained_at"].isoformat(),
+                "model_version": cache["model_version"],
+                "is_neural": is_neural,
+                "window_size": window_size,
+            }
+            tmp = meta_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(meta, indent=2))
+            tmp.replace(meta_file)
+            logger.info(
+                f"  Persisted cached {cache['model_name']} for {exp_name} "
+                f"→ {model_dir}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"  Failed to persist cached model for {exp_name}: {e}",
+                exc_info=True,
+            )
+
+    def _restore_cached_models(self) -> None:
+        """On startup, reload any production models a previous run left
+        on disk so the first forecast cycle after restart can use them
+        immediately instead of waiting for a fresh retrain to finish.
+
+        Silently ignores missing / corrupt / schema-mismatched entries;
+        main_loop's cache-freshness check will schedule a cold-start
+        retrain for any experiment that didn't restore.
+        """
+        import json
+        if not self.config or not self.config.experiments:
+            return
+
+        base_dir = Path("/data/ml_forecast_lab/models")
+        if not base_dir.exists():
+            return
+
+        restored = 0
+        for exp_cfg in self.config.experiments:
+            if exp_cfg.mode != "production":
+                continue
+            model_dir = self._cached_model_dir(exp_cfg.name)
+            meta_file = model_dir / "cache_meta.json"
+            model_bin = model_dir / "model.bin"
+            if not meta_file.exists() or not model_bin.exists():
+                continue
+            try:
+                meta = json.loads(meta_file.read_text())
+                if meta.get("schema_version") != 1:
+                    logger.info(
+                        f"  Cached model for {exp_cfg.name} has schema "
+                        f"v{meta.get('schema_version')}, ignoring"
+                    )
+                    continue
+
+                model_name = meta["model_name"]
+                model = self.model_registry.create(model_name)
+                model.load(str(model_bin))
+
+                trained_at = datetime.fromisoformat(meta["trained_at"])
+                is_neural = meta.get("is_neural", False)
+                window_size = meta.get("window_size")
+
+                # Rebuild a minimal seq_kwargs so _forecast_with_cached
+                # can still read window_size from sequence_data.shape[1]
+                # without us having to persist the full training array.
+                seq_kwargs: Dict = {}
+                if is_neural and window_size:
+                    seq_kwargs["sequence_data"] = np.zeros(
+                        (1, window_size, 1), dtype=np.float32
+                    )
+
+                self._cached_models[exp_cfg.name] = {
+                    "model": model,
+                    "model_name": model_name,
+                    "feature_cols": meta["feature_cols"],
+                    "combined": None,  # re-fetched on first forecast
+                    "exp_cfg": exp_cfg,
+                    "trained_at": trained_at,
+                    "model_version": meta["model_version"],
+                    "is_neural": is_neural,
+                    "seq_kwargs": seq_kwargs,
+                }
+                # Also mirror into web status so the UI reflects the
+                # restored champion immediately, not "unknown" until the
+                # next retrain writes one.
+                if self.web_app:
+                    status = self.web_app.state.appstate.experiment_statuses.get(
+                        exp_cfg.name
+                    )
+                    if status:
+                        status.best_model = model_name
+                        status.model_version = meta["model_version"]
+                        status.last_benchmark_timestamp = meta["trained_at"]
+                age_m = (datetime.now(timezone.utc) - trained_at).total_seconds() / 60
+                logger.info(
+                    f"  Restored cached {model_name} for {exp_cfg.name} "
+                    f"(trained {age_m:.0f}m ago, addon "
+                    f"v{meta.get('addon_version', '?')})"
+                )
+                restored += 1
+            except Exception as e:
+                logger.warning(
+                    f"  Failed to restore cached model for {exp_cfg.name}: {e}",
+                    exc_info=True,
+                )
+
+        if restored:
+            logger.info(
+                f"Restored {restored} cached production model(s) from disk — "
+                f"skipping immediate retrain for these experiments"
+            )
 
     async def _run_forecast_cycle(self):
         """
@@ -2767,6 +2974,15 @@ class MLForecastLabApp:
                 f"forecast array is empty"
             )
             return
+
+        # The post-hoc "clear_sky_ghi = 0 → y_pred = 0" hard clamp from
+        # v2.27.8 used to live here. It was removed in v2.27.9 after
+        # the train-/inference-side fix in features.build_features and
+        # _run_recursive_forecast: the model now sees physics-gated lag
+        # features during both training and recursive inference, so its
+        # own learned response produces near-zero at night — no
+        # post-processing needed. Leaving the clamp in would mask real
+        # model errors at dusk/dawn and create a visible cliff.
 
         # One timestamp shared across log_forecast, every sensor's attrs,
         # and the cumulative sensor's "today" partition — so within a single
@@ -3217,9 +3433,15 @@ class MLForecastLabApp:
                 actuals_table = self.history_db.safe_table_name(
                     exp_cfg.target_entity
                 )
-                accuracy = self.history_db.get_forecast_accuracy(
-                    exp_cfg.name, actuals_table, max_age_days=30,
-                    interval_minutes=exp_cfg.interval_minutes,
+                # Offload the scan-heavy query — three CTE passes over
+                # the actuals table per call, multiplied by N experiments
+                # per publish cycle. Running inline would freeze the
+                # event loop for the full cycle duration, starving the
+                # web UI and the HA set_state HTTPX pool.
+                accuracy = await asyncio.to_thread(
+                    self.history_db.get_forecast_accuracy,
+                    exp_cfg.name, actuals_table, 30,
+                    exp_cfg.interval_minutes,
                 )
                 ltc = accuracy.get("lead_time_curve", {})
                 rev = accuracy.get("revision_improvement", {})
@@ -3371,7 +3593,17 @@ class MLForecastLabApp:
             logger.debug(f"  Fresh data: {len(combined)} samples, last={combined.index[-1]}")
         except Exception as e:
             logger.warning(f"  Fresh data fetch failed, using cached data: {e}")
-            combined = cache["combined"]
+            combined = cache.get("combined")
+            if combined is None:
+                # _restore_cached_models deliberately doesn't persist the
+                # training frame — so after a restart, fresh data is the
+                # only source. If that also failed, skip this cycle and
+                # wait for the next forecast tick rather than crash.
+                logger.warning(
+                    f"  No cached data frame for {exp_cfg.name} after a "
+                    f"restore — skipping this forecast cycle"
+                )
+                return
 
         n_lags = 12
         last_ts = combined.index[-1]
@@ -3450,13 +3682,72 @@ class MLForecastLabApp:
             # grows as we append predictions.
             lag_buffer = list(y[-max(n_lags, steps_per_day * 2 + 1):])
 
-            # Last known covariate values (we treat covariates as constant
-            # going forward; real future values would require per-covariate
-            # forecasts which is out of scope here)
+            # Last known covariate values — used as the fallback when a
+            # covariate has no role=future entry (lagged-only signals)
+            # or its future fetch fails. The full tree feature row
+            # prefers future_cov_values[c] below when available.
             last_cov_vals = {
                 c: float(combined[c].iloc[-1]) if c in combined.columns else 0.0
                 for c in raw_cov_cols
             }
+
+            # Future covariate values for role='future' / role='both'
+            # entries — ported from _run_production_inference so the
+            # cached forecast cycle stops pinning Solcast-style forecast
+            # sensors to their last observed reading for all 48 horizon
+            # steps. Without this, training saw a time-varying Solcast
+            # column but inference saw one constant, which regresses
+            # peak predictions toward the mean. fetch_future knows how
+            # to handle each covariate type (Solcast forecast series,
+            # tariff schedules, weather-forecast sensors); its result
+            # is reindexed/ffill-bfill'd onto the forecast grid.
+            future_index = pd.date_range(
+                start=last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes),
+                periods=future_periods,
+                freq=f'{exp_cfg.interval_minutes}min',
+            )
+            future_cov_values: Dict = {}
+            if exp_cfg.covariates and self.covariate_resolver:
+                for cov_cfg in exp_cfg.covariates:
+                    cov_name = cov_cfg.entity.split(".")[-1]
+                    if cov_name in raw_cov_cols and cov_cfg.role in ('future', 'both'):
+                        try:
+                            cov_dict = {"entity_id": cov_cfg.entity, "name": cov_name}
+                            future_series = await self.covariate_resolver.fetch_future(
+                                cov_dict, future_index,
+                            )
+                            if future_series is not None and not future_series.empty:
+                                if cov_cfg.scale is not None:
+                                    future_series = future_series * cov_cfg.scale
+                                aligned = future_series.reindex(
+                                    future_index
+                                ).ffill().bfill()
+                                # fetch_future returns an all-NaN series
+                                # for entity types it can't resolve
+                                # (which is most of them until the
+                                # forecast-attribute parser lands).
+                                # Accepting NaN here would land the
+                                # covariate at 0 after nan_to_num and
+                                # starve the tree of its training-time
+                                # signal (see v2.27.10 regression).
+                                # Only keep the fetched series when it
+                                # actually contains real values;
+                                # otherwise fall back to last-observed
+                                # carry-forward below.
+                                if aligned.notna().any():
+                                    future_cov_values[cov_name] = aligned
+                        except Exception as e:
+                            logger.debug(
+                                f"  Future fetch failed for {cov_name}: {e}"
+                            )
+            if future_cov_values:
+                logger.info(
+                    f"  Fetched future covariate series for "
+                    f"{len(future_cov_values)}/"
+                    f"{sum(1 for cc in (exp_cfg.covariates or []) if cc.role in ('future', 'both'))} "
+                    f"future-role covariates: "
+                    f"{list(future_cov_values.keys())}"
+                )
 
             # Pre-compute deterministic solar features for future timestamps.
             # Unlike other covariates, sun elevation and clear-sky irradiance
@@ -3472,14 +3763,10 @@ class MLForecastLabApp:
                 loc = await self._get_site_location()
                 if loc is not None:
                     lat, lon = loc
-                    future_idx = pd.DatetimeIndex([
-                        last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes * (i + 1))
-                        for i in range(future_periods)
-                    ])
                     try:
                         from ml_forecast_lab.solar_physics import compute_solar_features
                         future_solar = compute_solar_features(
-                            future_idx,
+                            future_index,
                             latitude=lat,
                             longitude=lon,
                             include_elevation="sun_elevation" in solar_cols,
@@ -3488,7 +3775,7 @@ class MLForecastLabApp:
                     except Exception as e:
                         logger.debug(f"Future solar pre-compute failed: {e}")
 
-            def _build_feature_row(ts: pd.Timestamp, buf: list) -> dict:
+            def _build_feature_row(ts: pd.Timestamp, buf: list, step_idx: int) -> dict:
                 """Construct a single feature row matching the training schema."""
                 row = {}
                 # Temporal
@@ -3524,8 +3811,17 @@ class MLForecastLabApp:
                         row[f'y_rolling_max_{w}'] = 0.0
                 # Rate of change
                 row['y_diff_1'] = float(buf[-1] - buf[-2]) if len(buf) >= 2 else 0.0
-                # Covariates (carried forward, except solar which has
-                # deterministic future values from pvlib)
+                # Covariates: preference order per value:
+                #   1. pvlib-computed future_solar for sun_elevation /
+                #      clear_sky_ghi (deterministic, always correct).
+                #   2. future_cov_values for user-configured
+                #      role=future / role=both entries (Solcast, tariff,
+                #      weather forecasts). This matches what the tree
+                #      saw at training time, where each row had the
+                #      current Solcast reading — not a single carried
+                #      value across all horizon steps.
+                #   3. last_cov_vals carry-forward fallback for
+                #      lagged-only covariates with no future source.
                 for c, v in last_cov_vals.items():
                     if (
                         future_solar is not None
@@ -3533,10 +3829,16 @@ class MLForecastLabApp:
                         and ts in future_solar.index
                     ):
                         row[c] = float(future_solar.loc[ts, c])
+                    elif c in future_cov_values:
+                        try:
+                            row[c] = float(future_cov_values[c].iloc[step_idx])
+                        except Exception:
+                            row[c] = v
                     else:
                         row[c] = v
-                # Interaction features — use row[c] so solar interactions
-                # reflect the true future covariate value, not the carried one.
+                # Interaction features — use row[c] so solar / future
+                # covariate interactions reflect the true future value,
+                # not the carried one.
                 for c in raw_cov_cols:
                     row[f'{c}_x_hour_sin'] = row.get(c, 0.0) * row['hour_sin']
                     row[f'{c}_x_hour_cos'] = row.get(c, 0.0) * row['hour_cos']
@@ -3546,7 +3848,7 @@ class MLForecastLabApp:
                 preds = []
                 for step in range(future_periods):
                     ts = last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes * (step + 1))
-                    row_dict = _build_feature_row(ts, lag_buffer)
+                    row_dict = _build_feature_row(ts, lag_buffer, step)
                     # Align to training feature order
                     row_vals = [row_dict.get(c, 0.0) for c in feature_cols]
                     X_row = np.array([row_vals], dtype=np.float32)
@@ -3554,7 +3856,25 @@ class MLForecastLabApp:
                     y = model.predict(X_row)
                     val = float(y.ravel()[0] if hasattr(y, 'ravel') else y[0])
                     preds.append(val)
-                    lag_buffer.append(val)
+                    # Physics-gated lag buffer: mirror the train-side
+                    # gate in build_features so every future feature
+                    # vector stays in-distribution. When the current
+                    # step is at night (clear_sky_ghi = 0), push 0
+                    # into the buffer instead of the raw prediction;
+                    # training's y_lag_k at rows following a night
+                    # step was 0 by construction, so feeding 0 forward
+                    # keeps the recursive model inputs matching what
+                    # the tree actually saw at fit time. Leaves preds[]
+                    # untouched so the model's own learned response —
+                    # on in-distribution inputs — drives what gets
+                    # published.
+                    ghi_now = None
+                    if future_solar is not None and ts in future_solar.index:
+                        ghi_now = float(future_solar.loc[ts, 'clear_sky_ghi'])
+                    if ghi_now is not None and ghi_now <= 0:
+                        lag_buffer.append(0.0)
+                    else:
+                        lag_buffer.append(val)
                 return np.array(preds, dtype=np.float32)
 
             loop = asyncio.get_running_loop()
@@ -3953,6 +4273,16 @@ class MLForecastLabApp:
                 elif ptype == "bool":
                     params[pname] = trial.suggest_categorical(pname, [True, False])
 
+            # Emit a trial-start log line so the user can see an
+            # in-flight trial rather than waiting in silence for the
+            # completion line. The previous-trial composite is already
+            # logged on completion, so between that and this line the
+            # transition from one trial to the next is always visible.
+            logger.info(
+                f"  [{tuning_state.completed_trials}/{n_trials}] "
+                f"Trial {trial.number} starting: params={params}"
+            )
+
             model = None
             result = None
             try:
@@ -4019,18 +4349,19 @@ class MLForecastLabApp:
             return composite
 
         # Create and run Optuna study.
-        # For neural models on constrained hardware (RPi5 etc.), cap the
-        # total wall-clock time to 30 minutes. Optuna will stop cleanly
-        # after the current trial finishes, so the best-so-far result is
-        # always available. Tree models are much faster per trial so they
-        # don't need a timeout.
+        # Cap total wall-clock time to 30 minutes for every backend.
+        # Optuna stops cleanly after the current trial finishes, so the
+        # best-so-far result is always available. Applies to trees as
+        # well: CatBoost with a small learning rate + large n_estimators
+        # can sit for many minutes inside a single trial before early
+        # stopping fires, which is indistinguishable from a stall.
         if strategy == "tpe":
             sampler = optuna.samplers.TPESampler(seed=42)
         else:
             sampler = optuna.samplers.RandomSampler(seed=42)
 
         study = optuna.create_study(direction="minimize", sampler=sampler)
-        study_timeout = 30 * 60 if _is_neural_model else None  # 30 min for neural
+        study_timeout = 30 * 60
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
@@ -4612,12 +4943,31 @@ class MLForecastLabApp:
             if exp_cfg.mode == "production":
                 # Production experiments retrain immediately on startup so
                 # cached models exist and forecast sensors get published
-                # right away — not after waiting hours for the schedule.
-                self._next_retrain_per_exp[exp_cfg.name] = now
-                logger.info(
-                    f"Timers for {exp_cfg.name}: forecast every {fc_mins}m, "
-                    f"retrain IMMEDIATELY (production, no cached model)"
-                )
+                # right away — unless _restore_cached_models already
+                # populated a fresh cache from disk, in which case defer
+                # to when the schedule would have fired next. Avoids
+                # thrashing through N sequential retrains on every restart.
+                cached = self._cached_models.get(exp_cfg.name)
+                cached_ts = cached.get("trained_at") if cached else None
+                if cached_ts is not None and (now - cached_ts).total_seconds() < rt_hrs * 3600:
+                    age_m = (now - cached_ts).total_seconds() / 60
+                    self._next_retrain_per_exp[exp_cfg.name] = cached_ts + timedelta(seconds=rt_hrs * 3600)
+                    logger.info(
+                        f"Timers for {exp_cfg.name}: forecast every {fc_mins}m, "
+                        f"retrain in {((self._next_retrain_per_exp[exp_cfg.name] - now).total_seconds() / 3600):.1f}h "
+                        f"(restored cache is {age_m:.0f}m old)"
+                    )
+                else:
+                    self._next_retrain_per_exp[exp_cfg.name] = now
+                    stale_reason = (
+                        f"cache {((now - cached_ts).total_seconds() / 3600):.1f}h old, stale"
+                        if cached_ts is not None
+                        else "no cached model"
+                    )
+                    logger.info(
+                        f"Timers for {exp_cfg.name}: forecast every {fc_mins}m, "
+                        f"retrain IMMEDIATELY ({stale_reason})"
+                    )
             else:
                 self._next_retrain_per_exp[exp_cfg.name] = now + timedelta(
                     seconds=rt_hrs * 3600
@@ -4742,6 +5092,10 @@ class MLForecastLabApp:
 
             # Initialise components
             await self.initialise_components()
+
+            # Restore any production models persisted by a previous run
+            # before main_loop decides whether to queue immediate retrains.
+            self._restore_cached_models()
 
             # Start web server
             await self.start_web_server()

@@ -141,33 +141,52 @@ class CatBoostModel(ForecastModel):
                         feature_names=self.feature_names_)
 
         epoch_callback = kwargs.get("epoch_callback")
+        best_val_loss = float('inf')
+        patience_counter = 0
+        patience_limit = 50
 
-        # CatBoost has no per-iteration python callback as flexible as
-        # LightGBM's, so we fit once and emit a single end-of-training event.
+        cat_callbacks = []
+        _outer = self
+
+        if epoch_callback is not None:
+            class _EpochCB:
+                """Emit per-iteration metrics to the training event bus."""
+                def after_iteration(self_cb, info):
+                    nonlocal best_val_loss, patience_counter
+                    val_metrics = info.metrics.get("validation", {})
+                    rmse_vals = val_metrics.get("RMSE", [])
+                    val_loss = rmse_vals[-1] if rmse_vals else None
+                    if val_loss is not None:
+                        if val_loss < best_val_loss:
+                            best_val_loss = val_loss
+                            patience_counter = 0
+                        else:
+                            patience_counter += 1
+                        _outer._emit_epoch(epoch_callback,
+                            model_name=_outer.name,
+                            epoch=info.iteration + 1,
+                            total_epochs=_outer.n_estimators,
+                            train_loss=val_loss,
+                            val_loss=val_loss,
+                            lr=_outer.learning_rate,
+                            patience_counter=patience_counter,
+                            patience_limit=patience_limit,
+                            best_val_loss=best_val_loss)
+                    return True  # continue training
+            cat_callbacks.append(_EpochCB())
+
         self.model.fit(
             train_pool,
             eval_set=val_pool,
             early_stopping_rounds=50,
             use_best_model=True,
             verbose=False,
+            callbacks=cat_callbacks if cat_callbacks else None,
         )
 
         best_iteration = int(self.model.get_best_iteration() or 0)
         best_val = float(
             self.model.get_best_score().get("validation", {}).get("RMSE", 0.0)
-        )
-
-        self._emit_epoch(
-            epoch_callback,
-            model_name=self.name,
-            epoch=best_iteration,
-            total_epochs=self.n_estimators,
-            train_loss=best_val,
-            val_loss=best_val,
-            lr=self.learning_rate,
-            patience_counter=0,
-            patience_limit=50,
-            best_val_loss=best_val,
         )
 
         importances = self.model.get_feature_importance(type="FeatureImportance")
