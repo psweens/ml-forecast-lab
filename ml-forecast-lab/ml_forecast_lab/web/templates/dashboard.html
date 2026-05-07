@@ -45,13 +45,13 @@
 
             <div class="card-body">
                 <div class="card-field">
-                    <span class="field-label">Target Entity</span>
+                    <span class="field-label">Target entity</span>
                     <span class="field-value monospace">{{ exp.target_entity }}</span>
                 </div>
 
                 {% if exp.best_model and exp.name not in running_experiments %}
                 <div class="card-field">
-                    <span class="field-label">{% if exp.mode == 'production' %}Production Model{% else %}Best Model{% endif %}</span>
+                    <span class="field-label">{% if exp.mode == 'production' %}Production model{% else %}Best model{% endif %}</span>
                     <span class="field-value color-accent font-bold">{{ exp.best_model | model_display }}</span>
                 </div>
                 {% endif %}
@@ -94,14 +94,14 @@
 
                 {% if exp.last_benchmark_timestamp %}
                 <div class="card-field">
-                    <span class="field-label">Last Run</span>
+                    <span class="field-label">Last run</span>
                     <span class="field-value timestamp" data-ts="{{ exp.last_benchmark_timestamp }}">{{ exp.last_benchmark_timestamp[:19] }}</span>
                 </div>
                 {% endif %}
 
                 {% if exp.next_forecast_in_seconds is not none %}
                 <div class="card-field">
-                    <span class="field-label">Next Forecast</span>
+                    <span class="field-label">Next forecast</span>
                     <span class="field-value next-update" data-seconds="{{ exp.next_forecast_in_seconds }}">
                         {% set s = exp.next_forecast_in_seconds %}
                         {% if s >= 3600 %}{{ (s // 3600) }}h {{ ((s % 3600) // 60) }}m
@@ -112,7 +112,7 @@
                 {% endif %}
                 {% if exp.next_retrain_in_seconds is not none %}
                 <div class="card-field">
-                    <span class="field-label">Next Retrain</span>
+                    <span class="field-label">Next retrain</span>
                     <span class="field-value next-update" data-seconds="{{ exp.next_retrain_in_seconds }}">
                         {% set s = exp.next_retrain_in_seconds %}
                         {% if s >= 86400 %}{{ (s // 86400) }}d {{ ((s % 86400) // 3600) }}h
@@ -190,7 +190,7 @@
                            placeholder="e.g. Hot Water Demand">
                 </div>
                 <div class="entity-search-wrapper">
-                    <label class="field-label" style="display:block;margin-bottom:0.3rem;">Target Entity</label>
+                    <label class="field-label" style="display:block;margin-bottom:0.3rem;">Target entity</label>
                     <input type="text" class="setting-input" id="new-exp-target" required
                            placeholder="Search HA entities..." autocomplete="off"
                            oninput="searchNewExpEntities(this)">

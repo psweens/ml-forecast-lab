@@ -62,7 +62,7 @@
     <form id="resource-form" onsubmit="saveSettings(event)">
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; max-width: 600px;">
             <div>
-                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Training CPU Cores</label>
+                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Training CPU cores</label>
                 <select name="cpu_cores" class="setting-input">
                     <option value="0" {% if config.cpu_cores == 0 %}selected{% endif %}>All available ({{ system.cpu_cores }})</option>
                     {% for i in range(1, system.cpu_cores + 1) %}
@@ -71,12 +71,12 @@
                 </select>
             </div>
             <div>
-                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Process Priority</label>
+                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Process priority</label>
                 <select name="nice_priority" class="setting-input">
                     <option value="0" {% if config.nice_priority == 0 %}selected{% endif %}>High (normal)</option>
                     <option value="5" {% if config.nice_priority == 5 %}selected{% endif %}>Medium</option>
                     <option value="10" {% if config.nice_priority == 10 %}selected{% endif %}>Low (recommended)</option>
-                    <option value="15" {% if config.nice_priority == 15 %}selected{% endif %}>Very Low</option>
+                    <option value="15" {% if config.nice_priority == 15 %}selected{% endif %}>Very low</option>
                     <option value="19" {% if config.nice_priority == 19 %}selected{% endif %}>Minimal (HA always first)</option>
                 </select>
             </div>
