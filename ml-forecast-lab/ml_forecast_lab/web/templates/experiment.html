@@ -690,7 +690,7 @@
     <div class="empty-state">
         <span class="empty-state-icon">📊</span>
         <p>No holdout predictions yet.</p>
-        <p class="empty-state-hint">Run a benchmark to generate model comparison charts.</p>
+        <p class="empty-state-hint">A benchmark holds out the most recent 20% of the training data and asks each model to predict it. Run one to populate this chart.</p>
     </div>
     {% endif %}
 </section>
@@ -1086,7 +1086,7 @@
     <div class="empty-state">
         <span class="empty-state-icon">🚀</span>
         <p>No benchmark results yet.</p>
-        <p class="empty-state-hint">Click "Run Pipeline" above to start model comparison.</p>
+        <p class="empty-state-hint">Click "Run Pipeline" above to train every enabled model on this experiment's data and rank them by accuracy. Results land here when the run finishes — typically a few minutes for tree models, longer for neural backends.</p>
     </div>
 </section>
 {% endif %}
@@ -1387,7 +1387,7 @@
         <div class="empty-state">
             <span class="empty-state-icon">📊</span>
             <p id="accuracy-empty-title">No forecast accuracy data yet.</p>
-            <p class="empty-state-hint" id="accuracy-empty-hint">Data accumulates automatically each time a production forecast runs.</p>
+            <p class="empty-state-hint" id="accuracy-empty-hint">Each production forecast logs its predictions; once the actuals arrive, this page compares them and tracks how accuracy holds up across lead times. Promote a model to production to start logging.</p>
         </div>
     </div>
 

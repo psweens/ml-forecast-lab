@@ -173,6 +173,7 @@
     <div class="empty-state">
         <span class="empty-state-icon">🧪</span>
         <p>No experiments configured yet.</p>
+        <p class="empty-state-hint">An experiment trains and benchmarks models on one HA sensor. Start in lab mode to find the best model, then promote to production to publish forecasts back to HA.</p>
         <button class="btn btn-success" onclick="openNewExperiment()" style="margin-top:0.75rem;">+ Create Your First Experiment</button>
     </div>
     {% endif %}
@@ -198,20 +199,21 @@
                 </div>
                 <div style="display:flex;gap:2rem;">
                     <div>
-                        <label class="field-label" style="display:block;margin-bottom:0.3rem;">Cumulative source</label>
+                        <label class="field-label" style="display:block;margin-bottom:0.3rem;">Cumulative source <span class="info-tip">?<span class="tip-text">Turn on if the sensor reports a running total (e.g. energy_today, demand_today) rather than an instantaneous value. The add-on will diff consecutive readings to recover per-interval values.</span></span></label>
                         <label class="toggle-switch">
                             <input type="checkbox" id="new-exp-cumulative">
                             <span class="toggle-slider"></span>
                         </label>
                     </div>
                     <div>
-                        <label class="field-label" style="display:block;margin-bottom:0.3rem;">Daily reset</label>
+                        <label class="field-label" style="display:block;margin-bottom:0.3rem;">Daily reset <span class="info-tip">?<span class="tip-text">Only relevant for cumulative sources. Turn on if the counter resets at local midnight (typical for "today" sensors) so the add-on knows to handle the rollover.</span></span></label>
                         <label class="toggle-switch">
                             <input type="checkbox" id="new-exp-reset">
                             <span class="toggle-slider"></span>
                         </label>
                     </div>
                 </div>
+                <p style="font-size:0.85rem;color:var(--text-secondary);margin:0.5rem 0 0;">You can configure covariates, models, and training settings on the experiment's Settings tab after creation.</p>
             </div>
             <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-top:1.5rem;">
                 <button type="button" class="btn btn-secondary" onclick="closeNewExperiment()">Cancel</button>
