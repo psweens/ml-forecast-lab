@@ -4,9 +4,17 @@ Multi-model machine learning forecasting and benchmarking for Home Assistant.
 
 ML Forecast Lab lets you train, compare, and deploy time-series forecasting models for any Home Assistant sensor. It brings academic-standard evaluation (walk-forward cross-validation, Diebold-Mariano tests, model confidence sets) to the HA ecosystem, so you can make informed decisions about which model actually works best for your data before deploying it.
 
+The intended workflow is **benchmark once, run forever**. Lab mode does the heavy lifting up front — trains every enabled backend, ranks them by composite Demšar score on your actual data, and shows you which one wins. Production mode is then set-and-forget: the chosen model retrains on a schedule and publishes forecasts back to HA as sensors. You don't need to babysit it after the initial benchmark.
+
+## How it differs from existing forecasting add-ons
+
+The HA forecasting space has good narrow tools — [EMHASS](https://github.com/davidusb-geek/emhass) for energy management, [Solar Forecast ML](https://github.com/Zara-Toorox/Solar-Forecast-ML) for PV production, [predbat](https://github.com/springfall2008/batpred) for battery optimisation. ML Forecast Lab fills a different niche: **the general-purpose case**, where you want to forecast *any* sensor (water demand, occupancy, grid prices, EV charge state, room temperature, anything) and you want the add-on to actually compare modern model architectures on your data rather than picking one for you.
+
+If your forecasting problem fits cleanly into a domain-specific tool's wheelhouse, use that. If it doesn't — or you want side-by-side benchmarks of 24 backends including the recent transformer / N-HiTS / TFT / TimeMixer architectures — that's what this is for.
+
 ## Features
 
-**22 model backends**, benchmarked on identical data splits:
+**24 model backends**, benchmarked on identical data splits:
 
 | Family | Models |
 |--------|--------|
@@ -73,6 +81,19 @@ The first build takes 10-15 minutes on a Raspberry Pi 5 (compiling LightGBM and 
 - `amd64` (x86-64 servers)
 - `armv7`
 
+## Quick start
+
+End-to-end first-run flow once the add-on is installed:
+
+1. **Create `mlfl.yaml`** at `/addon_configs/ml_forecast_lab/mlfl.yaml` with one experiment targeting one HA sensor. The minimal viable config is just `name`, `target_entity`, and `models_enabled` — see [Configuration](#configuration) below for the full schema.
+2. **Start the add-on.** Open the Web UI (`http://homeassistant.local:5052` or via the **Open Web UI** button). Your experiment appears on the dashboard in **lab mode** with status *pending*.
+3. **Run the benchmark.** Click into the experiment → **Run Pipeline**. Every enabled model trains on your sensor's history with walk-forward CV (typically a few minutes for tree models, longer for neural). Results land in the **Models** tab, ranked by composite Demšar score across MAE / RMSE / MASE.
+4. **Pick a model.** The top-ranked one is auto-selected, but you can override from the **Models** tab. Click **Promote to Production** on your choice.
+5. **Production mode is on.** The add-on now retrains the chosen model on the configured schedule (default: every 24h) and publishes forecasts as `sensor.mlfl_<experiment_name>` companion sensors with `_lower_80` / `_upper_80` conformal bands. The forecast cycle (default: every 30min) just runs the cached model — sub-second inference, no retrain.
+6. **Watch accuracy in production.** The **Forecast Accuracy** tab compares each logged prediction against the actual once it arrives. Bias, per-horizon error, and trajectory drift are tracked automatically. Re-benchmark whenever you want to swap to a different model.
+
+That's the whole loop: benchmark once, set the winner, walk away. Re-benchmark only when your sensor's behaviour changes (new equipment, seasonal drift) or when you want to try newer model backends.
+
 ## Configuration
 
 Create `/config/mlfl.yaml` (or `/addon_configs/ml_forecast_lab/mlfl.yaml`) with your experiments. Example for a Mixergy hot water cylinder:
@@ -112,7 +133,7 @@ experiments:
       - xgboost
       - lstm
       - cnn
-      # 18 more backends available: catboost, gru, dlinear, nlinear, fits,
+      # 20 more backends available: catboost, gru, dlinear, nlinear, fits,
       # nbeats, nhits, tide, tsmixer, timemixer, sparsetsf, patchtst,
       # itransformer, crossformer, timesnet, tft, seasonal_naive,
       # arima, ets, theta
@@ -135,7 +156,7 @@ experiments:
 | `future_periods` | Number of future steps to forecast | `48` |
 | `forecast_every_minutes` | How often to run cached-model inference | `30` |
 | `retrain_every_hours` | How often to retrain the model from scratch | `24` |
-| `models_enabled` | Which backends to benchmark (22 available) | LightGBM, XGBoost |
+| `models_enabled` | Which backends to benchmark (24 available) | LightGBM, XGBoost |
 | `cv_strategy` | `walk_forward` or `sliding_window` | `walk_forward` |
 | `cv_folds` | Number of CV folds | `5` |
 | `cv_embargo_periods` | Gap between train/test splits | `2` |
@@ -178,7 +199,7 @@ The web UI exposes a JSON API for status, benchmark results, forecasts, model se
                 ▼                      ▼                      │
        ┌─────────────────┐   ┌─────────────────┐               │
        │ Cross-Validator │   │ Model Registry  │               │
-       │ walk-fwd or SW  │   │ 22 backends     │               │
+       │ walk-fwd or SW  │   │ 24 backends     │               │
        └────────┬────────┘   │ tree+neural+cls │               │
                 │            └─────────────────┘               │
                 ▼                                              │
@@ -228,6 +249,36 @@ Tree models: LightGBM, XGBoost, CatBoost.
 Neural models: PyTorch (LSTM, GRU, CNN, DLinear, NLinear, FITS, N-BEATS, N-HiTS, TiDE, TSMixer, TimeMixer, SparseTSF, PatchTST, iTransformer, Crossformer, TimesNet, TFT).
 Classical baselines: statsforecast (AutoARIMA, AutoETS, AutoTheta).
 Hyperparameter tuning: Optuna.
+
+## Troubleshooting
+
+**Benchmark fails with "not enough data."** The add-on needs at least `cv_folds × interval` worth of history for walk-forward CV. With the defaults (5 folds, 30-min interval) you need roughly 30 days of data in HA's recorder. If your recorder retention is the HA default of 10 days, either bump the retention in `configuration.yaml` or wait — the add-on will start working once enough history accumulates.
+
+**Sensors don't appear after promoting to production.** Check the add-on log for HA REST errors. The most common cause is missing `homeassistant_api: true` (already set in `config.yaml`) or HA's auth token not being available — restarting the add-on usually resolves it. Sensors are published as `sensor.mlfl_<experiment_name>` plus `_lower_80` / `_upper_80` for the conformal bands.
+
+**Forecasts look flat / collapse to zero overnight on solar targets.** v2.27.8 added a physics gate that forces solar forecasts to zero at night (gated by past `clear_sky_ghi`, with `pvlib`'s Ineichen model). The gate only applies if the experiment opts into solar features via `include_sun_elevation: true` or `include_clear_sky_irradiance: true`. Latitude / longitude are pulled from HA's own config — no need to set them in `mlfl.yaml`.
+
+**Web UI shows "Database not available" on the Forecast Accuracy tab.** This usually means the SQLite forecast log was wiped (e.g. fresh install) — accuracy tracking populates as production forecasts run and their actuals arrive. Wait one or two cycles after promoting to production.
+
+**ARM build is slow on first install.** First build takes 10-15 minutes on a Pi 5 because LightGBM, XGBoost, and PyTorch all need to compile native extensions for `aarch64`. Subsequent updates use the cached image.
+
+For anything else, check the add-on log (visible in the Web UI's **Logs** tab or via the HA add-on page) — every phase tags its log lines (`[BENCH]`, `[MODEL]`, `[WEB]`, `[HA]`, `[PREP]`) so you can `grep` for the subsystem you're debugging.
+
+## Development
+
+Tests run locally without needing an HA instance:
+
+```bash
+cd ml-forecast-lab
+pip install -r requirements.txt -r tests/requirements-dev.txt
+pytest tests/                # 185 tests, ~10s
+pytest tests/smoke/          # 61 smoke tests, ~2s — release gate
+pytest tests/unit/           # 124 unit tests
+```
+
+Both suites are wired into GitHub Actions on every PR and main push (`tests.yml`). The smoke suite boots the FastAPI app against a tmp `mlfl.yaml` and walks the eight golden user flows (page renders, experiment CRUD, model param round-trip, settings persistence, promote/mode-toggle, analytics empty-states, HA picker fallback) without needing trained models — designed as a fast release gate that catches UI/API regressions before they ship.
+
+Documentation guides for the internal modules live in [`docs/`](docs/): [`CONFIG_GUIDE.md`](docs/CONFIG_GUIDE.md), [`PREPROCESSING_GUIDE.md`](docs/PREPROCESSING_GUIDE.md), [`FEATURES_GUIDE.md`](docs/FEATURES_GUIDE.md).
 
 ## Licence
 
