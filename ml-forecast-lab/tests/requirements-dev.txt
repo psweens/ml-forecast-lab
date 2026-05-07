@@ -1,0 +1,6 @@
+# Test-only deps. Production deps live in ../requirements.txt (and the addon's
+# Dockerfile installs both). Keep this file lightweight — anything that pulls in
+# torch/lightgbm/xgboost should already be in the prod requirements.
+pytest>=8.0,<9.0
+httpx>=0.27,<1.0
+pytest-playwright>=0.4,<1.0

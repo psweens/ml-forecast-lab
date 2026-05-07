@@ -355,7 +355,13 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         return request.headers.get("X-Ingress-Path", "")
 
     def _find_config_path() -> Optional[Path]:
-        """Locate the mlfl.yaml config file."""
+        """Locate the mlfl.yaml config file.
+
+        Honours an explicit override passed to ``create_app(config_path=...)``
+        so tests can inject a temp config without touching real add-on paths.
+        """
+        if config_path is not None and Path(config_path).exists():
+            return Path(config_path)
         import glob as _glob
         for p in [
             Path("/addon_configs/ml_forecast_lab/mlfl.yaml"),
@@ -999,18 +1005,14 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         exp_config = None
         try:
             from ml_forecast_lab.config import load_config as _lc
-            import glob as _g
-            for p in ["/addon_configs/ml_forecast_lab/mlfl.yaml", "/config/mlfl.yaml"] + \
-                      _g.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
-                cfg_path = Path(p)
-                if cfg_path.exists():
-                    cfg = _lc(cfg_path)
-                    for exp in cfg.experiments:
-                        if exp.name == name:
-                            units = exp.units or ""
-                            exp_models_enabled = list(exp.models_enabled)
-                            exp_config = exp
-                    break
+            cfg_path = _find_config_path()
+            if cfg_path and cfg_path.exists():
+                cfg = _lc(cfg_path)
+                for exp in cfg.experiments:
+                    if exp.name == name:
+                        units = exp.units or ""
+                        exp_models_enabled = list(exp.models_enabled)
+                        exp_config = exp
         except Exception:
             pass
 
@@ -2580,16 +2582,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if not model_name:
             return JSONResponse(content={"success": False, "error": "model_name required"})
 
-        # Find config file
-        config_path = None
-        for p in [Path("/addon_configs/ml_forecast_lab/mlfl.yaml"), Path("/config/mlfl.yaml")]:
-            if p.exists():
-                config_path = p
-                break
-        for match in _glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
-            config_path = Path(match)
-            break
-
+        config_path = _find_config_path()
         if not config_path or not config_path.exists():
             return JSONResponse(content={"success": False, "error": "Config file not found"})
 
@@ -2793,16 +2786,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception:
             return JSONResponse(content={"success": False, "error": "Invalid JSON"})
 
-        # Find config file
-        config_path = None
-        for p in [Path("/addon_configs/ml_forecast_lab/mlfl.yaml"), Path("/config/mlfl.yaml")]:
-            if p.exists():
-                config_path = p
-                break
-        import glob as _glob
-        for match in _glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
-            config_path = Path(match)
-            break
+        config_path = _find_config_path()
 
         if not config_path or not config_path.exists():
             return JSONResponse(content={"success": False, "error": "Config file not found"})
@@ -2910,16 +2894,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if not updates:
             return JSONResponse(content={"success": False, "error": "No valid fields to update"})
 
-        # Find config file
-        config_path = None
-        for p in [Path("/addon_configs/ml_forecast_lab/mlfl.yaml"), Path("/config/mlfl.yaml")]:
-            if p.exists():
-                config_path = p
-                break
-        import glob as _glob
-        for match in _glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
-            config_path = Path(match)
-            break
+        config_path = _find_config_path()
 
         if not config_path or not config_path.exists():
             return JSONResponse(content={"success": False, "error": "Config file not found"})
