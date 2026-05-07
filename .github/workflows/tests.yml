@@ -43,10 +43,6 @@ jobs:
   unit:
     name: Unit tests (full deps)
     runs-on: ubuntu-latest
-    # Some unit tests have known drift (test_config defaults, holiday detection,
-    # mean-rank scoring) and a few need ML backends installed. Phase 6 will
-    # clean these up; until then this job runs but doesn't gate.
-    continue-on-error: true
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

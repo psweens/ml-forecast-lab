@@ -54,16 +54,38 @@ class TestLSTM:
         assert "best_val_loss" in result
 
     def test_z_score_standardisation_stored(self):
+        """With RevIN off, dataset-level z-score stats are fitted and stored."""
         from ml_forecast_lab.models.lstm_backend import LSTMModel
         rng = np.random.default_rng(42)
         seq_data = rng.random((100, 24, 3)).astype(np.float32)
         y = rng.random(100).astype(np.float32)
         X_flat = rng.random((100, 10)).astype(np.float32)
-        model = LSTMModel(hidden_size=16, num_layers=1, epochs=3, patience=2)
+        model = LSTMModel(
+            hidden_size=16, num_layers=1, epochs=3, patience=2,
+            use_revin=False,
+        )
         model.fit(X_flat, y, sequence_data=seq_data)
         assert model._channel_mean is not None
         assert model._channel_std is not None
         assert model._channel_mean.shape == (3,)
+
+    def test_z_score_skipped_when_revin_enabled(self):
+        """RevIN handles per-window normalisation, so the dataset-level z-score
+        path must NOT run — applying both would double-normalise and wash out
+        the per-instance signal RevIN relies on.
+        """
+        from ml_forecast_lab.models.lstm_backend import LSTMModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = LSTMModel(
+            hidden_size=16, num_layers=1, epochs=3, patience=2,
+            use_revin=True,
+        )
+        model.fit(X_flat, y, sequence_data=seq_data)
+        assert model._channel_mean is None
+        assert model._channel_std is None
 
     def test_predict_clips_negative(self):
         from ml_forecast_lab.models.lstm_backend import LSTMModel
@@ -90,13 +112,34 @@ class TestCNN:
         assert "best_val_loss" in result
 
     def test_z_score_standardisation_stored(self):
+        """With RevIN off, dataset-level z-score stats are fitted and stored."""
         from ml_forecast_lab.models.cnn_backend import CNNModel
         rng = np.random.default_rng(42)
         seq_data = rng.random((100, 24, 3)).astype(np.float32)
         y = rng.random(100).astype(np.float32)
         X_flat = rng.random((100, 10)).astype(np.float32)
-        model = CNNModel(n_filters=8, n_layers=2, epochs=3, patience=2)
+        model = CNNModel(
+            n_filters=8, n_layers=2, epochs=3, patience=2,
+            use_revin=False,
+        )
         model.fit(X_flat, y, sequence_data=seq_data)
         assert model._channel_mean is not None
         assert model._channel_std is not None
         assert model._channel_mean.shape == (3,)
+
+    def test_z_score_skipped_when_revin_enabled(self):
+        """RevIN handles per-window normalisation; applying dataset-level
+        z-score on top would double-normalise.
+        """
+        from ml_forecast_lab.models.cnn_backend import CNNModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = CNNModel(
+            n_filters=8, n_layers=2, epochs=3, patience=2,
+            use_revin=True,
+        )
+        model.fit(X_flat, y, sequence_data=seq_data)
+        assert model._channel_mean is None
+        assert model._channel_std is None

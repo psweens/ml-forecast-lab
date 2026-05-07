@@ -1,5 +1,7 @@
 """Tests for SQLite database module."""
 
+from datetime import datetime
+
 import pandas as pd
 import pytest
 
@@ -28,38 +30,46 @@ class TestSafeTableName:
 
 
 class TestStoreAndRetrieve:
+    """Round-trip the actual public API: store_history / get_history / cleanup."""
+
     def test_roundtrip(self, tmp_db):
         db = HistoryDB(tmp_db)
-        entity = "sensor.test_entity"
+        table = db.safe_table_name("sensor.test_entity")
         idx = pd.date_range("2024-01-01", periods=10, freq="30min")
         data = pd.DataFrame({
             "ds": [t.isoformat() for t in idx],
             "value": range(10),
         })
-        db.store(entity, data)
-        result = db.load(entity)
+        inserted = db.store_history(table, data)
+        assert inserted == 10
+        result = db.get_history(table)
         assert len(result) == 10
 
     def test_deduplication(self, tmp_db):
+        """`INSERT OR IGNORE` collapses identical (ds, value) rows."""
         db = HistoryDB(tmp_db)
-        entity = "sensor.dedup_test"
+        table = db.safe_table_name("sensor.dedup_test")
         data = pd.DataFrame({
             "ds": ["2024-01-01T00:00:00", "2024-01-01T00:00:00"],
             "value": [1, 2],
         })
-        db.store(entity, data)
-        result = db.load(entity)
-        assert len(result) == 1  # INSERT OR IGNORE deduplicates
+        db.store_history(table, data)
+        result = db.get_history(table)
+        # Composite key is (ds, value), so two distinct values at the same ts
+        # are kept — but a true exact-duplicate insert is ignored.
+        db.store_history(table, data)
+        result_after = db.get_history(table)
+        assert len(result_after) == len(result), "Re-inserting must not duplicate"
 
     def test_cleanup(self, tmp_db):
         db = HistoryDB(tmp_db)
-        entity = "sensor.cleanup_test"
+        table = db.safe_table_name("sensor.cleanup_test")
         data = pd.DataFrame({
             "ds": ["2024-01-01T00:00:00", "2024-06-01T00:00:00"],
             "value": [1, 2],
         })
-        db.store(entity, data)
-        db.cleanup(entity, "2024-03-01T00:00:00")
-        result = db.load(entity)
+        db.store_history(table, data)
+        db.cleanup(table, datetime(2024, 3, 1))
+        result = db.get_history(table)
         assert len(result) == 1
-        assert result.iloc[0]["value"] == 2
+        assert result.iloc[0]["y"] == 2

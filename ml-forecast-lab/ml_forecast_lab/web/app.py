@@ -206,14 +206,6 @@ class FeatureImportanceData(BaseModel):
     features: List[Dict[str, Any]]  # [{"name": "hour_of_day", "importance": 0.25}, ...]
 
 
-class ModelInfo(BaseModel):
-    """Information about an available model backend."""
-
-    name: str
-    display_name: str
-    description: str
-
-
 class HealthStatus(BaseModel):
     """System health status."""
 
@@ -2569,7 +2561,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         Body: {"model_name": "lstm", "enabled": true}
         """
         import yaml
-        import glob as _glob
 
         try:
             data = await request.json()
@@ -2616,7 +2607,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         Body: {"model_name": "lstm", "enabled": true}
         """
         import yaml
-        import glob as _glob
 
         try:
             data = await request.json()
@@ -3029,34 +3019,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 )
 
         raise HTTPException(status_code=404, detail="Dashboard YAML not generated yet")
-
-    @app.get("/api/models")
-    async def list_models() -> List[ModelInfo]:
-        """
-        List available model backends.
-        """
-        return [
-            ModelInfo(
-                name="lightgbm",
-                display_name="LightGBM",
-                description="Gradient boosting framework for fast training",
-            ),
-            ModelInfo(
-                name="xgboost",
-                display_name="XGBoost",
-                description="Extreme gradient boosting",
-            ),
-            ModelInfo(
-                name="lstm",
-                display_name="LSTM",
-                description="Long short-term memory neural network",
-            ),
-            ModelInfo(
-                name="cnn",
-                display_name="CNN",
-                description="Convolutional neural network",
-            ),
-        ]
 
     # ========== Training Tab: SSE + Routes ==========
 
