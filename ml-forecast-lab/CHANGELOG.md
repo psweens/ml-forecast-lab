@@ -1,5 +1,92 @@
 # Changelog
 
+## 2.28.0
+
+### Added
+
+- **Smoke-test harness for the FastAPI web app.** New `tests/smoke/`
+  suite (61 tests, 1.9s wall time) boots the real `create_app()` factory
+  against a tmp `mlfl.yaml` and walks the eight golden user flows: top-
+  level page renders, experiment CRUD, model-param round-trip, global
+  and per-experiment settings persistence, promote / mode-toggle (incl.
+  4xx empty-states), the analytics route family's empty-state contracts,
+  and the HA entity picker's graceful-degrade-when-HA-unreachable path.
+  No model training, no live HA instance, no addon paths required.
+  Designed as a cheap release gate that catches "page returns 500" or
+  "YAML write contract changed" regressions before they ship.
+
+- **`tests.yml` GitHub Actions workflow.** Two-job split — `smoke`
+  (required, <30s, lightweight deps) gates every PR and main push;
+  `unit` (full deps incl. torch) runs alongside. Complements the
+  existing `validate.yml` syntax / version-consistency checks.
+
+- **`tests/unit/` reorg + shared fixtures.** Existing 9 test files
+  moved into `tests/unit/` to make room for `tests/smoke/`. Synthetic
+  pandas fixtures stay at the `tests/` root so both layers share them.
+  `tests/requirements-dev.txt` pins the dev-only deps.
+
+- **`docs/MODEL_GUIDE.md`** — practical "which of the 24 backends should
+  I enable?" with starter sets keyed to data volume, target shape, and
+  Pi compute budget. Linked from the README.
+
+### Changed
+
+- **Standardised UI text capitalisation across all templates.** Form
+  labels, dropdown options, and checkboxes are now consistently sentence
+  case ("Process priority", "Target entity", "Best model", "Last run",
+  "Next forecast", "Next retrain", "Production model", "Training CPU
+  cores", "Very low", "Include covariate analysis"). Page titles,
+  section headers, tab labels, and multi-word command buttons stay
+  Title Case ("Save Settings", "Reset to Defaults", "Load Log Summary",
+  "Create New Experiment"). Table column headers stay Title Case as a
+  distinct convention. Style rule documented in the v2.28.0 commit.
+
+- **Onboarding hints in the empty-state surfaces a first-time user
+  hits.** Dashboard empty state now explains what an experiment is and
+  the lab → production progression. Create-experiment modal now has
+  info-tip help on `Cumulative source` and `Daily reset` (the two
+  toggles new users with no timeseries background find most opaque)
+  plus a footer line clarifying that covariates / models / training
+  settings are configured per-experiment after creation. Three empty-
+  state blocks on the experiment detail page (no benchmark, no holdout,
+  no forecast accuracy) now explain what'll happen when the user clicks
+  the visible button.
+
+- **Deduped config-path discovery in `web/app.py`.** Four inline
+  copy-pasted blocks of `/addon_configs/ml_forecast_lab/mlfl.yaml`
+  fallback logic (~30 lines) folded into the existing
+  `_find_config_path()` helper, which all 21 other callsites already
+  used. The `create_app(config_path=...)` parameter — previously
+  declared in the signature but ignored — now actually overrides the
+  discovery, used by tests to inject tmp configs without filesystem
+  trickery. Behaviour unchanged in production.
+
+- **README sweep:** stale "22 backends" → 24 (table already showed 24,
+  prose lagged); positioning vs EMHASS / Solar Forecast ML / predbat;
+  "benchmark once, run forever" framing; six-step Quick start;
+  Troubleshooting; Development.
+
+### Fixed
+
+- **Pre-existing unit-test drift surfaced by the new smoke harness.**
+  `test_config.py::test_defaults` updated to expect the actual
+  `production_metric` default (`rmse`, has been since the initial
+  upload). `test_db.py` rewritten against the real public API
+  (`store_history` / `get_history` / `cleanup` with datetime — old
+  tests called methods that never existed). `test_models.py` LSTM/CNN
+  z-score test split into `use_revin=False` (asserts channel stats
+  are stored) and `use_revin=True` (asserts they're NOT, because RevIN
+  handles per-window normalisation). All 124 unit + 61 smoke = 185
+  tests now green; the unit job in `tests.yml` is no longer
+  best-effort.
+
+- **Dead code removed in `web/app.py`.** `/api/models` endpoint that
+  returned 4 hardcoded models (LightGBM, XGBoost, LSTM, CNN) — out of
+  sync with the 24-backend `MODEL_CATALOG` rendered on `/models`, no
+  callers anywhere. Plus the `ModelInfo` Pydantic class that backed it,
+  and two orphaned `import glob as _glob` left over from the
+  config-path dedup.
+
 ## 2.27.12
 
 ### Fixed
