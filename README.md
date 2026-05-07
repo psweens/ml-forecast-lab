@@ -278,7 +278,12 @@ pytest tests/unit/           # 124 unit tests
 
 Both suites are wired into GitHub Actions on every PR and main push (`tests.yml`). The smoke suite boots the FastAPI app against a tmp `mlfl.yaml` and walks the eight golden user flows (page renders, experiment CRUD, model param round-trip, settings persistence, promote/mode-toggle, analytics empty-states, HA picker fallback) without needing trained models — designed as a fast release gate that catches UI/API regressions before they ship.
 
-Documentation guides for the internal modules live in [`docs/`](docs/): [`CONFIG_GUIDE.md`](docs/CONFIG_GUIDE.md), [`PREPROCESSING_GUIDE.md`](docs/PREPROCESSING_GUIDE.md), [`FEATURES_GUIDE.md`](docs/FEATURES_GUIDE.md).
+Documentation lives in [`docs/`](docs/):
+
+- [`MODEL_GUIDE.md`](docs/MODEL_GUIDE.md) — practical "which of the 24 backends should I enable?" with starter sets by data shape and target characteristics.
+- [`CONFIG_GUIDE.md`](docs/CONFIG_GUIDE.md) — full schema reference for `mlfl.yaml`.
+- [`PREPROCESSING_GUIDE.md`](docs/PREPROCESSING_GUIDE.md) — how cumulative-source handling, log transforms, and load subtract work.
+- [`FEATURES_GUIDE.md`](docs/FEATURES_GUIDE.md) — feature-engineering reference (lags, temporal encodings, covariate roles, rolling stats).
 
 ## Licence
 
