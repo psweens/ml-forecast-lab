@@ -80,3 +80,22 @@ def client(app) -> TestClient:
     """Synchronous test client — fine for HTML route checks and JSON APIs."""
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture
+def seeded_experiment(app):
+    """Register an experiment in AppState (the runtime-managed dict).
+
+    Routes like ``/experiment/{name}`` 404 unless the name is in
+    ``app.state.appstate.experiment_statuses`` — that dict is normally
+    populated by the main app at startup. Tests that need a viewable
+    experiment without going through the create flow use this.
+    """
+    from ml_forecast_lab.web.app import ExperimentStatus
+    name = "smoke_demand"
+    app.state.appstate.experiment_statuses[name] = ExperimentStatus(
+        name=name,
+        target_entity="sensor.smoke_demand",
+        mode="lab",
+    )
+    return name
