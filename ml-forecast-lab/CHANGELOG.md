@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.28.4
+
+### Added
+
+- **Debug buttons under the lead-time chart on Forecast Accuracy.**
+  Two buttons — *View raw JSON* (dumps the response body into an
+  inline `<pre>` block on the page) and *Download as file* (saves it
+  as `<experiment_name>-forecast-accuracy.json`). Both fetch the same
+  `/forecast-accuracy?days=N` endpoint the chart itself uses, via
+  the live page session — so they work without any DevTools or
+  ingress-token URL surgery. Useful when the chart shows empty and
+  you need to know *why* the lead-time aggregation came back without
+  data (no logged forecasts, version filter mismatched, actuals
+  missing, etc.).
+
+### Changed
+
+- **Forecast Accuracy empty-state moved into the lead-time card.**
+  Previously the empty-state lived at the very bottom of the tab,
+  after the diagnostics accordion. When `loadForecastAccuracy()`
+  returned no data, `_renderAccuracyEmpty` would hide the verdict and
+  revision cards but the diagnostics accordion populated independently
+  via separate fetches — so users saw mixed state: empty top,
+  populated middle, stranded "No forecast accuracy data" panel at the
+  bottom. The empty-state now sits inside the same card as the
+  lead-time chart, so when there's no data it visually replaces the
+  chart in-place rather than appearing as an orphaned panel below
+  the rest of the tab.
+
 ## 2.28.3
 
 ### Fixed

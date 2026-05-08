@@ -1242,6 +1242,58 @@
                     <p class="empty-state-hint" id="accuracy-empty-hint">Each production forecast logs its predictions; once the actuals arrive, this page compares them and tracks how accuracy holds up across lead times. Promote a model to production to start logging.</p>
                 </div>
             </div>
+
+            <!-- Debug: show the raw JSON the chart is rendering from. Same
+                 pattern as the Forecast-log inspector below — uses the
+                 live session, no ingress-token URL surgery required.
+                 Useful when the chart shows empty and you need to know
+                 *why* the lead-time aggregation came back without data. -->
+            <div style="display:flex;gap:0.5rem;align-items:center;margin-top:0.75rem;flex-wrap:wrap;">
+                <button type="button" class="btn-secondary" onclick="window.viewAccuracyJson()" style="padding:0.4rem 0.9rem;">View raw JSON</button>
+                <button type="button" class="btn-secondary" onclick="window.downloadAccuracyJson()" style="padding:0.4rem 0.9rem;">Download as file</button>
+                <span style="color:var(--text-muted);font-size:0.8rem;">For debugging: shows / saves the response body that drives this chart.</span>
+            </div>
+            <pre id="accuracy-json-out" style="display:none;margin-top:0.75rem;padding:0.75rem;background:rgba(0,0,0,0.25);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.8rem;white-space:pre-wrap;max-height:420px;overflow:auto;"></pre>
+            <script>
+            // Defined right next to the buttons so they work even if the
+            // big IIFE further down throws — same belt-and-braces pattern
+            // as loadForecastLogStats. Both helpers re-fetch fresh rather
+            // than reuse _lastAccuracyData so the dump always reflects the
+            // current days/mode selection.
+            window.viewAccuracyJson = function() {
+                var out = document.getElementById('accuracy-json-out');
+                if (!out) return;
+                out.style.display = 'block';
+                out.textContent = 'Loading…';
+                var url = {{ base_path | tojson }}
+                    + '/experiment/' + {{ experiment.name | tojson }}
+                    + '/forecast-accuracy?days='
+                    + (document.getElementById('accuracy-window') ? document.getElementById('accuracy-window').value : '30');
+                fetch(url)
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) { out.textContent = JSON.stringify(data, null, 2); })
+                    .catch(function(err) { out.textContent = 'Failed to load: ' + err; });
+            };
+            window.downloadAccuracyJson = function() {
+                var url = {{ base_path | tojson }}
+                    + '/experiment/' + {{ experiment.name | tojson }}
+                    + '/forecast-accuracy?days='
+                    + (document.getElementById('accuracy-window') ? document.getElementById('accuracy-window').value : '30');
+                fetch(url)
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) {
+                        var blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+                        var a = document.createElement('a');
+                        a.href = URL.createObjectURL(blob);
+                        a.download = {{ experiment.name | tojson }} + '-forecast-accuracy.json';
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(a.href);
+                    })
+                    .catch(function(err) { alert('Failed to fetch JSON: ' + err); });
+            };
+            </script>
         </div>
     </div>
 
