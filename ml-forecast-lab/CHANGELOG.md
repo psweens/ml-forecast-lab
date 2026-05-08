@@ -1,5 +1,51 @@
 # Changelog
 
+## 2.28.3
+
+### Fixed
+
+- **Daily Rank column on the Results tab's Daily Cumulative Accuracy
+  table never populated.** Three call-sites in `main.py` push web
+  state via `_update_web_benchmark`; one of them (the final
+  post-holdout "completed" overwrite at line 2058) was missing the
+  `daily_rankings=` kwarg. The earlier completed call did pass it,
+  so the rank column briefly showed correct values mid-run before the
+  final overwrite landed with `daily_rank=None` for every model and
+  the column collapsed to `—`. Threaded `daily_rankings` through.
+
+- **Forecast Accuracy → Diagnostic Tools accordion was collapsed by
+  default, and "How predictions converge on a single moment" +
+  "Forecast convergence" charts only fired their fetches inside the
+  accordion's `toggle` handler.** Users who never opened the
+  accordion never saw those charts populate. Two changes: the
+  `<details>` now opens by default (matches the user expectation
+  that the diagnostic surface is part of the page, not hidden behind
+  a click), and `_bindDiagAccordion` now triggers `_loadDiagOnce()`
+  immediately if the accordion starts open — `toggle` events don't
+  fire on initial open state, so the deferred-load path never ran.
+
+### Changed
+
+- **Section headers across the Forecast Accuracy tab no longer
+  render as ALL CAPS.** Source HTML has them in sentence case
+  ("How error grows with forecast horizon", "Forecast convergence",
+  "How predictions converge on a single moment", etc.) but the CSS
+  rule `.settings-group-title` was applying `text-transform: uppercase`
+  + `letter-spacing: 0.04em`. That made sense when the only uses
+  were short eyebrow labels in the Settings tab ("Target",
+  "Training", "Covariates"), but reads as shouting on full-sentence
+  titles. Removed both rules; bumped font-size 0.85→0.95rem and
+  weight 700→600 to keep the visual hierarchy. Affects every section
+  header that uses the class — Settings tab labels also revert to
+  sentence case, which is consistent with the rest of the UI.
+
+- **Three Layer 1 tooltips on Forecast Accuracy expanded with more
+  context**: "Typical next-step error" now explains why near-term
+  error is the cleanest comparison metric, "Uncertainty bands" calls
+  out what well-calibrated coverage means for downstream automations,
+  and "Run-to-run swing" explains why prediction-spread between runs
+  matters when consuming the forecasts.
+
 ## 2.28.2
 
 ### Fixed
