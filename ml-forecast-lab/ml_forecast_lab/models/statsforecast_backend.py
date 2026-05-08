@@ -80,6 +80,11 @@ class _StatsForecastBase(ForecastModel):
 
         self._train_tail: Optional[np.ndarray] = None
         self._n_horizons: int = 1
+        # Per-batch fallback bookkeeping. _forecast_single increments these
+        # silently; predict_sequence / predict log a single summary line at
+        # the end of each batch instead of one warning per failing window.
+        self._fallback_count: int = 0
+        self._fallback_first_error: Optional[str] = None
 
     @property
     def is_neural(self) -> bool:
@@ -142,10 +147,11 @@ class _StatsForecastBase(ForecastModel):
             # Classical models can fail to converge on short or constant
             # series; fall back to seasonal-naive so the benchmark row is
             # still populated rather than crashing the whole pipeline.
-            logger.warning(
-                f"{self._model_kind} forecast failed ({e}); "
-                f"falling back to seasonal-naive for this window"
-            )
+            # Don't log here — predict_sequence / predict aggregate and
+            # emit a single summary at the end of each batch instead.
+            self._fallback_count += 1
+            if self._fallback_first_error is None:
+                self._fallback_first_error = str(e)
             out = np.zeros(h, dtype=np.float32)
             for k in range(h):
                 idx = -self.seasonal_period + k
@@ -155,12 +161,28 @@ class _StatsForecastBase(ForecastModel):
                     out[k] = history[-1]
             return out
 
+    def _reset_fallback_counters(self) -> None:
+        """Reset per-batch counters before predict_sequence / predict."""
+        self._fallback_count = 0
+        self._fallback_first_error = None
+
+    def _log_fallback_summary(self, n_windows: int) -> None:
+        """Emit a single summary line if any windows fell back this batch."""
+        if self._fallback_count == 0:
+            return
+        logger.warning(
+            f"{self._model_kind} fell back to seasonal-naive on "
+            f"{self._fallback_count}/{n_windows} window(s); "
+            f"first error: {self._fallback_first_error}"
+        )
+
     def predict_sequence(self, X: np.ndarray) -> np.ndarray:
         self._validate_fitted()
         if X.ndim != 3:
             raise ValueError(f"Expected 3-D windowed input, got shape {X.shape}")
         n_samples = X.shape[0]
         out = np.zeros((n_samples, self._n_horizons), dtype=np.float32)
+        self._reset_fallback_counters()
         for i in range(n_samples):
             target_window = X[i, :, self.target_channel]
             # Stitch the cached training tail in front of the window if the
@@ -172,14 +194,17 @@ class _StatsForecastBase(ForecastModel):
             else:
                 history = target_window
             out[i] = self._forecast_single(history, self._n_horizons)
+        self._log_fallback_summary(n_samples)
         return out
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         self._validate_fitted()
         self._validate_X(X)
         X_seq = self._reshape_to_sequences(X)
-        out = np.zeros(X_seq.shape[0], dtype=np.float32)
-        for i in range(X_seq.shape[0]):
+        n_samples = X_seq.shape[0]
+        out = np.zeros(n_samples, dtype=np.float32)
+        self._reset_fallback_counters()
+        for i in range(n_samples):
             target_window = X_seq[i, :, self.target_channel]
             if (self._train_tail is not None
                     and len(target_window) < 2 * self.seasonal_period):
@@ -188,6 +213,7 @@ class _StatsForecastBase(ForecastModel):
                 history = target_window
             preds = self._forecast_single(history, max(self._n_horizons, 1))
             out[i] = preds[0]
+        self._log_fallback_summary(n_samples)
         return out
 
     def get_params(self) -> Dict[str, Any]:
@@ -257,8 +283,16 @@ class ETSModel(_StatsForecastBase):
         return "ets"
 
     def _make_model(self):
-        # 'ZZZ' lets AutoETS pick error/trend/seasonal types automatically.
-        return AutoETS(season_length=self.seasonal_period, model='ZZZ')
+        # 'ZZA' = auto error type, auto trend type, additive seasonality.
+        # The fully-auto 'ZZZ' lets AutoETS pick *multiplicative* seasonality,
+        # which is mathematically ill-defined on series containing zeros or
+        # near-zero values — common for HA sensors (overnight energy demand,
+        # solar at night, intermittent appliances). The optimiser bottoms out
+        # with "Parameters out of range" and we fall back to seasonal-naive
+        # for every single window. Locking seasonality to additive keeps the
+        # auto-search useful while staying numerically well-defined on
+        # zero-bearing data.
+        return AutoETS(season_length=self.seasonal_period, model='ZZA')
 
 
 class ThetaModel(_StatsForecastBase):
