@@ -2053,12 +2053,18 @@ class MLForecastLabApp:
         if feature_importance_list and self.web_app:
             self.web_app.state.appstate.feature_importances[exp_cfg.name] = feature_importance_list
 
-        # 8. Final web state update (mark as completed)
+        # 8. Final web state update (mark as completed). Pass daily_rankings
+        # explicitly — without this the final overwrite wipes the daily-rank
+        # column in the UI (the earlier "completed" call at the top of this
+        # function did include it; this one was missing the kwarg, so the
+        # last-write-wins overwrite landed with daily_rank=None for every
+        # model).
         if self.web_app:
             self._update_web_benchmark(
                 exp_cfg, completed_models, rankings,
                 best_model_name,
                 status="completed",
+                daily_rankings=daily_rankings,
             )
 
         # Final results summary table

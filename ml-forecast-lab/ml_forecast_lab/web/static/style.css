@@ -437,8 +437,7 @@ select.setting-input, select.form-input { cursor: pointer; }
     margin-bottom: 1rem;
 }
 .settings-group-title {
-    color: var(--accent-secondary); font-size: 0.85rem; font-weight: 700;
-    text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--accent-secondary); font-size: 0.95rem; font-weight: 600;
     margin: 0 0 1rem; padding-bottom: 0.5rem;
     border-bottom: 1px solid var(--border);
 }

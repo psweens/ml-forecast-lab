@@ -1161,7 +1161,7 @@
             <div class="vnum">
                 <div class="vnum-label">
                     Typical next-step error
-                    <span class="info-tip">?<span class="tip-text">Mean absolute error at the shortest lead time — the first forecast point published to HA. Smaller is better.</span></span>
+                    <span class="info-tip">?<span class="tip-text">Mean absolute error at the shortest lead time — averaged over the published forecast points closest to "now". This is the cleanest measure of how the model actually does on near-term decisions; bigger lead times accumulate more horizon error and aren't comparable. Units match your sensor's units. Smaller is better.</span></span>
                 </div>
                 <div class="vnum-value" id="v-mae">—</div>
                 <div class="vnum-sub" id="v-mae-sub">—</div>
@@ -1169,7 +1169,7 @@
             <div class="vnum" id="v-coverage-tile">
                 <div class="vnum-label">
                     Uncertainty bands
-                    <span class="info-tip">?<span class="tip-text">How often the real value fell inside the published 80% band. Near 80% = well-calibrated.</span></span>
+                    <span class="info-tip">?<span class="tip-text">Empirical coverage: of all the actuals that have arrived, how many fell inside the published 80% confidence band (the `_lower_80` / `_upper_80` companion sensors). A well-calibrated model should hit ≈ 80% — much higher and the bands are unnecessarily wide; much lower and they're claiming more confidence than the model actually has. Use this to sanity-check whether downstream automations can trust the band.</span></span>
                 </div>
                 <div class="vnum-value" id="v-coverage">—</div>
                 <div class="vnum-sub" id="v-coverage-sub">target 80%</div>
@@ -1177,7 +1177,7 @@
             <div class="vnum" id="v-stability-tile">
                 <div class="vnum-label">
                     Run-to-run swing
-                    <span class="info-tip">?<span class="tip-text">Typical disagreement between forecasts for the same future moment across consecutive runs. Lower = more stable.</span></span>
+                    <span class="info-tip">?<span class="tip-text">For each future moment, we collect the predictions every forecast cycle made of it before it arrived, then measure the typical spread between those predictions. Low values mean the model is confident — successive runs converge on similar values. High values mean predictions for the same moment swing significantly between runs, which makes downstream automations harder to trust. Reported as a percentage of the predicted value.</span></span>
                 </div>
                 <div class="vnum-value" id="v-stability">—</div>
                 <div class="vnum-sub">of predicted value</div>
@@ -1233,9 +1233,9 @@
     </div>
 
     <!-- ============================================================ -->
-    <!-- LAYER 3 — DIAGNOSTIC TOOLS (collapsed by default)             -->
+    <!-- LAYER 3 — DIAGNOSTIC TOOLS (open by default)                  -->
     <!-- ============================================================ -->
-    <details id="diag-accordion" class="diag-accordion">
+    <details id="diag-accordion" class="diag-accordion" open>
         <summary>
             Diagnostic tools
             <span style="color:var(--text-secondary);font-size:0.85rem;font-weight:400;"> — for deeper debugging</span>
@@ -2410,28 +2410,41 @@ window.showTab = function(el) {
         }
     };
 
-    // Only render Layer 3 charts when the accordion is first opened —
-    // saves the initial paint on the common case where the user just
-    // wants to glance at the verdict.
+    // Render Layer 3 charts. Accordion opens by default, so we trigger the
+    // initial load directly on bind (the `toggle` event doesn't fire when a
+    // <details> starts open — only on user-initiated state changes). The
+    // toggle listener is still attached for the case where the user closes
+    // and re-opens the accordion: we want to no-op on subsequent opens
+    // since the data is already loaded.
     var _diagOpened = false;
-    function _bindDiagAccordion() {
+    function _loadDiagOnce() {
+        if (_diagOpened) return;
+        _diagOpened = true;
+        loadForecastEvolution();
+        loadForecastTrajectory(true);
+        // Stability charts depend on data already loaded into Layer 1;
+        // re-render now that the container is visible.
+        if (_lastStabilityData) _renderStabilityCharts(_lastStabilityData);
+        // Force a Plotly resize for anything that was hidden.
         var det = document.getElementById('diag-accordion');
-        if (!det) return;
-        det.addEventListener('toggle', function() {
-            if (!det.open || _diagOpened) return;
-            _diagOpened = true;
-            loadForecastEvolution();
-            loadForecastTrajectory(true);
-            // Stability charts depend on data already loaded into
-            // Layer 1; re-render now that the container is visible.
-            if (_lastStabilityData) _renderStabilityCharts(_lastStabilityData);
-            // Force a Plotly resize for anything that was hidden.
+        if (det) {
             setTimeout(function() {
                 det.querySelectorAll('.js-plotly-plot').forEach(function(c) {
                     Plotly.Plots.resize(c);
                 });
             }, 50);
+        }
+    }
+    function _bindDiagAccordion() {
+        var det = document.getElementById('diag-accordion');
+        if (!det) return;
+        det.addEventListener('toggle', function() {
+            if (!det.open) return;
+            _loadDiagOnce();
         });
+        // Accordion may already be open at first paint (the default state
+        // changed in v2.28.3) — fire the load immediately in that case.
+        if (det.open) _loadDiagOnce();
     }
 
     queueChart('sec-forecast-accuracy', function() {
