@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.28.2
+
+### Fixed
+
+- **"Tune" on AutoETS / AutoARIMA / AutoTheta / Seasonal Naive
+  appeared stuck at the start.** The classical backends had
+  `seasonal_period` listed as a tunable hyperparameter with range
+  1–1440, so Optuna would pick a value per trial and run a full CV
+  benchmark — but each inference window inside that benchmark spawns
+  a fresh AutoETS / AutoARIMA / AutoTheta which does its own internal
+  auto-search, so trials took many minutes apiece while producing
+  results that aren't really hyperparameter search anyway. Two
+  changes: (1) `seasonal_period` is now marked `tunable: False` on
+  these four backends — it's a data-cadence property (48 for
+  half-hourly daily, 168 for hourly weekly, etc.), set once based on
+  your sampling rate, not searchable; (2) the `/run-tuning` endpoint
+  now returns a clean `400` if a model has no tunable params, with
+  the message *"X has no tunable hyperparameters — the auto-model
+  selects them internally. Set fixed parameters (e.g. seasonal_period)
+  on the Models page instead."* No more silent spinning.
+
+  Locked in with 9 new smoke tests (`tests/smoke/test_tuning_guard.py`):
+  the four auto-models must 400, four representative ML models
+  (LightGBM, XGBoost, LSTM, CNN) must still 202, unknown model still
+  400. Smoke suite is now 70 tests.
+
 ## 2.28.1
 
 ### Fixed
