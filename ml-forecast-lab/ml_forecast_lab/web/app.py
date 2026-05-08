@@ -613,19 +613,27 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
             "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
+        # `seasonal_period` is marked non-tunable on the classical backends:
+        # it's a data-cadence property (set once based on sampling rate, e.g.
+        # 48 for half-hourly daily, 168 for hourly weekly), not a hyperparameter
+        # to search over. The auto-models (ARIMA/ETS/Theta) auto-select all
+        # remaining hyperparameters internally — there is genuinely nothing for
+        # Optuna to tune on these backends. Tuning is blocked at the API layer
+        # for any model whose schema has zero tunable params, so users get a
+        # clear error rather than an Optuna study spinning on no-op trials.
         "seasonal_naive": {
-            "seasonal_period": {"type": "int", "default": 48, "label": "Seasonal period (steps)", "min": 1, "max": 1440},
+            "seasonal_period": {"type": "int", "default": 48, "label": "Seasonal period (steps)", "min": 1, "max": 1440, "tunable": False},
         },
         "arima": {
-            "seasonal_period": {"type": "int", "default": 48, "label": "Seasonal period (steps)", "min": 1, "max": 1440},
+            "seasonal_period": {"type": "int", "default": 48, "label": "Seasonal period (steps)", "min": 1, "max": 1440, "tunable": False},
             "train_history": {"type": "int", "default": 1024, "label": "Max train history", "min": 64, "max": 8192, "tunable": False},
         },
         "ets": {
-            "seasonal_period": {"type": "int", "default": 48, "label": "Seasonal period (steps)", "min": 1, "max": 1440},
+            "seasonal_period": {"type": "int", "default": 48, "label": "Seasonal period (steps)", "min": 1, "max": 1440, "tunable": False},
             "train_history": {"type": "int", "default": 1024, "label": "Max train history", "min": 64, "max": 8192, "tunable": False},
         },
         "theta": {
-            "seasonal_period": {"type": "int", "default": 48, "label": "Seasonal period (steps)", "min": 1, "max": 1440},
+            "seasonal_period": {"type": "int", "default": 48, "label": "Seasonal period (steps)", "min": 1, "max": 1440, "tunable": False},
             "train_history": {"type": "int", "default": 1024, "label": "Max train history", "min": 64, "max": 8192, "tunable": False},
         },
     }
@@ -2379,6 +2387,25 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(
                 status_code=400,
                 content={"error": f"No parameter schema for model: {model_name}"},
+            )
+
+        # Reject tuning on auto-models that have no searchable hyperparameters.
+        # Without this guard the request would silently kick off an Optuna
+        # study where every trial uses the same defaults — wasting compute
+        # and looking like a hang to the user (the per-window AutoETS fits
+        # are slow enough to mask the no-op).
+        tunable = {k: v for k, v in schema.items() if v.get("tunable", True)}
+        if not tunable:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": (
+                        f"{model_name} has no tunable hyperparameters — "
+                        f"the auto-model selects them internally. "
+                        f"Set fixed parameters (e.g. seasonal_period) on "
+                        f"the Models page instead."
+                    )
+                },
             )
 
         if not app.state.appstate.tuning_callback:
