@@ -1229,6 +1229,19 @@
                 </label>
             </div>
             <div id="accuracy-lead-chart" style="width:100%;height:360px;"></div>
+            <!-- Empty-state for the whole accuracy tab — sits inside the
+                 lead-time card so it visually replaces the chart when the
+                 backend returns no lead-time data. Previously it was
+                 positioned at the very bottom of the tab, which made it
+                 look like a separate orphaned panel after the diagnostics
+                 accordion had populated its own charts. -->
+            <div id="accuracy-empty" style="display:none;">
+                <div class="empty-state">
+                    <span class="empty-state-icon">📊</span>
+                    <p id="accuracy-empty-title">No forecast accuracy data yet.</p>
+                    <p class="empty-state-hint" id="accuracy-empty-hint">Each production forecast logs its predictions; once the actuals arrive, this page compares them and tracks how accuracy holds up across lead times. Promote a model to production to start logging.</p>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -1382,15 +1395,10 @@
         </div>
     </details>
 
-    <!-- Empty state + footer -->
-    <div id="accuracy-empty" style="display:none;">
-        <div class="empty-state">
-            <span class="empty-state-icon">📊</span>
-            <p id="accuracy-empty-title">No forecast accuracy data yet.</p>
-            <p class="empty-state-hint" id="accuracy-empty-hint">Each production forecast logs its predictions; once the actuals arrive, this page compares them and tracks how accuracy holds up across lead times. Promote a model to production to start logging.</p>
-        </div>
-    </div>
-
+    <!-- Footer stats (per-page count line). The accuracy-empty block
+         that previously lived here was moved up to sit inside the
+         lead-time card, so the tab no longer renders a stranded empty
+         panel below the diagnostics accordion. -->
     <div id="accuracy-stats" style="display:none;margin-top:1rem;">
         <p style="color:var(--text-secondary);font-size:0.85rem;">
             <span id="accuracy-total-logged">0</span> forecast points logged
