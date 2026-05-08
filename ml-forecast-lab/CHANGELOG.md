@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.28.1
+
+### Fixed
+
+- **AutoETS log spam: every inference window emitted a `Parameters out
+  of range` WARNING and fell back to seasonal-naive.** Two compounding
+  causes. (1) `ETSModel._make_model` used `model='ZZZ'`, letting AutoETS
+  pick *multiplicative* seasonality — mathematically ill-defined on
+  series with zeros or near-zero values, which is most HA sensors
+  (overnight energy demand, solar at night, intermittent appliances).
+  Switched to `'ZZA'`: auto error type, auto trend type, additive
+  seasonality only — keeps the auto-search useful while staying
+  numerically well-defined on zero-bearing data. (2) The fallback
+  warning fired per failing window, flooding logs during benchmark and
+  tuning runs with hundreds of identical lines. `_forecast_single` now
+  increments a per-batch counter silently; `predict_sequence` and
+  `predict` log a single summary at the end of each batch
+  (`ets fell back on 47/50 window(s); first error: ...`).
+
 ## 2.28.0
 
 ### Added
