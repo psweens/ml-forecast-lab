@@ -279,9 +279,11 @@ class TestApplyLoadSubtract:
             adj.iloc[24:].values, load_48h.iloc[24:].values,
         )
         assert audit["per_sensor"][0]["rows_missing"] == 72
-        # Trailing gap window should be recorded
-        assert audit["per_sensor"][0]["gap_start"] is None  # leading is not missing
-        # (our detector only fires for leading gaps; trailing still counted via rows_missing)
+        # Leading-gap fields stay None when the sensor covers the start of
+        # the window; the trailing gap is now reported separately.
+        assert audit["per_sensor"][0]["gap_start"] is None
+        assert audit["per_sensor"][0]["trailing_gap_start"] is not None
+        assert audit["per_sensor"][0]["trailing_gap_end"] == load_48h.index[-1].isoformat()
 
     def test_on_missing_drop_removes_rows(self, load_48h):
         """on_missing='drop': NaN rows → dropped from the adjusted series."""
@@ -316,6 +318,39 @@ class TestApplyLoadSubtract:
         assert rec["gap_end"] is not None
         # gap ends the timestamp before first present row
         assert rec["gap_end"] == load_48h.index[47].isoformat()
+        # Trailing-gap fields stay None because the sensor reaches the end.
+        assert rec["trailing_gap_start"] is None
+        assert rec["trailing_gap_end"] is None
+
+    def test_trailing_gap_detected(self, load_48h):
+        """Sensor that stopped reporting before the load did: the trailing
+        gap window must be recorded in the audit so users can see the sensor
+        went stale. Previously the docstring promised this but the detector
+        only captured leading gaps."""
+        early_ev = pd.Series(0.1, index=load_48h.index[:48])  # only day 1
+        _, audit = apply_load_subtract(
+            load_48h, [(_cfg("sensor.ev"), early_ev)],
+        )
+        rec = audit["per_sensor"][0]
+        # Leading gap absent (sensor covers the start)
+        assert rec["gap_start"] is None
+        assert rec["gap_end"] is None
+        # Trailing gap starts one row after the last present timestamp
+        assert rec["trailing_gap_start"] == load_48h.index[48].isoformat()
+        assert rec["trailing_gap_end"] == load_48h.index[-1].isoformat()
+
+    def test_leading_and_trailing_gaps_both_detected(self, load_48h):
+        """Sensor that only covers the middle of the window: both gap
+        windows must be reported."""
+        middle = pd.Series(0.1, index=load_48h.index[24:72])
+        _, audit = apply_load_subtract(
+            load_48h, [(_cfg("sensor.x"), middle)],
+        )
+        rec = audit["per_sensor"][0]
+        assert rec["gap_start"] == load_48h.index[0].isoformat()
+        assert rec["gap_end"] == load_48h.index[23].isoformat()
+        assert rec["trailing_gap_start"] == load_48h.index[72].isoformat()
+        assert rec["trailing_gap_end"] == load_48h.index[-1].isoformat()
 
     # -- Negative clip ---------------------------------------------------
 

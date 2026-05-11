@@ -382,8 +382,11 @@ def apply_load_subtract(
       ``LoadSubtractError``. Never silently coerce NaN to 0 unless you ask.
     - **scale**: applied before subtraction to fix unit mismatches (Wh→kWh).
     - **history coverage gap**: if the subtract series is shorter than the
-      load, the first/last gap windows are recorded in ``audit['per_sensor']``
-      with ``gap_start``/``gap_end``.
+      load, the *leading* gap window is recorded in ``audit['per_sensor']``
+      under ``gap_start``/``gap_end``, and the *trailing* gap window (sensor
+      stopped reporting before the load did) is recorded under
+      ``trailing_gap_start``/``trailing_gap_end``. Interior gaps roll up
+      into ``rows_missing`` without per-window detail.
     - **negative clip**: after subtraction, the result is ``clip(lower=0)``
       and the number of clipped rows is counted. > 5 % → warning.
     - **fraction guard**: per-row ``(sum_subtract / load)`` is checked against
@@ -428,8 +431,10 @@ def apply_load_subtract(
                         "max_fraction": float,     # max (this_sensor / load)
                         "violation_rows": int,     # rows > max_fraction_of_load
                         "violation_pct": float,
-                        "gap_start": str | None,   # ISO ts of first missing window
-                        "gap_end": str | None,
+                        "gap_start": str | None,   # ISO ts of leading-gap start
+                        "gap_end": str | None,     # ISO ts of leading-gap end
+                        "trailing_gap_start": str | None,  # ISO ts of trailing-gap start
+                        "trailing_gap_end": str | None,    # ISO ts of trailing-gap end
                     },
                     ...
                 ],
@@ -511,25 +516,37 @@ def apply_load_subtract(
         rows_missing = int(missing_mask.sum())
         rows_present = len(aligned) - rows_missing
 
-        # Detect history-coverage gap windows. We only report the FIRST
-        # contiguous leading gap and the last trailing gap, because the
-        # common case is "the sensor didn't exist before install date".
-        # Interior gaps roll up into rows_missing without per-window detail.
+        # Detect history-coverage gap windows. We report the FIRST
+        # contiguous leading gap (sensor didn't exist before install date)
+        # and the LAST contiguous trailing gap (sensor stopped reporting),
+        # because those are the two cases that benefit from per-window
+        # diagnostics. Interior gaps roll up into rows_missing without
+        # per-window detail.
         gap_start: Optional[str] = None
         gap_end: Optional[str] = None
+        trailing_gap_start: Optional[str] = None
+        trailing_gap_end: Optional[str] = None
         if rows_missing > 0:
-            leading = missing_mask.values.argmax() if missing_mask.iloc[0] else -1
-            if leading >= 0:
-                # find end of leading gap (first non-missing)
-                not_missing = (~missing_mask).values
-                if not_missing.any():
-                    first_present = int(not_missing.argmax())
+            not_missing = (~missing_mask).values
+            if not not_missing.any():
+                # All missing. Whole window is a gap — only record it as the
+                # leading gap to avoid double-counting via trailing fields.
+                gap_start = load.index[0].isoformat()
+                gap_end = load.index[-1].isoformat()
+            else:
+                first_present = int(not_missing.argmax())
+                # Leading gap: zero or more rows of NaN before the first
+                # non-missing row.
+                if missing_mask.iloc[0]:
                     gap_start = load.index[0].isoformat()
                     gap_end = load.index[first_present - 1].isoformat()
-                else:
-                    # All missing. Whole window is a gap.
-                    gap_start = load.index[0].isoformat()
-                    gap_end = load.index[-1].isoformat()
+                # Trailing gap: zero or more rows of NaN after the last
+                # non-missing row. argmax on the reversed array finds the
+                # last True (since argmax returns the first True index).
+                if missing_mask.iloc[-1]:
+                    last_present = len(missing_mask) - 1 - int(not_missing[::-1].argmax())
+                    trailing_gap_start = load.index[last_present + 1].isoformat()
+                    trailing_gap_end = load.index[-1].isoformat()
 
         # Apply on_missing policy.
         rows_dropped = 0
@@ -566,6 +583,8 @@ def apply_load_subtract(
             "violation_pct": 0.0,      # filled in below
             "gap_start": gap_start,
             "gap_end": gap_end,
+            "trailing_gap_start": trailing_gap_start,
+            "trailing_gap_end": trailing_gap_end,
         })
 
     # --- Stage 2: per-sensor fraction-of-load guard (pre-drop). -------------
@@ -829,25 +848,45 @@ def align_series(
     series_list : list of pd.Series
         Series to align.
     method : str, default 'inner'
-        Join method: 'inner', 'outer', 'left', 'right'.
+        Join method:
+        - ``'inner'``: intersection of all indices (no NaNs introduced).
+        - ``'outer'``: union of all indices (NaNs where a series doesn't cover a
+          timestamp).
+        - ``'left'``: anchor on the first series' index; other series are
+          reindexed (and may pick up NaNs at unmatched timestamps).
+        - ``'right'``: anchor on the last series' index; other series are
+          reindexed.
 
     Returns
     -------
     list of pd.Series
-        Aligned series.
+        Aligned series, in the same order as ``series_list``.
 
     Notes
     -----
-    Useful for combining target and covariates with potentially different timestamps.
+    Useful for combining target and covariates with potentially different
+    timestamps. ``'left'`` and ``'right'`` are implemented via
+    ``Series.reindex`` rather than ``pd.concat`` because ``pd.concat`` only
+    supports ``'inner'``/``'outer'`` joins.
     """
     if not series_list:
         return []
 
     if len(series_list) == 1:
-        return series_list.copy()
+        return [series_list[0].copy()]
 
-    # Concatenate with join method
-    combined = pd.concat(series_list, axis=1, join=method)
+    if method in ('inner', 'outer'):
+        combined = pd.concat(series_list, axis=1, join=method)
+        return [combined.iloc[:, i] for i in range(len(series_list))]
 
-    # Split back
-    return [combined.iloc[:, i] for i in range(len(series_list))]
+    if method == 'left':
+        anchor = series_list[0].index
+        return [series_list[0].copy()] + [s.reindex(anchor) for s in series_list[1:]]
+
+    if method == 'right':
+        anchor = series_list[-1].index
+        return [s.reindex(anchor) for s in series_list[:-1]] + [series_list[-1].copy()]
+
+    raise ValueError(
+        f"method must be 'inner', 'outer', 'left', or 'right', got {method!r}"
+    )

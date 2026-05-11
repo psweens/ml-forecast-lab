@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from ml_forecast_lab.preprocessing import (
+    align_series,
     clip_outliers,
     cumulative_to_interval,
     resample_to_grid,
@@ -116,3 +117,68 @@ class TestTransformRoundtrip:
         np.testing.assert_allclose(
             recovered.values, synthetic_interval_series.values, atol=1e-6
         )
+
+
+class TestAlignSeries:
+    """``align_series`` claims to support 'left' and 'right' joins, but the
+    previous implementation forwarded the method straight to ``pd.concat``
+    which only accepts 'inner'/'outer'. These tests pin the documented
+    behaviour."""
+
+    def _two_offset_series(self):
+        idx_a = pd.date_range("2024-01-01", periods=4, freq="1h")
+        idx_b = pd.date_range("2024-01-01 02:00", periods=4, freq="1h")
+        a = pd.Series([1.0, 2.0, 3.0, 4.0], index=idx_a, name="a")
+        b = pd.Series([10.0, 20.0, 30.0, 40.0], index=idx_b, name="b")
+        return a, b
+
+    def test_inner_intersects_indices(self):
+        a, b = self._two_offset_series()
+        out_a, out_b = align_series([a, b], method="inner")
+        # Inner join keeps only the two overlapping timestamps
+        assert len(out_a) == 2
+        assert len(out_b) == 2
+        assert not out_a.isna().any()
+        assert not out_b.isna().any()
+
+    def test_outer_unions_indices(self):
+        a, b = self._two_offset_series()
+        out_a, out_b = align_series([a, b], method="outer")
+        # Outer join keeps all 6 distinct timestamps
+        assert len(out_a) == 6
+        # NaNs appear where each series didn't originally cover that timestamp
+        assert out_a.isna().sum() == 2
+        assert out_b.isna().sum() == 2
+
+    def test_left_anchors_to_first(self):
+        a, b = self._two_offset_series()
+        out_a, out_b = align_series([a, b], method="left")
+        # Left join uses a's index as the anchor
+        pd.testing.assert_index_equal(out_a.index, a.index)
+        pd.testing.assert_index_equal(out_b.index, a.index)
+        # a's values must be unchanged
+        np.testing.assert_array_equal(out_a.values, a.values)
+        # b is reindexed onto a's index — NaN where it didn't originally cover
+        assert out_b.isna().sum() == 2
+
+    def test_right_anchors_to_last(self):
+        a, b = self._two_offset_series()
+        out_a, out_b = align_series([a, b], method="right")
+        pd.testing.assert_index_equal(out_a.index, b.index)
+        pd.testing.assert_index_equal(out_b.index, b.index)
+        np.testing.assert_array_equal(out_b.values, b.values)
+        assert out_a.isna().sum() == 2
+
+    def test_unknown_method_raises(self):
+        a, b = self._two_offset_series()
+        with pytest.raises(ValueError, match="method must be"):
+            align_series([a, b], method="garbage")
+
+    def test_single_series_returns_copy(self):
+        idx = pd.date_range("2024-01-01", periods=3, freq="1h")
+        a = pd.Series([1.0, 2.0, 3.0], index=idx)
+        out = align_series([a])
+        assert len(out) == 1
+        # Must be a copy — mutating the result should not touch the input
+        out[0].iloc[0] = 99.0
+        assert a.iloc[0] == 1.0
