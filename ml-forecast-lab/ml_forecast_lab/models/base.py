@@ -370,8 +370,33 @@ class ForecastModel(ABC):
 
     @property
     def is_neural(self) -> bool:
-        """Whether this model requires sequence (sliding-window) input."""
+        """Whether this model requires sequence (sliding-window) input.
+
+        Drives the benchmark/training pipelines: when True, the caller
+        builds sliding-window features and uses ``predict_sequence``.
+        Note that some non-neural models (seasonal_naive, arima, ets,
+        theta) also return True here because they consume the target
+        channel of each window — see ``model_family`` for the actual
+        algorithmic family.
+        """
         return False
+
+    @property
+    def model_family(self) -> str:
+        """Algorithmic family for UI grouping and pipeline branching.
+
+        One of:
+          - ``'tree'``: gradient-boosted trees (lightgbm, xgboost, catboost).
+          - ``'neural'``: deep-learning backends (lstm, gru, transformer, ...).
+          - ``'classical'``: classical statistical models (arima, ets, theta).
+          - ``'baseline'``: trivial reference rules (seasonal_naive).
+
+        Defaults to ``'neural'`` when ``is_neural`` is True and ``'tree'``
+        otherwise. Classical/baseline backends should override this
+        explicitly so the leaderboard, model catalog, and per-family
+        defaults can group them correctly.
+        """
+        return 'neural' if self.is_neural else 'tree'
 
     @abstractmethod
     def fit(

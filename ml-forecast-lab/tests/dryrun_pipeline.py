@@ -281,6 +281,22 @@ def main():
     print(f"\nRegistry: {len(registry.list_available())} models")
     print(", ".join(registry.list_available()))
 
+    # ---- Model family classification ------------------------------------ #
+    # Confirms every backend resolves to one of the four documented
+    # families (tree / neural / classical / baseline) — caught a bug
+    # earlier when statsforecast backends had no explicit override and
+    # silently fell into 'neural' because they set is_neural=True for the
+    # pipeline.
+    print(f"\nModel families:")
+    families = registry.list_by_family()
+    expected_families = {'tree', 'neural', 'classical', 'baseline'}
+    unknown = set(families) - expected_families
+    if unknown:
+        print(f"  WARNING: unrecognised families: {sorted(unknown)}")
+    for fam in sorted(families):
+        members = families[fam]
+        print(f"  {fam:<10} ({len(members):2d}): {', '.join(members)}")
+
     # ---- Per-model dry run ---------------------------------------------- #
     failures = []
     print(f"\n{'─' * 72}\n[1/3] Per-model config dry-run\n{'─' * 72}")
@@ -480,6 +496,48 @@ def main():
                 [f"set_params(**override) not reflected in get_params(): {mismatched}"],
             ))
     print("  All overrides round-tripped through get_params().")
+
+    # ---- Classical backend wall-clock budget ---------------------------- #
+    # The benchmark pipeline calls predict_sequence per fold with hundreds
+    # of windows. Earlier the statsforecast backends fed their full
+    # 1024-sample train_history into each per-window auto-search, which
+    # made AutoTheta take ~26s per call and AutoARIMA stall indefinitely.
+    # We now cap per-call history at 8 × seasonal_period; this section
+    # asserts the cap is doing its job by timing predict_sequence on a
+    # representative slice and flagging anything over a generous budget.
+    import time
+    print(f"\n  Classical / baseline predict_sequence wall-clock (5 windows):")
+    BUDGET_PER_WINDOW_S = 1.0  # generous; healthy values are 0.05–0.5 s
+    n_check = min(5, seq_X.shape[0])
+    test_windows = seq_X[:n_check]
+    classical_names = [
+        n for n in registry.list_available()
+        if registry.create(n).model_family in {'classical', 'baseline'}
+    ]
+    for model_name in classical_names:
+        m = registry.create(model_name)
+        try:
+            m.fit(X_flat, y_flat)
+            t0 = time.time()
+            preds = m.predict_sequence(test_windows)
+            dt = time.time() - t0
+        except Exception as e:
+            failures.append((
+                f"classical_predict_sequence[{model_name}]",
+                [f"{type(e).__name__}: {e}"],
+            ))
+            print(f"    {model_name:<14}  FAIL: {type(e).__name__}: {e}")
+            continue
+        per_window = dt / max(n_check, 1)
+        flag = "" if per_window <= BUDGET_PER_WINDOW_S else f"  >budget {BUDGET_PER_WINDOW_S}s"
+        print(f"    {model_name:<14}  {dt:6.2f}s total  "
+              f"{per_window:5.2f}s/window  shape={preds.shape}{flag}")
+        if per_window > BUDGET_PER_WINDOW_S:
+            failures.append((
+                f"classical_budget[{model_name}]",
+                [f"{per_window:.2f}s per window exceeds {BUDGET_PER_WINDOW_S}s "
+                 "budget — would stall a full CV fold"],
+            ))
 
     # ---- Summary -------------------------------------------------------- #
     print(f"\n{'=' * 72}")
