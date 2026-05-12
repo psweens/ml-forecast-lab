@@ -1,5 +1,122 @@
 # Changelog
 
+## 2.29.0
+
+### Fixed
+
+- **AutoARIMA/AutoETS/AutoTheta no longer stall the benchmark
+  pipeline.** Each of the three statsforecast backends refits its
+  auto-search on every inference window, and the benchmark runs
+  hundreds of windows per fold; before this release each refit was
+  given the full 1024-sample `train_history` plus the window, and
+  AutoTheta's decomposition is roughly O(n²) — concrete timings on
+  half-hourly daily data: AutoARIMA >90 s/call, AutoTheta 26 s/call,
+  AutoETS 0.7 s/call. A single CV fold would not finish. Three
+  compounding fixes in `models/statsforecast_backend.py`:
+
+  - Per-call history is now capped at 4 × `seasonal_period`
+    (~192 samples for half-hourly daily data) via a new
+    `_cap_history()` helper. The auto-search converges on the same
+    orders from the shorter tail, so forecast quality is unchanged.
+  - `AutoARIMA`'s default search grid (max_p=5, max_q=5, max_P=2,
+    max_Q=2, nmodels=94, approximation=False) is impractically wide
+    for per-window refits. Tightened to (max_p=2, max_q=2, max_P=1,
+    max_Q=1, nmodels=10, approximation=True), which the classical
+    forecasting literature treats as covering essentially all
+    reasonable seasonal-ARIMA models. Cuts per-window cost from
+    ~2.2 s to ~0.6 s.
+  - The numba JIT inside statsforecast compiled lazily on first
+    `forecast()` call — AutoTheta took ~25 s the very first call,
+    then 0.05 s thereafter. That cold-start cost surfaced inside
+    `predict_sequence` and made the first benchmark window look
+    stuck. Moved the cost to `fit()` via a new `_warmup_jit()` call
+    on a tiny synthetic series so the compiled paths are cached
+    before inference starts.
+
+  After the fix the four classical/baseline backends are well under
+  a 1 s/window budget end-to-end (validated by a new section in
+  `tests/dryrun_pipeline.py`): arima 0.59 s, ets 0.18 s,
+  seasonal_naive 0.00 s, theta 0.03 s.
+
+- **Sliding-window CV bug surfaced by data-flow audit.** Walk-forward
+  CV could produce zero-length test folds on shorter series because
+  the window builder dropped the last `window_size` rows of every
+  fold (no future targets to predict), then the split used
+  pre-window indices. Folds whose post-window length was smaller than
+  the configured test size silently became empty and were excluded
+  from the Demšar ranking without any warning. Fix mirrors the
+  window builder's drop logic at split time so test folds always
+  contain the requested number of samples.
+
+- **CV embargo gap was being silently ignored when the dataset was
+  too small.** The embargo (configurable gap between train and test
+  to prevent peek-ahead leakage) was applied unconditionally, but
+  when the series wasn't long enough to satisfy
+  `train_size + embargo + test_size`, the code fell back to a
+  zero-embargo split without logging anything — a quiet correctness
+  regression for users running on short HA histories. Now logs a
+  clear warning and falls back to the smallest viable embargo.
+
+- **`align_series` could drop the last row of the longer series.**
+  When two series had different end timestamps, `align_series`
+  truncated to the shorter, but it used `< min_end` instead of
+  `<= min_end`, dropping the final aligned sample. Fixed off-by-one
+  and added regression tests.
+
+- **`apply_load_subtract` trailing-gap handling.** When the subtracted
+  series ended before the main series, the trailing gap was filled
+  with NaN and then quietly forward-filled from the last valid value,
+  producing a flat extrapolation. Now the trailing gap is explicitly
+  zeroed (treating "no measurement" as "no contribution") with a
+  warning, matching the existing leading-gap behaviour.
+
+### Added
+
+- **New `model_family` taxonomy.** Every registered backend now
+  reports one of `'tree'`, `'neural'`, `'classical'`, or `'baseline'`
+  via a new property on `ForecastModel`. The base default derives
+  from `is_neural`, so all 17 neural backends and 3 tree backends
+  auto-classify without any per-backend code; the four non-NN
+  backends override explicitly:
+
+      baseline   (1):  seasonal_naive
+      classical  (3):  arima, ets, theta
+      neural    (17):  cnn, crossformer, dlinear, fits, gru,
+                       itransformer, lstm, nbeats, nhits, nlinear,
+                       patchtst, sparsetsf, tft, tide, timemixer,
+                       timesnet, tsmixer
+      tree       (3):  catboost, lightgbm, xgboost
+
+  Two new registry helpers expose the grouping for downstream code:
+  `registry.list_by_family()` (dict[family → sorted names]) and
+  `registry.family_of(name)`. The web `MODEL_CATALOG` already
+  mirrors this taxonomy, so no UI changes are needed in this patch
+  — future code can query the registry directly instead of
+  maintaining a parallel hardcoded mapping.
+
+  `is_neural` is intentionally unchanged. It semantically means
+  "this model needs sliding-window input" (which classical/baseline
+  backends also do, because they pull the target series out of a
+  window channel), and renaming it would have rippled through
+  benchmark/runner.py, main.py production training, and Covariate
+  Analysis. `model_family` is the source of truth for grouping/UI
+  purposes only.
+
+- **`tests/dryrun_pipeline.py` — synthetic-data walkthrough of every
+  backend.** Standalone debug script that exercises every model
+  backend, the covariate-analysis enumeration, and the
+  hyperparameter-tuning sample round-trip without paying the
+  model-training cost. Intended as a fast local debug aid when
+  changing the model registry, the parameter schema, or any shared
+  helper. Runs in under 30 s and exits 1 on any failure.
+
+  The dryrun now also: (a) prints the family grouping so a
+  contributor can spot a backend that's accidentally landed in the
+  wrong category, and (b) times `predict_sequence` on the
+  classical/baseline backends, failing the run if any backend
+  exceeds 1 s/window — caught the AutoTheta-on-cold-JIT regression
+  during development of this release.
+
 ## 2.28.4
 
 ### Added
