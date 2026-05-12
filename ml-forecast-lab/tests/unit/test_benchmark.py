@@ -82,6 +82,143 @@ class TestCVSplits:
             assert train_idx.max() < test_idx.min(), \
                 f"Fold {fold_idx}: test starts before train ends"
 
+    def test_sliding_window_indices_in_range(self):
+        """Regression: sliding_window previously produced test indices past
+        the end of the dataframe for every fold past fold 0, which then
+        crashed ``df.iloc[test_idx]`` with IndexError. All folds must now
+        keep their indices in ``[0, n_samples)``."""
+        cfg = _make_experiment_cfg(cv_strategy="sliding_window", cv_folds=5)
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        idx = pd.date_range("2024-01-01", periods=300, freq="30min")
+        df = pd.DataFrame({
+            "feature_1": np.arange(300, dtype=float),
+            "target": np.arange(300, dtype=float),
+        }, index=idx)
+
+        splits = runner._prepare_train_test_splits(df)
+        assert len(splits) == 5
+
+        n = len(df)
+        for fold_idx, (train_idx, test_idx) in enumerate(splits):
+            assert train_idx.min() >= 0 and train_idx.max() < n, \
+                f"Fold {fold_idx}: train indices out of range"
+            assert test_idx.min() >= 0 and test_idx.max() < n, \
+                f"Fold {fold_idx}: test indices out of range"
+            assert len(set(train_idx) & set(test_idx)) == 0, \
+                f"Fold {fold_idx}: train/test overlap"
+            assert train_idx.max() < test_idx.min(), \
+                f"Fold {fold_idx}: test starts before train ends"
+
+    def test_sliding_window_slides_forward(self):
+        """Sliding window's train start must advance fold-by-fold so each
+        fold uses a different slice of history (otherwise it degenerates
+        into evaluating the same fit n times)."""
+        cfg = _make_experiment_cfg(cv_strategy="sliding_window", cv_folds=4)
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        idx = pd.date_range("2024-01-01", periods=400, freq="30min")
+        df = pd.DataFrame({
+            "target": np.arange(400, dtype=float),
+        }, index=idx)
+
+        splits = runner._prepare_train_test_splits(df)
+        train_starts = [train.min() for train, _ in splits]
+        assert train_starts == sorted(train_starts)
+        assert train_starts[0] < train_starts[-1], \
+            "train_start must advance across folds"
+
+    def test_sliding_window_last_fold_reaches_end(self):
+        """The final sliding fold should evaluate the most-recent rows, so
+        leaderboard rankings reflect current-time performance."""
+        cfg = _make_experiment_cfg(cv_strategy="sliding_window", cv_folds=5)
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        idx = pd.date_range("2024-01-01", periods=300, freq="30min")
+        df = pd.DataFrame({"target": np.arange(300, dtype=float)}, index=idx)
+
+        splits = runner._prepare_train_test_splits(df)
+        last_train, last_test = splits[-1]
+        assert last_test.max() == len(df) - 1
+
+    def test_walk_forward_honours_embargo(self):
+        """``cv_embargo_periods`` must produce a gap of that size between
+        train_end and test_start. Previously the runner ignored the field
+        entirely, so a documented config knob silently leaked across the
+        train/test boundary."""
+        cfg = _make_experiment_cfg(cv_folds=5, cv_embargo_periods=12)
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        idx = pd.date_range("2024-01-01", periods=300, freq="30min")
+        df = pd.DataFrame({"target": np.arange(300, dtype=float)}, index=idx)
+
+        splits = runner._prepare_train_test_splits(df)
+        assert len(splits) >= 1
+        for fold_idx, (train_idx, test_idx) in enumerate(splits):
+            gap = int(test_idx.min()) - int(train_idx.max()) - 1
+            assert gap >= 12, (
+                f"Fold {fold_idx}: gap={gap}, expected ≥12 from "
+                f"cv_embargo_periods=12"
+            )
+
+    def test_sliding_window_honours_embargo(self):
+        """Sliding-window CV must also apply ``cv_embargo_periods``."""
+        cfg = _make_experiment_cfg(
+            cv_strategy="sliding_window", cv_folds=4, cv_embargo_periods=8,
+        )
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        idx = pd.date_range("2024-01-01", periods=300, freq="30min")
+        df = pd.DataFrame({"target": np.arange(300, dtype=float)}, index=idx)
+
+        splits = runner._prepare_train_test_splits(df)
+        for fold_idx, (train_idx, test_idx) in enumerate(splits):
+            gap = int(test_idx.min()) - int(train_idx.max()) - 1
+            assert gap >= 8, (
+                f"Fold {fold_idx}: gap={gap}, expected ≥8 from "
+                f"cv_embargo_periods=8"
+            )
+
+    def test_walk_forward_runs_end_to_end(self):
+        """Regression: the runner must not raise IndexError when running a
+        full benchmark with a non-trivial CV configuration."""
+        cfg = _make_experiment_cfg(cv_folds=4)
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        idx = pd.date_range("2024-01-01", periods=240, freq="30min")
+        rng = np.random.default_rng(7)
+        df = pd.DataFrame({
+            "feature_1": rng.random(240),
+            "target": rng.random(240),
+        }, index=idx)
+
+        from ml_forecast_lab.models.lightgbm_backend import LightGBMModel
+        result = runner.run_benchmark(df, {"lightgbm": LightGBMModel()})
+        # Every fold must have actually produced metrics (no silent skips).
+        fold_metrics = result.model_results["lightgbm"].fold_metrics
+        assert all(fm for fm in fold_metrics), \
+            f"Some folds produced empty metrics: {fold_metrics}"
+
+    def test_sliding_window_runs_end_to_end(self):
+        """Regression for the sliding_window IndexError: a full benchmark
+        with ``cv_strategy='sliding_window'`` must run without raising and
+        must produce a metric for every fold."""
+        cfg = _make_experiment_cfg(cv_strategy="sliding_window", cv_folds=3)
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        idx = pd.date_range("2024-01-01", periods=240, freq="30min")
+        rng = np.random.default_rng(11)
+        df = pd.DataFrame({
+            "feature_1": rng.random(240),
+            "target": rng.random(240),
+        }, index=idx)
+
+        from ml_forecast_lab.models.lightgbm_backend import LightGBMModel
+        result = runner.run_benchmark(df, {"lightgbm": LightGBMModel()})
+        fold_metrics = result.model_results["lightgbm"].fold_metrics
+        assert all(fm for fm in fold_metrics), \
+            f"Some folds produced empty metrics: {fold_metrics}"
+
 
 class TestMeanRankScoring:
     def test_mean_rank_computed(self):

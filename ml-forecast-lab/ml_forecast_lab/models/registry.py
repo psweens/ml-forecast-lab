@@ -220,6 +220,32 @@ class ModelRegistry:
 
         return results
 
+    def list_by_family(self) -> Dict[str, List[str]]:
+        """Group registered models by their ``model_family`` value.
+
+        Returns a dict keyed by family name (``'tree'``, ``'neural'``,
+        ``'classical'``, ``'baseline'``) with sorted lists of model names.
+        Each backend is instantiated once with default args to read the
+        property — cheap because instantiation is intentionally side-effect
+        free for every backend. Empty families are omitted.
+        """
+        groups: Dict[str, List[str]] = {}
+        for name in self.list_available():
+            try:
+                family = getattr(self.create(name), 'model_family', 'tree')
+            except Exception:
+                family = 'tree'
+            groups.setdefault(family, []).append(name)
+        for fam in groups:
+            groups[fam].sort()
+        return groups
+
+    def family_of(self, name: str) -> str:
+        """Return the ``model_family`` string for a registered model."""
+        if name not in self._models:
+            raise KeyError(f'Model {name!r} not registered.')
+        return getattr(self.create(name), 'model_family', 'tree')
+
     def is_registered(self, name: str) -> bool:
         """
         Check whether a model is registered.

@@ -71,6 +71,10 @@ class SeasonalNaiveModel(ForecastModel):
         # is exactly what seasonal-naive needs to look one period back.
         return True
 
+    @property
+    def model_family(self) -> str:
+        return 'baseline'
+
     def _reshape_to_sequences(self, X: np.ndarray) -> np.ndarray:
         n_samples, n_features = X.shape
         seq_len = self.sequence_length or n_features

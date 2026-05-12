@@ -242,40 +242,89 @@ class BenchmarkRunner:
 
         Notes
         -----
-        Walk-forward: Test set size = len(df) / (n_folds + 1).
-        Sliding window: All folds have equal train/test sizes.
+        Walk-forward: train set grows; test set size = n // (n_folds + 1).
+        Sliding window: fixed train and test sizes that slide forward; the
+        stride is sized so the final fold's test window aligns with the end
+        of the data (so the most recent rows are always evaluated).
+
+        Both strategies honour ``cv_embargo_periods`` from the experiment
+        config: that many rows immediately preceding each test window are
+        excluded from training to prevent target leakage through lag /
+        rolling features whose forecast horizon overlaps the test inputs.
         """
         n_samples = len(df)
+        embargo = max(0, int(self.experiment_cfg.get('cv_embargo_periods', 0)))
 
         if self.cv_strategy == 'walk_forward':
-            # Grow train set, fixed test size
-            test_size = n_samples // (self.cv_folds + 1)
+            # Expanding train window, fixed test size. The final fold's test
+            # window ends at n_samples so the leaderboard always reflects
+            # the most-recent slice of the series.
+            test_size = max(1, n_samples // (self.cv_folds + 1))
+            splits: List[Tuple[np.ndarray, np.ndarray]] = []
+            for fold in range(self.cv_folds):
+                test_start = n_samples - test_size * (self.cv_folds - fold)
+                test_end = min(test_start + test_size, n_samples)
+                train_end = max(0, test_start - embargo)
+
+                if test_start >= n_samples or train_end <= 0:
+                    continue
+
+                train_idx = np.arange(0, train_end)
+                test_idx = np.arange(test_start, test_end)
+                if len(train_idx) > 0 and len(test_idx) > 0:
+                    splits.append((train_idx, test_idx))
+
+        else:  # sliding_window
+            # Fixed-size train and test windows that slide forward. The
+            # previous implementation set train_size = test_size * cv_folds
+            # with a stride of one test_size — that needs roughly
+            # 2 * cv_folds * test_size rows to fit, so every fold past
+            # the first produced out-of-range test indices on realistic
+            # n_samples / cv_folds combinations. The new layout sizes the
+            # train window to roughly half of what remains after a single
+            # test slot, then distributes the leftover space as the stride
+            # across the remaining folds, snapping the last fold's test to
+            # the end of the data.
+            test_size = max(1, n_samples // (self.cv_folds + 1))
+            train_size = max(test_size, (n_samples - test_size - embargo) // 2)
+            first_test_start = train_size + embargo
+            last_test_start = max(first_test_start, n_samples - test_size)
+
             splits = []
             for fold in range(self.cv_folds):
-                train_end = n_samples - test_size * (self.cv_folds - fold)
-                test_start = train_end
-                test_end = test_start + test_size
+                if self.cv_folds == 1:
+                    test_start = first_test_start
+                else:
+                    # Linear interpolation of test_start across folds so the
+                    # last fold's test window ends exactly at n_samples.
+                    test_start = first_test_start + int(round(
+                        fold * (last_test_start - first_test_start)
+                        / (self.cv_folds - 1)
+                    ))
+                test_end = min(test_start + test_size, n_samples)
+                train_end = max(0, test_start - embargo)
+                train_start = max(0, train_end - train_size)
 
-                train_idx = np.arange(train_end)
+                if train_end <= train_start or test_end <= test_start:
+                    continue
+                if test_start >= n_samples:
+                    continue
+
+                train_idx = np.arange(train_start, train_end)
                 test_idx = np.arange(test_start, test_end)
                 splits.append((train_idx, test_idx))
 
-        else:  # sliding_window
-            # Fixed train/test sizes, window slides
-            fold_size = n_samples // (self.cv_folds + 1)
-            train_size = fold_size * self.cv_folds
-            test_size = fold_size
+        if not splits:
+            raise ValueError(
+                f'Could not create any CV splits for n={n_samples}, '
+                f'folds={self.cv_folds}, embargo={embargo}, '
+                f'strategy={self.cv_strategy}'
+            )
 
-            splits = []
-            for fold in range(self.cv_folds):
-                start = fold * fold_size
-                train_idx = np.arange(start, start + train_size)
-                test_idx = np.arange(
-                    start + train_size, start + train_size + test_size
-                )
-                splits.append((train_idx, test_idx))
-
-        logger.info(f'Prepared {len(splits)} CV folds using {self.cv_strategy}')
+        logger.info(
+            f'Prepared {len(splits)} CV folds using {self.cv_strategy} '
+            f'(embargo={embargo})'
+        )
         return splits
 
     def run_single_model(
