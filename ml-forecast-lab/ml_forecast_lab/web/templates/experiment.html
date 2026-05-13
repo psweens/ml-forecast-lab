@@ -553,6 +553,31 @@
 <div class="tab-section" id="sec-results" style="display:none;">
 <section class="section">
     <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Two complementary views: <strong>Per-Interval Accuracy</strong> measures the next-step (h=1) prediction error — what the model gets right at the 30-minute level. <strong>Daily Cumulative Accuracy</strong> (table below) sums each day's predictions and actuals before computing errors — better for use cases like daily energy or hot-water demand where you care about totals rather than exact timing. Both rankings use the Demšar (2006) composite over MAE, RMSE, and MASE. The Per-Interval rank still drives Promote, Tuning, and live forecasting; the Daily rank is informational so you can pick the model that matches your objective.</span></span></h2>
+
+    {# Seasonal Naive skill chip. Always present when the baseline ran;
+       gives a quick "is my best model actually beating today=yesterday?"
+       answer that the rank table by itself doesn't surface. #}
+    {% if benchmark_result and benchmark_result.naive_baseline_mae and best_model %}
+        {% set _best = (models | selectattr('name', 'equalto', best_model) | list | first) %}
+        {% if _best and _best.mae %}
+            {% set _naive = benchmark_result.naive_baseline_mae %}
+            {% set _bestmae = _best.mae.mean %}
+            {% set _skill = ((_naive - _bestmae) / _naive * 100) if _naive > 0 else 0 %}
+            <div style="margin: 0.25rem 0 1rem; display: inline-flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0.85rem; border-radius: 1.5rem;
+                        background: {% if _skill > 0 %}rgba(46,204,113,0.12){% else %}rgba(231,76,60,0.12){% endif %};
+                        border: 1px solid {% if _skill > 0 %}rgba(46,204,113,0.3){% else %}rgba(231,76,60,0.3){% endif %};">
+                <span style="color: var(--text-secondary); font-size: 0.85rem;">vs Seasonal Naive</span>
+                <span style="font-weight: 700; color: {% if _skill > 0 %}var(--success){% else %}var(--error){% endif %};">
+                    {{ "%+.1f"|format(_skill) }}% MAE
+                    {% if _skill > 0 %}better{% else %}worse{% endif %}
+                </span>
+                <span style="color: var(--text-muted); font-size: 0.78rem;">
+                    ({{ "%.3f"|format(_bestmae) }} vs {{ "%.3f"|format(_naive) }})
+                </span>
+                <span class="info-tip">?<span class="tip-text">Seasonal Naive predicts <code>ŷ[t+h] = y[t+h−period]</code> — i.e. "same value as one seasonal period ago" — and ran on the same CV folds as every other model. If your chosen model can't beat it, none of the learned models are providing real value on this target. Seasonal Naive is included automatically for the chip even when not in your enabled set, but it isn't auto-promoted.</span></span>
+            </div>
+        {% endif %}
+    {% endif %}
     <h3 style="color: var(--text-primary); margin: 0.5rem 0 1rem 0;">Per-Interval Accuracy <span style="color: var(--text-secondary); font-size: 0.85rem; font-weight: normal;">— next-step (h=1), what the live forecast publishes</span></h3>
     <div class="table-container">
         <table class="metrics-table">

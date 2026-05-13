@@ -94,6 +94,15 @@ class BenchmarkResult(BaseModel):
     # it as a "are the differences inside fold noise?" indicator rather
     # than a formal hypothesis test — the UI info-tip says so.
     pairwise_dm: Optional[List[Dict[str, Any]]] = None
+    # Seasonal-naive reference baseline. Always populated when the
+    # baseline ran successfully — the UI shows a "vs Seasonal Naive"
+    # skill chip so users can see whether the best learned model is
+    # actually beating "today equals yesterday + last week's seasonality".
+    naive_baseline_mae: Optional[float] = None
+    # Whether the baseline was user-enabled (appears in the rank table)
+    # or force-included by the runner for the skill chip only (hidden
+    # from the table but used to compute skill).
+    naive_baseline_was_enabled: Optional[bool] = None
 
 
 class ExperimentStatus(BaseModel):

@@ -1431,6 +1431,7 @@ class MLForecastLabApp:
     def _update_web_benchmark(
         self, exp_cfg, model_results, rankings, best_model_name,
         status="running", daily_rankings=None,
+        naive_was_enabled: Optional[bool] = None,
     ):
         """
         Update web app state with current benchmark progress.
@@ -1601,6 +1602,17 @@ class MLForecastLabApp:
         except Exception as _e:
             logger.debug("Pairwise comparison build failed: %s", _e)
 
+        # Capture the Seasonal Naive baseline MAE for the skill chip. If
+        # the user didn't enable Seasonal Naive we hide it from the rank
+        # table (it was force-included by the runner just for the chip).
+        naive_baseline_mae: Optional[float] = None
+        for _wm in web_models:
+            if _wm.name == "seasonal_naive":
+                naive_baseline_mae = float(_wm.mae.mean) if _wm.mae else None
+                break
+        if naive_was_enabled is False:
+            web_models = [m for m in web_models if m.name != "seasonal_naive"]
+
         web_result = WebBenchmarkResult(
             experiment_name=exp_cfg.name,
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -1608,6 +1620,8 @@ class MLForecastLabApp:
             models=web_models,
             best_model_name=best_model_name,
             pairwise_dm=pairwise_dm,
+            naive_baseline_mae=naive_baseline_mae,
+            naive_baseline_was_enabled=naive_was_enabled,
         )
 
         self.web_app.state.appstate.benchmark_results[exp_cfg.name] = web_result
@@ -1774,9 +1788,23 @@ class MLForecastLabApp:
         except Exception as _e:
             logger.debug(f"Config refresh skipped: {_e}")
 
+        # Always include a Seasonal Naive baseline so the UI can render a
+        # "vs Seasonal Naive" skill chip even if the user hasn't enabled
+        # it. If it was force-added we'll hide it from the rank table
+        # below (otherwise it appears as a normal model). Seasonal Naive
+        # has no training cost so the overhead is negligible.
+        _naive_was_enabled = "seasonal_naive" in (exp_cfg.models_enabled or [])
+        _models_to_run = list(exp_cfg.models_enabled or [])
+        if (
+            not _naive_was_enabled
+            and self.model_registry is not None
+            and "seasonal_naive" in self.model_registry.list_available()
+        ):
+            _models_to_run.append("seasonal_naive")
+
         # Instantiate models — pass loss_fn to neural models
         models = {}
-        for model_name in exp_cfg.models_enabled:
+        for model_name in _models_to_run:
             try:
                 m = self.model_registry.create(model_name)
                 # Apply hyperparameter overrides:
@@ -1902,6 +1930,7 @@ class MLForecastLabApp:
                     exp_cfg, completed_models, rankings,
                     sorted_models[0][0] if sorted_models else None,
                     status="running",
+                    naive_was_enabled=_naive_was_enabled,
                 )
 
         # Final composite ranking via the runner's shared Demšar helper.
@@ -1920,7 +1949,16 @@ class MLForecastLabApp:
             completed_models[name].metrics['mean_rank_daily'] = daily_mean_ranks.get(name, float('inf'))
         mean_ranks = interval_mean_ranks  # for downstream logging
 
-        sorted_by_mean_rank = sorted(interval_mean_ranks.items(), key=lambda x: x[1])
+        # If Seasonal Naive was force-included for the skill chip (not
+        # user-enabled), exclude it from the auto-promote decision — we
+        # don't want the user's mlfl.yaml silently switched to a baseline
+        # they never asked to deploy.
+        _rank_pool = interval_mean_ranks
+        if not _naive_was_enabled:
+            _rank_pool = {
+                k: v for k, v in interval_mean_ranks.items() if k != "seasonal_naive"
+            }
+        sorted_by_mean_rank = sorted(_rank_pool.items(), key=lambda x: x[1])
         best_model_name = sorted_by_mean_rank[0][0] if sorted_by_mean_rank else None
         best_metric_value = completed_models[best_model_name].metrics.get(
             runner.production_metric, np.nan
@@ -1948,6 +1986,7 @@ class MLForecastLabApp:
                 best_model_name,
                 status="completed",
                 daily_rankings=daily_rankings,
+                naive_was_enabled=_naive_was_enabled,
             )
 
         # Build a BenchmarkResult-compatible object for downstream use
@@ -2188,6 +2227,7 @@ class MLForecastLabApp:
                 best_model_name,
                 status="completed",
                 daily_rankings=daily_rankings,
+                naive_was_enabled=_naive_was_enabled,
             )
 
         # Final results summary table
