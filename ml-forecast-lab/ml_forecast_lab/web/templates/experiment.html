@@ -658,6 +658,66 @@
     </div>
     {% endif %}
 
+    {% if benchmark_result and benchmark_result.pairwise_dm %}
+    <details class="fold-metrics" style="margin-top:1.25rem;">
+        <summary>Pairwise differences <span class="info-tip">?<span class="tip-text">For each pair of models we take the per-fold MAE values, compute their fold-wise differences, and run a paired t-test on the differences. With the default 5 CV folds the test is weak, so we frame the result as "is the difference inside fold noise?" rather than a formal hypothesis test: <strong>p &lt; 0.05</strong> means the difference is unlikely to be noise given the per-fold spread. Green = positive mean_diff (row beats column); red = negative; ★ = significant at α=0.05.</span></span></summary>
+        <div class="fold-content">
+            {% set _model_names = [] %}
+            {% for m in models %}{% set _ = _model_names.append(m.name) %}{% endfor %}
+            <div class="table-container">
+                <table class="metrics-table" style="font-size:0.85rem;">
+                    <thead>
+                        <tr>
+                            <th></th>
+                            {% for col in _model_names %}<th>{{ col | model_display }}</th>{% endfor %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row_model in _model_names %}
+                        <tr>
+                            <th style="text-align:right;">{{ row_model | model_display }}</th>
+                            {% for col_model in _model_names %}
+                                {% if row_model == col_model %}
+                                <td style="text-align:center;color:var(--text-muted);">—</td>
+                                {% else %}
+                                    {% set ns = namespace(cell=None) %}
+                                    {% for pair in benchmark_result.pairwise_dm %}
+                                        {% if pair.model_a == row_model and pair.model_b == col_model %}
+                                            {% set ns.cell = (pair.mean_diff, pair.p_value, pair.significant, false) %}
+                                        {% elif pair.model_a == col_model and pair.model_b == row_model %}
+                                            {% set ns.cell = (-pair.mean_diff, pair.p_value, pair.significant, true) %}
+                                        {% endif %}
+                                    {% endfor %}
+                                    {% if ns.cell %}
+                                        {% set mean_diff = ns.cell[0] %}
+                                        {% set p_value = ns.cell[1] %}
+                                        {% set sig = ns.cell[2] %}
+                                        {# row vs col: row better (mean_diff<0, lower MAE) shown green; row worse shown red. #}
+                                        {% set diff_for_row = -mean_diff %}
+                                        <td style="text-align:center;background:{% if sig and diff_for_row > 0 %}rgba(46,204,113,0.18){% elif sig and diff_for_row < 0 %}rgba(231,76,60,0.18){% else %}transparent{% endif %};">
+                                            <span style="color:{% if diff_for_row > 0 %}var(--success){% elif diff_for_row < 0 %}var(--error){% else %}var(--text-secondary){% endif %};">
+                                                {{ "%+.3f"|format(diff_for_row) }}
+                                            </span>
+                                            {% if sig %}<span style="color:var(--accent-secondary);">★</span>{% endif %}
+                                            <div style="color:var(--text-muted);font-size:0.7rem;">p={{ "%.3f"|format(p_value) }}</div>
+                                        </td>
+                                    {% else %}
+                                    <td style="text-align:center;color:var(--text-muted);">—</td>
+                                    {% endif %}
+                                {% endif %}
+                            {% endfor %}
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <p style="color:var(--text-secondary);font-size:0.8rem;margin-top:0.5rem;">
+                Each cell shows row.MAE − col.MAE averaged across folds. Positive values mean the row model is better (lower MAE) than the column model on the same data. ★ marks pairs where the per-fold variance suggests the difference is more than noise (p&lt;0.05).
+            </p>
+        </div>
+    </details>
+    {% endif %}
+
     <details class="fold-metrics">
         <summary>Per-Fold Metrics</summary>
         <div class="fold-content">

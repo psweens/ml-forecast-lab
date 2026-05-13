@@ -88,6 +88,12 @@ class BenchmarkResult(BaseModel):
     models: List[ModelResult]
     best_model_name: Optional[str] = None
     error_message: Optional[str] = None
+    # Pairwise model comparison — paired t-test on fold MAE differences.
+    # Each row: {model_a, model_b, mean_diff, t_stat, p_value, n_folds,
+    # significant}. With few folds (typically 5) the test is weak; we use
+    # it as a "are the differences inside fold noise?" indicator rather
+    # than a formal hypothesis test — the UI info-tip says so.
+    pairwise_dm: Optional[List[Dict[str, Any]]] = None
 
 
 class ExperimentStatus(BaseModel):

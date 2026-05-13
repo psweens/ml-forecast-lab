@@ -1545,12 +1545,69 @@ class MLForecastLabApp:
                 daily_mean_rank=daily_mean_rank,
             ))
 
+        # Pairwise comparison: paired difference of per-fold MAE values
+        # per model pair. With small fold counts the formal DM test is
+        # weak, so we report a paired t-statistic + p-value alongside the
+        # mean MAE difference — the UI frames this as "is the difference
+        # inside fold noise?" rather than a hypothesis test.
+        pairwise_dm: Optional[List[Dict[str, Any]]] = None
+        try:
+            from itertools import combinations as _combinations
+
+            fold_mae_by_model: Dict[str, list] = {}
+            for _mn, _mr in model_results.items():
+                _vals = [
+                    fm.get("mae", float("nan"))
+                    for fm in (_mr.fold_metrics or [])
+                ]
+                if _vals:
+                    fold_mae_by_model[_mn] = _vals
+
+            if len(fold_mae_by_model) >= 2:
+                rows = []
+                for ma, mb in _combinations(sorted(fold_mae_by_model.keys()), 2):
+                    a = np.asarray(fold_mae_by_model[ma], dtype=float)
+                    b = np.asarray(fold_mae_by_model[mb], dtype=float)
+                    n = int(min(len(a), len(b)))
+                    if n < 2:
+                        continue
+                    d = a[:n] - b[:n]
+                    d_clean = d[~np.isnan(d)]
+                    n = int(len(d_clean))
+                    if n < 2:
+                        continue
+                    mean_diff = float(np.mean(d_clean))
+                    std_diff = float(np.std(d_clean, ddof=1))
+                    if std_diff > 0:
+                        t_stat = mean_diff / (std_diff / np.sqrt(n))
+                        # Two-tailed normal-approx p-value (n typically 5;
+                        # full t-distribution not justified given the
+                        # already-approximate input)
+                        from math import erf as _erf, sqrt as _sqrt
+                        p_value = 2.0 * (1.0 - 0.5 * (1.0 + _erf(abs(t_stat) / _sqrt(2.0))))
+                    else:
+                        t_stat = 0.0
+                        p_value = 1.0
+                    rows.append({
+                        "model_a": ma,
+                        "model_b": mb,
+                        "mean_diff": round(mean_diff, 6),
+                        "t_stat": round(t_stat, 3),
+                        "p_value": round(p_value, 4),
+                        "n_folds": n,
+                        "significant": bool(p_value < 0.05),
+                    })
+                pairwise_dm = rows or None
+        except Exception as _e:
+            logger.debug("Pairwise comparison build failed: %s", _e)
+
         web_result = WebBenchmarkResult(
             experiment_name=exp_cfg.name,
             timestamp=datetime.now(timezone.utc).isoformat(),
             status=status,
             models=web_models,
             best_model_name=best_model_name,
+            pairwise_dm=pairwise_dm,
         )
 
         self.web_app.state.appstate.benchmark_results[exp_cfg.name] = web_result
