@@ -1421,6 +1421,22 @@
     <!-- ============================================================ -->
     <!-- LAYER 3 — DIAGNOSTIC TOOLS (open by default)                  -->
     <!-- ============================================================ -->
+    <!-- Retrain history — chip strip for the distinct (model_name,
+         model_version) pairs in the window. Lets the user spot when a
+         retrain happened relative to current accuracy and click into
+         a single version's view. Populated from the same /forecast-
+         accuracy response that drives the verdict card. -->
+    <div id="retrain-history-card" class="settings-group" style="display:none;">
+        <h3 class="settings-group-title">
+            Retrain history
+            <span class="info-tip">?<span class="tip-text">Distinct (model, version) pairs observed in <code>forecast_log</code> for the current window. Each retrain stamps a new <code>model_version</code> on every subsequent log row, so the earliest <code>issued_at</code> per version is when that retrain went live. Click a chip to filter the accuracy view to just that version — useful for answering "did Tuesday's retrain make things better or worse?".</span></span>
+        </h3>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.5rem 0;">
+            <span id="retrain-history-summary">—</span>
+        </p>
+        <div id="retrain-history-chips" style="display:flex;gap:0.4rem;flex-wrap:wrap;"></div>
+    </div>
+
     <details id="diag-accordion" class="diag-accordion" open>
         <summary>
             Diagnostic tools
@@ -2510,6 +2526,53 @@ window.showTab = function(el) {
             }
             document.getElementById('accuracy-empty').style.display = 'none';
             _lastAccuracyData = data;
+
+            // Retrain history strip — render chips for each distinct
+            // (model_name, model_version) the response carries. Best-
+            // effort: a missing or empty array hides the card.
+            try {
+                var rh = data.retrain_events || [];
+                var card = document.getElementById('retrain-history-card');
+                var chips = document.getElementById('retrain-history-chips');
+                var summary = document.getElementById('retrain-history-summary');
+                if (card && chips) {
+                    chips.innerHTML = '';
+                    if (rh.length) {
+                        rh.forEach(function(ev) {
+                            var chip = document.createElement('a');
+                            // Build a URL that filters the page to this
+                            // version. ?version=… is picked up by
+                            // _resolve_model_filter on the server.
+                            chip.href = '?version=' + encodeURIComponent(ev.model_version)
+                                + (ev.model_name ? '&model=' + encodeURIComponent(ev.model_name) : '')
+                                + '#sec-forecast-accuracy';
+                            chip.title = ev.model_name + ' v=' + ev.model_version
+                                + '\nFirst seen: ' + ev.first_seen
+                                + '\n' + ev.n_forecasts + ' forecast row(s)';
+                            chip.style.cssText = 'display:inline-flex;align-items:center;gap:0.4rem;'
+                                + 'padding:0.25rem 0.7rem;border-radius:1.2rem;'
+                                + 'border:1px solid var(--border);background:var(--bg-tertiary);'
+                                + 'color:var(--text-secondary);font-size:0.78rem;text-decoration:none;';
+                            var ts = (ev.first_seen || '').slice(5, 16).replace('T', ' ');
+                            chip.innerHTML =
+                                '<span style="color:var(--accent-secondary);font-weight:600;">'
+                                + ts + '</span>'
+                                + '<span style="color:var(--text-primary);">'
+                                + (ev.model_name || '—') + '</span>'
+                                + '<span style="color:var(--text-muted);">'
+                                + ev.n_forecasts + ' rows</span>';
+                            chips.appendChild(chip);
+                        });
+                        if (summary) {
+                            summary.textContent = rh.length + ' retrain'
+                                + (rh.length !== 1 ? 's' : '') + ' in window · click to filter';
+                        }
+                        card.style.display = '';
+                    } else {
+                        card.style.display = 'none';
+                    }
+                }
+            } catch (e) { console.error('retrain-history render:', e); }
 
             // Surface which model + version the metrics are for, and
             // whether the server had to fall back because the current

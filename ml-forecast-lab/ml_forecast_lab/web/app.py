@@ -1969,6 +1969,19 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception as e:
             result["coverage"] = {"error": _safe_error(e)}
 
+        # Retrain history — distinct (model_name, model_version) pairs
+        # in the window, ordered by first_seen. Used by the Forecast
+        # Accuracy tab to render markers on the diagnostic charts so
+        # the user can see "did the retrain on Tuesday make things
+        # better or worse?".
+        try:
+            result["retrain_events"] = await asyncio.to_thread(
+                db.get_retrain_events, name, days, model_name,
+            )
+        except Exception as e:
+            result["retrain_events"] = []
+            logger.debug("get_retrain_events failed for %s: %s", name, e)
+
         # Calibration progress. Surfaces "we have N of the M residuals
         # needed before _upper_80 / _lower_80 sensors start publishing"
         # so a freshly-promoted experiment doesn't leave the user

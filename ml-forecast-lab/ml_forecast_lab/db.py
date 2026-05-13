@@ -1779,6 +1779,60 @@ class HistoryDB:
         }
 
     @_locked
+    @_locked
+    def get_retrain_events(
+        self,
+        experiment: str,
+        days: int = 30,
+        model_name: Optional[str] = None,
+    ) -> list:
+        """Return distinct retrain events for *experiment* in the window.
+
+        A retrain is detected as a new ``model_version`` value appearing in
+        ``forecast_log`` — every retrain stamps a fresh version on every
+        subsequent log row. The earliest ``issued_at`` per (model_name,
+        model_version) approximates the moment the retrain finished.
+
+        Returns a list of dicts (ordered by first_seen ascending) shaped
+        ``{model_name, model_version, first_seen, n_forecasts}``. Rows
+        with a NULL model_version (legacy / pre-tag forecasts) are
+        excluded.
+        """
+        cursor = self.conn.cursor()
+        cutoff = (datetime.utcnow() - pd.Timedelta(days=days)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        params: list = [experiment, cutoff]
+        extra = ""
+        if model_name:
+            extra = " AND model_name = ?"
+            params.append(model_name)
+        cursor.execute(
+            f"""
+            SELECT model_name, model_version,
+                   MIN(issued_at) AS first_seen,
+                   COUNT(*)       AS n_forecasts
+            FROM forecast_log
+            WHERE experiment = ?
+              AND issued_at >= ?
+              AND model_version IS NOT NULL
+              AND model_version != ''
+              {extra}
+            GROUP BY model_name, model_version
+            ORDER BY first_seen ASC
+            """,
+            params,
+        )
+        return [
+            {
+                "model_name": row["model_name"],
+                "model_version": row["model_version"],
+                "first_seen": row["first_seen"],
+                "n_forecasts": int(row["n_forecasts"]),
+            }
+            for row in cursor.fetchall()
+        ]
+
     def cleanup_forecast_log(
         self,
         experiment: str,
