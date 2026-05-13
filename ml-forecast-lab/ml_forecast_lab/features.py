@@ -201,15 +201,22 @@ def build_features(
                 target.shift(lag_steps), lag_steps
             )
 
-    # Rate of change — first difference of consecutive lags. Gating
-    # each shift separately keeps y_diff_1 physically consistent: at
-    # deep night both components are 0 (diff = 0), at the first night
-    # step after dusk the current-minus-previous is -dusk_val, which
-    # matches what the un-gated target would have produced anyway.
-    features['y_diff_1'] = (
-        _gate_by_past_ghi(target.shift(1), 1)
-        - _gate_by_past_ghi(target.shift(2), 2)
-    )
+    # Rate of change — first difference of consecutive lags.
+    #
+    # Gating each shift independently used to create a synthetic discontinuity
+    # at every dusk-to-night transition: at row t with ghi(t-1)=0 (just past
+    # sunset) but ghi(t-2)>0 (last daytime sample), the gated lag_1 collapses
+    # to 0 while gated lag_2 retains the full daytime value, producing
+    # y_diff_1 ≈ -daytime instead of the physically expected small dip.
+    # We gate the entire diff by the lag_1 mask so both terms vanish
+    # together at night (correct) and the actual target.shift(1)-shift(2)
+    # is preserved at every other timestep — including dusk, where the
+    # true daytime-to-night slope is captured by the un-gated values.
+    raw_diff = target.shift(1) - target.shift(2)
+    if ghi_col is None:
+        features['y_diff_1'] = raw_diff
+    else:
+        features['y_diff_1'] = raw_diff.where(ghi_col.shift(1) > 0, 0.0)
 
     # Interaction features — covariate × time-of-day
     cov_cols = [c for c in df.columns if c != target_col]

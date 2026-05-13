@@ -10,9 +10,20 @@ mkdir -p /data/ml_forecast_lab
 mkdir -p /data/ml_forecast_lab/models
 mkdir -p /data/ml_forecast_lab/logs
 
-# Find the addon_configs directory (HA maps it with a slug hash prefix)
+# Find the addon_configs directory (HA maps it with a slug hash prefix).
+#
+# HA's slug hash is always 8 lowercase hex characters followed by an
+# underscore — anchor the glob to that shape so a community fork with a
+# slug like `psweens_ml_forecast_lab` (which would also match the loose
+# `*_ml_forecast_lab` pattern) can't capture our config search.
 ADDON_CONFIG=""
-for dir in /addon_configs/ml_forecast_lab /addon_configs/*_ml_forecast_lab /config; do
+candidate_dirs=("/addon_configs/ml_forecast_lab")
+for d in /addon_configs/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]_ml_forecast_lab; do
+    [ -d "$d" ] && candidate_dirs+=("$d")
+done
+candidate_dirs+=("/config")
+
+for dir in "${candidate_dirs[@]}"; do
     if [ -d "$dir" ]; then
         ADDON_CONFIG="$dir"
         break

@@ -57,6 +57,17 @@ class TrainingEventBus:
     _instance: Optional[TrainingEventBus] = None
     _init_lock = threading.Lock()
 
+    # Per-subscriber queue cap. Sized to comfortably hold one full benchmark
+    # pipeline's worth of telemetry (~28 models × 5 folds × ~50 epochs ≈ 7k
+    # events). Slow / disconnected clients see their oldest events dropped
+    # rather than driving the add-on into OOM on a Pi.
+    SUBSCRIBER_QUEUE_MAX = 8192
+
+    # Per-experiment history cap. clear_history() empties it at every
+    # pipeline_start, but a stuck consumer + a long run without a clear can
+    # still pile events up. Same order of magnitude as the queue cap.
+    HISTORY_MAX = 8192
+
     def __init__(self) -> None:
         self._subscribers: Dict[str, List[Tuple[asyncio.Queue, asyncio.AbstractEventLoop]]] = {}
         self._lock = threading.Lock()
@@ -77,10 +88,10 @@ class TrainingEventBus:
         """
         Register an async subscriber for an experiment's training events.
 
-        Called from the async SSE endpoint. Returns a Queue that will
-        receive TrainingEvent objects via call_soon_threadsafe.
+        Called from the async SSE endpoint. Returns a bounded Queue that
+        will receive TrainingEvent objects via call_soon_threadsafe.
         """
-        q: asyncio.Queue = asyncio.Queue()
+        q: asyncio.Queue = asyncio.Queue(maxsize=self.SUBSCRIBER_QUEUE_MAX)
         with self._lock:
             self._subscribers.setdefault(experiment_name, []).append((q, loop))
         logger.debug(f"SSE subscriber added for {experiment_name}")
@@ -95,20 +106,38 @@ class TrainingEventBus:
             ]
         logger.debug(f"SSE subscriber removed for {experiment_name}")
 
+    def _enqueue(self, q: asyncio.Queue, event: TrainingEvent) -> None:
+        """put_nowait with oldest-drop fallback so a slow client doesn't OOM us."""
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            try:
+                q.get_nowait()  # drop oldest
+                q.put_nowait(event)
+            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                pass
+
     def publish(self, event: TrainingEvent) -> None:
         """
         Publish an event from a training thread.
 
         Uses call_soon_threadsafe to bridge into each subscriber's
-        event loop without blocking the training thread.
+        event loop without blocking the training thread. History and
+        subscriber queues are bounded with oldest-drop semantics so a
+        stalled consumer cannot grow memory without limit.
         """
         with self._lock:
-            self._history.setdefault(event.experiment_name, []).append(event)
+            history = self._history.setdefault(event.experiment_name, [])
+            history.append(event)
+            # Cap history with a slice rather than per-event popleft because
+            # appends are common and the list is rarely near the cap.
+            if len(history) > self.HISTORY_MAX:
+                del history[: len(history) - self.HISTORY_MAX]
             subscribers = list(self._subscribers.get(event.experiment_name, []))
 
         for q, loop in subscribers:
             try:
-                loop.call_soon_threadsafe(q.put_nowait, event)
+                loop.call_soon_threadsafe(self._enqueue, q, event)
             except Exception:
                 pass  # Subscriber's loop may have closed
 
