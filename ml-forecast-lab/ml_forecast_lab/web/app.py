@@ -88,6 +88,27 @@ class BenchmarkResult(BaseModel):
     models: List[ModelResult]
     best_model_name: Optional[str] = None
     error_message: Optional[str] = None
+    # Pairwise model comparison — paired t-test on fold MAE differences.
+    # Each row: {model_a, model_b, mean_diff, t_stat, p_value, n_folds,
+    # significant}. With few folds (typically 5) the test is weak; we use
+    # it as a "are the differences inside fold noise?" indicator rather
+    # than a formal hypothesis test — the UI info-tip says so.
+    pairwise_dm: Optional[List[Dict[str, Any]]] = None
+    # Seasonal-naive reference baseline. Always populated when the
+    # baseline ran successfully — the UI shows a "vs Seasonal Naive"
+    # skill chip so users can see whether the best learned model is
+    # actually beating "today equals yesterday + last week's seasonality".
+    naive_baseline_mae: Optional[float] = None
+    # Whether the baseline was user-enabled (appears in the rank table)
+    # or force-included by the runner for the skill chip only (hidden
+    # from the table but used to compute skill).
+    naive_baseline_was_enabled: Optional[bool] = None
+    # Training-window vs test-window drift statistics. Comparing the
+    # target distribution in the earliest fold's train window against
+    # the latest fold's test window. PSI < 0.1 is "stable",
+    # 0.1–0.2 "moderate", >0.2 "shifted" — used as a UI verdict to
+    # explain why CV scores might disagree with live behaviour.
+    drift: Optional[Dict[str, Any]] = None
 
 
 class ExperimentStatus(BaseModel):
@@ -248,6 +269,14 @@ class AppState:
         self.benchmark_callback = None  # Set by main app for triggering
         self.tuning_results: Dict[str, TuningResult] = {}
         self.tuning_callback = None  # Set by main app for triggering
+        # Sweep mode: when the user triggers "Tune all enabled" on the
+        # Tuning tab the final per-model results accumulate here so the
+        # UI can render a stacked table after the sweep completes.
+        # tune_all_results[experiment] = List[TuningResult] (one per
+        # model tuned during the sweep).
+        self.tune_all_results: Dict[str, List[TuningResult]] = {}
+        # Set by main app — runs _run_tuning sequentially over models.
+        self.tune_all_callback = None
         # Trigger an immediate retrain for one experiment. Used by the
         # apply-tuning and apply-covariate-best endpoints so the user
         # doesn't have to wait for the next scheduled retrain cycle.
@@ -266,6 +295,17 @@ class AppState:
         # Matters for Californian users managing a UK HA: charts render in
         # HA-local time so axis labels match when events physically happened.
         self.ha_time_zone: Optional[str] = None
+        # Resolved runtime-resource caps actually applied to this process —
+        # surfaced on the System page so the user can verify their
+        # cpu_cores / nice_priority settings took effect.
+        self.applied_cpu_threads: Optional[int] = None
+        self.applied_nice: Optional[int] = None
+        # Rollback support (wired by main.py once components are
+        # initialised). Used by the per-experiment 'Roll back' button.
+        self.rollback_callback = None
+        self.cached_model_dir = None
+        # Pre-flight data sanity check — see /experiment/{name}/data-report.
+        self.data_report_callback = None
         # Strong references to fire-and-forget tasks. asyncio holds only a
         # weak reference to running tasks; without this set a coroutine
         # scheduled via create_task can be garbage-collected before its
@@ -685,14 +725,15 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     # ========== HTML Routes ==========
 
-    @app.get("/", response_class=Response)
-    async def dashboard(request: Request):
-        """
-        Main dashboard showing all experiments, their status, and current best models.
+    def _build_dashboard_context(request: Request) -> dict:
+        """Shared context for the full dashboard page and the HTMX fragment.
+
+        Both code paths need the same view-state — extracting the build
+        avoids drift between the two and keeps the page render + 10-second
+        refresh in lock-step.
         """
         experiments = list(app.state.appstate.experiment_statuses.values())
 
-        # Build lightweight training summaries for running experiments
         from ml_forecast_lab.training_events import TrainingEventBus
         training_summaries: Dict[str, Dict] = {}
         event_bus = TrainingEventBus.get_instance()
@@ -719,29 +760,48 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                     "progress_pct": round(_done / _total * 100) if _total else 0,
                 }
 
+        return {
+            "request": request,
+            "base_path": _get_base_path(request),
+            "active_page": "dashboard",
+            "version": APP_VERSION,
+            "experiments": experiments,
+            "total_experiments": len(experiments),
+            "lab_experiments": sum(1 for e in experiments if e.mode == "lab"),
+            "production_experiments": sum(
+                1 for e in experiments if e.mode == "production"
+            ),
+            "training_summaries": training_summaries,
+            "running_experiments": app.state.appstate.running_benchmarks,
+            "queued_experiments": {
+                item["name"]: i + 1
+                for i, item in enumerate(app.state.appstate.training_queue)
+            },
+        }
+
+    @app.get("/", response_class=Response)
+    async def dashboard(request: Request):
+        """Full dashboard page."""
         return templates.TemplateResponse(
             request=request,
             name="dashboard.html",
-            context={
-                "request": request,
-                "base_path": _get_base_path(request),
-                "active_page": "dashboard",
-                "version": APP_VERSION,
-                "experiments": experiments,
-                "total_experiments": len(experiments),
-                "lab_experiments": sum(
-                    1 for e in experiments if e.mode == "lab"
-                ),
-                "production_experiments": sum(
-                    1 for e in experiments if e.mode == "production"
-                ),
-                "training_summaries": training_summaries,
-                "running_experiments": app.state.appstate.running_benchmarks,
-                "queued_experiments": {
-                    item["name"]: i + 1
-                    for i, item in enumerate(app.state.appstate.training_queue)
-                },
-            },
+            context=_build_dashboard_context(request),
+        )
+
+    @app.get("/api/dashboard/grid", response_class=Response)
+    async def dashboard_grid_fragment(request: Request):
+        """HTMX partial: just the experiments-grid <section>.
+
+        Drives the dashboard's auto-refresh without a full page reload —
+        keeps scroll position, expanded details and the New-experiment
+        modal state intact. Polling cadence (10 s while a benchmark is
+        running, 60 s otherwise) is encoded into the fragment's
+        hx-trigger so it adapts after each swap.
+        """
+        return templates.TemplateResponse(
+            request=request,
+            name="_dashboard_grid.html",
+            context=_build_dashboard_context(request),
         )
 
     # Model catalog (shared between Models page and experiment detail).
@@ -1680,6 +1740,80 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         logger.info(f"User-triggered retrain for {name}")
         return JSONResponse(content={"success": True})
 
+    @app.post("/experiment/{name}/rollback")
+    async def rollback_experiment(name: str):
+        """Swap the cached production model back to the previous champion.
+
+        The previous-generation weights are archived inside
+        ``previous/`` by ``_persist_cached_model`` on every successful
+        retrain, so this swap is symmetric: calling it twice toggles
+        between two generations.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        if app.state.appstate.is_benchmark_running(name):
+            return JSONResponse(content={
+                "success": False, "error": "Training is in progress; wait for it to finish before rolling back",
+            })
+        cb = app.state.appstate.rollback_callback
+        if not cb:
+            return JSONResponse(content={
+                "success": False, "error": "Rollback unavailable",
+            })
+        try:
+            ok, msg = cb(name)
+        except Exception as e:
+            logger.error("Rollback failed for %s: %s", name, e, exc_info=True)
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
+        if not ok:
+            return JSONResponse(content={"success": False, "error": msg or "Rollback failed"})
+        return JSONResponse(content={"success": True, "message": msg})
+
+    @app.post("/experiment/{name}/data-report")
+    async def data_report(name: str):
+        """Run the pre-flight data sanity report for an experiment.
+
+        Fetches the raw target history (cache + HA delta) and computes
+        coverage, gap, freshness and value-distribution stats so users
+        can spot data issues before they spend an hour on a benchmark.
+        Synchronous from the caller's perspective; takes a few seconds.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        cb = app.state.appstate.data_report_callback
+        if not cb:
+            return JSONResponse(content={"verdict": "alert", "warnings": ["Data report unavailable"], "ok": False})
+        try:
+            report = await cb(name)
+            return JSONResponse(content=report)
+        except Exception as e:
+            logger.error("data-report failed for %s: %s", name, e, exc_info=True)
+            return JSONResponse(content={"verdict": "alert", "warnings": [_safe_error(e)], "ok": False}, status_code=500)
+
+    @app.get("/experiment/{name}/rollback-available")
+    async def rollback_available(name: str):
+        """Check whether a `previous/` snapshot exists on disk."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        getter = app.state.appstate.cached_model_dir
+        if not getter:
+            return JSONResponse(content={"available": False})
+        try:
+            model_dir = getter(name)
+            prev = Path(model_dir) / "previous"
+            available = (prev / "model.bin").exists() and (prev / "cache_meta.json").exists()
+            payload: Dict[str, Any] = {"available": bool(available)}
+            if available:
+                try:
+                    meta = json.loads((prev / "cache_meta.json").read_text())
+                    payload["previous_model"] = meta.get("model_name")
+                    payload["previous_trained_at"] = meta.get("trained_at")
+                except Exception:
+                    pass
+            return JSONResponse(content=payload)
+        except Exception as e:
+            return JSONResponse(content={"available": False, "error": _safe_error(e)})
+
     @app.post("/api/experiments/create")
     async def create_experiment_route(request: Request):
         """Create a new experiment."""
@@ -1948,6 +2082,50 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             result["nominal_interval_level"] = 0.8
         except Exception as e:
             result["coverage"] = {"error": _safe_error(e)}
+
+        # Retrain history — distinct (model_name, model_version) pairs
+        # in the window, ordered by first_seen. Used by the Forecast
+        # Accuracy tab to render markers on the diagnostic charts so
+        # the user can see "did the retrain on Tuesday make things
+        # better or worse?".
+        try:
+            result["retrain_events"] = await asyncio.to_thread(
+                db.get_retrain_events, name, days, model_name,
+            )
+        except Exception as e:
+            result["retrain_events"] = []
+            logger.debug("get_retrain_events failed for %s: %s", name, e)
+
+        # Calibration progress. Surfaces "we have N of the M residuals
+        # needed before _upper_80 / _lower_80 sensors start publishing"
+        # so a freshly-promoted experiment doesn't leave the user
+        # wondering why the bands tile says "—" with no explanation.
+        try:
+            cq = await asyncio.to_thread(
+                db.get_conformal_quantiles,
+                name, actuals_table,
+                0.8,
+                model_name,
+                exp_cfg.interval_minutes,
+                14,
+                10,
+                model_version,
+            )
+            n_have = int(cq.get("total_samples") or 0)
+            n_need = 10
+            forecast_every = exp_cfg.forecast_every_minutes or 30
+            ready = bool(cq.get("fallback_quantile") is not None) or n_have >= n_need
+            cycles_remaining = max(0, n_need - n_have)
+            result["calibration"] = {
+                "ready": ready,
+                "total_samples": n_have,
+                "min_samples": n_need,
+                "forecast_every_minutes": forecast_every,
+                "eta_minutes": cycles_remaining * forecast_every if not ready else 0,
+                "level": cq.get("level", 0.8),
+            }
+        except Exception as e:
+            result["calibration"] = {"error": _safe_error(e)}
         return JSONResponse(content=result)
 
     @app.get("/experiment/{name}/forecast-log-stats")
@@ -2489,6 +2667,52 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                       "n_trials": n_trials, "strategy": strategy},
         )
 
+    @app.post("/experiment/{name}/run-tuning-all")
+    async def run_tuning_all(name: str, request: Request):
+        """Tune every enabled model sequentially.
+
+        Body: {n_trials?, strategy?}. Each model's final TuningResult
+        is accumulated in tune_all_results[experiment]; the existing
+        single-model live-progress widgets continue to work because
+        each iteration overwrites the standard tuning_results slot.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        existing = app.state.appstate.tuning_results.get(name)
+        if existing and existing.status == "running":
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Tuning already running for this experiment"},
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not app.state.appstate.tune_all_callback:
+            raise HTTPException(status_code=501, detail="Tune-all callback not registered")
+        app.state.appstate.spawn(
+            app.state.appstate.tune_all_callback(
+                name,
+                int(body.get("n_trials", 30) or 30),
+                body.get("strategy", "tpe"),
+            )
+        )
+        return JSONResponse(
+            status_code=202,
+            content={"message": "Sweep started"},
+        )
+
+    @app.get("/experiment/{name}/tuning-all")
+    async def get_tuning_all(name: str):
+        """Return the per-model results of the most recent sweep."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        rows = app.state.appstate.tune_all_results.get(name, [])
+        return JSONResponse(content={
+            "experiment": name,
+            "results": [r.model_dump() for r in rows],
+        })
+
     @app.get("/experiment/{name}/tuning")
     async def get_tuning(name: str):
         """Get current tuning state (for polling)."""
@@ -2574,6 +2798,55 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="No benchmark results yet")
 
         return result.model_dump()
+
+    @app.get("/experiment/{name}/benchmark-history")
+    async def benchmark_history(name: str, request: Request):
+        """Return up to N previous benchmark runs for this experiment.
+
+        Used by the Results-tab "Previous runs" dropdown. Each run is
+        a JSON-serialised BenchmarkResult; the latest sits at index 0.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        db = app.state.appstate.history_db
+        if not db:
+            return JSONResponse(content={"runs": []})
+        try:
+            limit = int(request.query_params.get("limit", "5"))
+        except (TypeError, ValueError):
+            limit = 5
+        try:
+            rows = await asyncio.to_thread(
+                db.load_benchmark_history, name, max(1, min(50, limit)),
+            )
+        except Exception as e:
+            return JSONResponse(content={"runs": [], "error": _safe_error(e)}, status_code=500)
+        # Parse each saved blob enough to expose the headline fields the
+        # dropdown needs (timestamp, winner, naive_baseline) without
+        # forcing the client to JSON.parse twice.
+        out = []
+        for r in rows:
+            entry: Dict[str, Any] = {"ran_at": r.get("ran_at")}
+            try:
+                blob = json.loads(r.get("data") or "{}")
+                entry["timestamp"] = blob.get("timestamp")
+                entry["best_model_name"] = blob.get("best_model_name")
+                entry["naive_baseline_mae"] = blob.get("naive_baseline_mae")
+                # The full models list is heavy; surface just MAE of the
+                # winner so a sparkline of "best MAE over time" is cheap
+                # to build client-side.
+                if blob.get("best_model_name"):
+                    for m in blob.get("models", []):
+                        if m.get("name") == blob.get("best_model_name"):
+                            entry["best_mae"] = (
+                                m.get("mae", {}) or {}
+                            ).get("mean")
+                            break
+                entry["data"] = r.get("data")
+            except Exception:
+                entry["data"] = r.get("data")
+            out.append(entry)
+        return JSONResponse(content={"runs": out})
 
     @app.get("/experiment/{name}/forecast")
     async def get_forecast(name: str):
@@ -2808,6 +3081,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "disk_total_gb": disk_total_gb,
             "disk_used_gb": disk_used_gb,
             "disk_percent": disk_percent,
+            "applied_cpu_threads": app.state.appstate.applied_cpu_threads,
+            "applied_nice": app.state.appstate.applied_nice,
         }
 
         # Config data

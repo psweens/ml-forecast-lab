@@ -167,6 +167,11 @@ class MLForecastLabApp:
         # Cached site location (lat, lon) from HA's /api/config — used for
         # deterministic solar physics covariates. Fetched lazily on first use.
         self._site_location: Optional[tuple[float, float]] = None
+        # Resolved runtime-resource limits actually applied to this process
+        # (CPU thread cap, nice value). Surfaced on the System page so the
+        # user can verify their settings took effect.
+        self._applied_cpu_threads: Optional[int] = None
+        self._applied_nice: Optional[int] = None
         # Strong refs for fire-and-forget tasks scheduled from main_loop and
         # start_web_server. Same rationale as AppState._background_tasks:
         # asyncio holds only weak refs to running tasks, so without this set
@@ -546,6 +551,63 @@ class MLForecastLabApp:
 
             self.web_app.state.appstate.tuning_callback = _tuning_trigger
 
+            # 'Tune all enabled' sweep — loops _run_tuning over every
+            # model in models_enabled. Each iteration overwrites the
+            # single-model tuning_results slot (so the live progress
+            # UI continues to work) and copies the final result into
+            # tune_all_results[experiment] for the summary table.
+            async def _tune_all_trigger(experiment_name: str,
+                                        n_trials: int = 30,
+                                        strategy: str = "tpe"):
+                await self.load_config()
+                exp_cfg = next(
+                    (c for c in self.config.experiments if c.name == experiment_name),
+                    None,
+                )
+                if exp_cfg is None:
+                    logger.warning("tune-all: '%s' not in config", experiment_name)
+                    return
+                models = list(exp_cfg.models_enabled or [])
+                if not models:
+                    logger.warning("tune-all: no models enabled for '%s'", experiment_name)
+                    return
+                # Reset the sweep slot at the start of the run.
+                self.web_app.state.appstate.tune_all_results[experiment_name] = []
+                logger.info(
+                    "tune-all: %s — running %d model(s): %s",
+                    experiment_name, len(models), models,
+                )
+                for m_name in models:
+                    try:
+                        await self._run_tuning(
+                            experiment_name, m_name, n_trials, strategy, None,
+                        )
+                    except Exception as e:
+                        logger.error("tune-all: %s/%s failed: %s",
+                                     experiment_name, m_name, e, exc_info=True)
+                        continue
+                    tr = self.web_app.state.appstate.tuning_results.get(experiment_name)
+                    if tr is not None:
+                        try:
+                            self.web_app.state.appstate.tune_all_results[
+                                experiment_name
+                            ].append(tr.model_copy(deep=True))
+                        except Exception:
+                            # model_copy might not exist on older Pydantic
+                            # versions; fall back to a shallow snapshot.
+                            self.web_app.state.appstate.tune_all_results[
+                                experiment_name
+                            ].append(tr)
+                logger.info(
+                    "tune-all: %s complete — %d result(s) captured",
+                    experiment_name,
+                    len(self.web_app.state.appstate.tune_all_results.get(
+                        experiment_name, [],
+                    )),
+                )
+
+            self.web_app.state.appstate.tune_all_callback = _tune_all_trigger
+
             # Register retrain callback. All user-initiated retrains
             # (dashboard button, apply-tuning, apply-covariate-best,
             # toggle-mode→production) want to retrain the chosen/production
@@ -610,6 +672,34 @@ class MLForecastLabApp:
             self.web_app.state.appstate.stop_training_callback = _stop_training_trigger
             self.web_app.state.appstate.history_db = self.history_db
 
+            # Rollback callback for the "Roll back to previous" button on
+            # the experiment header. Synchronous swap so the UI's response
+            # reflects the new champion immediately.
+            def _rollback_trigger(experiment_name: str) -> tuple[bool, Optional[str]]:
+                return self._rollback_cached_model(experiment_name)
+            self.web_app.state.appstate.rollback_callback = _rollback_trigger
+
+            # Pre-flight data sanity report callback for the Settings tab.
+            async def _data_report_trigger(experiment_name: str) -> dict:
+                exp_cfg = next(
+                    (e for e in self.config.experiments if e.name == experiment_name),
+                    None,
+                )
+                if exp_cfg is None:
+                    return {"verdict": "alert", "warnings": ["Experiment not found"], "ok": False}
+                return await self.compute_data_report(exp_cfg)
+            self.web_app.state.appstate.data_report_callback = _data_report_trigger
+
+            # Cached-model directory accessor — lets the web layer check
+            # whether a "previous" version exists for the rollback button
+            # without duplicating the slugify logic.
+            self.web_app.state.appstate.cached_model_dir = self._cached_model_dir
+            # Expose the runtime-resource values actually applied so the
+            # System page can show "Applied: N threads, nice X" and the
+            # user can verify their cpu_cores / nice_priority took effect.
+            self.web_app.state.appstate.applied_cpu_threads = self._applied_cpu_threads
+            self.web_app.state.appstate.applied_nice = self._applied_nice
+
             # Pull HA's configured time zone so the Forecast Accuracy tab
             # can render charts in the TZ where events physically happen,
             # not the viewer's browser TZ. Needed when the user is
@@ -658,6 +748,7 @@ class MLForecastLabApp:
                 logger.error(f"Experiment config not found: {experiment_name}")
                 return
 
+            _started_at = datetime.now(timezone.utc)
             if is_lab_mode:
                 await self._run_benchmark(exp_cfg)
             else:
@@ -674,6 +765,18 @@ class MLForecastLabApp:
                     status.last_error = None  # Clear any previous error
                     self.web_app.state.appstate.end_benchmark(experiment_name)
 
+            # Publish lifecycle sensor for HA automations
+            if is_lab_mode:
+                _duration = (datetime.now(timezone.utc) - _started_at).total_seconds()
+                _attrs = {"duration_seconds": round(_duration, 1)}
+                br = (self.web_app.state.appstate.benchmark_results.get(experiment_name)
+                      if self.web_app else None)
+                if br and getattr(br, "best_model_name", None):
+                    _attrs["winner"] = br.best_model_name
+                await self._publish_lifecycle_sensor(
+                    exp_cfg, "benchmark", "completed", _attrs,
+                )
+
         except Exception as e:
             logger.error(
                 f"Error updating experiment {experiment_name}: {e}",
@@ -687,6 +790,12 @@ class MLForecastLabApp:
                     status.last_benchmark_status = "failed"
                     status.last_error = str(e)
                     self.web_app.state.appstate.end_benchmark(experiment_name)
+            try:
+                await self._publish_lifecycle_sensor(
+                    exp_cfg, "benchmark", "failed", {"error": str(e)[:200]},
+                )
+            except Exception:
+                pass
 
     async def _get_site_location(self) -> Optional[tuple[float, float]]:
         """
@@ -874,6 +983,189 @@ class MLForecastLabApp:
                 f"({sensor['violation_pct']:.2f}%)"
                 f"{gap}"
             )
+
+    async def compute_data_report(self, exp_cfg) -> dict:
+        """Pre-flight data sanity report for an experiment.
+
+        Fetches the raw target history the same way the benchmark would
+        (SQLite cache + HA delta fetch) and summarises it without
+        running the full pipeline — so the user can spot recorder
+        gaps, flatlines, max-increment hits, and missing-value rates
+        BEFORE spending an hour on a benchmark.
+        """
+        from ml_forecast_lab.ha_interface import normalise_history
+
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=exp_cfg.days_history)
+        table_name = (
+            self.history_db.safe_table_name(exp_cfg.target_entity)
+            if self.history_db else None
+        )
+
+        df = pd.DataFrame(columns=["ds", "value"])
+        cache_rows = 0
+        if exp_cfg.database and self.history_db and table_name:
+            try:
+                cached = self.history_db.get_history(table_name)
+                if not cached.empty:
+                    cached = cached.rename(columns={"y": "value"})
+                    start_naive = start.replace(tzinfo=None)
+                    cached = cached[cached["ds"] >= start_naive]
+                    cache_rows = int(len(cached))
+                    if cache_rows > 0:
+                        df = cached
+            except Exception as e:
+                logger.debug("data-report cache read failed: %s", e)
+
+        fetch_start = df["ds"].max() if len(df) > 0 else start
+        try:
+            if hasattr(fetch_start, "tzinfo") and fetch_start.tzinfo is None:
+                fetch_start = fetch_start.tz_localize("UTC")
+        except (AttributeError, TypeError):
+            pass
+
+        ha_rows = 0
+        try:
+            raw = await self.ha_interface.get_history(
+                exp_cfg.target_entity, fetch_start, now,
+            )
+            new_df = normalise_history(raw)
+            if not new_df.empty:
+                if hasattr(new_df["ds"].dtype, "tz") and new_df["ds"].dt.tz is not None:
+                    new_df["ds"] = new_df["ds"].dt.tz_localize(None)
+                ha_rows = int(len(new_df))
+                if len(df) > 0:
+                    df = pd.concat([df, new_df], ignore_index=True)
+                    df = df.drop_duplicates(subset=["ds"], keep="last")
+                else:
+                    df = new_df
+        except Exception as e:
+            logger.warning("data-report HA fetch failed: %s", e)
+
+        if df.empty:
+            return {
+                "experiment": exp_cfg.name,
+                "target_entity": exp_cfg.target_entity,
+                "verdict": "no-data",
+                "ok": False,
+                "rows_total": 0,
+                "rows_cache": cache_rows,
+                "rows_fetched": ha_rows,
+                "warnings": ["No history rows found for this entity"],
+                "checked_at": now.isoformat(),
+            }
+
+        df = df.sort_values("ds").reset_index(drop=True)
+        df["ds"] = pd.to_datetime(df["ds"])
+
+        last_ts = pd.Timestamp(df["ds"].max())
+        if last_ts.tzinfo is not None:
+            last_ts = last_ts.tz_convert(None)
+        now_naive = pd.Timestamp(now.replace(tzinfo=None))
+        recorder_age_min = float((now_naive - last_ts).total_seconds()) / 60.0
+
+        # Coverage relative to a uniform grid spanning the window.
+        expected_step = pd.Timedelta(minutes=exp_cfg.interval_minutes)
+        expected_rows = int(
+            max(1, (now_naive - df["ds"].min()).total_seconds() / expected_step.total_seconds())
+        )
+        coverage_pct = round(min(100.0, 100.0 * len(df) / expected_rows), 1) if expected_rows else None
+
+        # Gap analysis on consecutive timestamps.
+        gaps_min = (df["ds"].diff().dt.total_seconds() / 60.0).dropna()
+        biggest_gap_min = float(gaps_min.max()) if len(gaps_min) else 0.0
+        big_gap_threshold_min = exp_cfg.interval_minutes * 4
+        big_gap_count = int((gaps_min > big_gap_threshold_min).sum())
+
+        # Numeric stats on the value column.
+        series = pd.to_numeric(df["value"], errors="coerce")
+        non_null = series.dropna()
+        nan_pct = round(100.0 * (1.0 - len(non_null) / max(1, len(series))), 1)
+
+        if len(non_null):
+            target_min = float(non_null.min())
+            target_max = float(non_null.max())
+            target_median = float(non_null.median())
+            target_std = float(non_null.std())
+        else:
+            target_min = target_max = target_median = target_std = None
+
+        # Zero-run length (longest consecutive run of zero values).
+        zero_run = 0
+        max_zero_run = 0
+        for v in non_null.values:
+            if v == 0:
+                zero_run += 1
+                if zero_run > max_zero_run:
+                    max_zero_run = zero_run
+            else:
+                zero_run = 0
+
+        # Max-increment hits (cumulative sensors only).
+        max_inc_hits = None
+        if exp_cfg.source_is_cumulative and exp_cfg.max_increment:
+            diffs = series.diff().dropna()
+            max_inc_hits = int((diffs > exp_cfg.max_increment).sum())
+
+        warnings = []
+        verdict = "ok"
+        if recorder_age_min > exp_cfg.interval_minutes * 4:
+            warnings.append(
+                f"Recorder is {recorder_age_min:.0f} min behind wall-clock "
+                f"(expected ≤ {exp_cfg.interval_minutes * 2} min)"
+            )
+            verdict = "warning"
+        if coverage_pct is not None and coverage_pct < 70:
+            warnings.append(
+                f"Only {coverage_pct:.0f}% of the expected rows are present "
+                f"({len(df)} / ~{expected_rows})"
+            )
+            verdict = "warning"
+        if big_gap_count > 0:
+            warnings.append(
+                f"{big_gap_count} gap(s) of >{big_gap_threshold_min:.0f} min — "
+                f"biggest is {biggest_gap_min / 60:.1f} h"
+            )
+            if biggest_gap_min > exp_cfg.interval_minutes * 24:
+                verdict = "alert"
+        if nan_pct > 5:
+            warnings.append(f"{nan_pct:.1f}% of rows have non-numeric values")
+            verdict = "warning" if verdict == "ok" else verdict
+        if max_zero_run > exp_cfg.interval_minutes / 5 and max_zero_run > 10:
+            # Long zero runs may be legitimate (PV at night), so frame as note
+            warnings.append(
+                f"Longest zero-value run is {max_zero_run} consecutive samples "
+                f"(may be legitimate for solar / off-state sensors)"
+            )
+
+        return {
+            "experiment": exp_cfg.name,
+            "target_entity": exp_cfg.target_entity,
+            "verdict": verdict,
+            "ok": verdict != "alert",
+            "rows_total": int(len(df)),
+            "rows_cache": cache_rows,
+            "rows_fetched": ha_rows,
+            "rows_expected": expected_rows,
+            "coverage_pct": coverage_pct,
+            "recorder_age_minutes": round(recorder_age_min, 1),
+            "first_ts": df["ds"].min().isoformat(),
+            "last_ts": last_ts.isoformat(),
+            "biggest_gap_minutes": round(biggest_gap_min, 1),
+            "big_gap_count": big_gap_count,
+            "big_gap_threshold_minutes": big_gap_threshold_min,
+            "nan_pct": nan_pct,
+            "target_min": target_min,
+            "target_max": target_max,
+            "target_median": target_median,
+            "target_std": target_std,
+            "max_zero_run_samples": int(max_zero_run),
+            "max_increment_hits": max_inc_hits,
+            "max_increment_config": exp_cfg.max_increment,
+            "interval_minutes": exp_cfg.interval_minutes,
+            "warnings": warnings,
+            "checked_at": now.isoformat(),
+        }
 
     async def _fetch_and_preprocess(self, exp_cfg) -> Optional[pd.DataFrame]:
         """
@@ -1402,6 +1694,8 @@ class MLForecastLabApp:
     def _update_web_benchmark(
         self, exp_cfg, model_results, rankings, best_model_name,
         status="running", daily_rankings=None,
+        naive_was_enabled: Optional[bool] = None,
+        drift: Optional[dict] = None,
     ):
         """
         Update web app state with current benchmark progress.
@@ -1516,12 +1810,83 @@ class MLForecastLabApp:
                 daily_mean_rank=daily_mean_rank,
             ))
 
+        # Pairwise comparison: paired difference of per-fold MAE values
+        # per model pair. With small fold counts the formal DM test is
+        # weak, so we report a paired t-statistic + p-value alongside the
+        # mean MAE difference — the UI frames this as "is the difference
+        # inside fold noise?" rather than a hypothesis test.
+        pairwise_dm: Optional[List[Dict[str, Any]]] = None
+        try:
+            from itertools import combinations as _combinations
+
+            fold_mae_by_model: Dict[str, list] = {}
+            for _mn, _mr in model_results.items():
+                _vals = [
+                    fm.get("mae", float("nan"))
+                    for fm in (_mr.fold_metrics or [])
+                ]
+                if _vals:
+                    fold_mae_by_model[_mn] = _vals
+
+            if len(fold_mae_by_model) >= 2:
+                rows = []
+                for ma, mb in _combinations(sorted(fold_mae_by_model.keys()), 2):
+                    a = np.asarray(fold_mae_by_model[ma], dtype=float)
+                    b = np.asarray(fold_mae_by_model[mb], dtype=float)
+                    n = int(min(len(a), len(b)))
+                    if n < 2:
+                        continue
+                    d = a[:n] - b[:n]
+                    d_clean = d[~np.isnan(d)]
+                    n = int(len(d_clean))
+                    if n < 2:
+                        continue
+                    mean_diff = float(np.mean(d_clean))
+                    std_diff = float(np.std(d_clean, ddof=1))
+                    if std_diff > 0:
+                        t_stat = mean_diff / (std_diff / np.sqrt(n))
+                        # Two-tailed normal-approx p-value (n typically 5;
+                        # full t-distribution not justified given the
+                        # already-approximate input)
+                        from math import erf as _erf, sqrt as _sqrt
+                        p_value = 2.0 * (1.0 - 0.5 * (1.0 + _erf(abs(t_stat) / _sqrt(2.0))))
+                    else:
+                        t_stat = 0.0
+                        p_value = 1.0
+                    rows.append({
+                        "model_a": ma,
+                        "model_b": mb,
+                        "mean_diff": round(mean_diff, 6),
+                        "t_stat": round(t_stat, 3),
+                        "p_value": round(p_value, 4),
+                        "n_folds": n,
+                        "significant": bool(p_value < 0.05),
+                    })
+                pairwise_dm = rows or None
+        except Exception as _e:
+            logger.debug("Pairwise comparison build failed: %s", _e)
+
+        # Capture the Seasonal Naive baseline MAE for the skill chip. If
+        # the user didn't enable Seasonal Naive we hide it from the rank
+        # table (it was force-included by the runner just for the chip).
+        naive_baseline_mae: Optional[float] = None
+        for _wm in web_models:
+            if _wm.name == "seasonal_naive":
+                naive_baseline_mae = float(_wm.mae.mean) if _wm.mae else None
+                break
+        if naive_was_enabled is False:
+            web_models = [m for m in web_models if m.name != "seasonal_naive"]
+
         web_result = WebBenchmarkResult(
             experiment_name=exp_cfg.name,
             timestamp=datetime.now(timezone.utc).isoformat(),
             status=status,
             models=web_models,
             best_model_name=best_model_name,
+            pairwise_dm=pairwise_dm,
+            naive_baseline_mae=naive_baseline_mae,
+            naive_baseline_was_enabled=naive_was_enabled,
+            drift=drift,
         )
 
         self.web_app.state.appstate.benchmark_results[exp_cfg.name] = web_result
@@ -1688,9 +2053,23 @@ class MLForecastLabApp:
         except Exception as _e:
             logger.debug(f"Config refresh skipped: {_e}")
 
+        # Always include a Seasonal Naive baseline so the UI can render a
+        # "vs Seasonal Naive" skill chip even if the user hasn't enabled
+        # it. If it was force-added we'll hide it from the rank table
+        # below (otherwise it appears as a normal model). Seasonal Naive
+        # has no training cost so the overhead is negligible.
+        _naive_was_enabled = "seasonal_naive" in (exp_cfg.models_enabled or [])
+        _models_to_run = list(exp_cfg.models_enabled or [])
+        if (
+            not _naive_was_enabled
+            and self.model_registry is not None
+            and "seasonal_naive" in self.model_registry.list_available()
+        ):
+            _models_to_run.append("seasonal_naive")
+
         # Instantiate models — pass loss_fn to neural models
         models = {}
-        for model_name in exp_cfg.models_enabled:
+        for model_name in _models_to_run:
             try:
                 m = self.model_registry.create(model_name)
                 # Apply hyperparameter overrides:
@@ -1733,6 +2112,68 @@ class MLForecastLabApp:
         metric_registry = get_metric_registry()
         runner = BenchmarkRunner(exp_cfg_dict, feature_builder, metric_registry)
         fold_indices = runner._prepare_train_test_splits(combined)
+
+        # Training-window vs test-window drift on the target column.
+        # Surfaces "your recent data has shifted from what the model
+        # trained on" as a UI verdict so users can distinguish "the
+        # model is bad" from "the test window happens to be a regime
+        # the model has never seen". Uses the earliest fold's training
+        # rows vs the latest fold's test rows for the largest gap.
+        drift_stats: Optional[dict] = None
+        try:
+            if fold_indices and "target" in combined.columns:
+                train_idx_first, _ = fold_indices[0]
+                _, test_idx_last = fold_indices[-1]
+                train_y = combined["target"].iloc[train_idx_first].dropna().values
+                test_y = combined["target"].iloc[test_idx_last].dropna().values
+                if len(train_y) >= 20 and len(test_y) >= 5:
+                    train_mean = float(np.mean(train_y))
+                    test_mean = float(np.mean(test_y))
+                    train_std = float(np.std(train_y))
+                    test_std = float(np.std(test_y))
+                    # PSI on deciles of the training window. Bins with
+                    # zero population on either side get a small floor
+                    # to keep the log finite.
+                    edges = np.quantile(train_y, np.linspace(0, 1, 11))
+                    edges = np.unique(edges)
+                    if len(edges) >= 3:
+                        train_hist, _ = np.histogram(train_y, bins=edges)
+                        test_hist, _ = np.histogram(test_y, bins=edges)
+                        train_pct = train_hist / max(1, train_hist.sum())
+                        test_pct = test_hist / max(1, test_hist.sum())
+                        floor = 1e-4
+                        train_pct = np.where(train_pct < floor, floor, train_pct)
+                        test_pct = np.where(test_pct < floor, floor, test_pct)
+                        psi = float(np.sum((test_pct - train_pct) * np.log(test_pct / train_pct)))
+                    else:
+                        psi = 0.0
+                    if psi < 0.1:
+                        verdict, severity = "stable", "ok"
+                    elif psi < 0.2:
+                        verdict, severity = "moderate shift", "warning"
+                    else:
+                        verdict, severity = "significant shift", "alert"
+                    drift_stats = {
+                        "psi": round(psi, 4),
+                        "verdict": verdict,
+                        "severity": severity,
+                        "train": {
+                            "n": int(len(train_y)),
+                            "mean": round(train_mean, 4),
+                            "std": round(train_std, 4),
+                            "p10": round(float(np.quantile(train_y, 0.10)), 4),
+                            "p90": round(float(np.quantile(train_y, 0.90)), 4),
+                        },
+                        "test": {
+                            "n": int(len(test_y)),
+                            "mean": round(test_mean, 4),
+                            "std": round(test_std, 4),
+                            "p10": round(float(np.quantile(test_y, 0.10)), 4),
+                            "p90": round(float(np.quantile(test_y, 0.90)), 4),
+                        },
+                    }
+        except Exception as _e:
+            logger.debug("Drift computation skipped: %s", _e)
 
         completed_models = {}
         rankings = {}
@@ -1816,6 +2257,8 @@ class MLForecastLabApp:
                     exp_cfg, completed_models, rankings,
                     sorted_models[0][0] if sorted_models else None,
                     status="running",
+                    naive_was_enabled=_naive_was_enabled,
+                    drift=drift_stats,
                 )
 
         # Final composite ranking via the runner's shared Demšar helper.
@@ -1834,7 +2277,16 @@ class MLForecastLabApp:
             completed_models[name].metrics['mean_rank_daily'] = daily_mean_ranks.get(name, float('inf'))
         mean_ranks = interval_mean_ranks  # for downstream logging
 
-        sorted_by_mean_rank = sorted(interval_mean_ranks.items(), key=lambda x: x[1])
+        # If Seasonal Naive was force-included for the skill chip (not
+        # user-enabled), exclude it from the auto-promote decision — we
+        # don't want the user's mlfl.yaml silently switched to a baseline
+        # they never asked to deploy.
+        _rank_pool = interval_mean_ranks
+        if not _naive_was_enabled:
+            _rank_pool = {
+                k: v for k, v in interval_mean_ranks.items() if k != "seasonal_naive"
+            }
+        sorted_by_mean_rank = sorted(_rank_pool.items(), key=lambda x: x[1])
         best_model_name = sorted_by_mean_rank[0][0] if sorted_by_mean_rank else None
         best_metric_value = completed_models[best_model_name].metrics.get(
             runner.production_metric, np.nan
@@ -1862,6 +2314,8 @@ class MLForecastLabApp:
                 best_model_name,
                 status="completed",
                 daily_rankings=daily_rankings,
+                naive_was_enabled=_naive_was_enabled,
+                drift=drift_stats,
             )
 
         # Build a BenchmarkResult-compatible object for downstream use
@@ -2102,6 +2556,8 @@ class MLForecastLabApp:
                 best_model_name,
                 status="completed",
                 daily_rankings=daily_rankings,
+                naive_was_enabled=_naive_was_enabled,
+                drift=drift_stats,
             )
 
         # Final results summary table
@@ -2859,6 +3315,21 @@ class MLForecastLabApp:
         # this experiment and start publishing from the same weights.
         self._persist_cached_model(exp_cfg.name)
 
+        # Publish HA lifecycle sensor so automations can fire on retrain.
+        # Reuses the trained_at timestamp computed above so this sensor's
+        # state, model_version, and the forecast_log model_version tag
+        # all match.
+        try:
+            await self._publish_lifecycle_sensor(
+                exp_cfg, "retrain", "completed",
+                {
+                    "model": prod_model_name,
+                    "model_version": model_version,
+                },
+            )
+        except Exception:
+            pass
+
         # Also run a forecast immediately after retrain
         await self._forecast_with_cached(exp_cfg.name)
 
@@ -2879,11 +3350,17 @@ class MLForecastLabApp:
             cache_meta.json — feature_cols, trained_at, model_version,
                               is_neural, window_size, addon_version
 
+        Before overwriting, the previous champion (if any) is moved into
+        a ``previous/`` sub-directory so a regressive retrain can be
+        rolled back via the API / Roll back button. Only one generation
+        of previous weights is kept to bound disk usage on an SD card.
+
         Swallows and logs all errors: a failed persist must never break
         the retrain path. The live _cached_models dict is the source of
         truth at runtime; disk is only read on startup.
         """
         import json
+        import shutil
         cache = self._cached_models.get(exp_name)
         if not cache:
             return
@@ -2894,6 +3371,28 @@ class MLForecastLabApp:
 
             model_bin = model_dir / "model.bin"
             meta_file = model_dir / "cache_meta.json"
+
+            # Archive the current champion into previous/ before we
+            # overwrite it. Single-generation cap keeps SD-card writes
+            # bounded — older snapshots are silently dropped.
+            try:
+                if model_bin.exists() and meta_file.exists():
+                    prev_dir = model_dir / "previous"
+                    prev_dir.mkdir(parents=True, exist_ok=True)
+                    for fname in ("model.bin", "cache_meta.json"):
+                        src = model_dir / fname
+                        dst = prev_dir / fname
+                        if src.exists():
+                            if dst.exists():
+                                dst.unlink()
+                            shutil.copy2(src, dst)
+                    logger.debug(
+                        f"  Archived previous {exp_name} cache → {prev_dir}"
+                    )
+            except Exception as _e:
+                logger.debug(
+                    f"  Could not archive previous {exp_name} cache: {_e}"
+                )
 
             cache["model"].save(str(model_bin))
 
@@ -3022,6 +3521,96 @@ class MLForecastLabApp:
                 f"Restored {restored} cached production model(s) from disk — "
                 f"skipping immediate retrain for these experiments"
             )
+
+    def _rollback_cached_model(self, exp_name: str) -> tuple[bool, Optional[str]]:
+        """Roll a regressive retrain back to the previous champion.
+
+        Looks for ``previous/`` in the per-experiment cache dir. If
+        present, swaps current ↔ previous on disk and re-loads the
+        in-memory cache. Returns ``(success, message)``.
+        """
+        import json
+        import shutil
+        if not self.model_registry:
+            return False, "Model registry not initialised"
+        if not self.config:
+            return False, "Config not loaded"
+        exp_cfg = next(
+            (e for e in self.config.experiments if e.name == exp_name), None,
+        )
+        if exp_cfg is None:
+            return False, "Experiment not found"
+
+        model_dir = self._cached_model_dir(exp_name)
+        prev_dir = model_dir / "previous"
+        prev_bin = prev_dir / "model.bin"
+        prev_meta = prev_dir / "cache_meta.json"
+        if not prev_bin.exists() or not prev_meta.exists():
+            return False, "No previous version on disk to roll back to"
+
+        try:
+            # Swap: current → previous_tmp, previous → current, previous_tmp → previous.
+            # Keeps the rollback symmetric so it can be performed again
+            # (toggling between two generations).
+            tmp_dir = model_dir / "_swap_tmp"
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir)
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            for fname in ("model.bin", "cache_meta.json"):
+                src = model_dir / fname
+                if src.exists():
+                    shutil.move(str(src), str(tmp_dir / fname))
+            for fname in ("model.bin", "cache_meta.json"):
+                src = prev_dir / fname
+                if src.exists():
+                    shutil.move(str(src), str(model_dir / fname))
+            for fname in ("model.bin", "cache_meta.json"):
+                src = tmp_dir / fname
+                if src.exists():
+                    shutil.move(str(src), str(prev_dir / fname))
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception as e:
+            return False, f"Swap failed: {e}"
+
+        # Re-load into the live cache.
+        try:
+            meta = json.loads((model_dir / "cache_meta.json").read_text())
+            model_name = meta["model_name"]
+            model = self.model_registry.create(model_name)
+            model.load(str(model_dir / "model.bin"))
+            trained_at = datetime.fromisoformat(meta["trained_at"])
+            is_neural = meta.get("is_neural", False)
+            window_size = meta.get("window_size")
+            seq_kwargs: Dict = {}
+            if is_neural and window_size:
+                seq_kwargs["sequence_data"] = np.zeros(
+                    (1, window_size, 1), dtype=np.float32
+                )
+            self._cached_models[exp_name] = {
+                "model": model,
+                "model_name": model_name,
+                "feature_cols": meta["feature_cols"],
+                "combined": None,
+                "exp_cfg": exp_cfg,
+                "trained_at": trained_at,
+                "model_version": meta["model_version"],
+                "is_neural": is_neural,
+                "seq_kwargs": seq_kwargs,
+            }
+            if self.web_app:
+                status = self.web_app.state.appstate.experiment_statuses.get(exp_name)
+                if status:
+                    status.best_model = model_name
+                    status.model_version = meta["model_version"]
+                    status.last_benchmark_timestamp = meta["trained_at"]
+                    status.last_error = None
+            logger.info(
+                "Rolled back %s to previous champion %s (trained %s)",
+                exp_name, model_name, meta["trained_at"],
+            )
+            return True, f"Rolled back to {model_name} trained {meta['trained_at']}"
+        except Exception as e:
+            return False, f"Rollback restore failed: {e}"
 
     async def _run_forecast_cycle(self):
         """
@@ -5214,6 +5803,13 @@ class MLForecastLabApp:
             # Load configuration
             await self.load_config()
 
+            # Apply runtime resource limits (CPU threads, nice value) from
+            # AppConfig BEFORE component init pulls in the heavy ML stacks
+            # (torch, lightgbm, xgboost) so their thread pools spawn with
+            # the right ceiling. Previously these settings were stored in
+            # mlfl.yaml and shown on the System page but never applied.
+            self._apply_runtime_resources()
+
             # Generate dashboard YAML
             self._generate_dashboard()
 
@@ -5234,6 +5830,133 @@ class MLForecastLabApp:
             logger.info("Received keyboard interrupt")
         finally:
             await self.shutdown()
+
+    async def _publish_lifecycle_sensor(
+        self,
+        exp_cfg,
+        event: str,
+        outcome: str,
+        attrs: Optional[dict] = None,
+    ) -> None:
+        """Publish a `last_<event>` companion sensor for HA automations.
+
+        ``event`` is one of ``"benchmark"`` / ``"retrain"``. ``outcome``
+        is ``"completed"`` / ``"failed"`` / ``"started"`` — captured as the
+        ``outcome`` attribute, while the sensor state is the ISO timestamp
+        of the event (typed as device_class=timestamp so HA picks it up
+        without further config).
+
+        Entity ID follows the same prefix / name convention as the
+        forecast sensors: ``sensor.{publish_prefix}{publish_name}_last_<event>``.
+        Best-effort: failures are logged but don't propagate, so a stale HA
+        REST token won't break the user-visible benchmark or retrain cycle.
+        """
+        if not self.ha_interface:
+            return
+        try:
+            publish_name = exp_cfg.publish_name or exp_cfg.name
+            prefix = exp_cfg.publish_prefix or "mlfl_"
+            entity_id = f"sensor.{prefix}{publish_name}_last_{event}"
+            now_iso = datetime.now(timezone.utc).isoformat()
+            payload_attrs = {
+                "outcome": outcome,
+                "experiment": exp_cfg.name,
+                "event": event,
+                "device_class": "timestamp",
+                "friendly_name": f"{exp_cfg.name} last {event}",
+                "icon": "mdi:flask" if event == "benchmark" else "mdi:autorenew",
+            }
+            if attrs:
+                payload_attrs.update(attrs)
+            await self.ha_interface.set_state(entity_id, now_iso, payload_attrs)
+        except Exception as e:
+            # Lifecycle publish is best-effort. A failure here must not
+            # abort the calling benchmark / retrain code path.
+            logger.debug(
+                "Lifecycle sensor publish for %s/%s failed: %s",
+                getattr(exp_cfg, "name", "?"), event, e,
+            )
+
+    def _apply_runtime_resources(self) -> None:
+        """Apply ``cpu_cores`` and ``nice_priority`` from AppConfig.
+
+        Previously these knobs were persisted to mlfl.yaml and surfaced on
+        the System page but nothing in the codebase read them — training
+        saturated every core regardless of the user's choice. We now cap
+        the BLAS / OMP / torch thread pools and set the process nice value
+        once at startup, before any model backend imports. Per-thread
+        env-vars also affect numpy's downstream BLAS calls in workers that
+        spawn after this point.
+        """
+        if not self.config:
+            return
+
+        cpu_cores = int(getattr(self.config, "cpu_cores", 0) or 0)
+        system_cores = os.cpu_count() or 1
+        threads = cpu_cores if 1 <= cpu_cores <= system_cores else system_cores
+
+        # Set the env vars BLAS libraries pick up at import time. Workers
+        # forked after this point inherit them; libraries already imported
+        # (numpy is loaded at the top of this module) won't change their
+        # current pool size from the env var alone, which is why we also
+        # call torch.set_num_threads below.
+        for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                    "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+            os.environ[var] = str(threads)
+
+        try:
+            import torch
+            torch.set_num_threads(threads)
+            try:
+                torch.set_num_interop_threads(threads)
+            except RuntimeError:
+                # set_num_interop_threads can only be called before any
+                # parallel work begins; subsequent calls raise. Safe to
+                # ignore — the value persists from the first call.
+                pass
+        except ImportError:
+            pass
+
+        self._applied_cpu_threads = threads
+
+        nice_priority = int(getattr(self.config, "nice_priority", 10) or 0)
+        try:
+            # PRIO_PROCESS=0 sets an absolute nice value (preferred over
+            # os.nice which is relative). Linux kernel silently clamps to
+            # [-20, 19]; raising priority (negative values) requires
+            # CAP_SYS_NICE which an unprivileged add-on container does not
+            # have, so values below 0 will fail with PermissionError —
+            # treat as "stay at current priority" rather than crash.
+            os.setpriority(os.PRIO_PROCESS, 0, nice_priority)
+            self._applied_nice = nice_priority
+        except (PermissionError, OSError) as e:
+            logger.warning(
+                "Could not set nice priority to %d (need CAP_SYS_NICE for "
+                "values below 0): %s. Process will run at default priority.",
+                nice_priority, e,
+            )
+            try:
+                self._applied_nice = os.getpriority(os.PRIO_PROCESS, 0)
+            except OSError:
+                self._applied_nice = None
+
+        warn_floor = max(1, (system_cores + 1) // 2)
+        if threads < warn_floor:
+            logger.warning(
+                "Training thread cap of %d is below half the available cores "
+                "(%d) — benchmarks will be noticeably slower. Raise "
+                "'Training CPU cores' on the System page if this is not "
+                "intentional.",
+                threads, system_cores,
+            )
+
+        logger.info(
+            "Runtime resources applied: %d CPU thread(s), nice=%s "
+            "(system has %d core(s))",
+            threads,
+            self._applied_nice if self._applied_nice is not None else "unchanged",
+            system_cores,
+        )
 
     def _generate_dashboard(self):
         """Generate ApexCharts dashboard YAML from current config."""

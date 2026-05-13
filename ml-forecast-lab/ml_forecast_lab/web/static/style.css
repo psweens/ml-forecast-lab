@@ -307,6 +307,13 @@ main { flex: 1; }
     color: var(--accent-secondary); border-color: var(--accent-secondary);
     background: rgba(0,212,255,0.1);
 }
+.section-nav a.nav-disabled {
+    color: var(--text-muted); opacity: 0.55;
+    cursor: not-allowed; pointer-events: auto;
+}
+.section-nav a.nav-disabled:hover {
+    color: var(--text-muted); border-color: transparent; background: transparent;
+}
 
 /* ============================================================
    Models page
@@ -514,6 +521,27 @@ select.setting-input, select.form-input { cursor: pointer; }
 .btn-danger:hover { opacity: 0.85; }
 .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* Quick-preset chips (Models tab) */
+.model-presets { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+.preset-chip {
+    padding: 0.3rem 0.85rem !important; font-size: 0.8rem !important;
+    border-radius: 1.2rem !important;
+}
+
+/* Small icon-only destructive button (dashboard card delete) */
+.btn-icon-danger {
+    background: transparent; border: 1px solid transparent; color: var(--text-muted);
+    width: 2rem; height: 2rem; border-radius: 0.4rem; cursor: pointer;
+    font-size: 1.2rem; line-height: 1; flex-shrink: 0; transition: all 0.15s;
+    display: inline-flex; align-items: center; justify-content: center;
+}
+.btn-icon-danger:hover {
+    color: var(--error); border-color: var(--error); background: rgba(231,76,60,0.1);
+}
+.btn-icon-danger:disabled {
+    opacity: 0.3; cursor: not-allowed; pointer-events: none;
+}
+
 /* ============================================================
    Logs page
    ============================================================ */
@@ -561,6 +589,23 @@ select.setting-input, select.form-input { cursor: pointer; }
 .toast-error { background: var(--bg-tertiary); border-left: 4px solid var(--error); }
 .toast-warning { background: var(--bg-tertiary); border-left: 4px solid var(--warning); }
 .toast-info { background: var(--bg-tertiary); border-left: 4px solid var(--accent-secondary); }
+.toast-close {
+    background: transparent; border: none; color: var(--text-muted);
+    font-size: 1.1rem; line-height: 1; cursor: pointer; margin-left: 0.75rem;
+    padding: 0 0.2rem;
+}
+.toast-close:hover { color: var(--text-primary); }
+.toast { display: flex; align-items: flex-start; gap: 0.25rem; }
+
+/* Persistent save-error indicator on Settings-tab inputs / toggles.
+   The red border survives until the field saves successfully; the title
+   attribute carries the full error message so a user returning later
+   can still see what went wrong. */
+.setting-input.save-error,
+input.save-error { border-color: var(--error) !important; box-shadow: 0 0 0 1px var(--error); }
+.toggle-switch input.save-error + .toggle-slider {
+    box-shadow: 0 0 0 2px var(--error);
+}
 
 /* ============================================================
    Confirm modal

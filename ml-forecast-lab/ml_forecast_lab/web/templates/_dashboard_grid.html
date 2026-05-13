@@ -1,0 +1,22 @@
+{# Standalone fragment for HTMX-driven dashboard refreshes.
+   Renders just the <section class="experiments-grid"> the dashboard
+   page swaps into place. The hx-* attributes are repeated here so
+   the polling continues after each swap. #}
+<section class="experiments-grid"
+         id="experiments-grid"
+         hx-get="{{ base_path | default('') }}/api/dashboard/grid"
+         hx-trigger="every {{ '10s' if running_experiments else '60s' }}"
+         hx-swap="outerHTML">
+    {% if experiments %}
+        {% for exp in experiments %}
+            {% include "_dashboard_card.html" %}
+        {% endfor %}
+    {% else %}
+    <div class="empty-state">
+        <span class="empty-state-icon">🧪</span>
+        <p>No experiments configured yet.</p>
+        <p class="empty-state-hint">An experiment trains and benchmarks models on one HA sensor. Start in lab mode to find the best model, then promote to production to publish forecasts back to HA.</p>
+        <button class="btn btn-success" onclick="openNewExperiment()" style="margin-top:0.75rem;">+ Create Your First Experiment</button>
+    </div>
+    {% endif %}
+</section>

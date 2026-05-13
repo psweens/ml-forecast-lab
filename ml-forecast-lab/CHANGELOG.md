@@ -1,5 +1,157 @@
 # Changelog
 
+## 2.31.0
+
+Product / UX wave from the IMPROVEMENTS.md proposal. 19 changes
+grouped into functionality gaps, frontend usability, model-improvement
+workflows, and model-analysis trust signals. All grounded in existing
+code paths; no new third-party dependencies; every item passes the
+Pi-5 hard constraints (~4 GB RAM headroom, no CUDA, ARM64-buildable,
+bounded CPU, light UI over HA ingress, SD-card-friendly disk writes).
+
+### Functionality
+
+- **A1** — `cpu_cores` and `nice_priority` on the System page are
+  actually applied at startup now. Sets `OMP_NUM_THREADS` /
+  `MKL_NUM_THREADS` / `OPENBLAS_NUM_THREADS` /
+  `NUMEXPR_NUM_THREADS` / `VECLIB_MAXIMUM_THREADS` plus
+  `torch.set_num_threads` and `torch.set_num_interop_threads`, and
+  applies the nice value via `os.setpriority`. The System form now
+  renders a "Currently applied: N threads, nice = X" confirmation
+  line. Previously these settings were persisted to `mlfl.yaml` and
+  ignored — training saturated every core regardless of the user's
+  choice.
+- **A2** — Delete-experiment button on dashboard cards and the
+  experiment header. Reuses the existing confirm modal and the
+  `/api/experiments/{name}/delete` endpoint that previously had no
+  UI affordance.
+- **A3** — Last 5 benchmark runs are kept on disk in a new
+  `benchmark_history` table (append-only, capped per experiment).
+  Results-tab gains a "Compare with previous run" strip that picks
+  any prior run from a dropdown and renders a one-line diff: winner
+  change + MAE delta percent.
+- **A4** — One-click retrain rollback. Every `_persist_cached_model`
+  now archives the existing champion into `<model_dir>/previous/`
+  before overwriting; a new `Roll back` button on production
+  experiment headers swaps current ↔ previous and re-hydrates the
+  live cache. Single-generation cap keeps SD-card writes bounded.
+  Endpoints: `POST /experiment/{name}/rollback`,
+  `GET /experiment/{name}/rollback-available`.
+- **A5** — HA lifecycle sensors fire on benchmark / retrain
+  completion. Two new companion entities per experiment:
+  `sensor.{prefix}{name}_last_benchmark` and
+  `sensor.{prefix}{name}_last_retrain`. State is an ISO timestamp
+  (HA picks up `device_class=timestamp` automatically); attributes
+  carry outcome, duration, winner / model_version, and a truncated
+  error string when the cycle failed. Unblocks HA automations
+  reacting to ML-Forecast-Lab events without scraping logs.
+- **A6** — Future / Both options removed from the covariate Role
+  dropdown. `CovariateResolver.fetch_future` still returns NaN so
+  selecting them silently broke the pipeline; kept as Lagged-only
+  with an info-tip explaining the gap. Implementation is tracked
+  separately.
+
+### Frontend usability
+
+- **B1** — Plotly is now lazy-loaded on the experiment page. The
+  ~700 KB script no longer blocks the initial HTML render — a new
+  `mlflLoadPlotly()` injects it on first activation of any
+  chart-bearing tab. A transparent `Plotly.*` stub queues calls
+  that arrive before the bundle lands and replays them in order
+  once it does, so the many fetch-handler chart-render call sites
+  need no changes.
+- **B2** — Dashboard refresh swapped from `setInterval(location.reload)`
+  to an HTMX poll against a new `/api/dashboard/grid` fragment.
+  Scroll position, expanded `<details>`, and the New-experiment
+  modal state now survive each refresh. Per-cycle payload drops
+  from ~80 KB (full page) to ~5 KB (just the grid).
+- **B3** — Forecast Accuracy, Tuning, Predictions, Generalisation,
+  Covariate Analysis and Results tabs are now always rendered with
+  a `disabled` style + hover-tip when their unlock conditions
+  aren't met, so first-time users discover them.
+- **B4** — Settings-tab autosave errors now persist with a red
+  border + tooltip until the next successful save (the existing
+  4-second toast was too transient — users walked away thinking
+  they'd saved changes they hadn't). Error toasts also linger for
+  10 s with a dismiss button.
+- **B5** — Download buttons for the auto-generated Lovelace
+  dashboard YAML, surfaced on the System page and every experiment
+  header. The file was being written under `/addon_configs` since
+  v2.x but only discoverable via the docs.
+
+### Model improvement workflows
+
+- **C1** — Pre-flight "Data sanity check" panel on the Settings
+  tab, backed by a new `POST /experiment/{name}/data-report`
+  endpoint. Fetches the raw target history the same way the
+  benchmark would and reports rows fetched vs expected, biggest
+  gap, recorder freshness, missing-value rate, zero-run length,
+  and (for cumulative sensors) max-increment hits. Catches "your
+  sensor has a 14-day flatline / 40% missing values" BEFORE you
+  spend an hour on a benchmark.
+- **C2** — Quick-preset chips above the per-experiment Models tab
+  (Fast / Balanced / Thorough). Flips toggles in batches against
+  the existing `/api/experiment/{exp}/models/toggle` endpoint.
+  Combinations match the starter sets in `docs/MODEL_GUIDE.md`
+  that previously only lived in the docs.
+- **C3** — Pairwise model comparison matrix on the Results tab.
+  Paired-t test on per-fold MAE differences with a normal-approx
+  two-tailed p-value. Honest framing — with the default 5 folds
+  the test is weak; the info-tip is explicit. Star marks pairs
+  where the difference is unlikely to be inside fold noise at
+  α=0.05.
+- **C4** — "Tune all enabled" sweep across every enabled model.
+  Loops the existing `_run_tuning` sequentially; each model's
+  final result is captured in a new `tune_all_results[experiment]`
+  list. A Sweep-results table renders one row per model with
+  best composite, default vs tuned MAE, delta percent, and a
+  per-row Apply button. Endpoints:
+  `POST /experiment/{name}/run-tuning-all`,
+  `GET /experiment/{name}/tuning-all`.
+
+### Model analysis & trust
+
+- **D1** — Conformal-band calibration countdown on the Forecast
+  Accuracy verdict. Cold-start production experiments left the
+  Uncertainty Bands tile at "—" with no explanation; now it renders
+  *"Calibrating · 4 of 10 residuals · ~3 h to bands"* with a percent
+  chip, sourced from the same `db.get_conformal_quantiles` count
+  that drives the live publish path.
+- **D2** — Always-on "vs Seasonal Naive" skill chip on Results.
+  Seasonal Naive is force-included in every benchmark (no training
+  cost; excluded from auto-promote when force-added) so the chip
+  is present even when the user hasn't enabled the baseline. Green
+  pill when the chosen model beats naive; red when it doesn't — a
+  useful signal that the learned models aren't adding value on this
+  target.
+- **D3** — Retrain history chip strip on the Forecast Accuracy tab.
+  Distinct `(model_name, model_version)` pairs in the window, ordered
+  by first_seen. Click a chip to filter the verdict + charts to just
+  that one cohort via the existing `?version=…` URL parameter.
+  Backed by a new `db.get_retrain_events`.
+- **D4** — Training-window vs test-window drift verdict on Results.
+  Comparing target distribution stats over the earliest fold's
+  training rows vs the latest fold's test rows, with a PSI score
+  classed as stable (< 0.10), moderate shift (0.10–0.20), or
+  significant shift (> 0.20). Helps users distinguish "the model is
+  bad" from "the test window is from a regime the training rows
+  don't cover".
+
+### Internal
+
+- `BenchmarkResult` Pydantic model gains `pairwise_dm`,
+  `naive_baseline_mae`, `naive_baseline_was_enabled`, and `drift`
+  fields. All optional; persisted through the JSON round-trip
+  alongside the rest of the benchmark result.
+- New shared `_build_dashboard_context` builder used by both the
+  dashboard page and the HTMX grid fragment, eliminating drift
+  between the two.
+- New `_dashboard_card.html` and `_dashboard_grid.html` Jinja
+  partials.
+- `HistoryDB.BENCHMARK_HISTORY_RETAIN_PER_EXP = 5` constant
+  governs the per-experiment retention cap for the new benchmark
+  history table.
+
 ## 2.30.0
 
 ### Security

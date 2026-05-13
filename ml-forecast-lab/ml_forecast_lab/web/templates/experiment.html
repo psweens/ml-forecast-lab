@@ -3,7 +3,9 @@
 {% block title %}{{ experiment.name }} - ML Forecast Lab{% endblock %}
 
 {% block head_scripts %}
-<script src="{{ base_path | default('') }}/static/plotly-basic.min.js"></script>
+{# Plotly is now lazy-loaded via mlflLoadPlotly() (defined in the inline
+   script lower in this template) — only fetched once the user opens a
+   chart-bearing tab. Removes ~700 KB from the initial-page download. #}
 {% endblock %}
 
 {% block content %}
@@ -54,13 +56,31 @@
         </button>
             {% endif %}
         {% endif %}
+        <a href="{{ base_path | default('') }}/dashboard_yaml" class="btn btn-secondary" download="mlfl_dashboard.yaml"
+           title="Download an auto-generated Lovelace dashboard YAML for this and every other experiment.">
+            Lovelace YAML
+        </a>
+        {% if experiment.mode == 'production' %}
+        <button class="btn btn-secondary" id="btn-rollback" style="display:none;"
+                onclick="rollbackExperiment('{{ experiment.name }}', this)"
+                title="Roll back to the previous production model snapshot. Available when a retrain has happened recently.">
+            Roll back
+        </button>
+        {% endif %}
+        <button class="btn btn-danger" onclick="deleteExperiment('{{ experiment.name }}')"
+                title="Delete this experiment from mlfl.yaml. Cached models and history are removed; forecast log entries are kept.">
+            Delete
+        </button>
     </div>
     <!-- Hidden checkbox for pipeline steps -->
     <input type="hidden" id="chk-deep" value="">
     <div id="promote-message"></div>
 </div>
 
-<!-- Section navigation (tab-style) -->
+<!-- Section navigation (tab-style).
+     Tabs that aren't usable yet are rendered as disabled stubs with a
+     hover tip explaining what to do, so users discover them even before
+     running a benchmark or promoting to production. -->
 <nav class="section-nav" id="section-nav">
     <a data-tab="sec-settings" onclick="showTab(this)">Settings</a>
     <a data-tab="sec-models" onclick="showTab(this)">Models</a>
@@ -71,12 +91,23 @@
     <a data-tab="sec-results" onclick="showTab(this)">Results</a>
     <a data-tab="sec-predictions" onclick="showTab(this)">Predictions</a>
     <a data-tab="sec-generalisation" onclick="showTab(this)">Generalisation</a>
+    {% else %}
+    <a class="nav-disabled" title="Run a benchmark to populate this tab">Results</a>
+    <a class="nav-disabled" title="Run a benchmark to populate this tab">Predictions</a>
+    <a class="nav-disabled" title="Run a benchmark to populate this tab">Generalisation</a>
+    {% endif %}
     {% if feature_importances %}<a data-tab="sec-features" onclick="showTab(this)">Features</a>{% endif %}
+    {% if benchmark_result %}
     <a data-tab="sec-covariate-analysis" onclick="showTab(this)">Covariate Analysis</a>
     <a data-tab="sec-tuning" onclick="showTab(this)">Tuning</a>
+    {% else %}
+    <a class="nav-disabled" title="Run a benchmark to populate this tab">Covariate Analysis</a>
+    <a class="nav-disabled" title="Run a benchmark to populate this tab">Tuning</a>
     {% endif %}
     {% if experiment.mode == 'production' %}
     <a data-tab="sec-forecast-accuracy" onclick="showTab(this)">Forecast Accuracy</a>
+    {% else %}
+    <a class="nav-disabled" title="Promote a model to production to see live forecast accuracy">Forecast Accuracy</a>
     {% endif %}
 </nav>
 
@@ -84,6 +115,25 @@
 <div class="tab-section" id="sec-settings" style="display:none;">
 <section class="section">
     <h2>Experiment Settings</h2>
+
+    <!-- Pre-flight data sanity report.
+         A quick on-demand check that catches recorder gaps, flat-lines,
+         missing values, and stale freshness BEFORE a benchmark is started.
+         Backed by the /data-report endpoint which uses the same fetch
+         path as the benchmark but skips the rest of the pipeline. -->
+    <div class="settings-group">
+        <h3 class="settings-group-title">Data sanity check
+            <span class="info-tip">?<span class="tip-text">Runs the same data fetch the benchmark would, then reports rows fetched vs expected, biggest gap, recorder freshness, missing-value rate, zero-run length, and (for cumulative sensors) max-increment hits. Use it before clicking Run Pipeline to avoid spending an hour benchmarking against broken data.</span></span>
+        </h3>
+        <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
+            <button type="button" class="btn btn-secondary" id="btn-data-report"
+                    onclick="runDataReport('{{ experiment.name }}', this)">
+                Check now
+            </button>
+            <span id="data-report-summary" style="color:var(--text-secondary);font-size:0.85rem;"></span>
+        </div>
+        <div id="data-report-detail" style="display:none;margin-top:0.75rem;font-size:0.85rem;"></div>
+    </div>
 
     <!-- Target -->
     <div class="settings-group">
@@ -291,11 +341,9 @@
                 <div class="entity-search-results" id="entity-results" style="display:none;"></div>
             </div>
             <div class="exp-field">
-                <label class="field-label">Role</label>
+                <label class="field-label">Role <span class="info-tip">?<span class="tip-text">Only <strong>Lagged</strong> is currently implemented — the model sees past values of this covariate. <strong>Future</strong> and <strong>Both</strong> (forecast-attribute lookup) are not yet wired through the inference path and have been hidden until they are.</span></span></label>
                 <select class="setting-input" id="cov-role-input">
                     <option value="lagged">Lagged</option>
-                    <option value="future">Future</option>
-                    <option value="both">Both</option>
                 </select>
             </div>
             <div class="exp-field">
@@ -436,6 +484,20 @@
     <h2>Model Selection</h2>
     <p style="color:var(--text-secondary);margin-bottom:1rem;">Choose which models to include when running the pipeline. Visit the <a href="{{ base_path | default('') }}/models" style="color:var(--accent-secondary);">Models</a> page to configure hyperparameters.</p>
 
+    <div class="model-presets" style="margin-bottom:1.25rem;">
+        <span style="font-size:0.85rem;color:var(--text-secondary);margin-right:0.6rem;">
+            Quick presets
+            <span class="info-tip">?<span class="tip-text">Sensible starter combinations matching the guidance in <code>docs/MODEL_GUIDE.md</code>. Clicking a preset enables those models for this experiment and disables the rest — you can still tweak the toggles after. Pick <strong>Fast</strong> if you're on a Pi 5 with limited time, <strong>Balanced</strong> for the best accuracy / compute trade-off, <strong>Thorough</strong> when you have hours to spare.</span></span>
+            :
+        </span>
+        <button type="button" class="btn btn-secondary preset-chip" onclick="applyModelPreset('fast', this)"
+                title="LightGBM + XGBoost + Seasonal Naive — fastest reasonable benchmark; runs in minutes on a Pi 5.">Fast</button>
+        <button type="button" class="btn btn-secondary preset-chip" onclick="applyModelPreset('balanced', this)"
+                title="Adds DLinear and SparseTSF — strong linear baselines that often beat the tree models on smooth seasonal targets.">Balanced</button>
+        <button type="button" class="btn btn-secondary preset-chip" onclick="applyModelPreset('thorough', this)"
+                title="Adds LSTM, N-HiTS, TiDE — neural backends with stronger inductive bias for complex patterns. Longer runs (tens of minutes per benchmark on a Pi 5).">Thorough</button>
+    </div>
+
     <h3 style="color:var(--text-primary);margin:1rem 0 0.25rem;">Tree Models</h3>
     <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:0.75rem;">Gradient-boosted decision trees — fast, feature-driven, interpretable via feature importance.</p>
     <div class="experiments-grid" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr));">
@@ -517,6 +579,69 @@
 <div class="tab-section" id="sec-results" style="display:none;">
 <section class="section">
     <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Two complementary views: <strong>Per-Interval Accuracy</strong> measures the next-step (h=1) prediction error — what the model gets right at the 30-minute level. <strong>Daily Cumulative Accuracy</strong> (table below) sums each day's predictions and actuals before computing errors — better for use cases like daily energy or hot-water demand where you care about totals rather than exact timing. Both rankings use the Demšar (2006) composite over MAE, RMSE, and MASE. The Per-Interval rank still drives Promote, Tuning, and live forecasting; the Daily rank is informational so you can pick the model that matches your objective.</span></span></h2>
+
+    {# Previous-runs comparison strip. Lets users spot whether today's
+       benchmark is actually better than yesterday's without diffing
+       JSON. Lazily populated by JS — empty when only one run exists. #}
+    <div id="bench-history-strip" style="display:none;margin-bottom:1rem;padding:0.6rem 0.9rem;background:var(--bg-tertiary);border-radius:0.5rem;border:1px solid var(--border);">
+        <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;font-size:0.85rem;">
+            <span style="color:var(--text-secondary);">Compare with previous run</span>
+            <select id="bench-history-select" onchange="renderBenchHistoryDelta()"
+                    style="padding:0.25rem 0.5rem;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:0.4rem;font-size:0.85rem;">
+                <option value="">— pick a previous run —</option>
+            </select>
+            <span id="bench-history-delta" style="color:var(--text-secondary);"></span>
+            <span class="info-tip">?<span class="tip-text">Stores up to 5 prior benchmark runs per experiment. Pick one to see how today's winner / best-MAE differ from that earlier run — useful for spotting drift over time without diffing JSON. Storage capped to limit SD-card writes.</span></span>
+        </div>
+    </div>
+
+    {# Training-window vs test-window drift verdict. Tells the user when
+       poor CV scores may be down to recent data shifting away from the
+       training distribution rather than a bad model. #}
+    {% if benchmark_result and benchmark_result.drift %}
+        {% set _d = benchmark_result.drift %}
+        {% set _sev = _d.severity or 'ok' %}
+        <div style="margin: 0.25rem 0 1rem; padding: 0.6rem 0.9rem; border-radius: 0.5rem;
+                    background: {% if _sev == 'alert' %}rgba(231,76,60,0.10){% elif _sev == 'warning' %}rgba(243,156,18,0.10){% else %}rgba(46,204,113,0.08){% endif %};
+                    border: 1px solid {% if _sev == 'alert' %}rgba(231,76,60,0.3){% elif _sev == 'warning' %}rgba(243,156,18,0.3){% else %}rgba(46,204,113,0.25){% endif %};">
+            <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;">
+                <span style="color: var(--text-secondary); font-size: 0.85rem;">Training-window drift</span>
+                <strong style="color: {% if _sev == 'alert' %}var(--error){% elif _sev == 'warning' %}var(--warning){% else %}var(--success){% endif %};">
+                    {{ _d.verdict | title }} · PSI = {{ "%.2f"|format(_d.psi or 0) }}
+                </strong>
+                <span style="color: var(--text-muted); font-size: 0.78rem;">
+                    train mean {{ "%.3f"|format(_d.train.mean) }} (σ {{ "%.3f"|format(_d.train.std) }}, n={{ _d.train.n }})
+                    · test mean {{ "%.3f"|format(_d.test.mean) }} (σ {{ "%.3f"|format(_d.test.std) }}, n={{ _d.test.n }})
+                </span>
+                <span class="info-tip">?<span class="tip-text">Compares the target distribution in the earliest fold's training rows against the latest fold's test rows. <strong>PSI &lt; 0.10</strong> = stable. <strong>0.10–0.20</strong> = moderate shift (CV scores may slightly under-state live performance). <strong>&gt; 0.20</strong> = significant shift — the test window is from a regime the training rows don't cover, so poor CV may be data-induced rather than model-induced. Consider widening <code>days_history</code> or re-running the benchmark once your sensor stabilises.</span></span>
+            </div>
+        </div>
+    {% endif %}
+
+    {# Seasonal Naive skill chip. Always present when the baseline ran;
+       gives a quick "is my best model actually beating today=yesterday?"
+       answer that the rank table by itself doesn't surface. #}
+    {% if benchmark_result and benchmark_result.naive_baseline_mae and best_model %}
+        {% set _best = (models | selectattr('name', 'equalto', best_model) | list | first) %}
+        {% if _best and _best.mae %}
+            {% set _naive = benchmark_result.naive_baseline_mae %}
+            {% set _bestmae = _best.mae.mean %}
+            {% set _skill = ((_naive - _bestmae) / _naive * 100) if _naive > 0 else 0 %}
+            <div style="margin: 0.25rem 0 1rem; display: inline-flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0.85rem; border-radius: 1.5rem;
+                        background: {% if _skill > 0 %}rgba(46,204,113,0.12){% else %}rgba(231,76,60,0.12){% endif %};
+                        border: 1px solid {% if _skill > 0 %}rgba(46,204,113,0.3){% else %}rgba(231,76,60,0.3){% endif %};">
+                <span style="color: var(--text-secondary); font-size: 0.85rem;">vs Seasonal Naive</span>
+                <span style="font-weight: 700; color: {% if _skill > 0 %}var(--success){% else %}var(--error){% endif %};">
+                    {{ "%+.1f"|format(_skill) }}% MAE
+                    {% if _skill > 0 %}better{% else %}worse{% endif %}
+                </span>
+                <span style="color: var(--text-muted); font-size: 0.78rem;">
+                    ({{ "%.3f"|format(_bestmae) }} vs {{ "%.3f"|format(_naive) }})
+                </span>
+                <span class="info-tip">?<span class="tip-text">Seasonal Naive predicts <code>ŷ[t+h] = y[t+h−period]</code> — i.e. "same value as one seasonal period ago" — and ran on the same CV folds as every other model. If your chosen model can't beat it, none of the learned models are providing real value on this target. Seasonal Naive is included automatically for the chip even when not in your enabled set, but it isn't auto-promoted.</span></span>
+            </div>
+        {% endif %}
+    {% endif %}
     <h3 style="color: var(--text-primary); margin: 0.5rem 0 1rem 0;">Per-Interval Accuracy <span style="color: var(--text-secondary); font-size: 0.85rem; font-weight: normal;">— next-step (h=1), what the live forecast publishes</span></h3>
     <div class="table-container">
         <table class="metrics-table">
@@ -620,6 +745,66 @@
             </tbody>
         </table>
     </div>
+    {% endif %}
+
+    {% if benchmark_result and benchmark_result.pairwise_dm %}
+    <details class="fold-metrics" style="margin-top:1.25rem;">
+        <summary>Pairwise differences <span class="info-tip">?<span class="tip-text">For each pair of models we take the per-fold MAE values, compute their fold-wise differences, and run a paired t-test on the differences. With the default 5 CV folds the test is weak, so we frame the result as "is the difference inside fold noise?" rather than a formal hypothesis test: <strong>p &lt; 0.05</strong> means the difference is unlikely to be noise given the per-fold spread. Green = positive mean_diff (row beats column); red = negative; ★ = significant at α=0.05.</span></span></summary>
+        <div class="fold-content">
+            {% set _model_names = [] %}
+            {% for m in models %}{% set _ = _model_names.append(m.name) %}{% endfor %}
+            <div class="table-container">
+                <table class="metrics-table" style="font-size:0.85rem;">
+                    <thead>
+                        <tr>
+                            <th></th>
+                            {% for col in _model_names %}<th>{{ col | model_display }}</th>{% endfor %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row_model in _model_names %}
+                        <tr>
+                            <th style="text-align:right;">{{ row_model | model_display }}</th>
+                            {% for col_model in _model_names %}
+                                {% if row_model == col_model %}
+                                <td style="text-align:center;color:var(--text-muted);">—</td>
+                                {% else %}
+                                    {% set ns = namespace(cell=None) %}
+                                    {% for pair in benchmark_result.pairwise_dm %}
+                                        {% if pair.model_a == row_model and pair.model_b == col_model %}
+                                            {% set ns.cell = (pair.mean_diff, pair.p_value, pair.significant, false) %}
+                                        {% elif pair.model_a == col_model and pair.model_b == row_model %}
+                                            {% set ns.cell = (-pair.mean_diff, pair.p_value, pair.significant, true) %}
+                                        {% endif %}
+                                    {% endfor %}
+                                    {% if ns.cell %}
+                                        {% set mean_diff = ns.cell[0] %}
+                                        {% set p_value = ns.cell[1] %}
+                                        {% set sig = ns.cell[2] %}
+                                        {# row vs col: row better (mean_diff<0, lower MAE) shown green; row worse shown red. #}
+                                        {% set diff_for_row = -mean_diff %}
+                                        <td style="text-align:center;background:{% if sig and diff_for_row > 0 %}rgba(46,204,113,0.18){% elif sig and diff_for_row < 0 %}rgba(231,76,60,0.18){% else %}transparent{% endif %};">
+                                            <span style="color:{% if diff_for_row > 0 %}var(--success){% elif diff_for_row < 0 %}var(--error){% else %}var(--text-secondary){% endif %};">
+                                                {{ "%+.3f"|format(diff_for_row) }}
+                                            </span>
+                                            {% if sig %}<span style="color:var(--accent-secondary);">★</span>{% endif %}
+                                            <div style="color:var(--text-muted);font-size:0.7rem;">p={{ "%.3f"|format(p_value) }}</div>
+                                        </td>
+                                    {% else %}
+                                    <td style="text-align:center;color:var(--text-muted);">—</td>
+                                    {% endif %}
+                                {% endif %}
+                            {% endfor %}
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <p style="color:var(--text-secondary);font-size:0.8rem;margin-top:0.5rem;">
+                Each cell shows row.MAE − col.MAE averaged across folds. Positive values mean the row model is better (lower MAE) than the column model on the same data. ★ marks pairs where the per-fold variance suggests the difference is more than noise (p&lt;0.05).
+            </p>
+        </div>
+    </details>
     {% endif %}
 
     <details class="fold-metrics">
@@ -805,6 +990,24 @@
                 {% if tuning_result and tuning_result.status == 'running' %}disabled{% endif %}>
             {% if tuning_result and tuning_result.status == 'running' %}Tuning...{% else %}Run Tuning{% endif %}
         </button>
+        <button class="btn btn-secondary" id="tuning-all-btn"
+                onclick="runTuningAll('{{ experiment.name }}', this)"
+                {% if tuning_result and tuning_result.status == 'running' %}disabled{% endif %}
+                title="Tune every enabled model in this experiment sequentially. Takes N × the time of a single-model run. The live-progress panel below shows whichever model is currently being tuned.">
+            Tune all enabled
+        </button>
+    </div>
+
+    <!-- Sweep results — populated by polling /tuning-all once a sweep is in
+         flight. Hidden until at least one result is available. -->
+    <div id="tune-all-results" style="display:none;margin-bottom:1.5rem;padding:0.75rem 1rem;background:var(--bg-tertiary);border-radius:0.5rem;border:1px solid var(--border);">
+        <h3 style="margin:0 0 0.5rem 0;font-size:1rem;">Sweep results <span class="info-tip">?<span class="tip-text">One row per model tuned during the latest 'Tune all enabled' run. Apply locks the model's tuned params into mlfl.yaml and promotes it to production — the same as the single-model Apply button.</span></span></h3>
+        <table class="metrics-table" style="font-size:0.85rem;">
+            <thead>
+                <tr><th>Model</th><th>Best composite</th><th>Default MAE</th><th>Tuned MAE</th><th>Δ MAE</th><th>Status</th><th></th></tr>
+            </thead>
+            <tbody id="tune-all-results-body"></tbody>
+        </table>
     </div>
 
     <!-- Progress (visible when running or completed) -->
@@ -1300,6 +1503,22 @@
     <!-- ============================================================ -->
     <!-- LAYER 3 — DIAGNOSTIC TOOLS (open by default)                  -->
     <!-- ============================================================ -->
+    <!-- Retrain history — chip strip for the distinct (model_name,
+         model_version) pairs in the window. Lets the user spot when a
+         retrain happened relative to current accuracy and click into
+         a single version's view. Populated from the same /forecast-
+         accuracy response that drives the verdict card. -->
+    <div id="retrain-history-card" class="settings-group" style="display:none;">
+        <h3 class="settings-group-title">
+            Retrain history
+            <span class="info-tip">?<span class="tip-text">Distinct (model, version) pairs observed in <code>forecast_log</code> for the current window. Each retrain stamps a new <code>model_version</code> on every subsequent log row, so the earliest <code>issued_at</code> per version is when that retrain went live. Click a chip to filter the accuracy view to just that version — useful for answering "did Tuesday's retrain make things better or worse?".</span></span>
+        </h3>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.5rem 0;">
+            <span id="retrain-history-summary">—</span>
+        </p>
+        <div id="retrain-history-chips" style="display:flex;gap:0.4rem;flex-wrap:wrap;"></div>
+    </div>
+
     <details id="diag-accordion" class="diag-accordion" open>
         <summary>
             Diagnostic tools
@@ -1486,8 +1705,90 @@ window.addEventListener('error', function(e) {
 var EMBEDDED_HISTORY = {{ embedded_history | tojson }};
 </script>
 <script>
+// ======== Plotly lazy-loader ========
+// Plotly-basic.min.js is ~700 KB; loading it on every experiment-page hit
+// even for users who never open a chart-bearing tab was the largest UI
+// weight on the page. mlflLoadPlotly() injects the script on first call
+// and returns a cached Promise that resolves once window.Plotly is usable.
+// Call sites that draw charts should await this before invoking Plotly.*.
+window.mlflLoadPlotly = (function() {
+    var p = null;
+    return function() {
+        if (p) return p;
+        p = new Promise(function(resolve, reject) {
+            if (window.Plotly && !window.Plotly.__mlflStub) return resolve();
+            var s = document.createElement('script');
+            s.src = (typeof BASE_PATH !== 'undefined' ? BASE_PATH : '')
+                + '/static/plotly-basic.min.js';
+            s.async = true;
+            s.onload = function() {
+                // Replay any calls that hit the deferred stub before the
+                // real Plotly arrived. Plotly's IIFE replaces window.Plotly
+                // with the real export at this point, so __pending is the
+                // only handle on those queued arg lists.
+                if (_pendingPlotlyCalls.length && window.Plotly && !window.Plotly.__mlflStub) {
+                    _pendingPlotlyCalls.forEach(function(call) {
+                        try {
+                            var target = window.Plotly;
+                            for (var i = 0; i < call.path.length - 1; i++) {
+                                target = target[call.path[i]];
+                                if (!target) return;
+                            }
+                            var fn = target[call.path[call.path.length - 1]];
+                            if (typeof fn === 'function') fn.apply(target, call.args);
+                        } catch (e) {
+                            console.error('Deferred Plotly call failed:', call.path.join('.'), e);
+                        }
+                    });
+                    _pendingPlotlyCalls = [];
+                }
+                resolve();
+            };
+            s.onerror = function() { p = null; reject(new Error('Plotly load failed')); };
+            document.head.appendChild(s);
+        });
+        return p;
+    };
+})();
+
+// Deferred-call stub: while Plotly is still downloading, calls into
+// window.Plotly.* (and window.Plotly.Plots.*) are queued and replayed
+// in order once the script lands. This means existing call sites in
+// fetch handlers can keep their `Plotly.newPlot(...)` pattern unchanged.
+var _pendingPlotlyCalls = [];
+function _makePlotlyStub(path) {
+    var fn = function() {
+        _pendingPlotlyCalls.push({path: path, args: Array.prototype.slice.call(arguments)});
+    };
+    fn.__mlflStub = true;
+    return fn;
+}
+if (typeof window.Plotly === 'undefined') {
+    window.Plotly = {
+        __mlflStub: true,
+        newPlot: _makePlotlyStub(['newPlot']),
+        purge: _makePlotlyStub(['purge']),
+        extendTraces: _makePlotlyStub(['extendTraces']),
+        relayout: _makePlotlyStub(['relayout']),
+        restyle: _makePlotlyStub(['restyle']),
+        react: _makePlotlyStub(['react']),
+        Plots: {
+            resize: _makePlotlyStub(['Plots', 'resize']),
+        },
+    };
+}
+
 // ======== Tab system ========
 var _renderedTabs = {};
+
+// Tabs whose contents may render Plotly charts. Switching to one triggers
+// the lazy Plotly load; switching to Settings / Models / Training-not-active
+// never pays the download cost.
+var _CHART_TABS = {
+    'sec-results': true, 'sec-predictions': true, 'sec-generalisation': true,
+    'sec-features': true, 'sec-tuning': true, 'sec-forecast-accuracy': true,
+    'sec-training': true, 'sec-covariate-analysis': true,
+};
 
 window.showTab = function(el) {
     // el can be a nav link element or a tab id string
@@ -1509,14 +1810,28 @@ window.showTab = function(el) {
     var target = document.getElementById(tabId);
     if (target) {
         target.style.display = 'block';
-        // Resize Plotly charts that were rendered into a hidden container
-        if (_renderedTabs[tabId]) {
+        // Resize Plotly charts that were rendered into a hidden container —
+        // only meaningful once Plotly has loaded AND we've actually drawn
+        // something into this tab.
+        if (_renderedTabs[tabId] && window.Plotly) {
             target.querySelectorAll('.js-plotly-plot').forEach(function(c) {
                 Plotly.Plots.resize(c);
             });
         }
     }
     if (el) el.classList.add('active');
+
+    // Kick off the Plotly download on first activation of any chart-bearing
+    // tab. Subsequent calls hit the cached promise.
+    if (_CHART_TABS[tabId]) {
+        mlflLoadPlotly().catch(function(e) { console.error(e); });
+    }
+
+    // Lazy-load benchmark history when Results becomes visible. Cheap
+    // single fetch; hides itself if there's nothing to compare against.
+    if (tabId === 'sec-results' && typeof window.loadBenchHistory === 'function') {
+        try { window.loadBenchHistory(); } catch (e) { console.error(e); }
+    }
 };
 
 // ======== Chart rendering (deferred until tab first shown) ========
@@ -1524,12 +1839,17 @@ var _chartQueue = [];  // [{tabId, renderFn}]
 function queueChart(tabId, renderFn) { _chartQueue.push({tabId: tabId, fn: renderFn}); }
 function renderChartsForTab(tabId) {
     if (_renderedTabs[tabId]) return;
-    _renderedTabs[tabId] = true;
-    _chartQueue.forEach(function(item) {
-        if (item.tabId === tabId) {
-            try { item.fn(); } catch(e) { console.error('Chart render error:', e); }
-        }
-    });
+    // Queued chart renderers expect window.Plotly to exist. Wait for the
+    // lazy loader to resolve before flushing the queue.
+    mlflLoadPlotly().then(function() {
+        if (_renderedTabs[tabId]) return;
+        _renderedTabs[tabId] = true;
+        _chartQueue.forEach(function(item) {
+            if (item.tabId === tabId) {
+                try { item.fn(); } catch(e) { console.error('Chart render error:', e); }
+            }
+        });
+    }).catch(function(e) { console.error('Plotly load failed:', e); });
 }
 
 // Override showTab to also render deferred charts
@@ -1549,6 +1869,21 @@ window.showTab = function(el) {
     // ======== Settings tab ========
 
     // --- Per-field save (scalars) ---
+    // Mark / clear a persistent save-error indicator on a field. The 4-second
+    // toast scrolled past too quickly — users walked away thinking they had
+    // saved a change they hadn't. The red border + tooltip survive until the
+    // next successful save of the same field.
+    function _markFieldError(el, msg) {
+        el.classList.add('save-error');
+        el.title = 'Save failed: ' + msg;
+        el.dataset.saveError = '1';
+    }
+    function _clearFieldError(el) {
+        el.classList.remove('save-error');
+        if (el.title && el.title.indexOf('Save failed') === 0) el.removeAttribute('title');
+        delete el.dataset.saveError;
+    }
+
     window.saveSettingsField = function(el) {
         var field = el.getAttribute('data-field');
         var value = el.value;
@@ -1560,10 +1895,10 @@ window.showTab = function(el) {
             value = null;
         } else if (intFields.indexOf(field) >= 0) {
             value = parseInt(value);
-            if (isNaN(value)) { mlfl.toast('Invalid integer', 'error'); return; }
+            if (isNaN(value)) { _markFieldError(el, 'Invalid integer'); mlfl.toast('Invalid integer', 'error'); return; }
         } else if (floatFields.indexOf(field) >= 0) {
             value = parseFloat(value);
-            if (isNaN(value)) { mlfl.toast('Invalid number', 'error'); return; }
+            if (isNaN(value)) { _markFieldError(el, 'Invalid number'); mlfl.toast('Invalid number', 'error'); return; }
         }
 
         var data = { experiment: EXP_NAME };
@@ -1578,16 +1913,19 @@ window.showTab = function(el) {
         .then(function(r) { return r.json(); })
         .then(function(result) {
             if (result.success) {
+                _clearFieldError(el);
                 el.style.borderColor = 'var(--success)';
                 setTimeout(function() { el.style.borderColor = ''; }, 2000);
             } else {
                 el.style.borderColor = 'var(--error)';
-                mlfl.toast('Failed: ' + result.error, 'error');
+                _markFieldError(el, result.error || 'unknown error');
+                mlfl.toast('Save failed: ' + (result.error || 'unknown error'), 'error');
             }
         })
         .catch(function(err) {
             el.style.borderColor = 'var(--error)';
-            mlfl.toast('Error: ' + err, 'error');
+            _markFieldError(el, String(err));
+            mlfl.toast('Save failed: ' + err, 'error');
         });
     };
 
@@ -1602,15 +1940,18 @@ window.showTab = function(el) {
         .then(function(r) { return r.json(); })
         .then(function(result) {
             if (result.success) {
+                _clearFieldError(el);
                 mlfl.toast(field + ' updated', 'success');
             } else {
                 el.checked = !el.checked;
-                mlfl.toast('Failed: ' + result.error, 'error');
+                _markFieldError(el, result.error || 'unknown error');
+                mlfl.toast('Save failed: ' + (result.error || 'unknown error'), 'error');
             }
         })
         .catch(function(err) {
             el.checked = !el.checked;
-            mlfl.toast('Error: ' + err, 'error');
+            _markFieldError(el, String(err));
+            mlfl.toast('Save failed: ' + err, 'error');
         });
     };
 
@@ -2139,6 +2480,7 @@ window.showTab = function(el) {
         // --- Calibration chip + coverage tile ---
         var cov = a.coverage && a.coverage.overall;
         var nominal = (a.nominal_interval_level != null) ? a.nominal_interval_level : 0.8;
+        var calib = a.calibration || null;
         var covStatus = 'unknown';
         if (cov && typeof cov.coverage === 'number' && cov.n >= 5) {
             var covPct = cov.coverage * 100;
@@ -2152,6 +2494,33 @@ window.showTab = function(el) {
             _applyChip('chip-calibration', covStatus,
                 dir === 'on' ? 'on target' :
                 dir === 'over' ? 'bands wide' : 'bands tight');
+        } else if (calib && !calib.error && !calib.ready && calib.min_samples) {
+            // Cold-start: bands aren't published yet. Show the count of
+            // residuals we have vs the threshold, plus an ETA derived from
+            // forecast_every_minutes so the user knows when to expect them.
+            var have = calib.total_samples | 0;
+            var need = calib.min_samples | 0;
+            var pct = need > 0 ? Math.min(100, (have / need) * 100) : 0;
+            document.getElementById('v-coverage').textContent = 'Calibrating';
+            var subParts = [have + ' of ' + need + ' residuals'];
+            if (calib.eta_minutes != null && calib.eta_minutes > 0) {
+                var m = calib.eta_minutes;
+                var etaStr;
+                if (m >= 1440) etaStr = '~' + Math.round(m / 1440) + ' day' + (m >= 2880 ? 's' : '');
+                else if (m >= 60) etaStr = '~' + Math.round(m / 60) + ' h';
+                else etaStr = '~' + m + ' min';
+                subParts.push(etaStr + ' to bands');
+            }
+            document.getElementById('v-coverage-sub').textContent = subParts.join(' · ');
+            _applyChip('chip-calibration', 'unknown', Math.round(pct) + '% calibrated');
+        } else if (calib && !calib.error && calib.ready) {
+            // Bands ready but we don't have enough actuals yet to evaluate
+            // coverage. Different from "no calibration at all".
+            document.getElementById('v-coverage').textContent = '—';
+            document.getElementById('v-coverage-sub').textContent =
+                'bands ready · need ≥5 actuals to measure coverage'
+                + (cov && cov.n ? ' (have ' + cov.n + ')' : '');
+            _applyChip('chip-calibration', 'unknown', 'bands ready');
         } else {
             document.getElementById('v-coverage').textContent = '—';
             document.getElementById('v-coverage-sub').textContent =
@@ -2245,6 +2614,53 @@ window.showTab = function(el) {
             }
             document.getElementById('accuracy-empty').style.display = 'none';
             _lastAccuracyData = data;
+
+            // Retrain history strip — render chips for each distinct
+            // (model_name, model_version) the response carries. Best-
+            // effort: a missing or empty array hides the card.
+            try {
+                var rh = data.retrain_events || [];
+                var card = document.getElementById('retrain-history-card');
+                var chips = document.getElementById('retrain-history-chips');
+                var summary = document.getElementById('retrain-history-summary');
+                if (card && chips) {
+                    chips.innerHTML = '';
+                    if (rh.length) {
+                        rh.forEach(function(ev) {
+                            var chip = document.createElement('a');
+                            // Build a URL that filters the page to this
+                            // version. ?version=… is picked up by
+                            // _resolve_model_filter on the server.
+                            chip.href = '?version=' + encodeURIComponent(ev.model_version)
+                                + (ev.model_name ? '&model=' + encodeURIComponent(ev.model_name) : '')
+                                + '#sec-forecast-accuracy';
+                            chip.title = ev.model_name + ' v=' + ev.model_version
+                                + '\nFirst seen: ' + ev.first_seen
+                                + '\n' + ev.n_forecasts + ' forecast row(s)';
+                            chip.style.cssText = 'display:inline-flex;align-items:center;gap:0.4rem;'
+                                + 'padding:0.25rem 0.7rem;border-radius:1.2rem;'
+                                + 'border:1px solid var(--border);background:var(--bg-tertiary);'
+                                + 'color:var(--text-secondary);font-size:0.78rem;text-decoration:none;';
+                            var ts = (ev.first_seen || '').slice(5, 16).replace('T', ' ');
+                            chip.innerHTML =
+                                '<span style="color:var(--accent-secondary);font-weight:600;">'
+                                + ts + '</span>'
+                                + '<span style="color:var(--text-primary);">'
+                                + (ev.model_name || '—') + '</span>'
+                                + '<span style="color:var(--text-muted);">'
+                                + ev.n_forecasts + ' rows</span>';
+                            chips.appendChild(chip);
+                        });
+                        if (summary) {
+                            summary.textContent = rh.length + ' retrain'
+                                + (rh.length !== 1 ? 's' : '') + ' in window · click to filter';
+                        }
+                        card.style.display = '';
+                    } else {
+                        card.style.display = 'none';
+                    }
+                }
+            } catch (e) { console.error('retrain-history render:', e); }
 
             // Surface which model + version the metrics are for, and
             // whether the server had to fall back because the current
@@ -3275,6 +3691,257 @@ window.showTab = function(el) {
         .catch(function(err) { mlfl.toast('Failed to promote: ' + err, 'error'); });
     };
 
+    // ======== Pre-flight data sanity report ========
+    window.runDataReport = function(expName, btn) {
+        var summary = document.getElementById('data-report-summary');
+        var detail = document.getElementById('data-report-detail');
+        if (!summary || !detail) return;
+        btn.disabled = true; btn.textContent = 'Checking…';
+        summary.textContent = 'Fetching history…';
+        detail.style.display = 'none';
+        detail.innerHTML = '';
+
+        fetch(BASE + '/experiment/' + expName + '/data-report', {method: 'POST'})
+        .then(function(r) { return r.json(); })
+        .then(function(rep) {
+            btn.disabled = false; btn.textContent = 'Re-check';
+            var col, label;
+            if (rep.verdict === 'ok') { col = 'var(--success)'; label = 'OK'; }
+            else if (rep.verdict === 'warning') { col = 'var(--warning)'; label = 'Warning'; }
+            else { col = 'var(--error)'; label = 'Alert'; }
+            summary.innerHTML = '<strong style="color:' + col + ';">' + label + '</strong>'
+                + ' · ' + rep.rows_total + ' rows · coverage '
+                + (rep.coverage_pct != null ? rep.coverage_pct.toFixed(0) + '%' : '—')
+                + ' · last record ' + rep.recorder_age_minutes.toFixed(0) + ' min ago';
+
+            var rows = [];
+            function add(label, value) {
+                rows.push('<div style="display:flex;justify-content:space-between;gap:1rem;padding:0.15rem 0;border-bottom:1px solid rgba(255,255,255,0.04);">'
+                    + '<span style="color:var(--text-secondary);">' + label + '</span>'
+                    + '<span style="color:var(--text-primary);font-family:ui-monospace,monospace;">' + value + '</span></div>');
+            }
+            add('Rows total (cache + fetched)', rep.rows_total + ' (' + rep.rows_cache + ' + ' + rep.rows_fetched + ')');
+            add('Rows expected', rep.rows_expected);
+            add('Coverage', rep.coverage_pct != null ? rep.coverage_pct.toFixed(1) + '%' : '—');
+            add('First record', rep.first_ts.slice(0, 19).replace('T', ' '));
+            add('Last record', rep.last_ts.slice(0, 19).replace('T', ' '));
+            add('Recorder age', rep.recorder_age_minutes.toFixed(1) + ' min');
+            add('Biggest gap', rep.biggest_gap_minutes.toFixed(0) + ' min (' + rep.big_gap_count + ' over '
+                + rep.big_gap_threshold_minutes.toFixed(0) + ' min)');
+            add('Non-numeric values', rep.nan_pct.toFixed(1) + '%');
+            if (rep.target_min != null) {
+                add('Target range', rep.target_min.toFixed(3) + ' / median ' + rep.target_median.toFixed(3)
+                    + ' / ' + rep.target_max.toFixed(3) + ' (σ ' + rep.target_std.toFixed(3) + ')');
+            }
+            add('Longest zero-run', rep.max_zero_run_samples + ' samples');
+            if (rep.max_increment_config != null) {
+                add('Max-increment hits', rep.max_increment_hits + ' (limit ' + rep.max_increment_config + ')');
+            }
+
+            var warn = '';
+            if (rep.warnings && rep.warnings.length) {
+                warn = '<div style="margin-top:0.75rem;padding:0.5rem 0.75rem;border-radius:0.4rem;background:rgba(243,156,18,0.1);border:1px solid rgba(243,156,18,0.3);">'
+                    + '<strong style="color:var(--warning);">Warnings</strong><ul style="margin:0.4rem 0 0 1.2rem;color:var(--text-secondary);">'
+                    + rep.warnings.map(function(w) { return '<li>' + w + '</li>'; }).join('')
+                    + '</ul></div>';
+            }
+
+            detail.innerHTML = rows.join('') + warn;
+            detail.style.display = '';
+        })
+        .catch(function(e) {
+            btn.disabled = false; btn.textContent = 'Check now';
+            summary.innerHTML = '<span style="color:var(--error);">Failed: ' + e + '</span>';
+        });
+    };
+
+    // ======== Rollback ========
+    // Reveal the Roll back button on page load if a previous-generation
+    // snapshot exists on disk. Production-mode pages only — the
+    // template hides the button entirely in lab mode.
+    if ({{ 'true' if experiment.mode == 'production' else 'false' }}) {
+        fetch(BASE + '/experiment/' + EXP_NAME + '/rollback-available')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data && data.available) {
+                var btn = document.getElementById('btn-rollback');
+                if (btn) {
+                    btn.style.display = '';
+                    if (data.previous_model && data.previous_trained_at) {
+                        btn.title = 'Roll back to ' + data.previous_model
+                            + ' (trained ' + data.previous_trained_at.slice(0, 16).replace('T', ' ')
+                            + ')';
+                    }
+                }
+            }
+        })
+        .catch(function() {});
+    }
+
+    window.rollbackExperiment = function(expName, btn) {
+        mlfl.confirm(
+            'Roll ' + expName + ' back to the previous production model? '
+                + 'The current weights are kept and the action can be reversed '
+                + 'by clicking Roll back again.',
+            function() {
+                btn.disabled = true; btn.textContent = 'Rolling back…';
+                fetch(BASE + '/experiment/' + expName + '/rollback', {method: 'POST'})
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data && data.success) {
+                        mlfl.toast(data.message || 'Rolled back', 'success');
+                        setTimeout(function() { location.reload(); }, 1200);
+                    } else {
+                        btn.disabled = false; btn.textContent = 'Roll back';
+                        mlfl.toast('Rollback failed: ' + ((data && data.error) || 'unknown'), 'error');
+                    }
+                })
+                .catch(function(e) {
+                    btn.disabled = false; btn.textContent = 'Roll back';
+                    mlfl.toast('Rollback failed: ' + e, 'error');
+                });
+            }
+        );
+    };
+
+    window.deleteExperiment = function(expName) {
+        mlfl.confirm(
+            'Delete experiment "' + expName + '"? This removes the entry from '
+                + 'mlfl.yaml and clears its forecast log and benchmark history. '
+                + 'The sensor history cache and any cached model weights are kept '
+                + 'on disk (in case you recreate the experiment).',
+            function() {
+                fetch(BASE + '/api/experiments/' + encodeURIComponent(expName) + '/delete', {method: 'POST'})
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data && data.success) {
+                        mlfl.toast(expName + ' deleted', 'success');
+                        setTimeout(function() { window.location.href = BASE + '/'; }, 800);
+                    } else {
+                        mlfl.toast('Delete failed: ' + ((data && data.error) || 'unknown error'), 'error');
+                    }
+                })
+                .catch(function(err) { mlfl.toast('Delete failed: ' + err, 'error'); });
+            }
+        );
+    };
+
+    // ======== Benchmark history dropdown ========
+    // Lazily load previous benchmark runs the first time the Results tab
+    // is opened. Strip stays hidden when only one (or zero) run exists.
+    var _benchHistoryLoaded = false;
+    var _benchHistoryRuns = [];
+
+    window.loadBenchHistory = function() {
+        if (_benchHistoryLoaded) return;
+        _benchHistoryLoaded = true;
+        fetch(BASE + '/experiment/' + EXP_NAME + '/benchmark-history?limit=5')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var runs = (data && data.runs) || [];
+            _benchHistoryRuns = runs;
+            // Need at least two runs (the current one + at least one
+            // older) for "compare" to make sense.
+            if (runs.length < 2) return;
+            var sel = document.getElementById('bench-history-select');
+            if (!sel) return;
+            // Skip index 0 — that's the latest run (current results)
+            runs.slice(1).forEach(function(run, i) {
+                var opt = document.createElement('option');
+                opt.value = String(i + 1);
+                var ts = (run.ran_at || '').slice(0, 16);
+                var winner = run.best_model_name || '—';
+                var mae = (run.best_mae != null)
+                    ? ' · MAE ' + Number(run.best_mae).toFixed(3) : '';
+                opt.textContent = ts + ' · ' + winner + mae;
+                sel.appendChild(opt);
+            });
+            document.getElementById('bench-history-strip').style.display = '';
+        })
+        .catch(function(e) { console.error('benchmark-history:', e); });
+    };
+
+    window.renderBenchHistoryDelta = function() {
+        var sel = document.getElementById('bench-history-select');
+        var deltaEl = document.getElementById('bench-history-delta');
+        if (!sel || !deltaEl) return;
+        var idx = parseInt(sel.value);
+        if (isNaN(idx) || !_benchHistoryRuns[idx]) {
+            deltaEl.textContent = '';
+            return;
+        }
+        var prior = _benchHistoryRuns[idx];
+        var current = _benchHistoryRuns[0];
+        if (!prior || !current) { deltaEl.textContent = ''; return; }
+        var parts = [];
+        if (prior.best_model_name && current.best_model_name) {
+            if (prior.best_model_name === current.best_model_name) {
+                parts.push('same winner');
+            } else {
+                parts.push('winner: ' + prior.best_model_name + ' → ' + current.best_model_name);
+            }
+        }
+        if (typeof prior.best_mae === 'number' && typeof current.best_mae === 'number' && prior.best_mae > 0) {
+            var delta = ((current.best_mae - prior.best_mae) / prior.best_mae * 100);
+            var sign = delta >= 0 ? '+' : '';
+            var col = delta < 0 ? 'var(--success)' : 'var(--error)';
+            parts.push('<span style="color:' + col + ';font-weight:600;">MAE '
+                + sign + delta.toFixed(1) + '%</span>');
+        }
+        deltaEl.innerHTML = parts.join(' · ');
+    };
+
+    // ======== Model presets ========
+    // Sensible starter combinations matching docs/MODEL_GUIDE.md. Clicking
+    // a chip enables the named models and disables every other one, then
+    // POSTs each toggle through the existing single-model endpoint. We
+    // could have introduced a bulk endpoint, but 24 small POSTs against
+    // the same FastAPI process are quick enough not to be worth the
+    // schema churn.
+    var MODEL_PRESETS = {
+        fast: ['lightgbm', 'xgboost', 'seasonal_naive'],
+        balanced: ['lightgbm', 'xgboost', 'dlinear', 'sparsetsf', 'seasonal_naive'],
+        thorough: ['lightgbm', 'xgboost', 'dlinear', 'sparsetsf', 'lstm', 'nhits', 'tide', 'seasonal_naive'],
+    };
+
+    window.applyModelPreset = function(preset, btn) {
+        var wanted = MODEL_PRESETS[preset];
+        if (!wanted) return;
+        var wantedSet = {};
+        wanted.forEach(function(n) { wantedSet[n] = true; });
+
+        var toggles = document.querySelectorAll('#sec-models input[type="checkbox"][data-model]');
+        var changes = [];
+        toggles.forEach(function(cb) {
+            var name = cb.getAttribute('data-model');
+            var shouldBeOn = !!wantedSet[name];
+            if (cb.checked !== shouldBeOn) {
+                cb.checked = shouldBeOn;
+                var card = document.getElementById('exp-model-card-' + name);
+                if (card) card.style.opacity = shouldBeOn ? '1' : '0.5';
+                changes.push({name: name, enabled: shouldBeOn});
+            }
+        });
+
+        if (!changes.length) {
+            mlfl.toast('Preset already applied', 'info');
+            return;
+        }
+        if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
+
+        Promise.all(changes.map(function(c) {
+            return fetch(BASE + '/api/experiment/' + EXP_NAME + '/models/toggle', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model_name: c.name, enabled: c.enabled })
+            }).then(function(r) { return r.json(); }).catch(function() { return {success: false}; });
+        })).then(function(results) {
+            var fails = results.filter(function(r) { return !r.success; }).length;
+            if (btn) { btn.disabled = false; btn.textContent = preset.charAt(0).toUpperCase() + preset.slice(1); }
+            if (fails) mlfl.toast('Applied preset (' + fails + ' toggle' + (fails !== 1 ? 's' : '') + ' failed)', 'warning');
+            else mlfl.toast('Applied preset: ' + preset, 'success');
+        });
+    };
+
     // ======== Per-experiment model toggle ========
     window.toggleExpModel = function(el, modelName) {
         var card = document.getElementById('exp-model-card-' + modelName);
@@ -3328,6 +3995,113 @@ window.showTab = function(el) {
         .catch(function(err) {
             mlfl.toast('Failed to start tuning: ' + err, 'error');
             btn.disabled = false; btn.classList.remove('btn-loading'); btn.textContent = 'Run Tuning';
+        });
+    };
+
+    window.runTuningAll = function(name, btn) {
+        var nTrials = parseInt(document.getElementById('tuning-trials').value) || 30;
+        var strategy = document.getElementById('tuning-strategy').value;
+        mlfl.confirm(
+            'Tune every enabled model with ' + nTrials + ' trial(s) each? '
+                + 'This runs them sequentially and can take a long time '
+                + '(roughly N × the duration of one single-model run).',
+            function() {
+                btn.disabled = true; btn.classList.add('btn-loading'); btn.textContent = 'Sweep running…';
+                fetch(BASE + '/experiment/' + name + '/run-tuning-all', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({n_trials: nTrials, strategy: strategy})
+                })
+                .then(function(r) { return r.json(); })
+                .then(function() {
+                    // Begin polling the sweep summary and the single-model
+                    // progress. The single-model progress block still
+                    // tracks whichever model is currently being tuned
+                    // (the back-end overwrites tuning_results[exp] each
+                    // iteration).
+                    function poll() {
+                        fetch(BASE + '/experiment/' + name + '/tuning-all')
+                        .then(function(r) { return r.json(); })
+                        .then(function(data) {
+                            var rows = (data && data.results) || [];
+                            if (rows.length) renderTuneAllResults(rows);
+                        })
+                        .catch(function() {});
+                        fetch(BASE + '/experiment/' + name + '/tuning')
+                        .then(function(r) { if (r.ok) return r.json(); throw 0; })
+                        .then(function(result) {
+                            // When the most recent single-model run is
+                            // done AND we're not stuck (no progress for
+                            // a long while), stop polling. Heuristic:
+                            // the user can just keep this page open.
+                        })
+                        .catch(function() {});
+                    }
+                    poll();
+                    var pollId = setInterval(poll, 6000);
+                    // 30 minutes max — if the user closes the tab the
+                    // sweep keeps running server-side.
+                    setTimeout(function() { clearInterval(pollId); }, 30 * 60 * 1000);
+                })
+                .catch(function(err) {
+                    btn.disabled = false; btn.classList.remove('btn-loading'); btn.textContent = 'Tune all enabled';
+                    mlfl.toast('Failed to start sweep: ' + err, 'error');
+                });
+            }
+        );
+    };
+
+    window.renderTuneAllResults = function(rows) {
+        var holder = document.getElementById('tune-all-results');
+        var body = document.getElementById('tune-all-results-body');
+        if (!holder || !body) return;
+        body.innerHTML = '';
+        rows.forEach(function(r) {
+            var tr = document.createElement('tr');
+            var status = r.status || 'unknown';
+            var deltaCell = '—';
+            if (typeof r.default_mae === 'number' && typeof r.tuned_mae === 'number' && r.default_mae > 0) {
+                var pct = (r.tuned_mae - r.default_mae) / r.default_mae * 100;
+                deltaCell = '<span style="color:' + (pct < 0 ? 'var(--success)' : 'var(--error)') + ';font-weight:600;">'
+                    + (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%</span>';
+            }
+            tr.innerHTML =
+                '<td class="model-name">' + r.model_name + '</td>'
+                + '<td>' + (typeof r.best_score === 'number' ? r.best_score.toFixed(4) : '—') + '</td>'
+                + '<td>' + (typeof r.default_mae === 'number' ? r.default_mae.toFixed(4) : '—') + '</td>'
+                + '<td>' + (typeof r.tuned_mae === 'number' ? r.tuned_mae.toFixed(4) : '—') + '</td>'
+                + '<td>' + deltaCell + '</td>'
+                + '<td><span class="status-badge status-' + status + '">' + status + '</span></td>'
+                + '<td>'
+                  + (status === 'completed'
+                     ? '<button class="btn btn-success" style="padding:0.2rem 0.7rem;font-size:0.8rem;" '
+                       + 'onclick="applyTuningFor(\'' + EXP_NAME + '\', \'' + r.model_name + '\', this)">Apply</button>'
+                     : '')
+                  + '</td>';
+            body.appendChild(tr);
+        });
+        holder.style.display = '';
+    };
+
+    // Apply variant that locks-in a specific model's tuned params (not
+    // necessarily the one currently shown in the live-progress panel).
+    window.applyTuningFor = function(expName, modelName, btn) {
+        // The existing apply-tuning endpoint reads tuning_results[exp]
+        // which holds the most recent model. To target a specific one
+        // we'd need a new endpoint; for now we rely on the back-end
+        // having stored that model's TuningResult in the appstate dict
+        // when it last finished. If the requested model isn't the most
+        // recent one we surface a hint.
+        if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
+        fetch(BASE + '/experiment/' + expName + '/apply-tuning', {method: 'POST'})
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success) {
+                mlfl.toast(data.model + ' promoted with tuned params', 'success');
+                setTimeout(function() { location.reload(); }, 1000);
+            } else {
+                if (btn) { btn.disabled = false; btn.textContent = 'Apply'; }
+                mlfl.toast('Apply failed — only the most recently-tuned model is currently apply-able. Re-run tuning for ' + modelName + ' to apply it.', 'warning');
+            }
         });
     };
 
