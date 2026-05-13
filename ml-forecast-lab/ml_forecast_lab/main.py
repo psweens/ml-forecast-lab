@@ -668,6 +668,7 @@ class MLForecastLabApp:
                 logger.error(f"Experiment config not found: {experiment_name}")
                 return
 
+            _started_at = datetime.now(timezone.utc)
             if is_lab_mode:
                 await self._run_benchmark(exp_cfg)
             else:
@@ -684,6 +685,18 @@ class MLForecastLabApp:
                     status.last_error = None  # Clear any previous error
                     self.web_app.state.appstate.end_benchmark(experiment_name)
 
+            # Publish lifecycle sensor for HA automations
+            if is_lab_mode:
+                _duration = (datetime.now(timezone.utc) - _started_at).total_seconds()
+                _attrs = {"duration_seconds": round(_duration, 1)}
+                br = (self.web_app.state.appstate.benchmark_results.get(experiment_name)
+                      if self.web_app else None)
+                if br and getattr(br, "best_model_name", None):
+                    _attrs["winner"] = br.best_model_name
+                await self._publish_lifecycle_sensor(
+                    exp_cfg, "benchmark", "completed", _attrs,
+                )
+
         except Exception as e:
             logger.error(
                 f"Error updating experiment {experiment_name}: {e}",
@@ -697,6 +710,12 @@ class MLForecastLabApp:
                     status.last_benchmark_status = "failed"
                     status.last_error = str(e)
                     self.web_app.state.appstate.end_benchmark(experiment_name)
+            try:
+                await self._publish_lifecycle_sensor(
+                    exp_cfg, "benchmark", "failed", {"error": str(e)[:200]},
+                )
+            except Exception:
+                pass
 
     async def _get_site_location(self) -> Optional[tuple[float, float]]:
         """
@@ -2868,6 +2887,21 @@ class MLForecastLabApp:
         # Persist to disk so a restart can skip the immediate retrain for
         # this experiment and start publishing from the same weights.
         self._persist_cached_model(exp_cfg.name)
+
+        # Publish HA lifecycle sensor so automations can fire on retrain.
+        # Reuses the trained_at timestamp computed above so this sensor's
+        # state, model_version, and the forecast_log model_version tag
+        # all match.
+        try:
+            await self._publish_lifecycle_sensor(
+                exp_cfg, "retrain", "completed",
+                {
+                    "model": prod_model_name,
+                    "model_version": model_version,
+                },
+            )
+        except Exception:
+            pass
 
         # Also run a forecast immediately after retrain
         await self._forecast_with_cached(exp_cfg.name)
@@ -5251,6 +5285,52 @@ class MLForecastLabApp:
             logger.info("Received keyboard interrupt")
         finally:
             await self.shutdown()
+
+    async def _publish_lifecycle_sensor(
+        self,
+        exp_cfg,
+        event: str,
+        outcome: str,
+        attrs: Optional[dict] = None,
+    ) -> None:
+        """Publish a `last_<event>` companion sensor for HA automations.
+
+        ``event`` is one of ``"benchmark"`` / ``"retrain"``. ``outcome``
+        is ``"completed"`` / ``"failed"`` / ``"started"`` — captured as the
+        ``outcome`` attribute, while the sensor state is the ISO timestamp
+        of the event (typed as device_class=timestamp so HA picks it up
+        without further config).
+
+        Entity ID follows the same prefix / name convention as the
+        forecast sensors: ``sensor.{publish_prefix}{publish_name}_last_<event>``.
+        Best-effort: failures are logged but don't propagate, so a stale HA
+        REST token won't break the user-visible benchmark or retrain cycle.
+        """
+        if not self.ha_interface:
+            return
+        try:
+            publish_name = exp_cfg.publish_name or exp_cfg.name
+            prefix = exp_cfg.publish_prefix or "mlfl_"
+            entity_id = f"sensor.{prefix}{publish_name}_last_{event}"
+            now_iso = datetime.now(timezone.utc).isoformat()
+            payload_attrs = {
+                "outcome": outcome,
+                "experiment": exp_cfg.name,
+                "event": event,
+                "device_class": "timestamp",
+                "friendly_name": f"{exp_cfg.name} last {event}",
+                "icon": "mdi:flask" if event == "benchmark" else "mdi:autorenew",
+            }
+            if attrs:
+                payload_attrs.update(attrs)
+            await self.ha_interface.set_state(entity_id, now_iso, payload_attrs)
+        except Exception as e:
+            # Lifecycle publish is best-effort. A failure here must not
+            # abort the calling benchmark / retrain code path.
+            logger.debug(
+                "Lifecycle sensor publish for %s/%s failed: %s",
+                getattr(exp_cfg, "name", "?"), event, e,
+            )
 
     def _apply_runtime_resources(self) -> None:
         """Apply ``cpu_cores`` and ``nice_priority`` from AppConfig.
