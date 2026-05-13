@@ -32,148 +32,14 @@
     <div id="status-message"></div>
 </section>
 
-<section class="experiments-grid">
+<section class="experiments-grid"
+         id="experiments-grid"
+         hx-get="{{ base_path | default('') }}/api/dashboard/grid"
+         hx-trigger="every {{ '10s' if running_experiments else '60s' }}"
+         hx-swap="outerHTML">
     {% if experiments %}
         {% for exp in experiments %}
-        <div class="experiment-card">
-            <div class="card-header">
-                <h3 class="card-title">{{ exp.name | humanise }}</h3>
-                <span class="status-badge status-{{ exp.mode | lower }} {% if exp.last_benchmark_status == 'running' %}training{% endif %}">
-                    {{ exp.mode | upper }}
-                </span>
-            </div>
-
-            <div class="card-body">
-                <div class="card-field">
-                    <span class="field-label">Target entity</span>
-                    <span class="field-value monospace">{{ exp.target_entity }}</span>
-                </div>
-
-                {% if exp.best_model and exp.name not in running_experiments %}
-                <div class="card-field">
-                    <span class="field-label">{% if exp.mode == 'production' %}Production model{% else %}Best model{% endif %}</span>
-                    <span class="field-value color-accent font-bold">{{ exp.best_model | model_display }}</span>
-                </div>
-                {% endif %}
-
-                <div class="card-field">
-                    <span class="field-label">Status</span>
-                    <span class="field-value">
-                        {% if exp.name in running_experiments and training_summaries.get(exp.name) %}
-                        {% set ts = training_summaries[exp.name] %}
-                        <span class="status-badge status-running training">Training: {{ ts.current_model | model_display }}</span>
-                        {% else %}
-                        <span class="status-badge status-{{ exp.last_benchmark_status | lower }}">
-                            {{ exp.last_benchmark_status | title }}
-                        </span>
-                        {% endif %}
-                    </span>
-                </div>
-
-                {% if exp.last_error and exp.last_benchmark_status == 'failed' %}
-                <div class="card-field">
-                    <span class="field-label">Error</span>
-                    <span class="field-value" style="color:var(--color-error, #f44);font-size:0.85rem;word-break:break-word;">{{ exp.last_error }}</span>
-                </div>
-                {% endif %}
-
-                {% if exp.name in running_experiments and training_summaries.get(exp.name) %}
-                {% set ts = training_summaries[exp.name] %}
-                <div class="card-field">
-                    <span class="field-label">Progress</span>
-                    <span class="field-value" style="width:100%;">
-                        <div style="display:flex;align-items:center;gap:0.5rem;">
-                            <div style="flex:1;height:6px;background:var(--bg-tertiary);border-radius:3px;overflow:hidden;">
-                                <div style="height:100%;width:{{ ts.progress_pct }}%;background:linear-gradient(90deg,var(--accent-secondary),var(--accent-primary));border-radius:3px;transition:width 0.3s;"></div>
-                            </div>
-                            <span style="font-size:0.8rem;color:var(--accent-secondary);white-space:nowrap;">{{ ts.completed_models }}/{{ ts.total_models }}</span>
-                        </div>
-                    </span>
-                </div>
-                {% endif %}
-
-                {% if exp.last_benchmark_timestamp %}
-                <div class="card-field">
-                    <span class="field-label">Last run</span>
-                    <span class="field-value timestamp" data-ts="{{ exp.last_benchmark_timestamp }}">{{ exp.last_benchmark_timestamp[:19] }}</span>
-                </div>
-                {% endif %}
-
-                {% if exp.next_forecast_in_seconds is not none %}
-                <div class="card-field">
-                    <span class="field-label">Next forecast</span>
-                    <span class="field-value next-update" data-seconds="{{ exp.next_forecast_in_seconds }}">
-                        {% set s = exp.next_forecast_in_seconds %}
-                        {% if s >= 3600 %}{{ (s // 3600) }}h {{ ((s % 3600) // 60) }}m
-                        {% elif s >= 60 %}{{ (s // 60) }}m {{ (s % 60) }}s
-                        {% else %}{{ s }}s{% endif %}
-                    </span>
-                </div>
-                {% endif %}
-                {% if exp.next_retrain_in_seconds is not none %}
-                <div class="card-field">
-                    <span class="field-label">Next retrain</span>
-                    <span class="field-value next-update" data-seconds="{{ exp.next_retrain_in_seconds }}">
-                        {% set s = exp.next_retrain_in_seconds %}
-                        {% if s >= 86400 %}{{ (s // 86400) }}d {{ ((s % 86400) // 3600) }}h
-                        {% elif s >= 3600 %}{{ (s // 3600) }}h {{ ((s % 3600) // 60) }}m
-                        {% elif s >= 60 %}{{ (s // 60) }}m {{ (s % 60) }}s
-                        {% else %}{{ s }}s{% endif %}
-                    </span>
-                </div>
-                {% endif %}
-
-                {% if exp.mode == 'production' and exp.publish_entity %}
-                <div class="card-field">
-                    <span class="field-label">Sensor</span>
-                    <span class="field-value monospace" style="font-size:0.8rem;color:var(--accent-secondary);">{{ exp.publish_entity }}</span>
-                </div>
-                {% endif %}
-            </div>
-
-            <div class="card-footer card-footer-actions">
-                <a href="{{ base_path | default('') }}/experiment/{{ exp.name }}" class="btn btn-secondary flex-center">
-                    View Details
-                </a>
-                <button class="btn-icon-danger" aria-label="Delete experiment"
-                        title="Delete experiment"
-                        {% if exp.name in running_experiments or queued_experiments.get(exp.name) %}disabled{% endif %}
-                        onclick="deleteExperiment('{{ exp.name }}', this)">
-                    &times;
-                </button>
-                {% if exp.name in running_experiments %}
-                <button class="btn btn-danger flex-center nowrap" style="font-size:0.85rem;padding:0.4rem 1rem;"
-                        onclick="stopTraining('{{ exp.name }}', this)"
-                        title="Stops after current epoch completes">
-                    Stop Training
-                </button>
-                {% elif queued_experiments.get(exp.name) %}
-                <button class="btn flex-center nowrap" style="font-size:0.85rem;background:var(--warning);color:var(--bg-primary);"
-                        onclick="stopTraining('{{ exp.name }}', this)"
-                        title="Remove from queue">
-                    Queued (#{{ queued_experiments[exp.name] }})
-                </button>
-                {% else %}
-                {% if exp.mode == 'production' %}
-                <button class="btn btn-secondary flex-center nowrap" style="font-size:0.85rem;"
-                        onclick="retrainExperiment('{{ exp.name }}', this)"
-                        title="Retrain the production model to apply new settings (covariates, solar toggles, etc.)">
-                    Retrain
-                </button>
-                <button class="btn btn-success flex-center nowrap" style="font-size:0.85rem;"
-                        onclick="toggleMode('{{ exp.name }}', this)">
-                    Publishing
-                </button>
-                {% else %}
-                <button class="btn btn-success flex-center nowrap" style="font-size:0.85rem;"
-                        onclick="{% if exp.best_model %}toggleMode('{{ exp.name }}', this){% else %}mlfl.toast('Run a benchmark first', 'warning'){% endif %}"
-                        {% if not exp.best_model %}disabled{% endif %}>
-                    Publish
-                </button>
-                {% endif %}
-                {% endif %}
-            </div>
-        </div>
+            {% include "_dashboard_card.html" %}
         {% endfor %}
     {% else %}
     <div class="empty-state">
@@ -340,9 +206,10 @@
         });
     }
 
-    // Auto-refresh dashboard (faster when training is running)
-    var _refreshMs = {{ '10000' if running_experiments else '60000' }};
-    setInterval(function() { location.reload(); }, _refreshMs);
+    // Dashboard refresh is now driven by HTMX (hx-get / hx-trigger on
+    // #experiments-grid). No need for the legacy full-page reload —
+    // scroll position, expanded details and the New-experiment modal
+    // state all survive the swap.
 
     // ======== New Experiment Modal ========
     function openNewExperiment() {

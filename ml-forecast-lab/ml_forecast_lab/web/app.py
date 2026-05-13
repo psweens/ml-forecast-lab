@@ -725,14 +725,15 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     # ========== HTML Routes ==========
 
-    @app.get("/", response_class=Response)
-    async def dashboard(request: Request):
-        """
-        Main dashboard showing all experiments, their status, and current best models.
+    def _build_dashboard_context(request: Request) -> dict:
+        """Shared context for the full dashboard page and the HTMX fragment.
+
+        Both code paths need the same view-state — extracting the build
+        avoids drift between the two and keeps the page render + 10-second
+        refresh in lock-step.
         """
         experiments = list(app.state.appstate.experiment_statuses.values())
 
-        # Build lightweight training summaries for running experiments
         from ml_forecast_lab.training_events import TrainingEventBus
         training_summaries: Dict[str, Dict] = {}
         event_bus = TrainingEventBus.get_instance()
@@ -759,29 +760,48 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                     "progress_pct": round(_done / _total * 100) if _total else 0,
                 }
 
+        return {
+            "request": request,
+            "base_path": _get_base_path(request),
+            "active_page": "dashboard",
+            "version": APP_VERSION,
+            "experiments": experiments,
+            "total_experiments": len(experiments),
+            "lab_experiments": sum(1 for e in experiments if e.mode == "lab"),
+            "production_experiments": sum(
+                1 for e in experiments if e.mode == "production"
+            ),
+            "training_summaries": training_summaries,
+            "running_experiments": app.state.appstate.running_benchmarks,
+            "queued_experiments": {
+                item["name"]: i + 1
+                for i, item in enumerate(app.state.appstate.training_queue)
+            },
+        }
+
+    @app.get("/", response_class=Response)
+    async def dashboard(request: Request):
+        """Full dashboard page."""
         return templates.TemplateResponse(
             request=request,
             name="dashboard.html",
-            context={
-                "request": request,
-                "base_path": _get_base_path(request),
-                "active_page": "dashboard",
-                "version": APP_VERSION,
-                "experiments": experiments,
-                "total_experiments": len(experiments),
-                "lab_experiments": sum(
-                    1 for e in experiments if e.mode == "lab"
-                ),
-                "production_experiments": sum(
-                    1 for e in experiments if e.mode == "production"
-                ),
-                "training_summaries": training_summaries,
-                "running_experiments": app.state.appstate.running_benchmarks,
-                "queued_experiments": {
-                    item["name"]: i + 1
-                    for i, item in enumerate(app.state.appstate.training_queue)
-                },
-            },
+            context=_build_dashboard_context(request),
+        )
+
+    @app.get("/api/dashboard/grid", response_class=Response)
+    async def dashboard_grid_fragment(request: Request):
+        """HTMX partial: just the experiments-grid <section>.
+
+        Drives the dashboard's auto-refresh without a full page reload —
+        keeps scroll position, expanded details and the New-experiment
+        modal state intact. Polling cadence (10 s while a benchmark is
+        running, 60 s otherwise) is encoded into the fragment's
+        hx-trigger so it adapts after each swap.
+        """
+        return templates.TemplateResponse(
+            request=request,
+            name="_dashboard_grid.html",
+            context=_build_dashboard_context(request),
         )
 
     # Model catalog (shared between Models page and experiment detail).
