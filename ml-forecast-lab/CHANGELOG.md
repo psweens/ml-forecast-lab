@@ -1,5 +1,91 @@
 # Changelog
 
+## 2.30.0
+
+### Security
+
+- **Removed the direct port 5052 exposure from `config.yaml`.** The web
+  UI is now reached exclusively through Home Assistant's authenticated
+  ingress proxy. Previously the FastAPI app was listening on the host
+  LAN with `CORSMiddleware(allow_origins=["*"], allow_credentials=True)`
+  and zero authentication on every mutating endpoint — any LAN device
+  could delete experiments, promote arbitrary models, overwrite
+  `mlfl.yaml`, or hammer the box into CPU exhaustion with repeated
+  tuning kicks. Users who were relying on the direct port for an
+  external dashboard need to proxy through HA ingress instead.
+- CORS middleware removed entirely (ingress is same-origin).
+- Error responses no longer echo raw exception strings to the client;
+  filesystem paths are redacted via `_safe_error()` so internal
+  layout doesn't leak into JSON bodies.
+
+### Fixed
+
+- `POST /experiment/{name}/run-benchmark` no longer jams the experiment
+  permanently: the route now invokes `benchmark_callback` instead of
+  setting a status flag with no consumer to clear it.
+- All four web routes that rewrite `mlfl.yaml`
+  (`/api/settings`, `/api/experiment-settings`, `/api/models/toggle`,
+  `/api/experiment/{exp}/models/toggle`) now route through
+  `atomic_yaml_write` — a crash mid-write no longer corrupts the file.
+- `HistoryDB` now serialises every public method through the existing
+  RLock via a `@_locked` decorator. Before this, most methods touched
+  the shared `sqlite3.Connection` without holding the lock, racing
+  benchmark-cycle writes against UI accuracy queries.
+- `cleanup_forecast_log` on promote now preserves the incoming
+  champion's forecast history (`exclude_model_name=` filter) so a
+  demote → re-promote cycle doesn't wipe its calibrated residuals.
+- One malformed experiment in `mlfl.yaml` no longer crashes
+  `load_config`; the offending entry is skipped with an `ERROR` log
+  line and the remaining experiments load normally.
+- `apply_transform('log')` no longer produces `-inf` on inputs that
+  contain exact zeros (night-time PV, off-state load). Zero-min inputs
+  now use a `+1` shift; previously a `min_val == 0` branch left the
+  shift at zero and `np.log(0)` propagated `-inf` into the model.
+- `cumulative_to_interval` no longer under-reports demand during HA
+  recorder gaps. Rows whose preceding time-gap spans more than ~1.5
+  intervals are now dropped to `NaN` so the resampler treats the gap
+  as missing rather than as a single under-scaled bucket.
+- `y_diff_1` feature no longer encodes a synthetic dusk discontinuity.
+  The previous per-shift GHI gate clamped `lag_1` to 0 at the first
+  night sample while leaving `lag_2` at its daytime value, training
+  trees to expect a fictitious daily drop of size ~daytime-peak.
+
+### Changed
+
+- Subscriber queues in `TrainingEventBus` are now bounded
+  (`SUBSCRIBER_QUEUE_MAX = 8192`) with oldest-drop semantics. The
+  per-experiment event history is capped at the same size. A
+  backgrounded SSE consumer can no longer drive the add-on into OOM
+  during a long benchmark.
+- Fire-and-forget asyncio tasks in both `MLForecastLabApp` and the
+  FastAPI app are now scheduled through a `spawn()` helper that
+  retains a strong reference and surfaces unhandled exceptions via
+  the logger. Previously a GC'd task could swallow its own failure.
+- `cv_folds` validator now rejects values above 20 to stop typo
+  configurations (e.g. `cv_folds: 1000`) from turning the benchmark
+  into a multi-hour hang with no UI feedback.
+- The `future` covariate role is now explicitly flagged as a
+  stub at config-load time. `fetch_future` returns `NaN` rather than
+  pretending to consult the HA `forecast` attribute.
+- Cumulative forecast sensor is no longer published when predictions
+  are signed; `np.cumsum` would drift unboundedly and pollute HA's
+  long-term statistics. Other sensors still publish.
+
+### Schema
+
+- `HistoryDB` now records applied migrations in a new
+  `schema_versions` table. Existing installs are migrated to schema
+  v1 on first boot under 2.30.0.
+
+### Infrastructure
+
+- Bashio init script and all Python config-path helpers now anchor
+  the slug-hash glob to HA's actual 8-hex-character prefix
+  (`[0-9a-f]{8}_ml_forecast_lab`) so an unrelated add-on or fork with
+  a suffix collision can't hijack the lookup.
+- `_resample_covariate` no longer calls the deprecated
+  `Series.fillna(method="ffill")` API — uses `.ffill()` directly.
+
 ## 2.29.0
 
 ### Fixed

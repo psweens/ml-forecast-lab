@@ -21,7 +21,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
-def _atomic_yaml_write(config_path: Path, data: dict) -> None:
+def atomic_yaml_write(config_path: Path, data: dict) -> None:
     """Write *data* to *config_path* atomically via write-to-temp + rename.
 
     ``open('w')`` truncates a file **immediately**, so if the process is
@@ -173,6 +173,20 @@ class CovariateCfg:
         if self.role not in valid_roles:
             raise ValueError(
                 f'role must be one of {valid_roles}, got {self.role!r}'
+            )
+        if self.role in ('future', 'both'):
+            # The forecast-attribute path through CovariateResolver.fetch_future
+            # is a stub: it returns NaN regardless of the entity's forecast
+            # attribute, so the documented behaviour ("Predbat rates as a
+            # future covariate") does not actually work. Until a real aligner
+            # is implemented we treat the role as 'lagged' for fetch purposes
+            # and warn loudly so users know their config is being downgraded.
+            logger.warning(
+                "Covariate %r has role=%r; future-covariate fetch is not yet "
+                "implemented and will be treated as 'lagged' (historical "
+                "values only). Predictions at future timestamps will see the "
+                "covariate as NaN.",
+                self.entity, self.role,
             )
         valid_transforms = {None, 'log', 'sqrt', 'box_cox'}
         if self.transform not in valid_transforms:
@@ -491,6 +505,15 @@ class ExperimentCfg:
             )
         if self.cv_folds < 2:
             raise ValueError(f'cv_folds must be >= 2, got {self.cv_folds}')
+        if self.cv_folds > 20:
+            # An upper guard is needed because the runner does not check the
+            # absolute size of the test slice each fold — with cv_folds=1000
+            # on 5000 rows you get 1000 folds of ~4 rows each, training stalls
+            # for hours, and the UI shows no progress beyond "running".
+            raise ValueError(
+                f'cv_folds must be <= 20 to keep per-fold test slices large '
+                f'enough for stable metrics, got {self.cv_folds}'
+            )
         if self.cv_embargo_periods < 0:
             raise ValueError(
                 f'cv_embargo_periods must be >= 0, got {self.cv_embargo_periods}'
@@ -648,70 +671,84 @@ def load_config(config_path: Path | str) -> AppConfig:
 
     for exp_data in experiments_data:
         if not isinstance(exp_data, dict):
-            raise ValueError(
-                f'Each experiment must be a dictionary, got {type(exp_data)}'
-            )
-
-        # Migration: silently remove deprecated fields
-        if 'horizons_minutes' in exp_data:
-            exp_data.pop('horizons_minutes')
-            _needs_migrate = True
-
-        # Parse covariates
-        covariates_data = exp_data.pop('covariates', [])
-        covariates = []
-        for cov in covariates_data:
-            unknown_cov = set(cov) - cov_fields
-            if unknown_cov:
-                logger.warning(f'Ignoring unknown covariate fields: {unknown_cov}')
-                cov = {k: v for k, v in cov.items() if k in cov_fields}
-            covariates.append(CovariateCfg(**cov))
-
-        # Parse load_subtract (robust, per-sensor config).
-        #
-        # Each entry must be a mapping with SubtractCfg fields. Plain string
-        # entries are tolerated as a convenience (treated as entity_id with
-        # defaults) but logged as an ambiguity — the defaults may not match
-        # the sensor's actual semantics.
-        load_subtract_data = exp_data.pop('load_subtract', [])
-        load_subtract = []
-        for sub in load_subtract_data:
-            if isinstance(sub, str):
-                logger.warning(
-                    f'load_subtract entry {sub!r} is a bare string; '
-                    f'using SubtractCfg defaults (source=auto, on_missing=zero). '
-                    f'Prefer an explicit mapping with source/on_missing.'
-                )
-                sub = {'entity_id': sub}
-            unknown_sub = set(sub) - sub_fields
-            if unknown_sub:
-                logger.warning(
-                    f'Ignoring unknown load_subtract fields: {unknown_sub}'
-                )
-                sub = {k: v for k, v in sub.items() if k in sub_fields}
-            load_subtract.append(SubtractCfg(**sub))
-
-        # Deprecation: legacy `subtract: [str]` field is a stub that was never
-        # wired into preprocessing. Warn loudly so users migrate to
-        # load_subtract rather than silently ignoring what they set.
-        if exp_data.get('subtract'):
             logger.warning(
-                f"Experiment {exp_data.get('name', '?')!r}: field 'subtract' "
-                f"is deprecated and has no effect. Migrate to 'load_subtract' "
-                f"with explicit source/on_missing per sensor."
+                'Skipping malformed experiment entry: expected mapping, got %s',
+                type(exp_data).__name__,
             )
+            continue
 
-        # Filter unknown experiment fields
-        unknown_exp = set(exp_data) - exp_fields
-        if unknown_exp:
-            logger.warning(f'Ignoring unknown experiment fields: {unknown_exp}')
-            exp_data = {k: v for k, v in exp_data.items() if k in exp_fields}
+        exp_name_for_err = exp_data.get('name', '<unnamed>') if isinstance(exp_data, dict) else '?'
 
-        exp = ExperimentCfg(
-            **exp_data,
-            covariates=covariates,
-            load_subtract=load_subtract,
-        )
+        try:
+            # Migration: silently remove deprecated fields
+            if 'horizons_minutes' in exp_data:
+                exp_data.pop('horizons_minutes')
+                _needs_migrate = True
+
+            # Parse covariates
+            covariates_data = exp_data.pop('covariates', [])
+            covariates = []
+            for cov in covariates_data:
+                unknown_cov = set(cov) - cov_fields
+                if unknown_cov:
+                    logger.warning(f'Ignoring unknown covariate fields: {unknown_cov}')
+                    cov = {k: v for k, v in cov.items() if k in cov_fields}
+                covariates.append(CovariateCfg(**cov))
+
+            # Parse load_subtract (robust, per-sensor config).
+            #
+            # Each entry must be a mapping with SubtractCfg fields. Plain string
+            # entries are tolerated as a convenience (treated as entity_id with
+            # defaults) but logged as an ambiguity — the defaults may not match
+            # the sensor's actual semantics.
+            load_subtract_data = exp_data.pop('load_subtract', [])
+            load_subtract = []
+            for sub in load_subtract_data:
+                if isinstance(sub, str):
+                    logger.warning(
+                        f'load_subtract entry {sub!r} is a bare string; '
+                        f'using SubtractCfg defaults (source=auto, on_missing=zero). '
+                        f'Prefer an explicit mapping with source/on_missing.'
+                    )
+                    sub = {'entity_id': sub}
+                unknown_sub = set(sub) - sub_fields
+                if unknown_sub:
+                    logger.warning(
+                        f'Ignoring unknown load_subtract fields: {unknown_sub}'
+                    )
+                    sub = {k: v for k, v in sub.items() if k in sub_fields}
+                load_subtract.append(SubtractCfg(**sub))
+
+            # Deprecation: legacy `subtract: [str]` field is a stub that was never
+            # wired into preprocessing. Warn loudly so users migrate to
+            # load_subtract rather than silently ignoring what they set.
+            if exp_data.get('subtract'):
+                logger.warning(
+                    f"Experiment {exp_data.get('name', '?')!r}: field 'subtract' "
+                    f"is deprecated and has no effect. Migrate to 'load_subtract' "
+                    f"with explicit source/on_missing per sensor."
+                )
+
+            # Filter unknown experiment fields
+            unknown_exp = set(exp_data) - exp_fields
+            if unknown_exp:
+                logger.warning(f'Ignoring unknown experiment fields: {unknown_exp}')
+                exp_data = {k: v for k, v in exp_data.items() if k in exp_fields}
+
+            exp = ExperimentCfg(
+                **exp_data,
+                covariates=covariates,
+                load_subtract=load_subtract,
+            )
+        except (ValueError, TypeError, KeyError) as e:
+            # One bad experiment must not kill the whole add-on. The remaining
+            # experiments and the web UI must still come up so the user can
+            # see the diagnostic and edit mlfl.yaml from inside HA.
+            logger.error(
+                'Experiment %r failed validation and will be skipped: %s',
+                exp_name_for_err, e,
+            )
+            continue
         experiments.append(exp)
 
     # Extract model_overrides before filtering
@@ -741,7 +778,7 @@ def load_config(config_path: Path | str) -> AppConfig:
             for exp in raw.get('experiments', []):
                 if isinstance(exp, dict):
                     exp.pop('horizons_minutes', None)
-            _atomic_yaml_write(config_path, raw)
+            atomic_yaml_write(config_path, raw)
             logger.info('Migrated config: removed deprecated horizons_minutes')
         except Exception as e:
             logger.warning(f'Config migration failed (non-fatal): {e}')
@@ -781,7 +818,7 @@ def save_model_overrides(
     if not mo:
         data.pop('model_overrides', None)
 
-    _atomic_yaml_write(config_path, data)
+    atomic_yaml_write(config_path, data)
 
 
 def save_experiment_model_params(
@@ -823,7 +860,7 @@ def save_experiment_model_params(
             exp.pop('model_params', None)
         break
 
-    _atomic_yaml_write(config_path, data)
+    atomic_yaml_write(config_path, data)
 
 
 def save_experiment_field(
@@ -855,7 +892,7 @@ def save_experiment_field(
             exp[field] = value
             break
 
-    _atomic_yaml_write(config_path, data)
+    atomic_yaml_write(config_path, data)
 
 
 def remove_experiment_covariate(
@@ -893,7 +930,7 @@ def remove_experiment_covariate(
         break
 
     if removed:
-        _atomic_yaml_write(config_path, data)
+        atomic_yaml_write(config_path, data)
 
     return removed
 
@@ -920,7 +957,7 @@ def clear_experiment_covariates(
         break
 
     if removed > 0:
-        _atomic_yaml_write(config_path, data)
+        atomic_yaml_write(config_path, data)
 
     return removed
 
@@ -977,7 +1014,7 @@ def add_experiment_covariate(
         # Strip None values so YAML stays clean
         clean = {k: v for k, v in covariate.items() if v is not None}
         covs.append(clean)
-        _atomic_yaml_write(config_path, data)
+        atomic_yaml_write(config_path, data)
         return True
 
     return False
@@ -1043,7 +1080,7 @@ def add_experiment_load_subtract(
         # Strip None values so YAML stays clean
         clean = {k: v for k, v in subtract.items() if v is not None}
         subs.append(clean)
-        _atomic_yaml_write(config_path, data)
+        atomic_yaml_write(config_path, data)
         return True
 
     return False
@@ -1083,7 +1120,7 @@ def remove_experiment_load_subtract(
         break
 
     if removed:
-        _atomic_yaml_write(config_path, data)
+        atomic_yaml_write(config_path, data)
 
     return removed
 
@@ -1110,7 +1147,7 @@ def clear_experiment_load_subtract(
         break
 
     if removed > 0:
-        _atomic_yaml_write(config_path, data)
+        atomic_yaml_write(config_path, data)
 
     return removed
 
@@ -1158,7 +1195,7 @@ def create_experiment(
 
     exps.append(experiment)
 
-    _atomic_yaml_write(config_path, data)
+    atomic_yaml_write(config_path, data)
 
 
 def delete_experiment(
@@ -1179,7 +1216,7 @@ def delete_experiment(
     data['experiments'] = [e for e in exps if e.get('name') != experiment_name]
 
     if len(data['experiments']) < original_len:
-        _atomic_yaml_write(config_path, data)
+        atomic_yaml_write(config_path, data)
         return True
 
     return False

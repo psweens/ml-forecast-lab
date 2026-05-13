@@ -5,6 +5,7 @@ Stores historical entity states with efficient bulk insert and retrieval,
 and automatic cleanup of old records.
 """
 
+import functools
 import logging
 import re
 import sqlite3
@@ -16,6 +17,22 @@ from typing import Optional
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+def _locked(fn):
+    """Serialise SQLite access via ``self._lock``.
+
+    The connection is shared across threads with ``check_same_thread=False``,
+    which CPython's sqlite3 module allows only when callers wrap each use of
+    the connection / cursor in an external lock. ``self._lock`` is an
+    ``RLock`` so methods that delegate to other locked helpers don't
+    deadlock.
+    """
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return fn(self, *args, **kwargs)
+    return wrapper
 
 
 class HistoryDB:
@@ -44,7 +61,42 @@ class HistoryDB:
         except sqlite3.Error as e:
             logger.warning(f"Could not enable WAL mode: {e}")
         self._lock = threading.RLock()
+        self._ensure_schema_versions_table()
         logger.info(f"HistoryDB initialised at {self.path}")
+
+    def _ensure_schema_versions_table(self) -> None:
+        """Bookkeeping table for schema migrations.
+
+        Each row records that a versioned migration has been applied. Future
+        migrations should check this table (via ``_applied_versions()``) rather
+        than re-inspecting ``PRAGMA table_info`` for every relevant table.
+        """
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_versions (
+                    version    INTEGER PRIMARY KEY,
+                    applied_at TEXT    NOT NULL
+                )
+                """
+            )
+            self.conn.commit()
+
+    def _applied_versions(self) -> set:
+        """Return the set of schema versions already applied."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT version FROM schema_versions")
+        return {row[0] for row in cursor.fetchall()}
+
+    def _record_version(self, version: int) -> None:
+        """Mark *version* as applied (idempotent)."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)",
+            (version, datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        self.conn.commit()
 
     def safe_table_name(self, entity_id: str) -> str:
         """
@@ -64,6 +116,7 @@ class HistoryDB:
             raise ValueError(f"Invalid table name after sanitisation: {safe!r}")
         return safe
 
+    @_locked
     def ensure_table(self, table_name: str) -> None:
         """
         Create table if it doesn't exist.
@@ -86,6 +139,7 @@ class HistoryDB:
         self.conn.commit()
         logger.debug(f"Ensured table: {table_name}")
 
+    @_locked
     def store_history(self, table_name: str, df: pd.DataFrame) -> int:
         """
         Bulk insert history records (ignore duplicates).
@@ -133,6 +187,7 @@ class HistoryDB:
             self.conn.rollback()
             return 0
 
+    @_locked
     def get_history(self, table_name: str) -> pd.DataFrame:
         """
         Retrieve all stored history for a table.
@@ -161,6 +216,7 @@ class HistoryDB:
 
         return df
 
+    @_locked
     def cleanup(self, table_name: str, oldest_datetime: datetime) -> int:
         """
         Delete records older than specified datetime.
@@ -192,6 +248,7 @@ class HistoryDB:
     # Forecast evolution log
     # ------------------------------------------------------------------
 
+    @_locked
     def ensure_forecast_log_table(self) -> None:
         """Create the forecast_log table if it doesn't exist."""
         cursor = self.conn.cursor()
@@ -211,33 +268,37 @@ class HistoryDB:
             )
         """)
         # Migrate pre-existing tables that don't have the upper/lower
-        # columns. PRAGMA table_info returns rows (cid, name, type, ...).
-        # Each ALTER is logged at INFO so the operator can correlate
-        # schema bumps with version upgrades in the add-on log.
+        # columns. Idempotency on a clean install is preserved by
+        # checking schema_versions first; on an existing install with no
+        # schema_versions row we still fall back to PRAGMA table_info so
+        # the migration is robust across the rollout boundary.
+        applied = self._applied_versions()
         cursor.execute("PRAGMA table_info(forecast_log)")
         existing_cols = {row[1] for row in cursor.fetchall()}
         migrated: list = []
-        if "upper" not in existing_cols:
-            cursor.execute("ALTER TABLE forecast_log ADD COLUMN upper REAL")
-            migrated.append("upper")
-        if "lower" not in existing_cols:
-            cursor.execute("ALTER TABLE forecast_log ADD COLUMN lower REAL")
-            migrated.append("lower")
-        # `model_version` distinguishes weight regimes of a model that
-        # keeps the same name across retrains. Without it, the stability
-        # metric silently pools predictions from weights v1 and v2 under
-        # model_name='lgb' and reports that as "run-to-run disagreement".
-        # NULL is a legitimate legacy marker — rows predating this
-        # migration have no version and are filtered out once a versioned
-        # cohort appears for that experiment (see the analytics queries).
-        if "model_version" not in existing_cols:
-            cursor.execute(
-                "ALTER TABLE forecast_log ADD COLUMN model_version TEXT"
-            )
-            migrated.append("model_version")
+        if 1 not in applied:
+            if "upper" not in existing_cols:
+                cursor.execute("ALTER TABLE forecast_log ADD COLUMN upper REAL")
+                migrated.append("upper")
+            if "lower" not in existing_cols:
+                cursor.execute("ALTER TABLE forecast_log ADD COLUMN lower REAL")
+                migrated.append("lower")
+            # `model_version` distinguishes weight regimes of a model that
+            # keeps the same name across retrains. Without it, the stability
+            # metric silently pools predictions from weights v1 and v2 under
+            # model_name='lgb' and reports that as "run-to-run disagreement".
+            # NULL is a legitimate legacy marker — rows predating this
+            # migration have no version and are filtered out once a versioned
+            # cohort appears for that experiment (see the analytics queries).
+            if "model_version" not in existing_cols:
+                cursor.execute(
+                    "ALTER TABLE forecast_log ADD COLUMN model_version TEXT"
+                )
+                migrated.append("model_version")
+            self._record_version(1)
         if migrated:
             logger.info(
-                f"Migrated forecast_log: added column(s) {migrated}"
+                f"Migrated forecast_log to schema v1: added column(s) {migrated}"
             )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_flog_exp_target "
@@ -254,6 +315,7 @@ class HistoryDB:
         self.conn.commit()
         logger.debug("Ensured forecast_log table")
 
+    @_locked
     def log_forecast(
         self,
         experiment: str,
@@ -769,6 +831,7 @@ class HistoryDB:
             },
         }
 
+    @_locked
     def get_forecast_trajectory(
         self,
         experiment: str,
@@ -1017,6 +1080,7 @@ class HistoryDB:
             "actual_space": actual_space,
         }
 
+    @_locked
     def get_conformal_quantiles(
         self,
         experiment: str,
@@ -1175,6 +1239,7 @@ class HistoryDB:
             "level": level,
         }
 
+    @_locked
     def get_forecast_coverage(
         self,
         experiment: str,
@@ -1319,6 +1384,7 @@ class HistoryDB:
 
         return {"by_lead": by_lead, "overall": overall}
 
+    @_locked
     def get_forecast_evolution(
         self,
         experiment: str,
@@ -1451,6 +1517,7 @@ class HistoryDB:
             "time_range": {"from": min_target, "to": max_target},
         }
 
+    @_locked
     def get_forecast_stability(
         self,
         experiment: str,
@@ -1711,15 +1778,51 @@ class HistoryDB:
             },
         }
 
-    def cleanup_forecast_log(self, experiment: str, oldest_datetime: datetime) -> int:
-        """Delete forecast log entries older than the specified datetime."""
+    @_locked
+    def cleanup_forecast_log(
+        self,
+        experiment: str,
+        oldest_datetime: datetime,
+        model_name: Optional[str] = None,
+        model_version: Optional[str] = None,
+        exclude_model_name: Optional[str] = None,
+        exclude_model_version: Optional[str] = None,
+    ) -> int:
+        """Delete forecast log entries older than the specified datetime.
+
+        Filters
+        -------
+        model_name / model_version : optional positive filters to delete only
+            rows matching the given cohort. Omit either to leave that
+            dimension unfiltered.
+        exclude_model_name / exclude_model_version : optional negative
+            filters used by the promote path — delete only rows that do
+            **not** belong to the new champion cohort, so analytics for
+            the incoming model survive a champion switch.
+        """
         oldest_str = oldest_datetime.strftime("%Y-%m-%d %H:%M:%S")
+        where = ["experiment = ?", "issued_at < ?"]
+        params: list = [experiment, oldest_str]
+        if model_name is not None:
+            where.append("model_name = ?")
+            params.append(model_name)
+        if model_version is not None:
+            where.append("model_version = ?")
+            params.append(model_version)
+        if exclude_model_name is not None:
+            # Exclude rows that match BOTH name and (if given) version.
+            if exclude_model_version is not None:
+                where.append(
+                    "NOT (model_name = ? AND model_version = ?)"
+                )
+                params.extend([exclude_model_name, exclude_model_version])
+            else:
+                where.append("model_name != ?")
+                params.append(exclude_model_name)
+        sql = "DELETE FROM forecast_log WHERE " + " AND ".join(where)
         cursor = self.conn.cursor()
         try:
-            cursor.execute(
-                "DELETE FROM forecast_log WHERE experiment = ? AND issued_at < ?",
-                (experiment, oldest_str),
-            )
+            cursor.execute(sql, params)
             self.conn.commit()
             deleted = cursor.rowcount
             if deleted:
@@ -1730,6 +1833,7 @@ class HistoryDB:
             self.conn.rollback()
             return 0
 
+    @_locked
     def delete_forecast_log(self, experiment: str) -> int:
         """Delete all forecast log entries for an experiment."""
         cursor = self.conn.cursor()
@@ -1748,6 +1852,7 @@ class HistoryDB:
     # Benchmark results persistence
     # ------------------------------------------------------------------
 
+    @_locked
     def ensure_benchmark_table(self) -> None:
         """Create the benchmark_results table if it doesn't exist."""
         cursor = self.conn.cursor()
@@ -1761,6 +1866,7 @@ class HistoryDB:
         self.conn.commit()
         logger.debug("Ensured benchmark_results table")
 
+    @_locked
     def save_benchmark_result(self, experiment: str, json_data: str) -> None:
         """
         Upsert a benchmark result as a JSON blob.
@@ -1786,6 +1892,7 @@ class HistoryDB:
             logger.error(f"Error saving benchmark result for {experiment}: {e}", exc_info=True)
             self.conn.rollback()
 
+    @_locked
     def load_all_benchmark_results(self) -> dict:
         """
         Load all stored benchmark results.
@@ -1803,6 +1910,7 @@ class HistoryDB:
             logger.error(f"Error loading benchmark results: {e}", exc_info=True)
             return {}
 
+    @_locked
     def delete_benchmark_result(self, experiment: str) -> None:
         """Delete stored benchmark result for an experiment."""
         cursor = self.conn.cursor()
@@ -1816,6 +1924,7 @@ class HistoryDB:
             logger.error(f"Error deleting benchmark result for {experiment}: {e}", exc_info=True)
             self.conn.rollback()
 
+    @_locked
     def close(self) -> None:
         """Close database connection."""
         if self.conn:

@@ -10,15 +10,29 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+
+_PATH_REDACT_RE = re.compile(r"(?:[A-Za-z]:)?(?:/[\w.\-+]+)+")
+
+
+def _safe_error(exc: BaseException) -> str:
+    """User-facing error string with filesystem paths redacted.
+
+    The full traceback is logged server-side via ``exc_info=True``; callers
+    pass this through to JSON bodies so internal paths don't leak into
+    client-visible diagnostics. Only the first line of ``str(exc)`` is kept.
+    """
+    msg = str(exc).split("\n", 1)[0]
+    return f"{type(exc).__name__}: {_PATH_REDACT_RE.sub('<path>', msg)}"
+
 from ml_forecast_lab import __version__ as APP_VERSION
 
 from fastapi import FastAPI, HTTPException, Response
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -252,6 +266,35 @@ class AppState:
         # Matters for Californian users managing a UK HA: charts render in
         # HA-local time so axis labels match when events physically happened.
         self.ha_time_zone: Optional[str] = None
+        # Strong references to fire-and-forget tasks. asyncio holds only a
+        # weak reference to running tasks; without this set a coroutine
+        # scheduled via create_task can be garbage-collected before its
+        # exception is logged. discard() runs in the done callback.
+        self._background_tasks: set = set()
+
+    def spawn(self, coro):
+        """Schedule *coro* on the running loop and keep a strong reference.
+
+        Returns the underlying ``asyncio.Task``. The done callback both
+        releases the reference and logs any unhandled exception so silent
+        failures (cancelled tasks, OSError on the HA API, etc.) don't vanish.
+        """
+        import asyncio as _aio
+        task = _aio.create_task(coro)
+        self._background_tasks.add(task)
+
+        def _on_done(t: _aio.Task) -> None:
+            self._background_tasks.discard(t)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error(
+                    "Background task failed: %s", exc, exc_info=exc,
+                )
+
+        task.add_done_callback(_on_done)
+        return task
 
     def start_benchmark(self, experiment_name: str):
         """Mark benchmark as running."""
@@ -331,14 +374,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
-    # CORS middleware for external dashboard integration
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # The add-on is reached only via Home Assistant ingress (same-origin),
+    # so cross-origin requests have no legitimate use case. No CORSMiddleware
+    # is installed: any third-party origin attempting a fetch will be blocked
+    # by the browser's default same-origin policy.
 
     # ========== Ingress support ==========
 
@@ -351,6 +390,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         Honours an explicit override passed to ``create_app(config_path=...)``
         so tests can inject a temp config without touching real add-on paths.
+        The slug-hashed glob is anchored to HA's actual 8-hex-character prefix
+        so a community fork with a slug like ``psweens_ml_forecast_lab`` can
+        not accidentally hijack the lookup.
         """
         if config_path is not None and Path(config_path).exists():
             return Path(config_path)
@@ -361,7 +403,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         ]:
             if p.exists():
                 return p
-        for match in _glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
+        for match in _glob.glob(
+            "/addon_configs/[0-9a-f][0-9a-f][0-9a-f][0-9a-f]"
+            "[0-9a-f][0-9a-f][0-9a-f][0-9a-f]_ml_forecast_lab/mlfl.yaml"
+        ):
             return Path(match)
         return None
 
@@ -910,7 +955,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"success": True, "overrides": overrides, "current": current})
         except Exception as e:
             logger.error(f"Failed to save model params: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.post("/api/models/params/reset")
     async def reset_model_params(request: Request):
@@ -937,7 +982,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"success": True, "defaults": defaults})
         except Exception as e:
             logger.error(f"Failed to reset model params: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.get("/experiment/{name}", response_class=Response)
     async def experiment_detail(request: Request, name: str):
@@ -1065,11 +1110,28 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 content={"error": "Benchmark already running for this experiment"},
             )
 
-        # Mark as running
         app.state.appstate.start_benchmark(name)
 
-        # In a real application, this would trigger an async task queue
-        # For now, we return 202 Accepted and expect the main loop to handle it
+        # Without this dispatch the experiment is marked "running" but no
+        # work is queued — start_benchmark() only flips a flag. The matching
+        # end_benchmark() lives inside benchmark_callback's finally block,
+        # so if we don't call the callback the flag is never cleared and
+        # every subsequent run-benchmark / run-pipeline / retrain rejects
+        # with 409 until the add-on restarts.
+        if app.state.appstate.benchmark_callback:
+            try:
+                app.state.appstate.benchmark_callback(name)
+            except Exception:
+                # Clear the flag if dispatch itself raises so the experiment
+                # isn't permanently jammed; the callback's own error path
+                # handles clear-on-completion failures.
+                app.state.appstate.end_benchmark(name)
+                raise
+        else:
+            # No callback wired (test / stub harness) — clear the flag so
+            # the response below isn't a lie.
+            app.state.appstate.end_benchmark(name)
+
         return JSONResponse(
             status_code=202,
             content={
@@ -1155,10 +1217,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         # Prune forecast_log of rows issued under the PREVIOUS champion.
         # Only fires when the name actually changes — same-name idempotent
-        # promotes don't touch history. For same-name-different-weights
-        # discrimination we now rely on the model_version column (stamped
-        # at each retrain), so cleanup is defensive rather than load-
-        # bearing. Controlled by ExperimentCfg.clear_forecast_log_on_retrain.
+        # promotes don't touch history. The new champion's own history (if
+        # any, from a prior demote → re-promote cycle) is preserved via the
+        # exclude_model_name filter so conformal calibration and analytics
+        # don't reset on every champion switch. Controlled by
+        # ExperimentCfg.clear_forecast_log_on_retrain.
         deleted = 0
         try:
             db = app.state.appstate.history_db
@@ -1167,12 +1230,16 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 exp_cfg = next((e for e in cfg.experiments if e.name == name), None)
                 if exp_cfg and getattr(exp_cfg, "clear_forecast_log_on_retrain", True):
                     from datetime import datetime
-                    deleted = db.cleanup_forecast_log(name, datetime.utcnow())
+                    deleted = db.cleanup_forecast_log(
+                        name,
+                        datetime.utcnow(),
+                        exclude_model_name=model_name,
+                    )
                     if deleted:
                         logger.info(
                             f"Promotion {previous_model!r} → {model_name!r} "
                             f"for {name}: cleared {deleted} pre-promotion "
-                            f"forecast_log rows"
+                            f"forecast_log rows (preserving {model_name!r} history)"
                         )
         except Exception as e:
             logger.warning(f"Forecast-log cleanup on promote failed: {e}")
@@ -1185,7 +1252,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # looked like "the Publish button didn't do anything".
         if app.state.appstate.retrain_callback:
             import asyncio as _aio
-            _aio.create_task(app.state.appstate.retrain_callback(name))
+            app.state.appstate.spawn(app.state.appstate.retrain_callback(name))
             logger.info(f"Triggered immediate retrain for {name} after promotion")
 
         return JSONResponse(
@@ -1326,7 +1393,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             retrain_scheduled = False
             if action != "no_change" and app.state.appstate.retrain_callback:
                 import asyncio as _aio
-                _aio.create_task(app.state.appstate.retrain_callback(name))
+                app.state.appstate.spawn(app.state.appstate.retrain_callback(name))
                 retrain_scheduled = True
                 logger.info(
                     f"Scheduled immediate retrain for {name} after apply-covariate-best"
@@ -1357,7 +1424,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             })
         except Exception as e:
             logger.error(f"Failed to apply covariate-best: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.post("/experiment/{name}/remove-covariate")
     async def remove_covariate(name: str, request: Request):
@@ -1388,7 +1455,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 return JSONResponse(content={"success": False, "error": "Covariate not found"})
         except Exception as e:
             logger.error(f"Failed to remove covariate: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.post("/experiment/{name}/add-covariate")
     async def add_covariate(name: str, request: Request):
@@ -1423,10 +1490,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             else:
                 return JSONResponse(content={"success": False, "error": "Covariate already exists or experiment not found"})
         except ValueError as e:
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
         except Exception as e:
             logger.error(f"Failed to add covariate: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.post("/experiment/{name}/add-load-subtract")
     async def add_load_subtract(name: str, request: Request):
@@ -1482,10 +1549,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             })
         except ValueError as e:
             # SubtractCfg validation failure — message is user-actionable.
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
         except Exception as e:
             logger.error(f"Failed to add load_subtract: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.post("/experiment/{name}/remove-load-subtract")
     async def remove_load_subtract(name: str, request: Request):
@@ -1530,7 +1597,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             })
         except Exception as e:
             logger.error(f"Failed to remove load_subtract: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.post("/experiment/{name}/clear-load-subtract")
     async def clear_load_subtract(name: str):
@@ -1558,7 +1625,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             )
         except Exception as e:
             logger.error(f"Failed to clear load_subtract: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.post("/experiment/{name}/stop-training")
     async def stop_training(name: str):
@@ -1584,7 +1651,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 return JSONResponse(content={"success": False, "error": "No running task for this experiment"})
         except Exception as e:
             logger.error(f"Failed to stop training for {name}: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.post("/experiment/{name}/retrain")
     async def retrain_experiment(name: str):
@@ -1609,8 +1676,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "success": False, "error": "Retrain not available"
             })
 
-        import asyncio as _aio
-        _aio.create_task(cb(name))
+        app.state.appstate.spawn(cb(name))
         logger.info(f"User-triggered retrain for {name}")
         return JSONResponse(content={"success": True})
 
@@ -1641,10 +1707,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         try:
             create_experiment(config_path, exp_dict)
         except ValueError as e:
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
         except Exception as e:
             logger.error(f"Failed to create experiment: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
         # Register in-memory so it appears immediately
         from ml_forecast_lab.web.app import ExperimentStatus
@@ -1674,7 +1740,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 return JSONResponse(content={"success": False, "error": "Experiment not found in config"})
         except Exception as e:
             logger.error(f"Failed to delete experiment: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
         # Remove from in-memory state
         app.state.appstate.experiment_statuses.pop(name, None)
@@ -1767,7 +1833,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 return JSONResponse(content={"error": "Experiment not in config"}, status_code=404)
             actuals_table = db.safe_table_name(exp_cfg.target_entity)
         except Exception as e:
-            return JSONResponse(content={"error": str(e)}, status_code=500)
+            return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
 
         try:
             days = int(request.query_params.get("days", "30"))
@@ -1881,7 +1947,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             result["coverage"] = coverage
             result["nominal_interval_level"] = 0.8
         except Exception as e:
-            result["coverage"] = {"error": str(e)}
+            result["coverage"] = {"error": _safe_error(e)}
         return JSONResponse(content=result)
 
     @app.get("/experiment/{name}/forecast-log-stats")
@@ -1976,7 +2042,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 targets_with_multi_issuances = int(cur.fetchone()[0])
         except Exception as e:
             logger.error(f"forecast-log-stats failed for {name}: {e}", exc_info=True)
-            return JSONResponse(content={"error": str(e)}, status_code=500)
+            return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
 
         # Surface common diagnostic conditions so future debugging
         # doesn't require re-deriving them from the raw cohorts.
@@ -2056,7 +2122,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 return JSONResponse(content={"error": "Experiment not in config"}, status_code=404)
             actuals_table = db.safe_table_name(exp_cfg.target_entity)
         except Exception as e:
-            return JSONResponse(content={"error": str(e)}, status_code=500)
+            return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
 
         target_dt = request.query_params.get("target_dt") or None
         model_name, model_version = _resolve_model_filter(name, request)
@@ -2135,7 +2201,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 return JSONResponse(content={"error": "Experiment not in config"}, status_code=404)
             actuals_table = db.safe_table_name(exp_cfg.target_entity)
         except Exception as e:
-            return JSONResponse(content={"error": str(e)}, status_code=500)
+            return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
 
         # Clamp n_cycles to [2, 48] — 2 is the minimum for a "change over
         # time" visual, 48 keeps the chart legible and the query cheap.
@@ -2180,7 +2246,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             if not exp_cfg:
                 return JSONResponse(content={"error": "Experiment not in config"}, status_code=404)
         except Exception as e:
-            return JSONResponse(content={"error": str(e)}, status_code=500)
+            return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
 
         try:
             days = int(request.query_params.get("days", "30"))
@@ -2289,7 +2355,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # waiting for the next scheduled retrain cycle.
         if new_mode == "production" and app.state.appstate.retrain_callback:
             import asyncio as _aio
-            _aio.create_task(app.state.appstate.retrain_callback(name))
+            app.state.appstate.spawn(app.state.appstate.retrain_callback(name))
             logger.info(f"Triggered immediate retrain for {name} after production toggle")
 
         return JSONResponse(
@@ -2327,7 +2393,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # Trigger via callback if available
         import asyncio
         if app.state.appstate.covariate_analysis_callback:
-            asyncio.create_task(app.state.appstate.covariate_analysis_callback(name, selected_model))
+            app.state.appstate.spawn(app.state.appstate.covariate_analysis_callback(name, selected_model))
 
         return JSONResponse(
             status_code=202,
@@ -2411,8 +2477,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if not app.state.appstate.tuning_callback:
             raise HTTPException(status_code=501, detail="Tuning callback not registered")
 
-        import asyncio as _aio
-        _aio.create_task(
+        app.state.appstate.spawn(
             app.state.appstate.tuning_callback(
                 name, model_name, n_trials, strategy, schema
             )
@@ -2479,7 +2544,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             retrain_scheduled = False
             if app.state.appstate.retrain_callback:
                 import asyncio as _aio
-                _aio.create_task(app.state.appstate.retrain_callback(name))
+                app.state.appstate.spawn(app.state.appstate.retrain_callback(name))
                 retrain_scheduled = True
                 logger.info(f"Scheduled immediate retrain for {name} after apply-tuning")
 
@@ -2494,7 +2559,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             })
         except Exception as e:
             logger.error(f"Failed to apply tuning: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.get("/experiment/{name}/results")
     async def get_results(name: str):
@@ -2588,6 +2653,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         Body: {"model_name": "lstm", "enabled": true}
         """
         import yaml
+        from ml_forecast_lab.config import atomic_yaml_write
 
         try:
             data = await request.json()
@@ -2617,15 +2683,14 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                     models.remove(model_name)
                 exp["models_enabled"] = models
 
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+            atomic_yaml_write(config_path, yaml_data)
 
             logger.info(f"Model {model_name} {'enabled' if enabled else 'disabled'}")
             return JSONResponse(content={"success": True})
 
         except Exception as e:
             logger.error(f"Failed to toggle model: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.post("/api/experiment/{exp_name}/models/toggle")
     async def toggle_experiment_model(exp_name: str, request: Request):
@@ -2634,6 +2699,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         Body: {"model_name": "lstm", "enabled": true}
         """
         import yaml
+        from ml_forecast_lab.config import atomic_yaml_write
 
         try:
             data = await request.json()
@@ -2666,15 +2732,14 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 exp["models_enabled"] = models
                 break
 
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+            atomic_yaml_write(config_path, yaml_data)
 
             logger.info(f"Model {model_name} {'enabled' if enabled else 'disabled'} for {exp_name}")
             return JSONResponse(content={"success": True})
 
         except Exception as e:
             logger.error(f"Failed to toggle model for {exp_name}: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.get("/settings")
     async def settings_page(request: Request):
@@ -2808,6 +2873,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if not config_path or not config_path.exists():
             return JSONResponse(content={"success": False, "error": "Config file not found"})
 
+        from ml_forecast_lab.config import atomic_yaml_write
+
         try:
             # Read existing YAML
             with open(config_path, "r", encoding="utf-8") as f:
@@ -2828,16 +2895,14 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             if "nice_priority" in data:
                 yaml_data["nice_priority"] = int(data["nice_priority"])
 
-            # Write back
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+            atomic_yaml_write(config_path, yaml_data)
 
             logger.info(f"Settings saved to {config_path}")
             return JSONResponse(content={"success": True})
 
         except Exception as e:
             logger.error(f"Failed to save settings: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.post("/api/experiment-settings")
     async def save_experiment_settings(request: Request):
@@ -2916,6 +2981,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if not config_path or not config_path.exists():
             return JSONResponse(content={"success": False, "error": "Config file not found"})
 
+        from ml_forecast_lab.config import atomic_yaml_write
+
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 yaml_data = yaml.safe_load(f)
@@ -2938,8 +3005,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                     "success": False, "error": f"Experiment '{exp_name}' not found in config"
                 })
 
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+            atomic_yaml_write(config_path, yaml_data)
 
             # Also update the in-memory config if possible
             try:
@@ -2957,7 +3023,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         except Exception as e:
             logger.error(f"Failed to save experiment settings: {e}", exc_info=True)
-            return JSONResponse(content={"success": False, "error": str(e)})
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.get("/api/log")
     async def api_log(
@@ -3031,7 +3097,13 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         import glob
 
         dashboard_paths = [
-            *[Path(d) / "mlfl_dashboard.yaml" for d in glob.glob("/addon_configs/*_ml_forecast_lab")],
+            *[
+                Path(d) / "mlfl_dashboard.yaml"
+                for d in glob.glob(
+                    "/addon_configs/[0-9a-f][0-9a-f][0-9a-f][0-9a-f]"
+                    "[0-9a-f][0-9a-f][0-9a-f][0-9a-f]_ml_forecast_lab"
+                )
+            ],
             Path("/addon_configs/ml_forecast_lab/mlfl_dashboard.yaml"),
         ]
 

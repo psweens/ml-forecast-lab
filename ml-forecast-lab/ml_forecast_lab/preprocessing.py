@@ -117,8 +117,19 @@ def cumulative_to_interval(
     diffs_adj = diffs.copy()
     diffs_adj[resets] = series[resets]
 
-    # Cap spikes
-    spike_mask = diffs_adj > max_increment
+    # Identify rows where the time gap exceeds one interval. These hold the
+    # cumulative delta over multiple intervals — the per-row spike cap and
+    # the gap-scale division below would silently distort them. Multi-
+    # interval gaps are dropped to NaN downstream so resample_to_grid sees
+    # them as missing rather than as either a fake spike or an under-
+    # reported single bucket.
+    time_diffs = series.index.to_series().diff().dt.total_seconds() / 60.0
+    gap_scale = time_diffs / interval_minutes
+    multi_interval_gap = gap_scale > 1.5
+
+    # Cap spikes — but skip gap rows so a legitimate 4 h outage carrying
+    # several intervals' worth of energy isn't clamped to max_increment.
+    spike_mask = (diffs_adj > max_increment) & ~multi_interval_gap
     if spike_mask.any():
         logger.debug(f'Found {spike_mask.sum()} spike(s) exceeding max_increment')
         diffs_adj[spike_mask] = np.clip(
@@ -128,13 +139,21 @@ def cumulative_to_interval(
     # Handle negative differences (after reset handling)
     diffs_adj[diffs_adj < 0] = 0
 
-    # Gap-aware interpolation: scale by actual interval
-    time_diffs = series.index.to_series().diff().dt.total_seconds() / 60.0
-    gap_scale = time_diffs / interval_minutes
-    gap_scale = gap_scale.clip(lower=1.0)  # Never scale down
-    diffs_adj = diffs_adj / gap_scale
+    # Drop the accumulated-over-gap rows to NaN so downstream processing
+    # treats them as missing rather than as a single under-scaled bucket
+    # or a synthetic spike. The previous clip(lower=1.0) + division
+    # spread a multi-interval delta across one row whose neighbours were
+    # imputed zero, systematically under-reporting demand during outages.
+    if multi_interval_gap.any():
+        logger.info(
+            'cumulative_to_interval: %d row(s) span >1.5 intervals; '
+            'dropping to NaN so the gap is treated as missing rather than '
+            'a single inflated bucket.',
+            int(multi_interval_gap.sum()),
+        )
+        diffs_adj[multi_interval_gap] = np.nan
 
-    # Ensure no NaNs at start
+    # Ensure no NaNs at start (no diff for the first observation)
     diffs_adj.iloc[0] = 0
 
     return diffs_adj.astype('float64')
@@ -760,9 +779,16 @@ def apply_transform(
     series = series.copy()
 
     if transform == 'log':
-        # Shift before log if necessary
+        # Shift before log if necessary. log(0) = -inf, so any data with
+        # exact zeros (night-time PV, off-state load, midnight cumulative
+        # resets) needs a small positive shift even when min_val == 0.
         min_val = series.min()
-        shift = 0.0 if min_val >= 0 else abs(min_val) + 1.0
+        if min_val > 0:
+            shift = 0.0
+        elif min_val == 0:
+            shift = 1.0
+        else:
+            shift = abs(min_val) + 1.0
         series = np.log(series + shift)
         series.attrs['transform'] = 'log'
         series.attrs['transform_shift'] = shift

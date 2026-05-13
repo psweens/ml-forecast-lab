@@ -88,8 +88,10 @@ class CovariateResolver:
         resampler = series.resample(freq)
 
         if is_binary:
-            # Forward fill for binary (step function)
-            resampled = resampler.last().fillna(method="ffill")
+            # Forward fill for binary (step function). pandas 2.x removed the
+            # ``method=`` kwarg from Series.fillna in favour of the explicit
+            # ``ffill`` method.
+            resampled = resampler.last().ffill()
         else:
             # Mean for continuous
             resampled = resampler.mean()
@@ -183,19 +185,17 @@ class CovariateResolver:
             logger.debug(f"Using constant value {val} for {entity_id}")
             return pd.Series(val, index=future_index, name=name)
 
-        # Try to fetch forecast from entity attribute
-        try:
-            forecast_attr = await self.iface.get_state(
-                entity_id, attribute="forecast"
-            )
-            if forecast_attr:
-                logger.debug(f"Found forecast attribute for {entity_id}")
-                # Assume forecast_attr is structured; extract values aligned to future_index
-                # This is application-specific; for now, return NaN
-                return pd.Series(np.nan, index=future_index, name=name)
-        except Exception:
-            pass
-
-        # Default: return NaN (forecaster should handle missing covariates)
-        logger.info(f"No future covariate data for {entity_id}, using NaN")
+        # Future-covariate fetch from the HA `forecast` attribute is not
+        # implemented — the attribute shape is integration-specific (Met.no
+        # vs OpenWeatherMap vs Predbat all use different keys and time
+        # encodings). Until a per-integration aligner is added, we
+        # explicitly return NaN here rather than pretending to look at the
+        # attribute. CovariateCfg.__post_init__ already warns the user at
+        # load time that the role is downgraded; this is the corresponding
+        # silent fetch-side stub.
+        logger.debug(
+            "fetch_future is a stub; returning NaN for %s (future-covariate "
+            "alignment not yet implemented).",
+            entity_id,
+        )
         return pd.Series(np.nan, index=future_index, name=name)

@@ -167,6 +167,33 @@ class MLForecastLabApp:
         # Cached site location (lat, lon) from HA's /api/config — used for
         # deterministic solar physics covariates. Fetched lazily on first use.
         self._site_location: Optional[tuple[float, float]] = None
+        # Strong refs for fire-and-forget tasks scheduled from main_loop and
+        # start_web_server. Same rationale as AppState._background_tasks:
+        # asyncio holds only weak refs to running tasks, so without this set
+        # a coroutine scheduled via create_task can be GC'd before its
+        # exception is logged.
+        self._background_tasks: set = set()
+
+    def _spawn(self, coro) -> asyncio.Task:
+        """Schedule *coro* and retain a strong reference until completion.
+
+        Exceptions raised inside *coro* surface via the logger rather than
+        vanishing into a GC'd task. Callers should not await the returned
+        task unless they need cancellation semantics.
+        """
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+
+        def _on_done(t: asyncio.Task) -> None:
+            self._background_tasks.discard(t)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error("Background task failed: %s", exc, exc_info=exc)
+
+        task.add_done_callback(_on_done)
+        return task
 
     async def load_config(self, config_path: Optional[Path] = None):
         """
@@ -190,8 +217,14 @@ class MLForecastLabApp:
             Path(__file__).parent.parent / "mlfl.yaml",
         ])
 
-        # Also check HA's hashed slug paths (e.g. /addon_configs/47b4bbf0_ml_forecast_lab/)
-        for match in glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
+        # Also check HA's hashed slug paths (e.g. /addon_configs/47b4bbf0_ml_forecast_lab/).
+        # The glob is anchored to HA's 8-hex-character prefix so a community
+        # fork with a slug like `psweens_ml_forecast_lab` can't hijack the
+        # lookup and route reads/writes to the wrong directory.
+        for match in glob.glob(
+            "/addon_configs/[0-9a-f][0-9a-f][0-9a-f][0-9a-f]"
+            "[0-9a-f][0-9a-f][0-9a-f][0-9a-f]_ml_forecast_lab/mlfl.yaml"
+        ):
             search_paths.insert(0, Path(match))
 
         found_path = None
@@ -592,8 +625,9 @@ class MLForecastLabApp:
             except Exception as e:
                 logger.warning(f"Could not read HA time_zone from /api/config: {e}")
 
-            # Run in a background task
-            asyncio.create_task(self.server.serve())
+            # Run in a background task — held via _spawn so a failure here
+            # is logged rather than silently swallowed by GC.
+            self._spawn(self.server.serve())
             logger.info(f"Web server started successfully on {host}:{port}")
 
         except Exception as e:
@@ -1637,7 +1671,10 @@ class MLForecastLabApp:
                 if _p.exists():
                     _cfg_path = _p
                     break
-            for _m in _glob.glob("/addon_configs/*_ml_forecast_lab/mlfl.yaml"):
+            for _m in _glob.glob(
+                "/addon_configs/[0-9a-f][0-9a-f][0-9a-f][0-9a-f]"
+                "[0-9a-f][0-9a-f][0-9a-f][0-9a-f]_ml_forecast_lab/mlfl.yaml"
+            ):
                 _cfg_path = Path(_m)
                 break
             if _cfg_path and _cfg_path.exists():
@@ -3408,6 +3445,19 @@ class MLForecastLabApp:
                 ),
                 **common_attrs,
             }
+        elif np.any(np.asarray(y_pred) < 0):
+            # Signed predictions (e.g. net battery flow with PV export):
+            # cumsum can drift unboundedly negative or positive and the
+            # published "_cumulative" sensor stops matching the user's
+            # mental model of the target. Skip cumulative entirely and
+            # record the skip so the system page makes the omission visible.
+            logger.debug(
+                "Skipping cumulative sensor for %s: signed predictions "
+                "(min=%.3f) would produce unbounded drift in HA.",
+                publish_name, float(np.min(y_pred)),
+            )
+            skipped_sensors.append(("_cumulative", "signed_predictions"))
+            cum_attrs = None
         else:
             cum_vals = np.cumsum(y_pred)
             cum_list = [
@@ -3428,9 +3478,10 @@ class MLForecastLabApp:
                 "resets_daily": False,
                 **common_attrs,
             }
-        payloads.append(
-            (f"{base_entity}_cumulative", str(cum_state), cum_attrs)
-        )
+        if cum_attrs is not None:
+            payloads.append(
+                (f"{base_entity}_cumulative", str(cum_state), cum_attrs)
+            )
 
         # --- 4. Conformal interval sensors ----------------------------------
         # Separate upper/lower entities let the user graph the band in HA
@@ -5087,7 +5138,7 @@ class MLForecastLabApp:
                         if not already_queued:
                             self._next_retrain_per_exp[exp_cfg.name] = now + timedelta(seconds=rt_hrs * 3600)
                             await self._retrain_queue.put(exp_cfg)
-                            asyncio.ensure_future(self._retrain_queue_consumer())
+                            self._spawn(self._retrain_queue_consumer())
 
                     # Forecast this experiment
                     if (now >= self._next_forecast_per_exp[exp_cfg.name]
@@ -5097,7 +5148,7 @@ class MLForecastLabApp:
                         # tick can't double-fire this experiment before the
                         # task body runs and sets the flag itself.
                         self._forecast_running[exp_cfg.name] = True
-                        asyncio.create_task(self._forecast_single(exp_cfg))
+                        self._spawn(self._forecast_single(exp_cfg))
 
                 # Update UI countdowns
                 if self.web_app:
