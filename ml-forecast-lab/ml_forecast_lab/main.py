@@ -167,6 +167,11 @@ class MLForecastLabApp:
         # Cached site location (lat, lon) from HA's /api/config — used for
         # deterministic solar physics covariates. Fetched lazily on first use.
         self._site_location: Optional[tuple[float, float]] = None
+        # Resolved runtime-resource limits actually applied to this process
+        # (CPU thread cap, nice value). Surfaced on the System page so the
+        # user can verify their settings took effect.
+        self._applied_cpu_threads: Optional[int] = None
+        self._applied_nice: Optional[int] = None
         # Strong refs for fire-and-forget tasks scheduled from main_loop and
         # start_web_server. Same rationale as AppState._background_tasks:
         # asyncio holds only weak refs to running tasks, so without this set
@@ -609,6 +614,11 @@ class MLForecastLabApp:
 
             self.web_app.state.appstate.stop_training_callback = _stop_training_trigger
             self.web_app.state.appstate.history_db = self.history_db
+            # Expose the runtime-resource values actually applied so the
+            # System page can show "Applied: N threads, nice X" and the
+            # user can verify their cpu_cores / nice_priority took effect.
+            self.web_app.state.appstate.applied_cpu_threads = self._applied_cpu_threads
+            self.web_app.state.appstate.applied_nice = self._applied_nice
 
             # Pull HA's configured time zone so the Forecast Accuracy tab
             # can render charts in the TZ where events physically happen,
@@ -5214,6 +5224,13 @@ class MLForecastLabApp:
             # Load configuration
             await self.load_config()
 
+            # Apply runtime resource limits (CPU threads, nice value) from
+            # AppConfig BEFORE component init pulls in the heavy ML stacks
+            # (torch, lightgbm, xgboost) so their thread pools spawn with
+            # the right ceiling. Previously these settings were stored in
+            # mlfl.yaml and shown on the System page but never applied.
+            self._apply_runtime_resources()
+
             # Generate dashboard YAML
             self._generate_dashboard()
 
@@ -5234,6 +5251,87 @@ class MLForecastLabApp:
             logger.info("Received keyboard interrupt")
         finally:
             await self.shutdown()
+
+    def _apply_runtime_resources(self) -> None:
+        """Apply ``cpu_cores`` and ``nice_priority`` from AppConfig.
+
+        Previously these knobs were persisted to mlfl.yaml and surfaced on
+        the System page but nothing in the codebase read them — training
+        saturated every core regardless of the user's choice. We now cap
+        the BLAS / OMP / torch thread pools and set the process nice value
+        once at startup, before any model backend imports. Per-thread
+        env-vars also affect numpy's downstream BLAS calls in workers that
+        spawn after this point.
+        """
+        if not self.config:
+            return
+
+        cpu_cores = int(getattr(self.config, "cpu_cores", 0) or 0)
+        system_cores = os.cpu_count() or 1
+        threads = cpu_cores if 1 <= cpu_cores <= system_cores else system_cores
+
+        # Set the env vars BLAS libraries pick up at import time. Workers
+        # forked after this point inherit them; libraries already imported
+        # (numpy is loaded at the top of this module) won't change their
+        # current pool size from the env var alone, which is why we also
+        # call torch.set_num_threads below.
+        for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                    "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+            os.environ[var] = str(threads)
+
+        try:
+            import torch
+            torch.set_num_threads(threads)
+            try:
+                torch.set_num_interop_threads(threads)
+            except RuntimeError:
+                # set_num_interop_threads can only be called before any
+                # parallel work begins; subsequent calls raise. Safe to
+                # ignore — the value persists from the first call.
+                pass
+        except ImportError:
+            pass
+
+        self._applied_cpu_threads = threads
+
+        nice_priority = int(getattr(self.config, "nice_priority", 10) or 0)
+        try:
+            # PRIO_PROCESS=0 sets an absolute nice value (preferred over
+            # os.nice which is relative). Linux kernel silently clamps to
+            # [-20, 19]; raising priority (negative values) requires
+            # CAP_SYS_NICE which an unprivileged add-on container does not
+            # have, so values below 0 will fail with PermissionError —
+            # treat as "stay at current priority" rather than crash.
+            os.setpriority(os.PRIO_PROCESS, 0, nice_priority)
+            self._applied_nice = nice_priority
+        except (PermissionError, OSError) as e:
+            logger.warning(
+                "Could not set nice priority to %d (need CAP_SYS_NICE for "
+                "values below 0): %s. Process will run at default priority.",
+                nice_priority, e,
+            )
+            try:
+                self._applied_nice = os.getpriority(os.PRIO_PROCESS, 0)
+            except OSError:
+                self._applied_nice = None
+
+        warn_floor = max(1, (system_cores + 1) // 2)
+        if threads < warn_floor:
+            logger.warning(
+                "Training thread cap of %d is below half the available cores "
+                "(%d) — benchmarks will be noticeably slower. Raise "
+                "'Training CPU cores' on the System page if this is not "
+                "intentional.",
+                threads, system_cores,
+            )
+
+        logger.info(
+            "Runtime resources applied: %d CPU thread(s), nice=%s "
+            "(system has %d core(s))",
+            threads,
+            self._applied_nice if self._applied_nice is not None else "unchanged",
+            system_cores,
+        )
 
     def _generate_dashboard(self):
         """Generate ApexCharts dashboard YAML from current config."""

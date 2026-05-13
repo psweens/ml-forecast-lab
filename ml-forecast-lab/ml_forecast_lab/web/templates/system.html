@@ -106,6 +106,18 @@
             <button type="submit" class="btn btn-primary">Save Settings</button>
             <span id="save-status" style="margin-left: 1rem; color: var(--success);"></span>
         </div>
+        {% if system.applied_cpu_threads is not none or system.applied_nice is not none %}
+        <p style="margin-top:1rem;color:var(--text-secondary);font-size:0.85rem;">
+            Currently applied:
+            {% if system.applied_cpu_threads is not none %}
+            <strong style="color:var(--accent-secondary);">{{ system.applied_cpu_threads }} thread{{ 's' if system.applied_cpu_threads != 1 else '' }}</strong>,
+            {% endif %}
+            {% if system.applied_nice is not none %}
+            nice = <strong style="color:var(--accent-secondary);">{{ system.applied_nice }}</strong>
+            {% endif %}
+            <span class="info-tip">?<span class="tip-text">Changes here are persisted to mlfl.yaml and re-applied at startup. Restart the add-on for new values to take effect.</span></span>
+        </p>
+        {% endif %}
     </form>
 </section>
 

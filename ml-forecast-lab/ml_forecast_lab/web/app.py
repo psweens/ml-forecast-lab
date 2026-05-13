@@ -266,6 +266,11 @@ class AppState:
         # Matters for Californian users managing a UK HA: charts render in
         # HA-local time so axis labels match when events physically happened.
         self.ha_time_zone: Optional[str] = None
+        # Resolved runtime-resource caps actually applied to this process —
+        # surfaced on the System page so the user can verify their
+        # cpu_cores / nice_priority settings took effect.
+        self.applied_cpu_threads: Optional[int] = None
+        self.applied_nice: Optional[int] = None
         # Strong references to fire-and-forget tasks. asyncio holds only a
         # weak reference to running tasks; without this set a coroutine
         # scheduled via create_task can be garbage-collected before its
@@ -2808,6 +2813,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "disk_total_gb": disk_total_gb,
             "disk_used_gb": disk_used_gb,
             "disk_percent": disk_percent,
+            "applied_cpu_threads": app.state.appstate.applied_cpu_threads,
+            "applied_nice": app.state.appstate.applied_nice,
         }
 
         # Config data
