@@ -554,6 +554,21 @@
 <section class="section">
     <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Two complementary views: <strong>Per-Interval Accuracy</strong> measures the next-step (h=1) prediction error — what the model gets right at the 30-minute level. <strong>Daily Cumulative Accuracy</strong> (table below) sums each day's predictions and actuals before computing errors — better for use cases like daily energy or hot-water demand where you care about totals rather than exact timing. Both rankings use the Demšar (2006) composite over MAE, RMSE, and MASE. The Per-Interval rank still drives Promote, Tuning, and live forecasting; the Daily rank is informational so you can pick the model that matches your objective.</span></span></h2>
 
+    {# Previous-runs comparison strip. Lets users spot whether today's
+       benchmark is actually better than yesterday's without diffing
+       JSON. Lazily populated by JS — empty when only one run exists. #}
+    <div id="bench-history-strip" style="display:none;margin-bottom:1rem;padding:0.6rem 0.9rem;background:var(--bg-tertiary);border-radius:0.5rem;border:1px solid var(--border);">
+        <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;font-size:0.85rem;">
+            <span style="color:var(--text-secondary);">Compare with previous run</span>
+            <select id="bench-history-select" onchange="renderBenchHistoryDelta()"
+                    style="padding:0.25rem 0.5rem;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:0.4rem;font-size:0.85rem;">
+                <option value="">— pick a previous run —</option>
+            </select>
+            <span id="bench-history-delta" style="color:var(--text-secondary);"></span>
+            <span class="info-tip">?<span class="tip-text">Stores up to 5 prior benchmark runs per experiment. Pick one to see how today's winner / best-MAE differ from that earlier run — useful for spotting drift over time without diffing JSON. Storage capped to limit SD-card writes.</span></span>
+        </div>
+    </div>
+
     {# Training-window vs test-window drift verdict. Tells the user when
        poor CV scores may be down to recent data shifting away from the
        training distribution rather than a bad model. #}
@@ -1766,6 +1781,12 @@ window.showTab = function(el) {
     // tab. Subsequent calls hit the cached promise.
     if (_CHART_TABS[tabId]) {
         mlflLoadPlotly().catch(function(e) { console.error(e); });
+    }
+
+    // Lazy-load benchmark history when Results becomes visible. Cheap
+    // single fetch; hides itself if there's nothing to compare against.
+    if (tabId === 'sec-results' && typeof window.loadBenchHistory === 'function') {
+        try { window.loadBenchHistory(); } catch (e) { console.error(e); }
     }
 };
 
@@ -3646,6 +3667,71 @@ window.showTab = function(el) {
                 .catch(function(err) { mlfl.toast('Delete failed: ' + err, 'error'); });
             }
         );
+    };
+
+    // ======== Benchmark history dropdown ========
+    // Lazily load previous benchmark runs the first time the Results tab
+    // is opened. Strip stays hidden when only one (or zero) run exists.
+    var _benchHistoryLoaded = false;
+    var _benchHistoryRuns = [];
+
+    window.loadBenchHistory = function() {
+        if (_benchHistoryLoaded) return;
+        _benchHistoryLoaded = true;
+        fetch(BASE + '/experiment/' + EXP_NAME + '/benchmark-history?limit=5')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var runs = (data && data.runs) || [];
+            _benchHistoryRuns = runs;
+            // Need at least two runs (the current one + at least one
+            // older) for "compare" to make sense.
+            if (runs.length < 2) return;
+            var sel = document.getElementById('bench-history-select');
+            if (!sel) return;
+            // Skip index 0 — that's the latest run (current results)
+            runs.slice(1).forEach(function(run, i) {
+                var opt = document.createElement('option');
+                opt.value = String(i + 1);
+                var ts = (run.ran_at || '').slice(0, 16);
+                var winner = run.best_model_name || '—';
+                var mae = (run.best_mae != null)
+                    ? ' · MAE ' + Number(run.best_mae).toFixed(3) : '';
+                opt.textContent = ts + ' · ' + winner + mae;
+                sel.appendChild(opt);
+            });
+            document.getElementById('bench-history-strip').style.display = '';
+        })
+        .catch(function(e) { console.error('benchmark-history:', e); });
+    };
+
+    window.renderBenchHistoryDelta = function() {
+        var sel = document.getElementById('bench-history-select');
+        var deltaEl = document.getElementById('bench-history-delta');
+        if (!sel || !deltaEl) return;
+        var idx = parseInt(sel.value);
+        if (isNaN(idx) || !_benchHistoryRuns[idx]) {
+            deltaEl.textContent = '';
+            return;
+        }
+        var prior = _benchHistoryRuns[idx];
+        var current = _benchHistoryRuns[0];
+        if (!prior || !current) { deltaEl.textContent = ''; return; }
+        var parts = [];
+        if (prior.best_model_name && current.best_model_name) {
+            if (prior.best_model_name === current.best_model_name) {
+                parts.push('same winner');
+            } else {
+                parts.push('winner: ' + prior.best_model_name + ' → ' + current.best_model_name);
+            }
+        }
+        if (typeof prior.best_mae === 'number' && typeof current.best_mae === 'number' && prior.best_mae > 0) {
+            var delta = ((current.best_mae - prior.best_mae) / prior.best_mae * 100);
+            var sign = delta >= 0 ? '+' : '';
+            var col = delta < 0 ? 'var(--success)' : 'var(--error)';
+            parts.push('<span style="color:' + col + ';font-weight:600;">MAE '
+                + sign + delta.toFixed(1) + '%</span>');
+        }
+        deltaEl.innerHTML = parts.join(' · ');
     };
 
     // ======== Model presets ========

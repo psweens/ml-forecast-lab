@@ -2645,6 +2645,55 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         return result.model_dump()
 
+    @app.get("/experiment/{name}/benchmark-history")
+    async def benchmark_history(name: str, request: Request):
+        """Return up to N previous benchmark runs for this experiment.
+
+        Used by the Results-tab "Previous runs" dropdown. Each run is
+        a JSON-serialised BenchmarkResult; the latest sits at index 0.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        db = app.state.appstate.history_db
+        if not db:
+            return JSONResponse(content={"runs": []})
+        try:
+            limit = int(request.query_params.get("limit", "5"))
+        except (TypeError, ValueError):
+            limit = 5
+        try:
+            rows = await asyncio.to_thread(
+                db.load_benchmark_history, name, max(1, min(50, limit)),
+            )
+        except Exception as e:
+            return JSONResponse(content={"runs": [], "error": _safe_error(e)}, status_code=500)
+        # Parse each saved blob enough to expose the headline fields the
+        # dropdown needs (timestamp, winner, naive_baseline) without
+        # forcing the client to JSON.parse twice.
+        out = []
+        for r in rows:
+            entry: Dict[str, Any] = {"ran_at": r.get("ran_at")}
+            try:
+                blob = json.loads(r.get("data") or "{}")
+                entry["timestamp"] = blob.get("timestamp")
+                entry["best_model_name"] = blob.get("best_model_name")
+                entry["naive_baseline_mae"] = blob.get("naive_baseline_mae")
+                # The full models list is heavy; surface just MAE of the
+                # winner so a sparkline of "best MAE over time" is cheap
+                # to build client-side.
+                if blob.get("best_model_name"):
+                    for m in blob.get("models", []):
+                        if m.get("name") == blob.get("best_model_name"):
+                            entry["best_mae"] = (
+                                m.get("mae", {}) or {}
+                            ).get("mean")
+                            break
+                entry["data"] = r.get("data")
+            except Exception:
+                entry["data"] = r.get("data")
+            out.append(entry)
+        return JSONResponse(content={"runs": out})
+
     @app.get("/experiment/{name}/forecast")
     async def get_forecast(name: str):
         """

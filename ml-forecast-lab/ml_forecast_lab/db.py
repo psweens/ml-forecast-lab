@@ -1908,7 +1908,7 @@ class HistoryDB:
 
     @_locked
     def ensure_benchmark_table(self) -> None:
-        """Create the benchmark_results table if it doesn't exist."""
+        """Create the benchmark_results + benchmark_history tables."""
         cursor = self.conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS benchmark_results (
@@ -1917,13 +1917,34 @@ class HistoryDB:
                 updated_at TEXT NOT NULL
             )
         """)
+        # Append-only retention table — every save_benchmark_result writes
+        # one row here, capped to RETAIN_PER_EXP rows per experiment so
+        # the Results tab can offer a "Previous runs" dropdown without
+        # the disk usage growing unbounded on an SD card.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS benchmark_history (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                experiment TEXT NOT NULL,
+                ran_at     TEXT NOT NULL,
+                data       TEXT NOT NULL
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bhist_exp_ran "
+            "ON benchmark_history(experiment, ran_at)"
+        )
         self.conn.commit()
-        logger.debug("Ensured benchmark_results table")
+        logger.debug("Ensured benchmark_results + benchmark_history tables")
+
+    BENCHMARK_HISTORY_RETAIN_PER_EXP = 5
 
     @_locked
     def save_benchmark_result(self, experiment: str, json_data: str) -> None:
         """
-        Upsert a benchmark result as a JSON blob.
+        Upsert a benchmark result as a JSON blob, and append a copy to
+        ``benchmark_history`` (capped at ``BENCHMARK_HISTORY_RETAIN_PER_EXP``
+        rows per experiment) so the Results tab can offer a "Previous runs"
+        dropdown.
 
         Parameters
         ----------
@@ -1940,11 +1961,53 @@ class HistoryDB:
                 "(experiment, data, updated_at) VALUES (?, ?, ?)",
                 (experiment, json_data, now_str),
             )
+            cursor.execute(
+                "INSERT INTO benchmark_history (experiment, ran_at, data) "
+                "VALUES (?, ?, ?)",
+                (experiment, now_str, json_data),
+            )
+            # Trim oldest rows so the retention cap holds. Two-step
+            # because SQLite doesn't support DELETE with LIMIT/OFFSET in
+            # all builds; the subquery is bounded and indexed.
+            cursor.execute(
+                "DELETE FROM benchmark_history WHERE id IN ("
+                "  SELECT id FROM benchmark_history WHERE experiment = ?"
+                "  ORDER BY ran_at DESC LIMIT -1 OFFSET ?"
+                ")",
+                (experiment, self.BENCHMARK_HISTORY_RETAIN_PER_EXP),
+            )
             self.conn.commit()
             logger.debug(f"Saved benchmark result for {experiment}")
         except sqlite3.Error as e:
             logger.error(f"Error saving benchmark result for {experiment}: {e}", exc_info=True)
             self.conn.rollback()
+
+    @_locked
+    def load_benchmark_history(
+        self, experiment: str, limit: int = 5,
+    ) -> list:
+        """Return up to *limit* previous benchmark runs for *experiment*.
+
+        Each item is a dict with ``ran_at`` (ISO-ish UTC string) and
+        ``data`` (JSON-serialised BenchmarkResult). Ordered newest first.
+        """
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT ran_at, data FROM benchmark_history "
+                "WHERE experiment = ? ORDER BY ran_at DESC LIMIT ?",
+                (experiment, int(limit)),
+            )
+            return [
+                {"ran_at": row["ran_at"], "data": row["data"]}
+                for row in cursor.fetchall()
+            ]
+        except sqlite3.Error as e:
+            logger.error(
+                "Error loading benchmark history for %s: %s",
+                experiment, e, exc_info=True,
+            )
+            return []
 
     @_locked
     def load_all_benchmark_results(self) -> dict:
@@ -1966,11 +2029,15 @@ class HistoryDB:
 
     @_locked
     def delete_benchmark_result(self, experiment: str) -> None:
-        """Delete stored benchmark result for an experiment."""
+        """Delete stored benchmark result + history for an experiment."""
         cursor = self.conn.cursor()
         try:
             cursor.execute(
                 "DELETE FROM benchmark_results WHERE experiment = ?",
+                (experiment,),
+            )
+            cursor.execute(
+                "DELETE FROM benchmark_history WHERE experiment = ?",
                 (experiment,),
             )
             self.conn.commit()
