@@ -1953,6 +1953,37 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             result["nominal_interval_level"] = 0.8
         except Exception as e:
             result["coverage"] = {"error": _safe_error(e)}
+
+        # Calibration progress. Surfaces "we have N of the M residuals
+        # needed before _upper_80 / _lower_80 sensors start publishing"
+        # so a freshly-promoted experiment doesn't leave the user
+        # wondering why the bands tile says "—" with no explanation.
+        try:
+            cq = await asyncio.to_thread(
+                db.get_conformal_quantiles,
+                name, actuals_table,
+                0.8,
+                model_name,
+                exp_cfg.interval_minutes,
+                14,
+                10,
+                model_version,
+            )
+            n_have = int(cq.get("total_samples") or 0)
+            n_need = 10
+            forecast_every = exp_cfg.forecast_every_minutes or 30
+            ready = bool(cq.get("fallback_quantile") is not None) or n_have >= n_need
+            cycles_remaining = max(0, n_need - n_have)
+            result["calibration"] = {
+                "ready": ready,
+                "total_samples": n_have,
+                "min_samples": n_need,
+                "forecast_every_minutes": forecast_every,
+                "eta_minutes": cycles_remaining * forecast_every if not ready else 0,
+                "level": cq.get("level", 0.8),
+            }
+        except Exception as e:
+            result["calibration"] = {"error": _safe_error(e)}
         return JSONResponse(content=result)
 
     @app.get("/experiment/{name}/forecast-log-stats")

@@ -2291,6 +2291,7 @@ window.showTab = function(el) {
         // --- Calibration chip + coverage tile ---
         var cov = a.coverage && a.coverage.overall;
         var nominal = (a.nominal_interval_level != null) ? a.nominal_interval_level : 0.8;
+        var calib = a.calibration || null;
         var covStatus = 'unknown';
         if (cov && typeof cov.coverage === 'number' && cov.n >= 5) {
             var covPct = cov.coverage * 100;
@@ -2304,6 +2305,33 @@ window.showTab = function(el) {
             _applyChip('chip-calibration', covStatus,
                 dir === 'on' ? 'on target' :
                 dir === 'over' ? 'bands wide' : 'bands tight');
+        } else if (calib && !calib.error && !calib.ready && calib.min_samples) {
+            // Cold-start: bands aren't published yet. Show the count of
+            // residuals we have vs the threshold, plus an ETA derived from
+            // forecast_every_minutes so the user knows when to expect them.
+            var have = calib.total_samples | 0;
+            var need = calib.min_samples | 0;
+            var pct = need > 0 ? Math.min(100, (have / need) * 100) : 0;
+            document.getElementById('v-coverage').textContent = 'Calibrating';
+            var subParts = [have + ' of ' + need + ' residuals'];
+            if (calib.eta_minutes != null && calib.eta_minutes > 0) {
+                var m = calib.eta_minutes;
+                var etaStr;
+                if (m >= 1440) etaStr = '~' + Math.round(m / 1440) + ' day' + (m >= 2880 ? 's' : '');
+                else if (m >= 60) etaStr = '~' + Math.round(m / 60) + ' h';
+                else etaStr = '~' + m + ' min';
+                subParts.push(etaStr + ' to bands');
+            }
+            document.getElementById('v-coverage-sub').textContent = subParts.join(' · ');
+            _applyChip('chip-calibration', 'unknown', Math.round(pct) + '% calibrated');
+        } else if (calib && !calib.error && calib.ready) {
+            // Bands ready but we don't have enough actuals yet to evaluate
+            // coverage. Different from "no calibration at all".
+            document.getElementById('v-coverage').textContent = '—';
+            document.getElementById('v-coverage-sub').textContent =
+                'bands ready · need ≥5 actuals to measure coverage'
+                + (cov && cov.n ? ' (have ' + cov.n + ')' : '');
+            _applyChip('chip-calibration', 'unknown', 'bands ready');
         } else {
             document.getElementById('v-coverage').textContent = '—';
             document.getElementById('v-coverage-sub').textContent =
