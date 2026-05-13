@@ -614,6 +614,18 @@ class MLForecastLabApp:
 
             self.web_app.state.appstate.stop_training_callback = _stop_training_trigger
             self.web_app.state.appstate.history_db = self.history_db
+
+            # Rollback callback for the "Roll back to previous" button on
+            # the experiment header. Synchronous swap so the UI's response
+            # reflects the new champion immediately.
+            def _rollback_trigger(experiment_name: str) -> tuple[bool, Optional[str]]:
+                return self._rollback_cached_model(experiment_name)
+            self.web_app.state.appstate.rollback_callback = _rollback_trigger
+
+            # Cached-model directory accessor — lets the web layer check
+            # whether a "previous" version exists for the rollback button
+            # without duplicating the slugify logic.
+            self.web_app.state.appstate.cached_model_dir = self._cached_model_dir
             # Expose the runtime-resource values actually applied so the
             # System page can show "Applied: N threads, nice X" and the
             # user can verify their cpu_cores / nice_priority took effect.
@@ -3087,11 +3099,17 @@ class MLForecastLabApp:
             cache_meta.json — feature_cols, trained_at, model_version,
                               is_neural, window_size, addon_version
 
+        Before overwriting, the previous champion (if any) is moved into
+        a ``previous/`` sub-directory so a regressive retrain can be
+        rolled back via the API / Roll back button. Only one generation
+        of previous weights is kept to bound disk usage on an SD card.
+
         Swallows and logs all errors: a failed persist must never break
         the retrain path. The live _cached_models dict is the source of
         truth at runtime; disk is only read on startup.
         """
         import json
+        import shutil
         cache = self._cached_models.get(exp_name)
         if not cache:
             return
@@ -3102,6 +3120,28 @@ class MLForecastLabApp:
 
             model_bin = model_dir / "model.bin"
             meta_file = model_dir / "cache_meta.json"
+
+            # Archive the current champion into previous/ before we
+            # overwrite it. Single-generation cap keeps SD-card writes
+            # bounded — older snapshots are silently dropped.
+            try:
+                if model_bin.exists() and meta_file.exists():
+                    prev_dir = model_dir / "previous"
+                    prev_dir.mkdir(parents=True, exist_ok=True)
+                    for fname in ("model.bin", "cache_meta.json"):
+                        src = model_dir / fname
+                        dst = prev_dir / fname
+                        if src.exists():
+                            if dst.exists():
+                                dst.unlink()
+                            shutil.copy2(src, dst)
+                    logger.debug(
+                        f"  Archived previous {exp_name} cache → {prev_dir}"
+                    )
+            except Exception as _e:
+                logger.debug(
+                    f"  Could not archive previous {exp_name} cache: {_e}"
+                )
 
             cache["model"].save(str(model_bin))
 
@@ -3230,6 +3270,96 @@ class MLForecastLabApp:
                 f"Restored {restored} cached production model(s) from disk — "
                 f"skipping immediate retrain for these experiments"
             )
+
+    def _rollback_cached_model(self, exp_name: str) -> tuple[bool, Optional[str]]:
+        """Roll a regressive retrain back to the previous champion.
+
+        Looks for ``previous/`` in the per-experiment cache dir. If
+        present, swaps current ↔ previous on disk and re-loads the
+        in-memory cache. Returns ``(success, message)``.
+        """
+        import json
+        import shutil
+        if not self.model_registry:
+            return False, "Model registry not initialised"
+        if not self.config:
+            return False, "Config not loaded"
+        exp_cfg = next(
+            (e for e in self.config.experiments if e.name == exp_name), None,
+        )
+        if exp_cfg is None:
+            return False, "Experiment not found"
+
+        model_dir = self._cached_model_dir(exp_name)
+        prev_dir = model_dir / "previous"
+        prev_bin = prev_dir / "model.bin"
+        prev_meta = prev_dir / "cache_meta.json"
+        if not prev_bin.exists() or not prev_meta.exists():
+            return False, "No previous version on disk to roll back to"
+
+        try:
+            # Swap: current → previous_tmp, previous → current, previous_tmp → previous.
+            # Keeps the rollback symmetric so it can be performed again
+            # (toggling between two generations).
+            tmp_dir = model_dir / "_swap_tmp"
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir)
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            for fname in ("model.bin", "cache_meta.json"):
+                src = model_dir / fname
+                if src.exists():
+                    shutil.move(str(src), str(tmp_dir / fname))
+            for fname in ("model.bin", "cache_meta.json"):
+                src = prev_dir / fname
+                if src.exists():
+                    shutil.move(str(src), str(model_dir / fname))
+            for fname in ("model.bin", "cache_meta.json"):
+                src = tmp_dir / fname
+                if src.exists():
+                    shutil.move(str(src), str(prev_dir / fname))
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception as e:
+            return False, f"Swap failed: {e}"
+
+        # Re-load into the live cache.
+        try:
+            meta = json.loads((model_dir / "cache_meta.json").read_text())
+            model_name = meta["model_name"]
+            model = self.model_registry.create(model_name)
+            model.load(str(model_dir / "model.bin"))
+            trained_at = datetime.fromisoformat(meta["trained_at"])
+            is_neural = meta.get("is_neural", False)
+            window_size = meta.get("window_size")
+            seq_kwargs: Dict = {}
+            if is_neural and window_size:
+                seq_kwargs["sequence_data"] = np.zeros(
+                    (1, window_size, 1), dtype=np.float32
+                )
+            self._cached_models[exp_name] = {
+                "model": model,
+                "model_name": model_name,
+                "feature_cols": meta["feature_cols"],
+                "combined": None,
+                "exp_cfg": exp_cfg,
+                "trained_at": trained_at,
+                "model_version": meta["model_version"],
+                "is_neural": is_neural,
+                "seq_kwargs": seq_kwargs,
+            }
+            if self.web_app:
+                status = self.web_app.state.appstate.experiment_statuses.get(exp_name)
+                if status:
+                    status.best_model = model_name
+                    status.model_version = meta["model_version"]
+                    status.last_benchmark_timestamp = meta["trained_at"]
+                    status.last_error = None
+            logger.info(
+                "Rolled back %s to previous champion %s (trained %s)",
+                exp_name, model_name, meta["trained_at"],
+            )
+            return True, f"Rolled back to {model_name} trained {meta['trained_at']}"
+        except Exception as e:
+            return False, f"Rollback restore failed: {e}"
 
     async def _run_forecast_cycle(self):
         """

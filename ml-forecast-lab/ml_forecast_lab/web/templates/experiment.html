@@ -60,6 +60,13 @@
            title="Download an auto-generated Lovelace dashboard YAML for this and every other experiment.">
             Lovelace YAML
         </a>
+        {% if experiment.mode == 'production' %}
+        <button class="btn btn-secondary" id="btn-rollback" style="display:none;"
+                onclick="rollbackExperiment('{{ experiment.name }}', this)"
+                title="Roll back to the previous production model snapshot. Available when a retrain has happened recently.">
+            Roll back
+        </button>
+        {% endif %}
         <button class="btn btn-danger" onclick="deleteExperiment('{{ experiment.name }}')"
                 title="Delete this experiment from mlfl.yaml. Cached models and history are removed; forecast log entries are kept.">
             Delete
@@ -3645,6 +3652,55 @@ window.showTab = function(el) {
             setTimeout(function() { location.reload(); }, 1000);
         })
         .catch(function(err) { mlfl.toast('Failed to promote: ' + err, 'error'); });
+    };
+
+    // ======== Rollback ========
+    // Reveal the Roll back button on page load if a previous-generation
+    // snapshot exists on disk. Production-mode pages only — the
+    // template hides the button entirely in lab mode.
+    if ({{ 'true' if experiment.mode == 'production' else 'false' }}) {
+        fetch(BASE + '/experiment/' + EXP_NAME + '/rollback-available')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data && data.available) {
+                var btn = document.getElementById('btn-rollback');
+                if (btn) {
+                    btn.style.display = '';
+                    if (data.previous_model && data.previous_trained_at) {
+                        btn.title = 'Roll back to ' + data.previous_model
+                            + ' (trained ' + data.previous_trained_at.slice(0, 16).replace('T', ' ')
+                            + ')';
+                    }
+                }
+            }
+        })
+        .catch(function() {});
+    }
+
+    window.rollbackExperiment = function(expName, btn) {
+        mlfl.confirm(
+            'Roll ' + expName + ' back to the previous production model? '
+                + 'The current weights are kept and the action can be reversed '
+                + 'by clicking Roll back again.',
+            function() {
+                btn.disabled = true; btn.textContent = 'Rolling back…';
+                fetch(BASE + '/experiment/' + expName + '/rollback', {method: 'POST'})
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data && data.success) {
+                        mlfl.toast(data.message || 'Rolled back', 'success');
+                        setTimeout(function() { location.reload(); }, 1200);
+                    } else {
+                        btn.disabled = false; btn.textContent = 'Roll back';
+                        mlfl.toast('Rollback failed: ' + ((data && data.error) || 'unknown'), 'error');
+                    }
+                })
+                .catch(function(e) {
+                    btn.disabled = false; btn.textContent = 'Roll back';
+                    mlfl.toast('Rollback failed: ' + e, 'error');
+                });
+            }
+        );
     };
 
     window.deleteExperiment = function(expName) {

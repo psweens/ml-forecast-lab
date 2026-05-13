@@ -292,6 +292,10 @@ class AppState:
         # cpu_cores / nice_priority settings took effect.
         self.applied_cpu_threads: Optional[int] = None
         self.applied_nice: Optional[int] = None
+        # Rollback support (wired by main.py once components are
+        # initialised). Used by the per-experiment 'Roll back' button.
+        self.rollback_callback = None
+        self.cached_model_dir = None
         # Strong references to fire-and-forget tasks. asyncio holds only a
         # weak reference to running tasks; without this set a coroutine
         # scheduled via create_task can be garbage-collected before its
@@ -1705,6 +1709,59 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         app.state.appstate.spawn(cb(name))
         logger.info(f"User-triggered retrain for {name}")
         return JSONResponse(content={"success": True})
+
+    @app.post("/experiment/{name}/rollback")
+    async def rollback_experiment(name: str):
+        """Swap the cached production model back to the previous champion.
+
+        The previous-generation weights are archived inside
+        ``previous/`` by ``_persist_cached_model`` on every successful
+        retrain, so this swap is symmetric: calling it twice toggles
+        between two generations.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        if app.state.appstate.is_benchmark_running(name):
+            return JSONResponse(content={
+                "success": False, "error": "Training is in progress; wait for it to finish before rolling back",
+            })
+        cb = app.state.appstate.rollback_callback
+        if not cb:
+            return JSONResponse(content={
+                "success": False, "error": "Rollback unavailable",
+            })
+        try:
+            ok, msg = cb(name)
+        except Exception as e:
+            logger.error("Rollback failed for %s: %s", name, e, exc_info=True)
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
+        if not ok:
+            return JSONResponse(content={"success": False, "error": msg or "Rollback failed"})
+        return JSONResponse(content={"success": True, "message": msg})
+
+    @app.get("/experiment/{name}/rollback-available")
+    async def rollback_available(name: str):
+        """Check whether a `previous/` snapshot exists on disk."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        getter = app.state.appstate.cached_model_dir
+        if not getter:
+            return JSONResponse(content={"available": False})
+        try:
+            model_dir = getter(name)
+            prev = Path(model_dir) / "previous"
+            available = (prev / "model.bin").exists() and (prev / "cache_meta.json").exists()
+            payload: Dict[str, Any] = {"available": bool(available)}
+            if available:
+                try:
+                    meta = json.loads((prev / "cache_meta.json").read_text())
+                    payload["previous_model"] = meta.get("model_name")
+                    payload["previous_trained_at"] = meta.get("trained_at")
+                except Exception:
+                    pass
+            return JSONResponse(content=payload)
+        except Exception as e:
+            return JSONResponse(content={"available": False, "error": _safe_error(e)})
 
     @app.post("/api/experiments/create")
     async def create_experiment_route(request: Request):
