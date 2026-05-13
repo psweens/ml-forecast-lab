@@ -458,6 +458,20 @@
     <h2>Model Selection</h2>
     <p style="color:var(--text-secondary);margin-bottom:1rem;">Choose which models to include when running the pipeline. Visit the <a href="{{ base_path | default('') }}/models" style="color:var(--accent-secondary);">Models</a> page to configure hyperparameters.</p>
 
+    <div class="model-presets" style="margin-bottom:1.25rem;">
+        <span style="font-size:0.85rem;color:var(--text-secondary);margin-right:0.6rem;">
+            Quick presets
+            <span class="info-tip">?<span class="tip-text">Sensible starter combinations matching the guidance in <code>docs/MODEL_GUIDE.md</code>. Clicking a preset enables those models for this experiment and disables the rest — you can still tweak the toggles after. Pick <strong>Fast</strong> if you're on a Pi 5 with limited time, <strong>Balanced</strong> for the best accuracy / compute trade-off, <strong>Thorough</strong> when you have hours to spare.</span></span>
+            :
+        </span>
+        <button type="button" class="btn btn-secondary preset-chip" onclick="applyModelPreset('fast', this)"
+                title="LightGBM + XGBoost + Seasonal Naive — fastest reasonable benchmark; runs in minutes on a Pi 5.">Fast</button>
+        <button type="button" class="btn btn-secondary preset-chip" onclick="applyModelPreset('balanced', this)"
+                title="Adds DLinear and SparseTSF — strong linear baselines that often beat the tree models on smooth seasonal targets.">Balanced</button>
+        <button type="button" class="btn btn-secondary preset-chip" onclick="applyModelPreset('thorough', this)"
+                title="Adds LSTM, N-HiTS, TiDE — neural backends with stronger inductive bias for complex patterns. Longer runs (tens of minutes per benchmark on a Pi 5).">Thorough</button>
+    </div>
+
     <h3 style="color:var(--text-primary);margin:1rem 0 0.25rem;">Tree Models</h3>
     <p style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:0.75rem;">Gradient-boosted decision trees — fast, feature-driven, interpretable via feature importance.</p>
     <div class="experiments-grid" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr));">
@@ -3433,6 +3447,57 @@ window.showTab = function(el) {
                 .catch(function(err) { mlfl.toast('Delete failed: ' + err, 'error'); });
             }
         );
+    };
+
+    // ======== Model presets ========
+    // Sensible starter combinations matching docs/MODEL_GUIDE.md. Clicking
+    // a chip enables the named models and disables every other one, then
+    // POSTs each toggle through the existing single-model endpoint. We
+    // could have introduced a bulk endpoint, but 24 small POSTs against
+    // the same FastAPI process are quick enough not to be worth the
+    // schema churn.
+    var MODEL_PRESETS = {
+        fast: ['lightgbm', 'xgboost', 'seasonal_naive'],
+        balanced: ['lightgbm', 'xgboost', 'dlinear', 'sparsetsf', 'seasonal_naive'],
+        thorough: ['lightgbm', 'xgboost', 'dlinear', 'sparsetsf', 'lstm', 'nhits', 'tide', 'seasonal_naive'],
+    };
+
+    window.applyModelPreset = function(preset, btn) {
+        var wanted = MODEL_PRESETS[preset];
+        if (!wanted) return;
+        var wantedSet = {};
+        wanted.forEach(function(n) { wantedSet[n] = true; });
+
+        var toggles = document.querySelectorAll('#sec-models input[type="checkbox"][data-model]');
+        var changes = [];
+        toggles.forEach(function(cb) {
+            var name = cb.getAttribute('data-model');
+            var shouldBeOn = !!wantedSet[name];
+            if (cb.checked !== shouldBeOn) {
+                cb.checked = shouldBeOn;
+                var card = document.getElementById('exp-model-card-' + name);
+                if (card) card.style.opacity = shouldBeOn ? '1' : '0.5';
+                changes.push({name: name, enabled: shouldBeOn});
+            }
+        });
+
+        if (!changes.length) {
+            mlfl.toast('Preset already applied', 'info');
+            return;
+        }
+        if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
+
+        Promise.all(changes.map(function(c) {
+            return fetch(BASE + '/api/experiment/' + EXP_NAME + '/models/toggle', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model_name: c.name, enabled: c.enabled })
+            }).then(function(r) { return r.json(); }).catch(function() { return {success: false}; });
+        })).then(function(results) {
+            var fails = results.filter(function(r) { return !r.success; }).length;
+            if (btn) { btn.disabled = false; btn.textContent = preset.charAt(0).toUpperCase() + preset.slice(1); }
+            if (fails) mlfl.toast('Applied preset (' + fails + ' toggle' + (fails !== 1 ? 's' : '') + ' failed)', 'warning');
+            else mlfl.toast('Applied preset: ' + preset, 'success');
+        });
     };
 
     // ======== Per-experiment model toggle ========

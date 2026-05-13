@@ -521,6 +521,13 @@ select.setting-input, select.form-input { cursor: pointer; }
 .btn-danger:hover { opacity: 0.85; }
 .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* Quick-preset chips (Models tab) */
+.model-presets { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+.preset-chip {
+    padding: 0.3rem 0.85rem !important; font-size: 0.8rem !important;
+    border-radius: 1.2rem !important;
+}
+
 /* Small icon-only destructive button (dashboard card delete) */
 .btn-icon-danger {
     background: transparent; border: 1px solid transparent; color: var(--text-muted);
