@@ -3,7 +3,9 @@
 {% block title %}{{ experiment.name }} - ML Forecast Lab{% endblock %}
 
 {% block head_scripts %}
-<script src="{{ base_path | default('') }}/static/plotly-basic.min.js"></script>
+{# Plotly is now lazy-loaded via mlflLoadPlotly() (defined in the inline
+   script lower in this template) — only fetched once the user opens a
+   chart-bearing tab. Removes ~700 KB from the initial-page download. #}
 {% endblock %}
 
 {% block content %}
@@ -1506,8 +1508,90 @@ window.addEventListener('error', function(e) {
 var EMBEDDED_HISTORY = {{ embedded_history | tojson }};
 </script>
 <script>
+// ======== Plotly lazy-loader ========
+// Plotly-basic.min.js is ~700 KB; loading it on every experiment-page hit
+// even for users who never open a chart-bearing tab was the largest UI
+// weight on the page. mlflLoadPlotly() injects the script on first call
+// and returns a cached Promise that resolves once window.Plotly is usable.
+// Call sites that draw charts should await this before invoking Plotly.*.
+window.mlflLoadPlotly = (function() {
+    var p = null;
+    return function() {
+        if (p) return p;
+        p = new Promise(function(resolve, reject) {
+            if (window.Plotly && !window.Plotly.__mlflStub) return resolve();
+            var s = document.createElement('script');
+            s.src = (typeof BASE_PATH !== 'undefined' ? BASE_PATH : '')
+                + '/static/plotly-basic.min.js';
+            s.async = true;
+            s.onload = function() {
+                // Replay any calls that hit the deferred stub before the
+                // real Plotly arrived. Plotly's IIFE replaces window.Plotly
+                // with the real export at this point, so __pending is the
+                // only handle on those queued arg lists.
+                if (_pendingPlotlyCalls.length && window.Plotly && !window.Plotly.__mlflStub) {
+                    _pendingPlotlyCalls.forEach(function(call) {
+                        try {
+                            var target = window.Plotly;
+                            for (var i = 0; i < call.path.length - 1; i++) {
+                                target = target[call.path[i]];
+                                if (!target) return;
+                            }
+                            var fn = target[call.path[call.path.length - 1]];
+                            if (typeof fn === 'function') fn.apply(target, call.args);
+                        } catch (e) {
+                            console.error('Deferred Plotly call failed:', call.path.join('.'), e);
+                        }
+                    });
+                    _pendingPlotlyCalls = [];
+                }
+                resolve();
+            };
+            s.onerror = function() { p = null; reject(new Error('Plotly load failed')); };
+            document.head.appendChild(s);
+        });
+        return p;
+    };
+})();
+
+// Deferred-call stub: while Plotly is still downloading, calls into
+// window.Plotly.* (and window.Plotly.Plots.*) are queued and replayed
+// in order once the script lands. This means existing call sites in
+// fetch handlers can keep their `Plotly.newPlot(...)` pattern unchanged.
+var _pendingPlotlyCalls = [];
+function _makePlotlyStub(path) {
+    var fn = function() {
+        _pendingPlotlyCalls.push({path: path, args: Array.prototype.slice.call(arguments)});
+    };
+    fn.__mlflStub = true;
+    return fn;
+}
+if (typeof window.Plotly === 'undefined') {
+    window.Plotly = {
+        __mlflStub: true,
+        newPlot: _makePlotlyStub(['newPlot']),
+        purge: _makePlotlyStub(['purge']),
+        extendTraces: _makePlotlyStub(['extendTraces']),
+        relayout: _makePlotlyStub(['relayout']),
+        restyle: _makePlotlyStub(['restyle']),
+        react: _makePlotlyStub(['react']),
+        Plots: {
+            resize: _makePlotlyStub(['Plots', 'resize']),
+        },
+    };
+}
+
 // ======== Tab system ========
 var _renderedTabs = {};
+
+// Tabs whose contents may render Plotly charts. Switching to one triggers
+// the lazy Plotly load; switching to Settings / Models / Training-not-active
+// never pays the download cost.
+var _CHART_TABS = {
+    'sec-results': true, 'sec-predictions': true, 'sec-generalisation': true,
+    'sec-features': true, 'sec-tuning': true, 'sec-forecast-accuracy': true,
+    'sec-training': true, 'sec-covariate-analysis': true,
+};
 
 window.showTab = function(el) {
     // el can be a nav link element or a tab id string
@@ -1529,14 +1613,22 @@ window.showTab = function(el) {
     var target = document.getElementById(tabId);
     if (target) {
         target.style.display = 'block';
-        // Resize Plotly charts that were rendered into a hidden container
-        if (_renderedTabs[tabId]) {
+        // Resize Plotly charts that were rendered into a hidden container —
+        // only meaningful once Plotly has loaded AND we've actually drawn
+        // something into this tab.
+        if (_renderedTabs[tabId] && window.Plotly) {
             target.querySelectorAll('.js-plotly-plot').forEach(function(c) {
                 Plotly.Plots.resize(c);
             });
         }
     }
     if (el) el.classList.add('active');
+
+    // Kick off the Plotly download on first activation of any chart-bearing
+    // tab. Subsequent calls hit the cached promise.
+    if (_CHART_TABS[tabId]) {
+        mlflLoadPlotly().catch(function(e) { console.error(e); });
+    }
 };
 
 // ======== Chart rendering (deferred until tab first shown) ========
@@ -1544,12 +1636,17 @@ var _chartQueue = [];  // [{tabId, renderFn}]
 function queueChart(tabId, renderFn) { _chartQueue.push({tabId: tabId, fn: renderFn}); }
 function renderChartsForTab(tabId) {
     if (_renderedTabs[tabId]) return;
-    _renderedTabs[tabId] = true;
-    _chartQueue.forEach(function(item) {
-        if (item.tabId === tabId) {
-            try { item.fn(); } catch(e) { console.error('Chart render error:', e); }
-        }
-    });
+    // Queued chart renderers expect window.Plotly to exist. Wait for the
+    // lazy loader to resolve before flushing the queue.
+    mlflLoadPlotly().then(function() {
+        if (_renderedTabs[tabId]) return;
+        _renderedTabs[tabId] = true;
+        _chartQueue.forEach(function(item) {
+            if (item.tabId === tabId) {
+                try { item.fn(); } catch(e) { console.error('Chart render error:', e); }
+            }
+        });
+    }).catch(function(e) { console.error('Plotly load failed:', e); });
 }
 
 // Override showTab to also render deferred charts
