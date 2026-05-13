@@ -103,6 +103,12 @@ class BenchmarkResult(BaseModel):
     # or force-included by the runner for the skill chip only (hidden
     # from the table but used to compute skill).
     naive_baseline_was_enabled: Optional[bool] = None
+    # Training-window vs test-window drift statistics. Comparing the
+    # target distribution in the earliest fold's train window against
+    # the latest fold's test window. PSI < 0.1 is "stable",
+    # 0.1–0.2 "moderate", >0.2 "shifted" — used as a UI verdict to
+    # explain why CV scores might disagree with live behaviour.
+    drift: Optional[Dict[str, Any]] = None
 
 
 class ExperimentStatus(BaseModel):

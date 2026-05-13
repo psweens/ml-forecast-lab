@@ -1432,6 +1432,7 @@ class MLForecastLabApp:
         self, exp_cfg, model_results, rankings, best_model_name,
         status="running", daily_rankings=None,
         naive_was_enabled: Optional[bool] = None,
+        drift: Optional[dict] = None,
     ):
         """
         Update web app state with current benchmark progress.
@@ -1622,6 +1623,7 @@ class MLForecastLabApp:
             pairwise_dm=pairwise_dm,
             naive_baseline_mae=naive_baseline_mae,
             naive_baseline_was_enabled=naive_was_enabled,
+            drift=drift,
         )
 
         self.web_app.state.appstate.benchmark_results[exp_cfg.name] = web_result
@@ -1848,6 +1850,68 @@ class MLForecastLabApp:
         runner = BenchmarkRunner(exp_cfg_dict, feature_builder, metric_registry)
         fold_indices = runner._prepare_train_test_splits(combined)
 
+        # Training-window vs test-window drift on the target column.
+        # Surfaces "your recent data has shifted from what the model
+        # trained on" as a UI verdict so users can distinguish "the
+        # model is bad" from "the test window happens to be a regime
+        # the model has never seen". Uses the earliest fold's training
+        # rows vs the latest fold's test rows for the largest gap.
+        drift_stats: Optional[dict] = None
+        try:
+            if fold_indices and "target" in combined.columns:
+                train_idx_first, _ = fold_indices[0]
+                _, test_idx_last = fold_indices[-1]
+                train_y = combined["target"].iloc[train_idx_first].dropna().values
+                test_y = combined["target"].iloc[test_idx_last].dropna().values
+                if len(train_y) >= 20 and len(test_y) >= 5:
+                    train_mean = float(np.mean(train_y))
+                    test_mean = float(np.mean(test_y))
+                    train_std = float(np.std(train_y))
+                    test_std = float(np.std(test_y))
+                    # PSI on deciles of the training window. Bins with
+                    # zero population on either side get a small floor
+                    # to keep the log finite.
+                    edges = np.quantile(train_y, np.linspace(0, 1, 11))
+                    edges = np.unique(edges)
+                    if len(edges) >= 3:
+                        train_hist, _ = np.histogram(train_y, bins=edges)
+                        test_hist, _ = np.histogram(test_y, bins=edges)
+                        train_pct = train_hist / max(1, train_hist.sum())
+                        test_pct = test_hist / max(1, test_hist.sum())
+                        floor = 1e-4
+                        train_pct = np.where(train_pct < floor, floor, train_pct)
+                        test_pct = np.where(test_pct < floor, floor, test_pct)
+                        psi = float(np.sum((test_pct - train_pct) * np.log(test_pct / train_pct)))
+                    else:
+                        psi = 0.0
+                    if psi < 0.1:
+                        verdict, severity = "stable", "ok"
+                    elif psi < 0.2:
+                        verdict, severity = "moderate shift", "warning"
+                    else:
+                        verdict, severity = "significant shift", "alert"
+                    drift_stats = {
+                        "psi": round(psi, 4),
+                        "verdict": verdict,
+                        "severity": severity,
+                        "train": {
+                            "n": int(len(train_y)),
+                            "mean": round(train_mean, 4),
+                            "std": round(train_std, 4),
+                            "p10": round(float(np.quantile(train_y, 0.10)), 4),
+                            "p90": round(float(np.quantile(train_y, 0.90)), 4),
+                        },
+                        "test": {
+                            "n": int(len(test_y)),
+                            "mean": round(test_mean, 4),
+                            "std": round(test_std, 4),
+                            "p10": round(float(np.quantile(test_y, 0.10)), 4),
+                            "p90": round(float(np.quantile(test_y, 0.90)), 4),
+                        },
+                    }
+        except Exception as _e:
+            logger.debug("Drift computation skipped: %s", _e)
+
         completed_models = {}
         rankings = {}
 
@@ -1931,6 +1995,7 @@ class MLForecastLabApp:
                     sorted_models[0][0] if sorted_models else None,
                     status="running",
                     naive_was_enabled=_naive_was_enabled,
+                    drift=drift_stats,
                 )
 
         # Final composite ranking via the runner's shared Demšar helper.
@@ -1987,6 +2052,7 @@ class MLForecastLabApp:
                 status="completed",
                 daily_rankings=daily_rankings,
                 naive_was_enabled=_naive_was_enabled,
+                drift=drift_stats,
             )
 
         # Build a BenchmarkResult-compatible object for downstream use
@@ -2228,6 +2294,7 @@ class MLForecastLabApp:
                 status="completed",
                 daily_rankings=daily_rankings,
                 naive_was_enabled=_naive_was_enabled,
+                drift=drift_stats,
             )
 
         # Final results summary table

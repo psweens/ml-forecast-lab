@@ -554,6 +554,29 @@
 <section class="section">
     <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Two complementary views: <strong>Per-Interval Accuracy</strong> measures the next-step (h=1) prediction error — what the model gets right at the 30-minute level. <strong>Daily Cumulative Accuracy</strong> (table below) sums each day's predictions and actuals before computing errors — better for use cases like daily energy or hot-water demand where you care about totals rather than exact timing. Both rankings use the Demšar (2006) composite over MAE, RMSE, and MASE. The Per-Interval rank still drives Promote, Tuning, and live forecasting; the Daily rank is informational so you can pick the model that matches your objective.</span></span></h2>
 
+    {# Training-window vs test-window drift verdict. Tells the user when
+       poor CV scores may be down to recent data shifting away from the
+       training distribution rather than a bad model. #}
+    {% if benchmark_result and benchmark_result.drift %}
+        {% set _d = benchmark_result.drift %}
+        {% set _sev = _d.severity or 'ok' %}
+        <div style="margin: 0.25rem 0 1rem; padding: 0.6rem 0.9rem; border-radius: 0.5rem;
+                    background: {% if _sev == 'alert' %}rgba(231,76,60,0.10){% elif _sev == 'warning' %}rgba(243,156,18,0.10){% else %}rgba(46,204,113,0.08){% endif %};
+                    border: 1px solid {% if _sev == 'alert' %}rgba(231,76,60,0.3){% elif _sev == 'warning' %}rgba(243,156,18,0.3){% else %}rgba(46,204,113,0.25){% endif %};">
+            <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;">
+                <span style="color: var(--text-secondary); font-size: 0.85rem;">Training-window drift</span>
+                <strong style="color: {% if _sev == 'alert' %}var(--error){% elif _sev == 'warning' %}var(--warning){% else %}var(--success){% endif %};">
+                    {{ _d.verdict | title }} · PSI = {{ "%.2f"|format(_d.psi or 0) }}
+                </strong>
+                <span style="color: var(--text-muted); font-size: 0.78rem;">
+                    train mean {{ "%.3f"|format(_d.train.mean) }} (σ {{ "%.3f"|format(_d.train.std) }}, n={{ _d.train.n }})
+                    · test mean {{ "%.3f"|format(_d.test.mean) }} (σ {{ "%.3f"|format(_d.test.std) }}, n={{ _d.test.n }})
+                </span>
+                <span class="info-tip">?<span class="tip-text">Compares the target distribution in the earliest fold's training rows against the latest fold's test rows. <strong>PSI &lt; 0.10</strong> = stable. <strong>0.10–0.20</strong> = moderate shift (CV scores may slightly under-state live performance). <strong>&gt; 0.20</strong> = significant shift — the test window is from a regime the training rows don't cover, so poor CV may be data-induced rather than model-induced. Consider widening <code>days_history</code> or re-running the benchmark once your sensor stabilises.</span></span>
+            </div>
+        </div>
+    {% endif %}
+
     {# Seasonal Naive skill chip. Always present when the baseline ran;
        gives a quick "is my best model actually beating today=yesterday?"
        answer that the rank table by itself doesn't surface. #}
