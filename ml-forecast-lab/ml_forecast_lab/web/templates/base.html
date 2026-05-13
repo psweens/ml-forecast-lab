@@ -84,20 +84,35 @@
                 }, window.mlfl.pollInterval);
             },
 
-            // Toast notification system
+            // Toast notification system. Errors linger longer (and carry a
+            // dismiss button) because users were reporting walking away
+            // thinking they had saved changes they hadn't.
             toast: function(message, level) {
                 level = level || 'info';
                 var container = document.getElementById('toast-container');
                 var el = document.createElement('div');
                 el.className = 'toast toast-' + level;
-                el.textContent = message;
+                var span = document.createElement('span');
+                span.textContent = message;
+                el.appendChild(span);
+                if (level === 'error' || level === 'warning') {
+                    var close = document.createElement('button');
+                    close.className = 'toast-close';
+                    close.setAttribute('aria-label', 'Dismiss');
+                    close.textContent = '×';
+                    close.onclick = function() {
+                        el.classList.remove('toast-visible');
+                        setTimeout(function() { el.remove(); }, 300);
+                    };
+                    el.appendChild(close);
+                }
                 container.appendChild(el);
-                // Trigger animation
                 requestAnimationFrame(function() { el.classList.add('toast-visible'); });
+                var dwell = (level === 'error') ? 10000 : (level === 'warning' ? 7000 : 4000);
                 setTimeout(function() {
                     el.classList.remove('toast-visible');
                     setTimeout(function() { el.remove(); }, 300);
-                }, 4000);
+                }, dwell);
             },
 
             // Styled confirm dialog

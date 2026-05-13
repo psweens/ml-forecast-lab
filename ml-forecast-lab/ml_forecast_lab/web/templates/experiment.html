@@ -54,13 +54,24 @@
         </button>
             {% endif %}
         {% endif %}
+        <a href="{{ base_path | default('') }}/dashboard_yaml" class="btn btn-secondary" download="mlfl_dashboard.yaml"
+           title="Download an auto-generated Lovelace dashboard YAML for this and every other experiment.">
+            Lovelace YAML
+        </a>
+        <button class="btn btn-danger" onclick="deleteExperiment('{{ experiment.name }}')"
+                title="Delete this experiment from mlfl.yaml. Cached models and history are removed; forecast log entries are kept.">
+            Delete
+        </button>
     </div>
     <!-- Hidden checkbox for pipeline steps -->
     <input type="hidden" id="chk-deep" value="">
     <div id="promote-message"></div>
 </div>
 
-<!-- Section navigation (tab-style) -->
+<!-- Section navigation (tab-style).
+     Tabs that aren't usable yet are rendered as disabled stubs with a
+     hover tip explaining what to do, so users discover them even before
+     running a benchmark or promoting to production. -->
 <nav class="section-nav" id="section-nav">
     <a data-tab="sec-settings" onclick="showTab(this)">Settings</a>
     <a data-tab="sec-models" onclick="showTab(this)">Models</a>
@@ -71,12 +82,23 @@
     <a data-tab="sec-results" onclick="showTab(this)">Results</a>
     <a data-tab="sec-predictions" onclick="showTab(this)">Predictions</a>
     <a data-tab="sec-generalisation" onclick="showTab(this)">Generalisation</a>
+    {% else %}
+    <a class="nav-disabled" title="Run a benchmark to populate this tab">Results</a>
+    <a class="nav-disabled" title="Run a benchmark to populate this tab">Predictions</a>
+    <a class="nav-disabled" title="Run a benchmark to populate this tab">Generalisation</a>
+    {% endif %}
     {% if feature_importances %}<a data-tab="sec-features" onclick="showTab(this)">Features</a>{% endif %}
+    {% if benchmark_result %}
     <a data-tab="sec-covariate-analysis" onclick="showTab(this)">Covariate Analysis</a>
     <a data-tab="sec-tuning" onclick="showTab(this)">Tuning</a>
+    {% else %}
+    <a class="nav-disabled" title="Run a benchmark to populate this tab">Covariate Analysis</a>
+    <a class="nav-disabled" title="Run a benchmark to populate this tab">Tuning</a>
     {% endif %}
     {% if experiment.mode == 'production' %}
     <a data-tab="sec-forecast-accuracy" onclick="showTab(this)">Forecast Accuracy</a>
+    {% else %}
+    <a class="nav-disabled" title="Promote a model to production to see live forecast accuracy">Forecast Accuracy</a>
     {% endif %}
 </nav>
 
@@ -291,11 +313,9 @@
                 <div class="entity-search-results" id="entity-results" style="display:none;"></div>
             </div>
             <div class="exp-field">
-                <label class="field-label">Role</label>
+                <label class="field-label">Role <span class="info-tip">?<span class="tip-text">Only <strong>Lagged</strong> is currently implemented — the model sees past values of this covariate. <strong>Future</strong> and <strong>Both</strong> (forecast-attribute lookup) are not yet wired through the inference path and have been hidden until they are.</span></span></label>
                 <select class="setting-input" id="cov-role-input">
                     <option value="lagged">Lagged</option>
-                    <option value="future">Future</option>
-                    <option value="both">Both</option>
                 </select>
             </div>
             <div class="exp-field">
@@ -1549,6 +1569,21 @@ window.showTab = function(el) {
     // ======== Settings tab ========
 
     // --- Per-field save (scalars) ---
+    // Mark / clear a persistent save-error indicator on a field. The 4-second
+    // toast scrolled past too quickly — users walked away thinking they had
+    // saved a change they hadn't. The red border + tooltip survive until the
+    // next successful save of the same field.
+    function _markFieldError(el, msg) {
+        el.classList.add('save-error');
+        el.title = 'Save failed: ' + msg;
+        el.dataset.saveError = '1';
+    }
+    function _clearFieldError(el) {
+        el.classList.remove('save-error');
+        if (el.title && el.title.indexOf('Save failed') === 0) el.removeAttribute('title');
+        delete el.dataset.saveError;
+    }
+
     window.saveSettingsField = function(el) {
         var field = el.getAttribute('data-field');
         var value = el.value;
@@ -1560,10 +1595,10 @@ window.showTab = function(el) {
             value = null;
         } else if (intFields.indexOf(field) >= 0) {
             value = parseInt(value);
-            if (isNaN(value)) { mlfl.toast('Invalid integer', 'error'); return; }
+            if (isNaN(value)) { _markFieldError(el, 'Invalid integer'); mlfl.toast('Invalid integer', 'error'); return; }
         } else if (floatFields.indexOf(field) >= 0) {
             value = parseFloat(value);
-            if (isNaN(value)) { mlfl.toast('Invalid number', 'error'); return; }
+            if (isNaN(value)) { _markFieldError(el, 'Invalid number'); mlfl.toast('Invalid number', 'error'); return; }
         }
 
         var data = { experiment: EXP_NAME };
@@ -1578,16 +1613,19 @@ window.showTab = function(el) {
         .then(function(r) { return r.json(); })
         .then(function(result) {
             if (result.success) {
+                _clearFieldError(el);
                 el.style.borderColor = 'var(--success)';
                 setTimeout(function() { el.style.borderColor = ''; }, 2000);
             } else {
                 el.style.borderColor = 'var(--error)';
-                mlfl.toast('Failed: ' + result.error, 'error');
+                _markFieldError(el, result.error || 'unknown error');
+                mlfl.toast('Save failed: ' + (result.error || 'unknown error'), 'error');
             }
         })
         .catch(function(err) {
             el.style.borderColor = 'var(--error)';
-            mlfl.toast('Error: ' + err, 'error');
+            _markFieldError(el, String(err));
+            mlfl.toast('Save failed: ' + err, 'error');
         });
     };
 
@@ -1602,15 +1640,18 @@ window.showTab = function(el) {
         .then(function(r) { return r.json(); })
         .then(function(result) {
             if (result.success) {
+                _clearFieldError(el);
                 mlfl.toast(field + ' updated', 'success');
             } else {
                 el.checked = !el.checked;
-                mlfl.toast('Failed: ' + result.error, 'error');
+                _markFieldError(el, result.error || 'unknown error');
+                mlfl.toast('Save failed: ' + (result.error || 'unknown error'), 'error');
             }
         })
         .catch(function(err) {
             el.checked = !el.checked;
-            mlfl.toast('Error: ' + err, 'error');
+            _markFieldError(el, String(err));
+            mlfl.toast('Save failed: ' + err, 'error');
         });
     };
 
@@ -3273,6 +3314,28 @@ window.showTab = function(el) {
             setTimeout(function() { location.reload(); }, 1000);
         })
         .catch(function(err) { mlfl.toast('Failed to promote: ' + err, 'error'); });
+    };
+
+    window.deleteExperiment = function(expName) {
+        mlfl.confirm(
+            'Delete experiment "' + expName + '"? This removes the entry from '
+                + 'mlfl.yaml and clears its forecast log and benchmark history. '
+                + 'The sensor history cache and any cached model weights are kept '
+                + 'on disk (in case you recreate the experiment).',
+            function() {
+                fetch(BASE + '/api/experiments/' + encodeURIComponent(expName) + '/delete', {method: 'POST'})
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data && data.success) {
+                        mlfl.toast(expName + ' deleted', 'success');
+                        setTimeout(function() { window.location.href = BASE + '/'; }, 800);
+                    } else {
+                        mlfl.toast('Delete failed: ' + ((data && data.error) || 'unknown error'), 'error');
+                    }
+                })
+                .catch(function(err) { mlfl.toast('Delete failed: ' + err, 'error'); });
+            }
+        );
     };
 
     // ======== Per-experiment model toggle ========

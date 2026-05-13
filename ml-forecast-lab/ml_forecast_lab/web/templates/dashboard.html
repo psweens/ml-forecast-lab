@@ -135,6 +135,12 @@
                 <a href="{{ base_path | default('') }}/experiment/{{ exp.name }}" class="btn btn-secondary flex-center">
                     View Details
                 </a>
+                <button class="btn-icon-danger" aria-label="Delete experiment"
+                        title="Delete experiment"
+                        {% if exp.name in running_experiments or queued_experiments.get(exp.name) %}disabled{% endif %}
+                        onclick="deleteExperiment('{{ exp.name }}', this)">
+                    &times;
+                </button>
                 {% if exp.name in running_experiments %}
                 <button class="btn btn-danger flex-center nowrap" style="font-size:0.85rem;padding:0.4rem 1rem;"
                         onclick="stopTraining('{{ exp.name }}', this)"
@@ -283,6 +289,30 @@
                 btn.disabled = false; btn.textContent = orig;
             });
         });
+    }
+
+    // Delete an experiment
+    function deleteExperiment(name, btn) {
+        mlfl.confirm(
+            'Delete experiment "' + name + '"? Removes the entry from mlfl.yaml '
+                + 'and clears its forecast log and benchmark history. The sensor '
+                + 'history cache and cached model weights are kept on disk.',
+            function() {
+                btn.disabled = true;
+                fetch(BASE_PATH + '/api/experiments/' + encodeURIComponent(name) + '/delete', {method: 'POST'})
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data && data.success) {
+                        mlfl.toast(name + ' deleted', 'success');
+                        setTimeout(function() { location.reload(); }, 800);
+                    } else {
+                        btn.disabled = false;
+                        mlfl.toast('Delete failed: ' + ((data && data.error) || 'unknown error'), 'error');
+                    }
+                })
+                .catch(function(err) { btn.disabled = false; mlfl.toast('Delete failed: ' + err, 'error'); });
+            }
+        );
     }
 
     // Stop training
