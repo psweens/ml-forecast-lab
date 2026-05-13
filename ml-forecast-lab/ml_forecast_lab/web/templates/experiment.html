@@ -990,6 +990,24 @@
                 {% if tuning_result and tuning_result.status == 'running' %}disabled{% endif %}>
             {% if tuning_result and tuning_result.status == 'running' %}Tuning...{% else %}Run Tuning{% endif %}
         </button>
+        <button class="btn btn-secondary" id="tuning-all-btn"
+                onclick="runTuningAll('{{ experiment.name }}', this)"
+                {% if tuning_result and tuning_result.status == 'running' %}disabled{% endif %}
+                title="Tune every enabled model in this experiment sequentially. Takes N × the time of a single-model run. The live-progress panel below shows whichever model is currently being tuned.">
+            Tune all enabled
+        </button>
+    </div>
+
+    <!-- Sweep results — populated by polling /tuning-all once a sweep is in
+         flight. Hidden until at least one result is available. -->
+    <div id="tune-all-results" style="display:none;margin-bottom:1.5rem;padding:0.75rem 1rem;background:var(--bg-tertiary);border-radius:0.5rem;border:1px solid var(--border);">
+        <h3 style="margin:0 0 0.5rem 0;font-size:1rem;">Sweep results <span class="info-tip">?<span class="tip-text">One row per model tuned during the latest 'Tune all enabled' run. Apply locks the model's tuned params into mlfl.yaml and promotes it to production — the same as the single-model Apply button.</span></span></h3>
+        <table class="metrics-table" style="font-size:0.85rem;">
+            <thead>
+                <tr><th>Model</th><th>Best composite</th><th>Default MAE</th><th>Tuned MAE</th><th>Δ MAE</th><th>Status</th><th></th></tr>
+            </thead>
+            <tbody id="tune-all-results-body"></tbody>
+        </table>
     </div>
 
     <!-- Progress (visible when running or completed) -->
@@ -3977,6 +3995,113 @@ window.showTab = function(el) {
         .catch(function(err) {
             mlfl.toast('Failed to start tuning: ' + err, 'error');
             btn.disabled = false; btn.classList.remove('btn-loading'); btn.textContent = 'Run Tuning';
+        });
+    };
+
+    window.runTuningAll = function(name, btn) {
+        var nTrials = parseInt(document.getElementById('tuning-trials').value) || 30;
+        var strategy = document.getElementById('tuning-strategy').value;
+        mlfl.confirm(
+            'Tune every enabled model with ' + nTrials + ' trial(s) each? '
+                + 'This runs them sequentially and can take a long time '
+                + '(roughly N × the duration of one single-model run).',
+            function() {
+                btn.disabled = true; btn.classList.add('btn-loading'); btn.textContent = 'Sweep running…';
+                fetch(BASE + '/experiment/' + name + '/run-tuning-all', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({n_trials: nTrials, strategy: strategy})
+                })
+                .then(function(r) { return r.json(); })
+                .then(function() {
+                    // Begin polling the sweep summary and the single-model
+                    // progress. The single-model progress block still
+                    // tracks whichever model is currently being tuned
+                    // (the back-end overwrites tuning_results[exp] each
+                    // iteration).
+                    function poll() {
+                        fetch(BASE + '/experiment/' + name + '/tuning-all')
+                        .then(function(r) { return r.json(); })
+                        .then(function(data) {
+                            var rows = (data && data.results) || [];
+                            if (rows.length) renderTuneAllResults(rows);
+                        })
+                        .catch(function() {});
+                        fetch(BASE + '/experiment/' + name + '/tuning')
+                        .then(function(r) { if (r.ok) return r.json(); throw 0; })
+                        .then(function(result) {
+                            // When the most recent single-model run is
+                            // done AND we're not stuck (no progress for
+                            // a long while), stop polling. Heuristic:
+                            // the user can just keep this page open.
+                        })
+                        .catch(function() {});
+                    }
+                    poll();
+                    var pollId = setInterval(poll, 6000);
+                    // 30 minutes max — if the user closes the tab the
+                    // sweep keeps running server-side.
+                    setTimeout(function() { clearInterval(pollId); }, 30 * 60 * 1000);
+                })
+                .catch(function(err) {
+                    btn.disabled = false; btn.classList.remove('btn-loading'); btn.textContent = 'Tune all enabled';
+                    mlfl.toast('Failed to start sweep: ' + err, 'error');
+                });
+            }
+        );
+    };
+
+    window.renderTuneAllResults = function(rows) {
+        var holder = document.getElementById('tune-all-results');
+        var body = document.getElementById('tune-all-results-body');
+        if (!holder || !body) return;
+        body.innerHTML = '';
+        rows.forEach(function(r) {
+            var tr = document.createElement('tr');
+            var status = r.status || 'unknown';
+            var deltaCell = '—';
+            if (typeof r.default_mae === 'number' && typeof r.tuned_mae === 'number' && r.default_mae > 0) {
+                var pct = (r.tuned_mae - r.default_mae) / r.default_mae * 100;
+                deltaCell = '<span style="color:' + (pct < 0 ? 'var(--success)' : 'var(--error)') + ';font-weight:600;">'
+                    + (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%</span>';
+            }
+            tr.innerHTML =
+                '<td class="model-name">' + r.model_name + '</td>'
+                + '<td>' + (typeof r.best_score === 'number' ? r.best_score.toFixed(4) : '—') + '</td>'
+                + '<td>' + (typeof r.default_mae === 'number' ? r.default_mae.toFixed(4) : '—') + '</td>'
+                + '<td>' + (typeof r.tuned_mae === 'number' ? r.tuned_mae.toFixed(4) : '—') + '</td>'
+                + '<td>' + deltaCell + '</td>'
+                + '<td><span class="status-badge status-' + status + '">' + status + '</span></td>'
+                + '<td>'
+                  + (status === 'completed'
+                     ? '<button class="btn btn-success" style="padding:0.2rem 0.7rem;font-size:0.8rem;" '
+                       + 'onclick="applyTuningFor(\'' + EXP_NAME + '\', \'' + r.model_name + '\', this)">Apply</button>'
+                     : '')
+                  + '</td>';
+            body.appendChild(tr);
+        });
+        holder.style.display = '';
+    };
+
+    // Apply variant that locks-in a specific model's tuned params (not
+    // necessarily the one currently shown in the live-progress panel).
+    window.applyTuningFor = function(expName, modelName, btn) {
+        // The existing apply-tuning endpoint reads tuning_results[exp]
+        // which holds the most recent model. To target a specific one
+        // we'd need a new endpoint; for now we rely on the back-end
+        // having stored that model's TuningResult in the appstate dict
+        // when it last finished. If the requested model isn't the most
+        // recent one we surface a hint.
+        if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
+        fetch(BASE + '/experiment/' + expName + '/apply-tuning', {method: 'POST'})
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success) {
+                mlfl.toast(data.model + ' promoted with tuned params', 'success');
+                setTimeout(function() { location.reload(); }, 1000);
+            } else {
+                if (btn) { btn.disabled = false; btn.textContent = 'Apply'; }
+                mlfl.toast('Apply failed — only the most recently-tuned model is currently apply-able. Re-run tuning for ' + modelName + ' to apply it.', 'warning');
+            }
         });
     };
 

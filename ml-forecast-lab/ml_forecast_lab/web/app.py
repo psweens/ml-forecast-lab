@@ -269,6 +269,14 @@ class AppState:
         self.benchmark_callback = None  # Set by main app for triggering
         self.tuning_results: Dict[str, TuningResult] = {}
         self.tuning_callback = None  # Set by main app for triggering
+        # Sweep mode: when the user triggers "Tune all enabled" on the
+        # Tuning tab the final per-model results accumulate here so the
+        # UI can render a stacked table after the sweep completes.
+        # tune_all_results[experiment] = List[TuningResult] (one per
+        # model tuned during the sweep).
+        self.tune_all_results: Dict[str, List[TuningResult]] = {}
+        # Set by main app — runs _run_tuning sequentially over models.
+        self.tune_all_callback = None
         # Trigger an immediate retrain for one experiment. Used by the
         # apply-tuning and apply-covariate-best endpoints so the user
         # doesn't have to wait for the next scheduled retrain cycle.
@@ -2638,6 +2646,52 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             content={"message": "Tuning started", "model": model_name,
                       "n_trials": n_trials, "strategy": strategy},
         )
+
+    @app.post("/experiment/{name}/run-tuning-all")
+    async def run_tuning_all(name: str, request: Request):
+        """Tune every enabled model sequentially.
+
+        Body: {n_trials?, strategy?}. Each model's final TuningResult
+        is accumulated in tune_all_results[experiment]; the existing
+        single-model live-progress widgets continue to work because
+        each iteration overwrites the standard tuning_results slot.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        existing = app.state.appstate.tuning_results.get(name)
+        if existing and existing.status == "running":
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Tuning already running for this experiment"},
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not app.state.appstate.tune_all_callback:
+            raise HTTPException(status_code=501, detail="Tune-all callback not registered")
+        app.state.appstate.spawn(
+            app.state.appstate.tune_all_callback(
+                name,
+                int(body.get("n_trials", 30) or 30),
+                body.get("strategy", "tpe"),
+            )
+        )
+        return JSONResponse(
+            status_code=202,
+            content={"message": "Sweep started"},
+        )
+
+    @app.get("/experiment/{name}/tuning-all")
+    async def get_tuning_all(name: str):
+        """Return the per-model results of the most recent sweep."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        rows = app.state.appstate.tune_all_results.get(name, [])
+        return JSONResponse(content={
+            "experiment": name,
+            "results": [r.model_dump() for r in rows],
+        })
 
     @app.get("/experiment/{name}/tuning")
     async def get_tuning(name: str):

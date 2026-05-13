@@ -551,6 +551,63 @@ class MLForecastLabApp:
 
             self.web_app.state.appstate.tuning_callback = _tuning_trigger
 
+            # 'Tune all enabled' sweep — loops _run_tuning over every
+            # model in models_enabled. Each iteration overwrites the
+            # single-model tuning_results slot (so the live progress
+            # UI continues to work) and copies the final result into
+            # tune_all_results[experiment] for the summary table.
+            async def _tune_all_trigger(experiment_name: str,
+                                        n_trials: int = 30,
+                                        strategy: str = "tpe"):
+                await self.load_config()
+                exp_cfg = next(
+                    (c for c in self.config.experiments if c.name == experiment_name),
+                    None,
+                )
+                if exp_cfg is None:
+                    logger.warning("tune-all: '%s' not in config", experiment_name)
+                    return
+                models = list(exp_cfg.models_enabled or [])
+                if not models:
+                    logger.warning("tune-all: no models enabled for '%s'", experiment_name)
+                    return
+                # Reset the sweep slot at the start of the run.
+                self.web_app.state.appstate.tune_all_results[experiment_name] = []
+                logger.info(
+                    "tune-all: %s — running %d model(s): %s",
+                    experiment_name, len(models), models,
+                )
+                for m_name in models:
+                    try:
+                        await self._run_tuning(
+                            experiment_name, m_name, n_trials, strategy, None,
+                        )
+                    except Exception as e:
+                        logger.error("tune-all: %s/%s failed: %s",
+                                     experiment_name, m_name, e, exc_info=True)
+                        continue
+                    tr = self.web_app.state.appstate.tuning_results.get(experiment_name)
+                    if tr is not None:
+                        try:
+                            self.web_app.state.appstate.tune_all_results[
+                                experiment_name
+                            ].append(tr.model_copy(deep=True))
+                        except Exception:
+                            # model_copy might not exist on older Pydantic
+                            # versions; fall back to a shallow snapshot.
+                            self.web_app.state.appstate.tune_all_results[
+                                experiment_name
+                            ].append(tr)
+                logger.info(
+                    "tune-all: %s complete — %d result(s) captured",
+                    experiment_name,
+                    len(self.web_app.state.appstate.tune_all_results.get(
+                        experiment_name, [],
+                    )),
+                )
+
+            self.web_app.state.appstate.tune_all_callback = _tune_all_trigger
+
             # Register retrain callback. All user-initiated retrains
             # (dashboard button, apply-tuning, apply-covariate-best,
             # toggle-mode→production) want to retrain the chosen/production
