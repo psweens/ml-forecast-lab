@@ -622,6 +622,17 @@ class MLForecastLabApp:
                 return self._rollback_cached_model(experiment_name)
             self.web_app.state.appstate.rollback_callback = _rollback_trigger
 
+            # Pre-flight data sanity report callback for the Settings tab.
+            async def _data_report_trigger(experiment_name: str) -> dict:
+                exp_cfg = next(
+                    (e for e in self.config.experiments if e.name == experiment_name),
+                    None,
+                )
+                if exp_cfg is None:
+                    return {"verdict": "alert", "warnings": ["Experiment not found"], "ok": False}
+                return await self.compute_data_report(exp_cfg)
+            self.web_app.state.appstate.data_report_callback = _data_report_trigger
+
             # Cached-model directory accessor — lets the web layer check
             # whether a "previous" version exists for the rollback button
             # without duplicating the slugify logic.
@@ -915,6 +926,189 @@ class MLForecastLabApp:
                 f"({sensor['violation_pct']:.2f}%)"
                 f"{gap}"
             )
+
+    async def compute_data_report(self, exp_cfg) -> dict:
+        """Pre-flight data sanity report for an experiment.
+
+        Fetches the raw target history the same way the benchmark would
+        (SQLite cache + HA delta fetch) and summarises it without
+        running the full pipeline — so the user can spot recorder
+        gaps, flatlines, max-increment hits, and missing-value rates
+        BEFORE spending an hour on a benchmark.
+        """
+        from ml_forecast_lab.ha_interface import normalise_history
+
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=exp_cfg.days_history)
+        table_name = (
+            self.history_db.safe_table_name(exp_cfg.target_entity)
+            if self.history_db else None
+        )
+
+        df = pd.DataFrame(columns=["ds", "value"])
+        cache_rows = 0
+        if exp_cfg.database and self.history_db and table_name:
+            try:
+                cached = self.history_db.get_history(table_name)
+                if not cached.empty:
+                    cached = cached.rename(columns={"y": "value"})
+                    start_naive = start.replace(tzinfo=None)
+                    cached = cached[cached["ds"] >= start_naive]
+                    cache_rows = int(len(cached))
+                    if cache_rows > 0:
+                        df = cached
+            except Exception as e:
+                logger.debug("data-report cache read failed: %s", e)
+
+        fetch_start = df["ds"].max() if len(df) > 0 else start
+        try:
+            if hasattr(fetch_start, "tzinfo") and fetch_start.tzinfo is None:
+                fetch_start = fetch_start.tz_localize("UTC")
+        except (AttributeError, TypeError):
+            pass
+
+        ha_rows = 0
+        try:
+            raw = await self.ha_interface.get_history(
+                exp_cfg.target_entity, fetch_start, now,
+            )
+            new_df = normalise_history(raw)
+            if not new_df.empty:
+                if hasattr(new_df["ds"].dtype, "tz") and new_df["ds"].dt.tz is not None:
+                    new_df["ds"] = new_df["ds"].dt.tz_localize(None)
+                ha_rows = int(len(new_df))
+                if len(df) > 0:
+                    df = pd.concat([df, new_df], ignore_index=True)
+                    df = df.drop_duplicates(subset=["ds"], keep="last")
+                else:
+                    df = new_df
+        except Exception as e:
+            logger.warning("data-report HA fetch failed: %s", e)
+
+        if df.empty:
+            return {
+                "experiment": exp_cfg.name,
+                "target_entity": exp_cfg.target_entity,
+                "verdict": "no-data",
+                "ok": False,
+                "rows_total": 0,
+                "rows_cache": cache_rows,
+                "rows_fetched": ha_rows,
+                "warnings": ["No history rows found for this entity"],
+                "checked_at": now.isoformat(),
+            }
+
+        df = df.sort_values("ds").reset_index(drop=True)
+        df["ds"] = pd.to_datetime(df["ds"])
+
+        last_ts = pd.Timestamp(df["ds"].max())
+        if last_ts.tzinfo is not None:
+            last_ts = last_ts.tz_convert(None)
+        now_naive = pd.Timestamp(now.replace(tzinfo=None))
+        recorder_age_min = float((now_naive - last_ts).total_seconds()) / 60.0
+
+        # Coverage relative to a uniform grid spanning the window.
+        expected_step = pd.Timedelta(minutes=exp_cfg.interval_minutes)
+        expected_rows = int(
+            max(1, (now_naive - df["ds"].min()).total_seconds() / expected_step.total_seconds())
+        )
+        coverage_pct = round(min(100.0, 100.0 * len(df) / expected_rows), 1) if expected_rows else None
+
+        # Gap analysis on consecutive timestamps.
+        gaps_min = (df["ds"].diff().dt.total_seconds() / 60.0).dropna()
+        biggest_gap_min = float(gaps_min.max()) if len(gaps_min) else 0.0
+        big_gap_threshold_min = exp_cfg.interval_minutes * 4
+        big_gap_count = int((gaps_min > big_gap_threshold_min).sum())
+
+        # Numeric stats on the value column.
+        series = pd.to_numeric(df["value"], errors="coerce")
+        non_null = series.dropna()
+        nan_pct = round(100.0 * (1.0 - len(non_null) / max(1, len(series))), 1)
+
+        if len(non_null):
+            target_min = float(non_null.min())
+            target_max = float(non_null.max())
+            target_median = float(non_null.median())
+            target_std = float(non_null.std())
+        else:
+            target_min = target_max = target_median = target_std = None
+
+        # Zero-run length (longest consecutive run of zero values).
+        zero_run = 0
+        max_zero_run = 0
+        for v in non_null.values:
+            if v == 0:
+                zero_run += 1
+                if zero_run > max_zero_run:
+                    max_zero_run = zero_run
+            else:
+                zero_run = 0
+
+        # Max-increment hits (cumulative sensors only).
+        max_inc_hits = None
+        if exp_cfg.source_is_cumulative and exp_cfg.max_increment:
+            diffs = series.diff().dropna()
+            max_inc_hits = int((diffs > exp_cfg.max_increment).sum())
+
+        warnings = []
+        verdict = "ok"
+        if recorder_age_min > exp_cfg.interval_minutes * 4:
+            warnings.append(
+                f"Recorder is {recorder_age_min:.0f} min behind wall-clock "
+                f"(expected ≤ {exp_cfg.interval_minutes * 2} min)"
+            )
+            verdict = "warning"
+        if coverage_pct is not None and coverage_pct < 70:
+            warnings.append(
+                f"Only {coverage_pct:.0f}% of the expected rows are present "
+                f"({len(df)} / ~{expected_rows})"
+            )
+            verdict = "warning"
+        if big_gap_count > 0:
+            warnings.append(
+                f"{big_gap_count} gap(s) of >{big_gap_threshold_min:.0f} min — "
+                f"biggest is {biggest_gap_min / 60:.1f} h"
+            )
+            if biggest_gap_min > exp_cfg.interval_minutes * 24:
+                verdict = "alert"
+        if nan_pct > 5:
+            warnings.append(f"{nan_pct:.1f}% of rows have non-numeric values")
+            verdict = "warning" if verdict == "ok" else verdict
+        if max_zero_run > exp_cfg.interval_minutes / 5 and max_zero_run > 10:
+            # Long zero runs may be legitimate (PV at night), so frame as note
+            warnings.append(
+                f"Longest zero-value run is {max_zero_run} consecutive samples "
+                f"(may be legitimate for solar / off-state sensors)"
+            )
+
+        return {
+            "experiment": exp_cfg.name,
+            "target_entity": exp_cfg.target_entity,
+            "verdict": verdict,
+            "ok": verdict != "alert",
+            "rows_total": int(len(df)),
+            "rows_cache": cache_rows,
+            "rows_fetched": ha_rows,
+            "rows_expected": expected_rows,
+            "coverage_pct": coverage_pct,
+            "recorder_age_minutes": round(recorder_age_min, 1),
+            "first_ts": df["ds"].min().isoformat(),
+            "last_ts": last_ts.isoformat(),
+            "biggest_gap_minutes": round(biggest_gap_min, 1),
+            "big_gap_count": big_gap_count,
+            "big_gap_threshold_minutes": big_gap_threshold_min,
+            "nan_pct": nan_pct,
+            "target_min": target_min,
+            "target_max": target_max,
+            "target_median": target_median,
+            "target_std": target_std,
+            "max_zero_run_samples": int(max_zero_run),
+            "max_increment_hits": max_inc_hits,
+            "max_increment_config": exp_cfg.max_increment,
+            "interval_minutes": exp_cfg.interval_minutes,
+            "warnings": warnings,
+            "checked_at": now.isoformat(),
+        }
 
     async def _fetch_and_preprocess(self, exp_cfg) -> Optional[pd.DataFrame]:
         """

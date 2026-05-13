@@ -116,6 +116,25 @@
 <section class="section">
     <h2>Experiment Settings</h2>
 
+    <!-- Pre-flight data sanity report.
+         A quick on-demand check that catches recorder gaps, flat-lines,
+         missing values, and stale freshness BEFORE a benchmark is started.
+         Backed by the /data-report endpoint which uses the same fetch
+         path as the benchmark but skips the rest of the pipeline. -->
+    <div class="settings-group">
+        <h3 class="settings-group-title">Data sanity check
+            <span class="info-tip">?<span class="tip-text">Runs the same data fetch the benchmark would, then reports rows fetched vs expected, biggest gap, recorder freshness, missing-value rate, zero-run length, and (for cumulative sensors) max-increment hits. Use it before clicking Run Pipeline to avoid spending an hour benchmarking against broken data.</span></span>
+        </h3>
+        <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
+            <button type="button" class="btn btn-secondary" id="btn-data-report"
+                    onclick="runDataReport('{{ experiment.name }}', this)">
+                Check now
+            </button>
+            <span id="data-report-summary" style="color:var(--text-secondary);font-size:0.85rem;"></span>
+        </div>
+        <div id="data-report-detail" style="display:none;margin-top:0.75rem;font-size:0.85rem;"></div>
+    </div>
+
     <!-- Target -->
     <div class="settings-group">
         <h3 class="settings-group-title">Target</h3>
@@ -3652,6 +3671,70 @@ window.showTab = function(el) {
             setTimeout(function() { location.reload(); }, 1000);
         })
         .catch(function(err) { mlfl.toast('Failed to promote: ' + err, 'error'); });
+    };
+
+    // ======== Pre-flight data sanity report ========
+    window.runDataReport = function(expName, btn) {
+        var summary = document.getElementById('data-report-summary');
+        var detail = document.getElementById('data-report-detail');
+        if (!summary || !detail) return;
+        btn.disabled = true; btn.textContent = 'Checking…';
+        summary.textContent = 'Fetching history…';
+        detail.style.display = 'none';
+        detail.innerHTML = '';
+
+        fetch(BASE + '/experiment/' + expName + '/data-report', {method: 'POST'})
+        .then(function(r) { return r.json(); })
+        .then(function(rep) {
+            btn.disabled = false; btn.textContent = 'Re-check';
+            var col, label;
+            if (rep.verdict === 'ok') { col = 'var(--success)'; label = 'OK'; }
+            else if (rep.verdict === 'warning') { col = 'var(--warning)'; label = 'Warning'; }
+            else { col = 'var(--error)'; label = 'Alert'; }
+            summary.innerHTML = '<strong style="color:' + col + ';">' + label + '</strong>'
+                + ' · ' + rep.rows_total + ' rows · coverage '
+                + (rep.coverage_pct != null ? rep.coverage_pct.toFixed(0) + '%' : '—')
+                + ' · last record ' + rep.recorder_age_minutes.toFixed(0) + ' min ago';
+
+            var rows = [];
+            function add(label, value) {
+                rows.push('<div style="display:flex;justify-content:space-between;gap:1rem;padding:0.15rem 0;border-bottom:1px solid rgba(255,255,255,0.04);">'
+                    + '<span style="color:var(--text-secondary);">' + label + '</span>'
+                    + '<span style="color:var(--text-primary);font-family:ui-monospace,monospace;">' + value + '</span></div>');
+            }
+            add('Rows total (cache + fetched)', rep.rows_total + ' (' + rep.rows_cache + ' + ' + rep.rows_fetched + ')');
+            add('Rows expected', rep.rows_expected);
+            add('Coverage', rep.coverage_pct != null ? rep.coverage_pct.toFixed(1) + '%' : '—');
+            add('First record', rep.first_ts.slice(0, 19).replace('T', ' '));
+            add('Last record', rep.last_ts.slice(0, 19).replace('T', ' '));
+            add('Recorder age', rep.recorder_age_minutes.toFixed(1) + ' min');
+            add('Biggest gap', rep.biggest_gap_minutes.toFixed(0) + ' min (' + rep.big_gap_count + ' over '
+                + rep.big_gap_threshold_minutes.toFixed(0) + ' min)');
+            add('Non-numeric values', rep.nan_pct.toFixed(1) + '%');
+            if (rep.target_min != null) {
+                add('Target range', rep.target_min.toFixed(3) + ' / median ' + rep.target_median.toFixed(3)
+                    + ' / ' + rep.target_max.toFixed(3) + ' (σ ' + rep.target_std.toFixed(3) + ')');
+            }
+            add('Longest zero-run', rep.max_zero_run_samples + ' samples');
+            if (rep.max_increment_config != null) {
+                add('Max-increment hits', rep.max_increment_hits + ' (limit ' + rep.max_increment_config + ')');
+            }
+
+            var warn = '';
+            if (rep.warnings && rep.warnings.length) {
+                warn = '<div style="margin-top:0.75rem;padding:0.5rem 0.75rem;border-radius:0.4rem;background:rgba(243,156,18,0.1);border:1px solid rgba(243,156,18,0.3);">'
+                    + '<strong style="color:var(--warning);">Warnings</strong><ul style="margin:0.4rem 0 0 1.2rem;color:var(--text-secondary);">'
+                    + rep.warnings.map(function(w) { return '<li>' + w + '</li>'; }).join('')
+                    + '</ul></div>';
+            }
+
+            detail.innerHTML = rows.join('') + warn;
+            detail.style.display = '';
+        })
+        .catch(function(e) {
+            btn.disabled = false; btn.textContent = 'Check now';
+            summary.innerHTML = '<span style="color:var(--error);">Failed: ' + e + '</span>';
+        });
     };
 
     // ======== Rollback ========

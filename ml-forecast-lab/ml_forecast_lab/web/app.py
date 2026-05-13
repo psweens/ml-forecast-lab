@@ -296,6 +296,8 @@ class AppState:
         # initialised). Used by the per-experiment 'Roll back' button.
         self.rollback_callback = None
         self.cached_model_dir = None
+        # Pre-flight data sanity check — see /experiment/{name}/data-report.
+        self.data_report_callback = None
         # Strong references to fire-and-forget tasks. asyncio holds only a
         # weak reference to running tasks; without this set a coroutine
         # scheduled via create_task can be garbage-collected before its
@@ -1738,6 +1740,27 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if not ok:
             return JSONResponse(content={"success": False, "error": msg or "Rollback failed"})
         return JSONResponse(content={"success": True, "message": msg})
+
+    @app.post("/experiment/{name}/data-report")
+    async def data_report(name: str):
+        """Run the pre-flight data sanity report for an experiment.
+
+        Fetches the raw target history (cache + HA delta) and computes
+        coverage, gap, freshness and value-distribution stats so users
+        can spot data issues before they spend an hour on a benchmark.
+        Synchronous from the caller's perspective; takes a few seconds.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        cb = app.state.appstate.data_report_callback
+        if not cb:
+            return JSONResponse(content={"verdict": "alert", "warnings": ["Data report unavailable"], "ok": False})
+        try:
+            report = await cb(name)
+            return JSONResponse(content=report)
+        except Exception as e:
+            logger.error("data-report failed for %s: %s", name, e, exc_info=True)
+            return JSONResponse(content={"verdict": "alert", "warnings": [_safe_error(e)], "ok": False}, status_code=500)
 
     @app.get("/experiment/{name}/rollback-available")
     async def rollback_available(name: str):
