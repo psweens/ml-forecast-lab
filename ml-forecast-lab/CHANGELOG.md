@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.33.2
+
+Docs cleanup. Two parts:
+
+- **`DOCS.md` per-experiment config table** still listed the
+  `database` field that v2.33.1 removed from `ExperimentCfg`.
+  Dropped the row and amended the neighbouring `max_age`
+  description to call out that the SQLite actuals cache is
+  always-on now (`max_age` is the only knob that controls
+  retention).
+
+- **Removed four stale internal audit documents** from the repo
+  root: `SURVEY.md`, `ML_AUDIT.md`, `IMPROVEMENTS.md`,
+  `DOC_SURVEY.md`. These were working-document outputs of earlier
+  audit rounds (the ML preprocessing/loss audit merged in v2.31.0
+  via PRs #9–#11, plus the docs-restructure audit of the same
+  cycle). The proposals they contained have all landed; the docs
+  themselves are now stale snapshots that confuse new readers of
+  the repo. Git history preserves them — anyone wanting the
+  original audit text can `git log --diff-filter=D --name-only`
+  to find the deletion commit. Total ~1,615 lines removed.
+
+No code changes.
+
 ## 2.33.1
 
 Removes the `database` per-experiment flag and improves the dashboard
