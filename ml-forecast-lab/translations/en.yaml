@@ -3,6 +3,3 @@ configuration:
   log_level:
     name: Log Level
     description: Sets the logging verbosity for the application
-  models:
-    name: Forecasting Models
-    description: Configure machine learning forecasting models
