@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.34.4
+
+### Fixed
+
+- **Convergence chart X-axis labels bunched on the left** when the
+  actuals window was much shorter than the prediction window (every
+  freshly-retrained cohort, until enough past targets accumulate).
+  `_tzTicks` used `dates[0]` and `dates[last]` for the tick range,
+  but the convergence chart concatenates `fanX + actuals.targets`
+  unsorted — so `dates[last]` was the last actual (early in the
+  window) rather than the last fanX target (end of horizon). All 8
+  ticks ended up inside a few-hour slice. Now uses min/max across
+  the array, which also nan-guards each timestamp.
+
+- **Trajectory chart had the same bunching** for a different reason:
+  forecasts are clustered in the issued-at history, but the chart
+  extends the X-axis to include `target_dt` (where the Actual
+  marker and target-time line sit). `_tzTicks` only saw the
+  forecasts and emitted ticks for that narrow range. Now passes
+  `xs + [targetTs]` so the ticks span the full visible X range.
+
+### Changed
+
+- **Lead-time chart legend moved out of the plot area.** With
+  20+ cohort traces (e.g. after 3 weeks of daily retrains widened
+  to all versions), the previous top-left-inside legend covered the
+  data. Now anchored to the right outside the plot, matching the
+  convergence chart's pattern.
+
 ## 2.34.3
 
 ### Changed
