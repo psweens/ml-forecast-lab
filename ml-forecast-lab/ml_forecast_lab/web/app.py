@@ -2601,41 +2601,19 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             )
 
         result = _fetch(model_name, model_version)
-        def _empty(res):
-            return not res.get("per_timestep", {}).get("target_dt")
-        if _empty(result) and model_version and not version_param:
-            relaxed = _fetch(model_name, None)
-            if not _empty(relaxed):
-                logger.info(
-                    f"/forecast-stability fallback for {name}: no cycles "
-                    f"for {model_name!r} v={model_version!r}; widening to all versions."
-                )
-                result = relaxed
-                result["model_fallback"] = {
-                    "requested_model": model_name,
-                    "requested_version": model_version,
-                    "used_model": model_name,
-                    "used_version": None,
-                    "reason": "No forecasts logged for this version yet; showing all versions of this model.",
-                }
-                model_version = None
-        if _empty(result) and model_name and not model_param:
-            relaxed = _fetch(None, None)
-            if not _empty(relaxed):
-                logger.info(
-                    f"/forecast-stability fallback for {name}: no cycles "
-                    f"for {model_name!r}; widening to all models."
-                )
-                result = relaxed
-                result["model_fallback"] = {
-                    "requested_model": model_name,
-                    "requested_version": model_version,
-                    "used_model": None,
-                    "used_version": None,
-                    "reason": "No forecasts logged for this model in the selected window.",
-                }
-                model_name = None
-                model_version = None
+        # v2.34.0: the version-widening + model-widening fallbacks
+        # were removed. Stability is a per-cohort metric — pooling
+        # cross-version cycles produces a number that doesn't reflect
+        # any actual model's run-to-run swing. The new SQL also
+        # self-protects (partitions per cohort, picks one winner per
+        # target_dt), so the widening was redundant with the SQL fix
+        # AND misleading on cohorts with <2 cycles. Cold-start cases
+        # now return empty with `empty_reason: cohort_warming_up`
+        # and the verdict-card chip handles the empty payload
+        # gracefully (it already showed "need ≥2 cycles per moment"
+        # in that branch — now it's the canonical path).
+        if not result.get("per_timestep", {}).get("target_dt"):
+            result["empty_reason"] = "cohort_warming_up"
         result["model_name"] = model_name
         result["model_version"] = model_version
         return JSONResponse(content=result)
