@@ -1,5 +1,113 @@
 # Changelog
 
+## 2.34.0
+
+Multi-cohort Forecast Accuracy view. The user asked "how does the
+view handle a tune or a new model used for the experiment? both
+should appear on the graphs such as the run-to-run disagreement,
+and swing values updated to not use predictions of other types of
+model". Two parts, in that order:
+
+### Fixed
+
+- **Run-to-run stability, coverage, and conformal calibration no
+  longer pool predictions across cohorts.** Each query
+  (`get_forecast_stability` × 2 sub-queries, `get_forecast_coverage`
+  × 2, `get_conformal_quantiles`) now pre-aggregates per
+  `(model_name, model_version)` cohort and picks ONE winner per
+  output row (target_dt / lead_bucket / day) via `ROW_NUMBER()` —
+  most rows wins, ties broken by most recent `model_version`.
+  Previously, when the caller's filter widened (e.g. `?model=catboost`
+  with no version pinned, or `?model=all`), a single target_dt could
+  pool predictions from old + new weight regimes; a retrain mid-
+  window made the std balloon as "noise" that was actually just
+  "different weights making different predictions".
+
+  The endpoint-level version-widening fallback on `/forecast-stability`
+  is removed in the same pass — the SQL self-protects now, so
+  widening was redundant. The failure mode it tried to mask
+  (cohort warming up with <2 cycles per target) is now an explicit
+  `empty_reason: "cohort_warming_up"` on the response.
+
+  Three existing tests were documenting the bug as if it were the
+  spec ("Mixed: huge CV from pooling two regimes" etc.) — updated
+  to assert the new invariant: mixed-filter results equal a single
+  cohort's value, never the pooled mean. Two new tests added to
+  pin "larger cohort wins" as the v2.34.0 contract.
+
+### Added
+
+- **Multi-cohort overlay on the lead-time + run-to-run stability
+  charts.** When the response carries ≥2 cohorts (i.e. the user has
+  not pinned a single cohort via the chip strip and the window
+  contains a retrain or model switch), each chart renders ONE line
+  per cohort instead of the single dominant-cohort line. Visible at
+  a glance: how today's retrain's error curve compares to yesterday's,
+  or how the new lightgbm champion's stability tracks against the
+  old catboost one.
+
+  - Lead-time chart: per-cohort MAE traces, each grouped via
+    `legendgroup` so clicking a legend entry toggles the line.
+    RMSE / Bias stay single-cohort (pooled) to keep the chart
+    readable when "Show detail" is on — N × 3 traces is too many.
+  - Stability std chart: per-cohort std-vs-target_dt lines, time-
+    tiled (cohorts naturally occupy non-overlapping windows so
+    legibility stays high).
+  - Convergence (fan) chart, trajectory chart, and stability daily
+    bars stay single-cohort: stacked translucent fans become
+    illegible quickly, trajectory is already per-target.
+
+- **Per-cohort colour mapping.** New `_cohortColor(model_name,
+  model_version)` hashes the compound key into `PLOT_COLORWAY` —
+  stable across page reloads. Used by the lead-time chart, the
+  stability std chart, AND the retrain-history chip strip, so a
+  cohort wears the same colour on its chip dot and its lines on
+  every chart. The chip → trace correspondence is now visual, not
+  just textual.
+
+- **Multi-select retrain-history chip strip.** Three click modes:
+  - Plain click → focus on this cohort only (legacy single-select)
+  - Cmd/Ctrl-click → toggle cohort in the overlay set
+  - Shift-click → range select from last-clicked chip to this one
+
+  Selection lives in `_activeFilter.versions` as a Set keyed by
+  `"model_name::model_version"` and serialises to URL as
+  `?versions=key1,key2`. Single-select (`?model=&version=`) and
+  multi-select (`?versions=`) are mutually exclusive in the URL.
+
+  The backend stays oblivious to multi-select: when `versions=` is
+  the active mode, no model filter is sent and the backend returns
+  the full `cohorts` array; the frontend filters client-side via
+  `_filterCohortsBySelection()`. Means re-toggling chips doesn't
+  pay the SQL round-trip — re-renders directly from the cached
+  payload. Range selects feel instant even on a Pi 5.
+
+- **`empty_reason: "cohort_warming_up"`** on `/forecast-stability`
+  when the current cohort has fewer than the minimum cycles
+  (replaces the silently-removed widening fallback). Verdict chip
+  shows "need ≥2 cycles per moment" — same copy as before, now
+  the canonical path.
+
+### Backend
+
+- `get_forecast_accuracy` response carries a new `cohorts` array
+  (one entry per `(model_name, model_version)`, each with its own
+  `lead_time_curve` block). Skipped when caller pinned a single
+  cohort — only one cohort to chart, redundant work.
+
+- `get_forecast_stability` response carries the same `cohorts`
+  array shape, each entry with its own `per_timestep` block.
+
+- Pooled `lead_time_curve` and `per_timestep` scalars stay in
+  the response unchanged — the verdict-card chip + calibration
+  tile + older frontends keep working.
+
+- The `forecast_vals` CTE in `get_forecast_accuracy` now carries
+  `model_version` so the per-cohort lead-time GROUP BY can
+  reference it without rejoining `forecast_log`.
+
+212 tests pass.
+
 ## 2.33.2
 
 Docs cleanup. Two parts:
