@@ -1583,6 +1583,7 @@ class HistoryDB:
         interval_minutes: int = 30,
         model_name: Optional[str] = None,
         model_version: Optional[str] = None,
+        source_is_cumulative: bool = False,
     ) -> dict:
         """
         Return the last ``n_cycles`` forecast snapshots plus actuals.
@@ -1698,13 +1699,50 @@ class HistoryDB:
             if max_target is None or target_dt > max_target:
                 max_target = target_dt
 
-        # Pull actuals covering the same time window, snapped to the grid
+        # Pull actuals covering the same time window, snapped to the grid.
+        # When the source is cumulative, the model emits per-interval
+        # deltas to forecast_log, so the actuals need to be diffed to the
+        # same space — otherwise the fan chart plots raw cumulative
+        # values against delta predictions on one axis and the "Measured"
+        # line spikes up to the daily total while predictions hug zero.
+        # Adjacency guard: only diff against the previous bin if it's
+        # exactly one interval back (mirrors get_forecast_trajectory).
+        # Reset guard: clamp negative deltas to 0 so daily-reset sensors
+        # don't produce a huge negative spike at midnight.
         actuals_targets: list = []
         actuals_values: list = []
         if min_target and max_target:
-            try:
-                cursor.execute(
-                    f"""
+            if source_is_cumulative:
+                actuals_sql = f"""
+                    WITH actuals_grid AS (
+                        SELECT
+                            strftime('%Y-%m-%d %H:%M:%S',
+                                (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                                'unixepoch') AS grid_dt,
+                            AVG(value) AS value
+                        FROM {actuals_table}
+                        WHERE SUBSTR(ds, 1, 19) >= ?
+                          AND SUBSTR(ds, 1, 19) <= ?
+                        GROUP BY grid_dt
+                    )
+                    SELECT grid_dt,
+                        CASE
+                            WHEN CAST(strftime('%s', grid_dt) AS INTEGER)
+                                 - CAST(strftime('%s', LAG(grid_dt) OVER (ORDER BY grid_dt)) AS INTEGER)
+                                 = ?
+                            THEN MAX(0, value - LAG(value) OVER (ORDER BY grid_dt))
+                            ELSE NULL
+                        END AS value
+                    FROM actuals_grid
+                    ORDER BY grid_dt ASC
+                """
+                actuals_params: tuple = (
+                    interval_sec, interval_sec,
+                    min_target, max_target,
+                    interval_sec,
+                )
+            else:
+                actuals_sql = f"""
                     SELECT
                         strftime('%Y-%m-%d %H:%M:%S',
                             (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
@@ -1715,9 +1753,12 @@ class HistoryDB:
                       AND SUBSTR(ds, 1, 19) <= ?
                     GROUP BY grid_dt
                     ORDER BY grid_dt ASC
-                    """,
-                    (interval_sec, interval_sec, min_target, max_target),
+                """
+                actuals_params = (
+                    interval_sec, interval_sec, min_target, max_target,
                 )
+            try:
+                cursor.execute(actuals_sql, actuals_params)
                 for grid_dt, value in cursor.fetchall():
                     if value is None:
                         continue
