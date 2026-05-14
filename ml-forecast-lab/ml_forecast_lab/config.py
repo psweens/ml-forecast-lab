@@ -155,9 +155,6 @@ class CovariateCfg:
     scale: Optional[float] = None
     """Optional scaling factor; if None, no scaling applied."""
 
-    scaling: Optional[str] = None
-    """Optional scaling strategy name: 'standard', 'minmax', or None."""
-
     transform: Optional[str] = None
     """Optional transformation: 'log', 'sqrt', 'box_cox', or None."""
 

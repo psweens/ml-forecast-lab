@@ -34,6 +34,34 @@ class TestBuildFeatures:
         rolling_cols = [c for c in result.columns if c.startswith('y_rolling_')]
         assert len(rolling_cols) >= 3
 
+    def test_no_target_leakage_in_features(self):
+        """Feature row at t must not depend on target[t]."""
+        idx = pd.date_range('2024-01-01', periods=200, freq='30min')
+        df = pd.DataFrame({'y': np.linspace(0, 100, 200)}, index=idx)
+
+        baseline = build_features(df, target_col='y', interval_minutes=30, n_lags=6)
+
+        # Perturb a single target row and confirm that the feature row at the
+        # same timestamp is unchanged. Any feature column that depends on
+        # target[t] would shift here — including unshifted rolling stats.
+        probe_idx = 150
+        perturbed = df.copy()
+        perturbed.iloc[probe_idx, 0] += 1000.0
+        perturbed_features = build_features(
+            perturbed, target_col='y', interval_minutes=30, n_lags=6
+        )
+
+        for col in baseline.columns:
+            base_val = baseline.iloc[probe_idx][col]
+            new_val = perturbed_features.iloc[probe_idx][col]
+            if pd.isna(base_val) and pd.isna(new_val):
+                continue
+            assert base_val == new_val, (
+                f"feature '{col}' at row {probe_idx} changed from {base_val!r} "
+                f"to {new_val!r} when target[{probe_idx}] was perturbed — "
+                f"this is a look-ahead leak"
+            )
+
 
 class TestCreateSlidingWindows:
     def test_output_shapes(self, synthetic_df):

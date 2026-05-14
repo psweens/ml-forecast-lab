@@ -2008,13 +2008,17 @@ class MLForecastLabApp:
 
         def feature_builder(df_sub, config, purpose="train"):
             df_out = df_sub.copy()
-            # Re-compute rolling stats from fold-local target to avoid leakage
             target = df_out["target"]
+            # Shift before rolling so the feature at row t uses target[t-w..t-1]
+            # only. Without the shift pandas rolling includes target[t] (the
+            # value being predicted): target leakage for tree backends and
+            # a train/inference skew vs the recursive forecast which uses
+            # buf[-w:].
+            shifted_target = target.shift(1)
             for window in rolling_windows:
-                df_out[f"y_rolling_mean_{window}"] = target.rolling(window=window).mean()
-                df_out[f"y_rolling_std_{window}"] = target.rolling(window=window).std()
-                df_out[f"y_rolling_max_{window}"] = target.rolling(window=window).max()
-            # Re-compute periodic lags and diff from fold-local target
+                df_out[f"y_rolling_mean_{window}"] = shifted_target.rolling(window=window).mean()
+                df_out[f"y_rolling_std_{window}"] = shifted_target.rolling(window=window).std()
+                df_out[f"y_rolling_max_{window}"] = shifted_target.rolling(window=window).max()
             for d in [1, 2]:
                 lag_steps = steps_per_day * d
                 if lag_steps <= len(target):
@@ -2022,7 +2026,6 @@ class MLForecastLabApp:
             df_out["y_diff_1"] = target.shift(1) - target.shift(2)
             cols = [c for c in df_out.columns if c != "target"]
             X = df_out[cols].values.astype(np.float32)
-            # Replace any remaining NaN with 0 for model safety
             X = np.nan_to_num(X, nan=0.0)
             return X
 
@@ -4700,10 +4703,11 @@ class MLForecastLabApp:
         def feature_builder(df_sub, config, purpose="train"):
             df_out = df_sub.copy()
             target = df_out["target"]
+            shifted_target = target.shift(1)
             for window in rolling_windows:
-                df_out[f"y_rolling_mean_{window}"] = target.rolling(window=window).mean()
-                df_out[f"y_rolling_std_{window}"] = target.rolling(window=window).std()
-                df_out[f"y_rolling_max_{window}"] = target.rolling(window=window).max()
+                df_out[f"y_rolling_mean_{window}"] = shifted_target.rolling(window=window).mean()
+                df_out[f"y_rolling_std_{window}"] = shifted_target.rolling(window=window).std()
+                df_out[f"y_rolling_max_{window}"] = shifted_target.rolling(window=window).max()
             for d in [1, 2]:
                 lag_steps = steps_per_day * d
                 if lag_steps <= len(target):
