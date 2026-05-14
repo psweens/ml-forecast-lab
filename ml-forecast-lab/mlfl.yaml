@@ -1,7 +1,9 @@
 # ============================================================================
 # ML Forecast Lab — Example Configuration
 # ============================================================================
-# Place this file at /config/mlfl.yaml on your HA instance.
+# Place this file at /addon_configs/ml_forecast_lab/mlfl.yaml on your HA
+# instance (the canonical add-on config directory). The legacy
+# /config/mlfl.yaml path is still read as a fallback.
 #
 # Two operational modes per experiment:
 #   mode: lab        → trains ALL enabled models, benchmarks with CV, shows
@@ -10,9 +12,11 @@
 #                      publishes forecasts to HA every cycle.
 #
 # Typical workflow:
-#   1. Start in lab mode, run benchmarks, inspect results at http://<ha>:5052
-#   2. Pick the winning model (or let auto-select choose by metric)
-#   3. Switch to production mode — forecasts appear as HA sensor entities
+#   1. Start in lab mode, run benchmarks, inspect results via the add-on's
+#      "Open Web UI" button (Home Assistant ingress — direct port 5052 was
+#      removed in v2.30.0, all access is now through HA's authenticated proxy).
+#   2. Pick the winning model (or let auto-select choose by metric).
+#   3. Switch to production mode — forecasts appear as HA sensor entities.
 # ============================================================================
 
 # --- Global settings --------------------------------------------------------
