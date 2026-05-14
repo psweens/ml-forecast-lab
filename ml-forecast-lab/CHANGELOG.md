@@ -1,5 +1,50 @@
 # Changelog
 
+## 2.33.1
+
+Removes the `database` per-experiment flag and improves the dashboard
+card's destructive-action affordance. Both noticed while debugging a
+real "Forecast Accuracy view is empty" report against v2.33.0 — the
+underlying cause was `database: false` silently breaking every query
+that joins forecasts against the per-target actuals cache. Rather
+than build self-diagnosis surfaces around the foot-gun, we removed
+the foot-gun.
+
+### Removed
+
+- **`database: bool` per-experiment config field.** Actuals caching
+  is now unconditional. The flag was a foot-gun: every Forecast
+  Accuracy query (`get_forecast_accuracy`, `get_forecast_stability`,
+  `get_forecast_coverage`, `get_conformal_quantiles`) reads from
+  the cached per-entity actuals table, and `store_history` only
+  populated that table when the flag was on. Disabling it broke
+  the entire tab with no signal. The cost of always-on caching
+  is negligible (~72 KB / experiment for a 30-day window, bounded
+  by `cleanup(table_name, oldest)`); no reason to keep the choice.
+
+  - `ExperimentCfg.database` removed from the dataclass.
+  - Both gates removed from `_fetch_and_preprocess` (read path at
+    `main.py:1007`, write path at `main.py:1254`).
+  - **Auto-migration**: yamls carrying `database: true` or
+    `database: false` have the field silently stripped on first
+    load by `load_config`, alongside the existing `horizons_minutes`
+    cleanup. A single INFO line records the migration.
+  - Removed from the `/api/experiment-settings` editable whitelist.
+  - "Cache actuals" toggle removed from the Settings → Target
+    section.
+
+### Changed
+
+- **Dashboard card delete button moved to the top-right corner
+  of each experiment card.** Previously a faint `×` sat in the
+  footer-actions row between "View Details" and "Retrain" /
+  "Publishing" — it read as a separator rather than a destructive
+  control. New `.btn-card-delete` is absolutely positioned in the
+  card corner, always-visible with a faint red tint, and brightens
+  fully on hover. The mode badge in the card header reserves
+  matching right-margin so the corner X never collides with it on
+  narrow viewports.
+
 ## 2.33.0
 
 Audit-driven UX, accessibility, and correctness pass on the

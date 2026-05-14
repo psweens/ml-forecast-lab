@@ -421,8 +421,14 @@ class ExperimentCfg:
     publish_name: Optional[str] = None
     """Override name for published HA entities."""
 
-    database: bool = False
-    """Whether to cache history in SQLite."""
+    # `database` was a per-experiment toggle gating the SQLite actuals
+    # cache. Removed in v2.33.1 — actuals are cached unconditionally
+    # because every Forecast Accuracy query depends on them, the cost
+    # is negligible (~72 KB per experiment for a 30-day window), and
+    # the flag was a foot-gun (disabling it silently broke the whole
+    # Forecast Accuracy view). Old yamls carrying the field are
+    # auto-migrated by load_config — the field is stripped from disk
+    # and an INFO line records the migration.
 
     model_params: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     """Per-model hyperparameter overrides specific to this experiment.
@@ -773,6 +779,14 @@ def load_config(config_path: Path | str) -> AppConfig:
             if 'horizons_minutes' in exp_data:
                 exp_data.pop('horizons_minutes')
                 _needs_migrate = True
+            # v2.33.1: `database` removed. Actuals are cached
+            # unconditionally now; the flag was a foot-gun (off → entire
+            # Forecast Accuracy view silently broken). Old yamls carrying
+            # either `database: true` or `database: false` are auto-cleaned
+            # below; the field is no longer consulted at runtime.
+            if 'database' in exp_data:
+                exp_data.pop('database')
+                _needs_migrate = True
 
             # Parse covariates
             covariates_data = exp_data.pop('covariates', [])
@@ -864,11 +878,17 @@ def load_config(config_path: Path | str) -> AppConfig:
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 raw = yaml.safe_load(f)
+            removed: list = []
             for exp in raw.get('experiments', []):
                 if isinstance(exp, dict):
-                    exp.pop('horizons_minutes', None)
+                    for fld in ('horizons_minutes', 'database'):
+                        if exp.pop(fld, None) is not None and fld not in removed:
+                            removed.append(fld)
             atomic_yaml_write(config_path, raw)
-            logger.info('Migrated config: removed deprecated horizons_minutes')
+            if removed:
+                logger.info(
+                    f'Migrated config: removed deprecated field(s): {", ".join(removed)}'
+                )
         except Exception as e:
             logger.warning(f'Config migration failed (non-fatal): {e}')
 

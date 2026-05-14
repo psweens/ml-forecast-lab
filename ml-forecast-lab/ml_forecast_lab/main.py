@@ -1004,7 +1004,8 @@ class MLForecastLabApp:
 
         df = pd.DataFrame(columns=["ds", "value"])
         cache_rows = 0
-        if exp_cfg.database and self.history_db and table_name:
+        # v2.33.1: cache read is unconditional now (database flag removed).
+        if self.history_db and table_name:
             try:
                 cached = self.history_db.get_history(table_name)
                 if not cached.empty:
@@ -1189,10 +1190,13 @@ class MLForecastLabApp:
         freq = f"{exp_cfg.interval_minutes}min"
         table_name = self.history_db.safe_table_name(exp_cfg.target_entity) if self.history_db else None
 
-        df = pd.DataFrame(columns=["ds", "value"])
-
         # --- Try SQLite cache first ---
-        if exp_cfg.database and self.history_db and table_name:
+        # v2.33.1: actuals caching is unconditional. The previous
+        # `exp_cfg.database` gate was removed — the field was a footgun
+        # (off → entire Forecast Accuracy view silently broken) and the
+        # cost is negligible (~72 KB / experiment for a 30-day window,
+        # bounded by the cleanup call below).
+        if self.history_db and table_name:
             cached_df = self.history_db.get_history(table_name)
             if not cached_df.empty:
                 # Rename 'y' back to 'value' for consistency
@@ -1248,7 +1252,9 @@ class MLForecastLabApp:
             )
 
         # --- Store in SQLite cache ---
-        if exp_cfg.database and self.history_db and table_name:
+        # v2.33.1: unconditional — the `exp_cfg.database` gate was
+        # removed (see the matching comment on the cache-read above).
+        if self.history_db and table_name:
             inserted = self.history_db.store_history(table_name, df)
             if inserted > 0:
                 logger.info(f"  Cached {inserted} new records in SQLite")
