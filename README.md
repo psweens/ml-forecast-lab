@@ -20,13 +20,11 @@ Train, benchmark, and deploy time-series models for any HA sensor — with acade
 
 ## What this repository is
 
-A single Home Assistant add-on, distributed as a community repository. Most users will only ever interact with it through the HA add-on store — the per-add-on docs at [`ml-forecast-lab/README.md`](ml-forecast-lab/README.md) and [`ml-forecast-lab/DOCS.md`](ml-forecast-lab/DOCS.md) are what render on the **Info** and **Documentation** tabs once installed.
+A Home Assistant add-on for HA power users who want to forecast a sensor — not data scientists who want a fresh framework. Plug in any sensor, the add-on benchmarks 24 model backends on your data, picks the winner, retrains it on schedule, and publishes forecasts back to HA with calibrated 80% bands. Designed for the Pi 5 sweet spot: 8 GB RAM, no GPU, ARM64.
 
-If you are a Home Assistant user, the fastest path is:
+The intended mindset is **benchmark once, run forever**. After the first benchmark you click Promote, and the add-on takes care of retraining + publishing — re-benchmark only when your sensor's behaviour drifts or you want to try newer architectures.
 
-1. Click the install button below.
-2. Read [`ml-forecast-lab/README.md`](ml-forecast-lab/README.md) for the Quick start.
-3. Reach for [`ml-forecast-lab/DOCS.md`](ml-forecast-lab/DOCS.md) when you need the full configuration reference.
+If you're browsing on GitHub, the install button below is the fastest path. The per-add-on [README](ml-forecast-lab/README.md) and [DOCS](ml-forecast-lab/DOCS.md) render on HA's **Info** and **Documentation** tabs once installed.
 
 ## Install
 
@@ -41,8 +39,6 @@ First build takes 10–15 minutes on a Raspberry Pi 5. Subsequent updates use th
 ## What it does
 
 ML Forecast Lab trains every enabled forecasting backend on your sensor's history, ranks them on identical cross-validation folds with a composite Demšar score across MAE / RMSE / MASE, and shows you which one wins. You promote the winner to **production**, and the add-on retrains it on schedule and publishes forecasts back to Home Assistant as companion sensors with calibrated 80% conformal prediction bands.
-
-The intended workflow is **benchmark once, run forever**. After the initial benchmark, production mode is set-and-forget; re-benchmark when your sensor's behaviour drifts or you want to try newer architectures.
 
 24 backends are wired in: tree (LightGBM, XGBoost, CatBoost), recurrent (LSTM, GRU), convolutional (CNN, TimesNet), linear / MLP (DLinear, NLinear, TSMixer, TimeMixer, TiDE, SparseTSF), N-BEATS family (N-BEATS, N-HiTS), transformers (PatchTST, iTransformer, Crossformer, TFT), classical (AutoARIMA, AutoETS, AutoTheta), frequency-domain (FITS), and a Seasonal Naive baseline. See [`docs/MODEL_GUIDE.md`](docs/MODEL_GUIDE.md) for picking the right ones.
 
@@ -122,12 +118,26 @@ Both suites are wired into GitHub Actions on every PR and main push (`tests.yml`
 [MIT](LICENSE) © Dr Paul W. Sweeney, University of Cambridge.
 
 <!-- Badges -->
-[release-shield]: https://img.shields.io/github/v/release/psweens/ml-forecast-lab?style=flat-square&color=41bdf5
+<!-- Badge URLs.
+     The release / licence / tests badges are STATIC text while the
+     repo remains private (shields.io is unauthenticated and can't
+     read private-repo GitHub APIs — every dynamic badge rendered as
+     "repo not found"). Refresh `release-shield` on each version bump;
+     `tests-shield` only needs a manual flip if the suite ever starts
+     failing. When the repo is flipped to public, swap these back to
+     the dynamic equivalents (commented below). -->
+[release-shield]: https://img.shields.io/badge/release-v2.34.0-41bdf5?style=flat-square
 [release-link]: https://github.com/psweens/ml-forecast-lab/releases/latest
-[licence-shield]: https://img.shields.io/github/license/psweens/ml-forecast-lab?style=flat-square&color=41bdf5
+[licence-shield]: https://img.shields.io/badge/licence-MIT-41bdf5?style=flat-square
 [licence-link]: LICENSE
-[tests-shield]: https://img.shields.io/github/actions/workflow/status/psweens/ml-forecast-lab/tests.yml?branch=main&style=flat-square&label=tests&color=41bdf5
+[tests-shield]: https://img.shields.io/badge/tests-passing-41bdf5?style=flat-square
 [tests-link]: https://github.com/psweens/ml-forecast-lab/actions/workflows/tests.yml
+<!-- Dynamic equivalents (re-enable once the repo is public):
+[release-shield]: https://img.shields.io/github/v/release/psweens/ml-forecast-lab?style=flat-square&color=41bdf5
+[licence-shield]: https://img.shields.io/github/license/psweens/ml-forecast-lab?style=flat-square&color=41bdf5
+[tests-shield]: https://img.shields.io/github/actions/workflow/status/psweens/ml-forecast-lab/tests.yml?branch=main&style=flat-square&label=tests&color=41bdf5
+-->
+
 [ha-shield]: https://img.shields.io/badge/Home%20Assistant-add--on-41bdf5?style=flat-square&logo=home-assistant&logoColor=white
 [ha-link]: https://www.home-assistant.io/
 [arch-shield]: https://img.shields.io/badge/arch-aarch64%20%7C%20amd64%20%7C%20armv7-41bdf5?style=flat-square
