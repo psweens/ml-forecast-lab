@@ -289,33 +289,32 @@ def clip_outliers(
     return clipped
 
 
-def apply_log_transform(series: pd.Series, shift: float = 1.0) -> pd.Series:
+def apply_log_transform(
+    series: pd.Series, shift: Optional[float] = None
+) -> pd.Series:
     """
-    Apply log transformation with shift for non-positive values.
+    Apply ``log(x + shift)`` to a series.
 
-    Parameters
-    ----------
-    series : pd.Series
-        Input series.
-    shift : float, default 1.0
-        Shift applied before log: log(x + shift).
-
-    Returns
-    -------
-    pd.Series
-        Log-transformed series.
-
-    Notes
-    -----
-    Stores shift value as attribute for later inversion.
+    When ``shift`` is None the shift is derived from the data:
+    ``max(1.0, abs(min(series)) + 1.0)`` so the transform is well-defined
+    even on signed targets, while remaining identical to the legacy
+    ``shift=1.0`` path for the non-negative HA targets the rest of the
+    pipeline produces. The chosen shift is stored on ``series.attrs`` so
+    ``invert_log_transform`` can read it back without the caller having
+    to thread it through.
     """
+    series = series.copy()
+    if shift is None:
+        try:
+            min_val = float(series.min())
+        except (TypeError, ValueError):
+            min_val = 0.0
+        shift = 1.0 if min_val >= 0 else abs(min_val) + 1.0
     if shift < 0:
         raise ValueError(f'shift must be >= 0, got {shift}')
 
-    series = series.copy()
     transformed = np.log(series + shift)
     transformed.attrs['log_shift'] = shift
-
     return transformed
 
 

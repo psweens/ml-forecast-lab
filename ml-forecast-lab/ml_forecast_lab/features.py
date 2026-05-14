@@ -134,7 +134,17 @@ def build_features(
         raise ValueError(f'interval_minutes must be >= 1, got {interval_minutes}')
 
     if lag_windows is None:
-        lag_windows = [6, 24, 72]
+        # Pick rolling windows by their hour-of-history meaning rather than
+        # by row count. At 30-min interval this resolves to [6, 24, 72] —
+        # the legacy default — and at 5-min interval it scales to [36, 144,
+        # 432] so the longest window still spans 36 h. Without this the
+        # model never sees the daily seasonality on small intervals.
+        steps_per_hour = max(1, 60 // max(interval_minutes, 1))
+        lag_windows = [
+            max(2, 3 * steps_per_hour),    # ~3 h
+            max(3, 12 * steps_per_hour),   # ~12 h
+            max(4, 36 * steps_per_hour),   # ~36 h
+        ]
 
     features = pd.DataFrame(index=df.index)
 

@@ -236,8 +236,14 @@ class ExperimentCfg:
     cv_folds: int = 5
     """Number of cross-validation folds."""
 
-    cv_embargo_periods: int = 2
-    """Gap between training and test sets (in periods) to avoid temporal leakage."""
+    cv_embargo_periods: int = 0
+    """Gap (in periods) between training and test sets to avoid temporal
+    leakage from rolling / lag features that span the fold boundary.
+
+    ``0`` (default) tells the runner to derive a sensible value from
+    ``interval_minutes``: at 30-min sampling the longest rolling window is
+    36 h = 72 steps, so the runner uses ``max(2, longest_rolling_window)``.
+    Set explicitly to override."""
 
     metrics: List[str] = field(
         default_factory=lambda: ['mae', 'rmse', 'mase', 'seasonal_mase']
@@ -469,10 +475,15 @@ class ExperimentCfg:
     Typical useful range: 0.1–1.0 (stronger under MSE than MAE due to loss
     geometry)."""
 
-    recency_half_life_days: float = 7.0
-    """Half-life for exponential recency weighting in days. Recent samples receive
-    higher weight during training so models prioritise current patterns.
-    Set to 0 to disable recency weighting (all samples weighted equally)."""
+    recency_half_life_days: float = 0.0
+    """Half-life for exponential recency weighting in days. ``0`` (default,
+    post-audit) gives uniform sample weight — the right choice for the
+    stable household / business sensors most users forecast, where the
+    weekly-seasonal pattern from a fortnight ago is just as informative
+    as yesterday's data. Set to a positive value (e.g. 7) only when the
+    series has recently entered a new regime (heat pump install, EV
+    delivery, schedule change). Pre-audit default was ``7``, which
+    silently down-weighted older training rows by ~75%."""
 
     conformal_coverage: float = 0.8
     """Nominal coverage for the conformal prediction interval published with

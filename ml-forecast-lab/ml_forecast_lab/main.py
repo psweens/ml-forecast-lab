@@ -2009,10 +2009,16 @@ class MLForecastLabApp:
             f"{len(feature_cols)} features ({len(feature_cols) - n_cov} temporal + {n_cov} covariates)"
         )
 
-        # 4. Create feature_builder callback for BenchmarkRunner
-        # BenchmarkRunner splits by index and passes df subsets here.
+        # 4. Create feature_builder callback for BenchmarkRunner.
         # Re-compute rolling stats per fold to prevent feature leakage.
-        rolling_windows = [6, 24, 72]
+        # Windows scale with interval_minutes so the daily seasonality is
+        # captured at any sampling rate (legacy 30-min default → [6, 24, 72]).
+        _steps_per_hour = max(1, 60 // max(exp_cfg.interval_minutes, 1))
+        rolling_windows = [
+            max(2, 3 * _steps_per_hour),
+            max(3, 12 * _steps_per_hour),
+            max(4, 36 * _steps_per_hour),
+        ]
 
         steps_per_day = max(1, 1440 // exp_cfg.interval_minutes)
 
@@ -2814,6 +2820,12 @@ class MLForecastLabApp:
             # predict, append, and repeat.
             raw_cov_cols = [c for c in covariate_cols if c != 'target']
             steps_per_day = max(1, 1440 // exp_cfg.interval_minutes)
+            _steps_per_hour = max(1, 60 // max(exp_cfg.interval_minutes, 1))
+            rolling_windows = [
+                max(2, 3 * _steps_per_hour),
+                max(3, 12 * _steps_per_hour),
+                max(4, 36 * _steps_per_hour),
+            ]
 
             # Try to fetch future covariate values where available
             future_index = pd.date_range(
@@ -2899,8 +2911,7 @@ class MLForecastLabApp:
                 for d in [1, 2]:
                     lag_steps = steps_per_day * d
                     row[f'y_lag_{lag_steps}'] = float(buf[-lag_steps]) if lag_steps <= len(buf) else 0.0
-                # Rolling stats
-                for w in [6, 24, 72]:
+                for w in rolling_windows:
                     window = buf[-w:] if len(buf) >= w else buf
                     if window:
                         row[f'y_rolling_mean_{w}'] = float(np.mean(window))
@@ -2910,7 +2921,6 @@ class MLForecastLabApp:
                         row[f'y_rolling_mean_{w}'] = 0.0
                         row[f'y_rolling_std_{w}'] = 0.0
                         row[f'y_rolling_max_{w}'] = 0.0
-                # Rate of change
                 row['y_diff_1'] = float(buf[-1] - buf[-2]) if len(buf) >= 2 else 0.0
                 # Covariates (use future values if available, else last-known)
                 for c in raw_cov_cols:
@@ -4425,6 +4435,12 @@ class MLForecastLabApp:
             ]
 
             steps_per_day = max(1, 1440 // exp_cfg.interval_minutes)
+            _steps_per_hour = max(1, 60 // max(exp_cfg.interval_minutes, 1))
+            rolling_windows = [
+                max(2, 3 * _steps_per_hour),
+                max(3, 12 * _steps_per_hour),
+                max(4, 36 * _steps_per_hour),
+            ]
 
             # Rolling lag buffer — starts with the last observed values,
             # grows as we append predictions.
@@ -4546,8 +4562,7 @@ class MLForecastLabApp:
                 for d in [1, 2]:
                     lag_steps = steps_per_day * d
                     row[f'y_lag_{lag_steps}'] = float(buf[-lag_steps]) if lag_steps <= len(buf) else 0.0
-                # Rolling stats (on most recent window of buffer)
-                for w in [6, 24, 72]:
+                for w in rolling_windows:
                     window = buf[-w:] if len(buf) >= w else buf
                     if window:
                         row[f'y_rolling_mean_{w}'] = float(np.mean(window))
@@ -4725,8 +4740,14 @@ class MLForecastLabApp:
             combined[col] = df[col]
         combined = combined.dropna()
 
-        # Feature builder (same as _run_benchmark)
-        rolling_windows = [6, 24, 72]
+        # Feature builder (same as _run_benchmark). Windows scale with
+        # interval_minutes so daily seasonality is captured at any rate.
+        _steps_per_hour = max(1, 60 // max(exp_cfg.interval_minutes, 1))
+        rolling_windows = [
+            max(2, 3 * _steps_per_hour),
+            max(3, 12 * _steps_per_hour),
+            max(4, 36 * _steps_per_hour),
+        ]
         steps_per_day = max(1, 1440 // exp_cfg.interval_minutes)
 
         def feature_builder(df_sub, config, purpose="train"):
