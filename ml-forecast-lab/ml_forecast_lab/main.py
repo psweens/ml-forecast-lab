@@ -5590,80 +5590,148 @@ class MLForecastLabApp:
                 if base.mase > 0 and np.isfinite(cell.mase) and np.isfinite(base.mase):
                     cell.mase_change_pct = round((cell.mase - base.mase) / base.mase * 100, 1)
 
-        # Generate recommendations
-        # All percentages use baseline (All covariates) as denominator,
-        # matching the change_pct shown in the table.
+        # Generate recommendations. All percentages use baseline (All
+        # covariates) as denominator, matching the change_pct shown in
+        # the table. Two passes:
+        #   1. Per-model overall — does the model want covariates at all?
+        #   2. Per-covariate consensus — across models that DO want
+        #      covariates, is there agreement on a specific one to keep
+        #      or drop?
+        # The `variant` field is a semantic name (good / warning / bad /
+        # info); the colour mapping lives in the template so the palette
+        # can evolve without touching the backend (LOW-5).
         recommendations = []
         no_cov = results.get("No covariates", {})
 
-        # Overall covariate value (per model)
+        # Pass 1: per-model overall covariate value.
+        # Track which models would do better with no covariates so we
+        # can suppress contradictory per-covariate "Keep X" recs for
+        # those models in pass 2 (HIGH-5: avoid contradictory recs).
+        models_better_without_covs: set = set()
         for model_name in models_to_run:
             base_mae = baseline.get(model_name, _nan_cell).mae
             no_cov_mae = no_cov.get(model_name, _nan_cell).mae
             if not np.isnan(base_mae) and not np.isnan(no_cov_mae) and base_mae > 0:
-                # Positive = removing covariates increases MAE (covariates help)
-                # Negative = removing covariates decreases MAE (covariates hurt)
+                # Positive = removing covariates increases error (covariates help)
+                # Negative = removing covariates decreases error (covariates hurt)
                 change_pct = (no_cov_mae - base_mae) / base_mae * 100
                 if change_pct > 5:
                     recommendations.append({
                         "icon": "✓",
-                        "text": f"Covariates help {model_name} — removing all increases MAE by {change_pct:.1f}%",
-                        "color": "#2ecc71",
+                        "text": (
+                            f"Covariates help {model_name} — without them, typical "
+                            f"forecast error is {change_pct:.1f}% larger."
+                        ),
+                        "variant": "good",
                     })
                 elif change_pct < -3:
+                    models_better_without_covs.add(model_name)
                     recommendations.append({
                         "icon": "⚠",
-                        "text": f"{model_name} performs better without covariates (MAE drops {abs(change_pct):.1f}%)",
-                        "color": "#f39c12",
+                        "text": (
+                            f"{model_name} forecasts better without covariates — "
+                            f"removing them all reduces typical error by {abs(change_pct):.1f}%."
+                        ),
+                        "variant": "warning",
                     })
 
-        # Per-covariate: cross-model consensus
+        # Pass 2: per-covariate cross-model consensus.
+        # Exclude models from pass 1 that already prefer no covariates,
+        # so the "Keep X" voice doesn't contradict their own overall
+        # recommendation. If excluding leaves us with <2 models, skip
+        # the rec rather than emit a single-model claim.
         for cov_col in covariate_cols:
             label = f"Without {cov_col}"
             dropped = results.get(label, {})
 
-            # Compute impact across ALL models (same formula as table change_pct)
-            # Negative = dropping this covariate improves MAE
-            # Positive = dropping this covariate worsens MAE (covariate is useful)
             impacts = {}
             for m in models_to_run:
+                if m in models_better_without_covs:
+                    continue
                 d_mae = dropped.get(m, _nan_cell).mae
                 b_mae = baseline.get(m, _nan_cell).mae
                 if np.isfinite(d_mae) and np.isfinite(b_mae) and b_mae > 0:
                     impacts[m] = (d_mae - b_mae) / b_mae * 100
 
-            if not impacts:
+            if len(impacts) < 2:
                 continue
 
             avg_impact = np.mean(list(impacts.values()))
-            n_helps = sum(1 for v in impacts.values() if v > 2)    # dropping hurts → covariate helps
-            n_hurts = sum(1 for v in impacts.values() if v < -2)   # dropping helps → covariate hurts
+            # MED-7: symmetric ±2% threshold matching the row-level
+            # Remove button gate in the template.
+            n_helps = sum(1 for v in impacts.values() if v > 2)
+            n_hurts = sum(1 for v in impacts.values() if v < -2)
             n_models = len(impacts)
+            suppressed = len(models_better_without_covs)
+            qual = (
+                f" (excluding {suppressed} model(s) that prefer no covariates)"
+                if suppressed else ""
+            )
 
             if n_helps == n_models and avg_impact > 3:
                 recommendations.append({
                     "icon": "✓",
-                    "text": f"Keep {cov_col} — dropping it increases MAE by {avg_impact:.1f}% across all {n_models} models",
-                    "color": "#2ecc71",
+                    "text": (
+                        f"Keep {cov_col} — dropping it grows typical error by "
+                        f"{avg_impact:.1f}% across all {n_models} tested models{qual}."
+                    ),
+                    "variant": "good",
                 })
             elif n_hurts == n_models and avg_impact < -2:
                 recommendations.append({
                     "icon": "✗",
-                    "text": f"Consider removing {cov_col} — dropping it reduces MAE by {abs(avg_impact):.1f}% across all {n_models} models",
-                    "color": "#e74c3c",
+                    "text": (
+                        f"Consider removing {cov_col} — dropping it reduces typical "
+                        f"error by {abs(avg_impact):.1f}% across all {n_models} "
+                        f"tested models{qual}."
+                    ),
+                    "variant": "bad",
                 })
             elif n_helps > n_models / 2 and avg_impact > 3:
                 recommendations.append({
                     "icon": "✓",
-                    "text": f"Keep {cov_col} — {n_helps}/{n_models} models benefit (+{avg_impact:.1f}% MAE when dropped)",
-                    "color": "#2ecc71",
+                    "text": (
+                        f"Keep {cov_col} — {n_helps}/{n_models} models forecast "
+                        f"worse without it (+{avg_impact:.1f}% typical error){qual}."
+                    ),
+                    "variant": "good",
                 })
             elif n_hurts > n_models / 2 and avg_impact < -2:
                 recommendations.append({
                     "icon": "✗",
-                    "text": f"Consider removing {cov_col} — {n_hurts}/{n_models} models improve ({avg_impact:.1f}% MAE when dropped)",
-                    "color": "#e74c3c",
+                    "text": (
+                        f"Consider removing {cov_col} — {n_hurts}/{n_models} models "
+                        f"forecast better without it ({avg_impact:.1f}% typical error){qual}."
+                    ),
+                    "variant": "bad",
                 })
+
+        # MED-5: never leave the panel silent on a completed run. If no
+        # rule fired, tell the user the analysis ran but found no strong
+        # signal — that's a useful conclusion in its own right and
+        # reassures them the run wasn't a failure.
+        if not recommendations and results:
+            recommendations.append({
+                "icon": "ℹ",
+                "text": (
+                    "No covariate had a strong effect (>3% change in typical error) "
+                    "on any tested model. Your current configuration looks well-balanced."
+                ),
+                "variant": "info",
+            })
+
+        # Single-fold caveat. Always emitted alongside any populated
+        # rec block so the user reads the rankings with appropriate
+        # confidence (HIGH-5).
+        if recommendations:
+            recommendations.append({
+                "icon": "ⓘ",
+                "text": (
+                    "Rankings are based on one 80/20 split — rerun the analysis "
+                    "to confirm borderline results before applying."
+                ),
+                "variant": "info",
+            })
 
         # Store final results
         if self.web_app:

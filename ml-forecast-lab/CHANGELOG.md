@@ -1,5 +1,259 @@
 # Changelog
 
+## 2.33.0
+
+Audit-driven UX, accessibility, and correctness pass on the
+Forecast Accuracy and Covariate Analysis views — produced from a
+static audit of both surfaces (see `VIEW_SURVEY.md` and
+`VIEW_AUDIT.md`). 30 distinct fixes; companion to the v2.31.0 wave
+which addressed adjacent concerns (lazy-load Plotly, retrain
+history chips, calibration progress tile).
+
+### Fixed
+
+- **Forecast convergence (fan) chart silently mixed predictions
+  from rotated-out models.** `db.get_forecast_evolution` and its
+  `/forecast-evolution` endpoint had no `model_name` /
+  `model_version` parameters — every other accuracy endpoint
+  applies the default-then-widen ladder via
+  `_resolve_model_filter`, but this one ran unfiltered. After any
+  retrain (which stamps a new `model_version`) or champion
+  rotation, the "Latest run" yellow line and the fan band could
+  span two different model weight regimes on the same axes, and
+  the chart looked perfectly fine. Threaded the filter through
+  both the issuance query and the per-cycle rows query; the
+  endpoint now uses the same probe-then-widen ladder and surfaces
+  a `model_fallback` payload when it widens.
+
+- **Forecast Accuracy → Trajectory could spin in an unbounded
+  re-fetch loop.** When the server's `data.target_dt` didn't
+  match the `want` the client had just picked (e.g. the target
+  was purged from `forecast_log` between the dropdown render and
+  the row fetch, or a string-comparison mismatch), the loader
+  called itself again with no attempt cap. Added a one-shot
+  `window._trajRetries` guard — after one retry the loader bails,
+  purges the chart, and shows "Couldn't load the requested
+  target — pick another from the dropdown" rather than hammering
+  the Pi.
+
+- **Trajectory error path left a stale chart visible behind the
+  empty state text.** The empty-data branch already called
+  `Plotly.purge('accuracy-trajectory-chart')`; the `.catch` did
+  not. A previously-rendered trajectory could therefore stay on
+  screen while the page told the user "no targets yet". Added the
+  same purge to the error path.
+
+- **Apply Best & Retrain scored covariate configs against the
+  mean MAE across every tested model — not the model actually
+  publishing forecasts.** When the user ran the analysis with the
+  default "All models" dropdown selection, the winning row could
+  be one that helped a weak model but hurt the production model,
+  and the button silently applied it. Scoring now reads from
+  `experiment.selected_model || experiment.best_model` first; falls
+  back to the cross-model mean only when the production model's
+  cells are all NaN (e.g. it was disabled when the analysis ran).
+  Response carries a `score_source` field describing which rule
+  applied.
+
+- **Calibration ETA on the verdict tile was off by up to 48×.**
+  The new "Calibrating: 3 of 10 residuals · ~12 h to bands" tile
+  (v2.31.0) divided remaining residuals by `forecast_every_minutes`
+  assuming one residual per cycle. Every cycle actually produces
+  `future_periods` residuals as actuals arrive. Now divides by
+  `future_periods` so the displayed ETA is meaningful rather
+  than wildly conservative.
+
+### Changed
+
+- **Forecast Accuracy now shows a loading skeleton on every chart
+  card.** Tab-open fires four concurrent fetches against backend
+  SQL that, against a mature `forecast_log` on a Pi 5, plausibly
+  take 1–3 s combined. Previously the page rendered empty
+  `<div>`s for the duration — empty looked identical to broken
+  and to "still computing". A `.chart-loading` CSS class with a
+  cyan shimmer + "Computing…" caption is toggled on each chart
+  host via `_setCardLoading()`; the class is cleared on settle
+  (success or empty). Honours `prefers-reduced-motion`.
+
+- **All Forecast Accuracy fetches now share a JSON helper with
+  one-shot retry, memoisation, and a user-facing failure toast.**
+  `accuracyFetch()` retries once with 2 s backoff before giving
+  up (covers most ingress hiccups in the 4-fetch storm on tab
+  open), caches the last 8 responses per URL so flipping between
+  30 and 90 days doesn't re-run the full SQL pipeline twice, and
+  on persistent failure emits a non-blocking `mlfl.toast`. The
+  cache is invalidated on `pageshow` (bfcache restore), on
+  `pipeline_end` SSE events, and on `popstate` after a chip
+  filter changes the URL.
+
+- **Plotly bundle now ships compressed and cacheable.** Added
+  `GZipMiddleware(minimum_size=1024)` to the FastAPI app — cuts
+  the 1.05 MB Plotly Basic bundle to roughly 330 kB on the wire.
+  `StaticFiles` is now subclassed to set
+  `Cache-Control: public, max-age=31536000, immutable` on
+  `*.min.js` / `*.min.css` (versions are pinned by filename at
+  build time, safe to long-cache) and a 5-minute cache on
+  everything else so addon updates ship without hard refreshes.
+  Stacks with the lazy-loader landed in v2.31.0.
+
+- **Apply Best & Retrain now requires confirmation.** The action
+  rewrites `mlfl.yaml` and triggers an immediate retrain — a
+  single misclick previously did both with no recovery path. The
+  click now opens an `mlfl.confirm` (matching the pattern already
+  used by the inline Remove button on the same tab) that names
+  the production model the config will be optimised for and
+  warns that the change overwrites existing covariate settings.
+
+- **Covariate analysis cell colour convention reversed to follow
+  the value direction.** The macro previously coloured cells
+  green when `change_pct > 2` (because "this row says the
+  covariate is useful") and red when `change_pct < -2` — a
+  positive number meaning "MAE got worse" was therefore green,
+  which the reader cannot rely on grasping. Cells now follow the
+  value: positive (worse) → red, negative (better) → green. A
+  legend strip above the table spells out the new convention,
+  the section info-tip lists the colour mapping explicitly, and
+  "MAE" is framed as "typical forecast error" in user-facing
+  strings (column headers keep the technical names with hover
+  tooltips expanding them).
+
+- **Covariate analysis recommendations rewritten.** Per-model
+  "performs better without covariates" recs now suppress
+  contradictory per-covariate "Keep X" recs for the same model
+  (they used to fire in the same panel and confuse the reader).
+  Per-covariate threshold symmetric on ±2% to match the inline
+  Remove button. Every text string replaces unexpanded "MAE"
+  with "typical forecast error" so HA-user readers don't need
+  ML training to parse the verdicts. A single-fold caveat is
+  appended to every populated recommendations block. When the
+  rules collectively fire nothing, the panel now emits an
+  informational rec ("No covariate had a strong effect… your
+  configuration looks well-balanced") rather than showing blank
+  — empty recs no longer look like an analysis failure.
+
+- **Stability "Daily-total disagreement by day" chart encoding
+  now works for colourblind users.** Previously the bars carried
+  the green/amber/red CV-threshold mapping via hue alone, with
+  no legend. Added two dotted threshold lines at CV = 10%
+  (green) and CV = 25% (red) with right-anchored annotations
+  ("Stable", "Unstable") — encoding is now readable by position
+  alone; colour is a redundant channel.
+
+- **Covariate Analysis tab finally has a cold-start empty state.**
+  When the benchmark has run but the covariate analysis has not,
+  the tab previously rendered just the controls — a model
+  picker and a button with no surrounding context. Added an
+  empty-state card under the controls explaining what the
+  analysis does, how many model runs it will perform for the
+  experiment's current configuration, and what to expect for
+  duration.
+
+- **Lowest cross-model mean MAE row is now highlighted as best,
+  not the baseline.** The `.best-model` row highlight is
+  computed server-side in Jinja and applied to the actually-best
+  row; the baseline row gets a separate "baseline" pill in the
+  first column so the comparison anchor is still visible.
+
+- **Forecast convergence card and trajectory card now surface
+  their empty / error state inline.** Previously the convergence
+  card vanished silently (`wrap.style.display = 'none'`) on any
+  error or empty payload — users had no way to tell whether the
+  diagnostic had been removed or had failed. Both cards now stay
+  visible with a one-line message ("Convergence chart needs at
+  least two forecast cycles in this window." / "Could not load
+  convergence data — <reason>") inside the chart host.
+
+- **Forecast Accuracy empty-state distinguishes the three real
+  conditions behind it.** The backend `/forecast-accuracy`
+  response now carries an `empty_reason` field — `ok` /
+  `warming_up` / `no_actuals` / `no_overlap` — derived from row
+  counts and table existence, so the UI can show the right hint
+  without substring-matching on error strings. Each branch shows
+  a distinct title + hint pair.
+
+- **Retrain history chip strip now identifies the active filter,
+  filters softly, caps overflow, and honours timezone.** Four
+  related improvements to the v2.31.0 strip: (1) the chip
+  matching the currently-rendered cohort gets a cyan outline +
+  "active" badge so the user can see what's filtering the view;
+  (2) chip click uses `history.pushState` + an in-page reload
+  rather than navigating away, preserving page state and any
+  warm caches; (3) experiments with >12 retrains in the window
+  get a "Show all (N)" expand toggle so the strip doesn't dominate
+  the page; (4) chip timestamps now use `Intl.DateTimeFormat`
+  with the active accuracyTz setting instead of the hand-rolled
+  UTC slice. A "× Clear filter" pill appears alongside the chips
+  when a filter is active.
+
+- **Calibration progress now scales `min_samples` with the
+  coverage level.** Previously hardcoded at 10. Higher coverage
+  levels need more residuals for stable quantile estimation —
+  now uses `max(10, ceil(10 / (1 - level)))` so a 0.95-coverage
+  experiment waits for 200 residuals before publishing bands,
+  not 10.
+
+- **Run Covariate Analysis button matches the rest of the page
+  palette.** Switched from `btn-purple` (used nowhere else in
+  the Forecast Accuracy / Covariate Analysis tabs) to the
+  standard `btn-primary` (cyan), with a small `⚗` glyph to
+  retain the "heavyweight analysis" cue.
+
+- **Covariate analysis polling dropped from 5 s to 2 s.** The
+  per-row JSON is small and the reduced lag visibly improves
+  the Run button → completion handoff.
+
+- **Trajectory "miss X" annotation includes units now.**
+  "miss 0.85" is hard to interpret without knowing the sensor's
+  typical range; the dropdown now appends `EXP_UNITS` and, when
+  available, a "% of typical" suffix derived from the cached
+  accuracy payload's `typical_interval_demand`.
+
+- **Bias trace on the lead-time chart switched from green to a
+  neutral yellow.** Green encodes "good" elsewhere in the UI
+  (verdict chip, success status, "keep" recommendation), and
+  bias is a signed metric with no good direction — green for
+  bias was misleading. `#facc15` carries no semantic baggage.
+
+- **Inline Remove-covariate button threshold aligned with the
+  recommendation threshold.** Both now fire at ±2% (was ±1% for
+  the button, ±2% for the recommendation), so a row's button can
+  no longer disagree with whether the recommendations endorse
+  dropping that covariate.
+
+- **Recommendations payload now ships
+  `variant: good|warning|bad|info` instead of a hex colour.**
+  Template maps the variant to a CSS variable client-side, so
+  palette changes don't require touching the backend. Legacy
+  `rec.color` is kept as a fallback for responses produced by
+  older add-on versions still in memory.
+
+- **Forecast-log inspector and "View raw JSON" buttons are now
+  collapsed behind a `<details>` summary.** Both are developer
+  diagnostics; surfacing them as primary buttons on every page
+  load confused first-time users. Available with one click for
+  anyone debugging "why is my chart empty?".
+
+- **"⚠ HA TZ unknown" inline note next to the Times-in selector
+  when Home Assistant didn't report a timezone.** The dropdown
+  silently falls back to browser-local in that case, which can
+  bucket midnight resets wrong if the browser and HA server are
+  in different timezones. The note explains the fallback.
+
+- **Plotly load failures now surface a toast and reset the
+  deferred-call queue.** When the lazy-load `<script>` tag's
+  `onerror` fired, the Promise rejected silently — only
+  `console.error` was emitted, and the pending-call queue
+  continued to accumulate stub invocations indefinitely. Adds
+  a `mlfl.toast('Charts unavailable — check network connection.')`
+  on failure, resets `_pendingPlotlyCalls`, and caps the queue
+  size at 64 to prevent unbounded growth under retry storms.
+
+- **Dead `colorway: PLOT_COLORWAY` removed from the lead-time
+  and trajectory layouts.** Every trace on those charts pins its
+  own colour, so the colourway setting was unused. Left in place
+  on the Predictions tab's holdout / residual charts where it
+  legitimately drives multi-model trace colours.
+
 ## 2.31.0
 
 Product / UX wave from the IMPROVEMENTS.md proposal. 19 changes

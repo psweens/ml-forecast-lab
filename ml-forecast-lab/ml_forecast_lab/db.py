@@ -523,7 +523,10 @@ class HistoryDB:
             (actuals_table,),
         )
         if not cursor.fetchone():
-            return {"error": "No actuals data available yet"}
+            return {
+                "error": "No actuals data available yet",
+                "empty_reason": "no_actuals",
+            }
 
         interval_sec = interval_minutes * 60
         bucket_min = max(1, int(interval_minutes))
@@ -818,13 +821,33 @@ class HistoryDB:
         except sqlite3.Error as e:
             logger.warning(f"Typical-demand baseline query failed: {e}")
 
+        # Classify why the lead-time curve might be empty so the UI can
+        # render a precise hint instead of substring-matching the error
+        # string. Branches:
+        #   "ok"          — at least one bucket populated.
+        #   "warming_up"  — no rows logged at all in this window
+        #                   (production just started, or champion
+        #                   rotated and the filter widened to a fresh
+        #                   cohort).
+        #   "no_overlap"  — rows exist but no forecast target_dt matched
+        #                   the actuals grid (sensor stopped reporting,
+        #                   increment mode + outages, etc.).
+        total_logged = int(stats_row[0]) if stats_row else 0
+        if lead_rows:
+            empty_reason = "ok"
+        elif total_logged == 0:
+            empty_reason = "warming_up"
+        else:
+            empty_reason = "no_overlap"
+
         return {
             "experiment": experiment,
             "evaluation_mode": "increment" if increment else "raw",
             "lead_time_curve": lead_time_curve,
             "revision_improvement": revision,
             "typical_interval_demand": typical,
-            "total_logged": stats_row[0] if stats_row else 0,
+            "total_logged": total_logged,
+            "empty_reason": empty_reason,
             "date_range": {
                 "from": stats_row[1] if stats_row else None,
                 "to": stats_row[2] if stats_row else None,
@@ -1391,6 +1414,8 @@ class HistoryDB:
         actuals_table: str,
         n_cycles: int = 12,
         interval_minutes: int = 30,
+        model_name: Optional[str] = None,
+        model_version: Optional[str] = None,
     ) -> dict:
         """
         Return the last ``n_cycles`` forecast snapshots plus actuals.
@@ -1411,6 +1436,14 @@ class HistoryDB:
         interval_minutes : int
             Grid interval used to snap actuals to regular bins before
             returning.
+        model_name : str, optional
+            Restrict to one model. Without this, a champion rotation
+            inside the window can mix predictions from two different
+            models on the same chart — the "Latest run" line and the
+            fan band become incoherent.
+        model_version : str, optional
+            Restrict to one weight regime of ``model_name``. Same
+            motivation as above for retrains under the current champion.
 
         Returns
         -------
@@ -1430,13 +1463,29 @@ class HistoryDB:
         if not cursor.fetchone():
             return {"error": "No actuals data available yet"}
 
+        # Optional model/version filter — splice into both the issuance
+        # query and the per-cycle rows query so cycles and rows agree on
+        # the cohort. Without this the fan can mix rotated-out
+        # predictions with the current champion.
+        _clauses = []
+        _params: list = []
+        if model_name:
+            _clauses.append("model_name = ?")
+            _params.append(model_name)
+        if model_version:
+            _clauses.append("model_version = ?")
+            _params.append(model_version)
+        model_filter_sql = (" AND " + " AND ".join(_clauses)) if _clauses else ""
+        model_filter_param = tuple(_params)
+
         # Find the last N distinct issuance timestamps for this experiment
+        # under the chosen model/version filter.
         try:
             cursor.execute(
                 "SELECT DISTINCT issued_at FROM forecast_log "
-                "WHERE experiment = ? "
+                f"WHERE experiment = ?{model_filter_sql} "
                 "ORDER BY issued_at DESC LIMIT ?",
-                (experiment, int(n_cycles)),
+                (experiment, *model_filter_param, int(n_cycles)),
             )
             issued_ats = [r[0] for r in cursor.fetchall()]
         except sqlite3.Error as e:
@@ -1450,15 +1499,18 @@ class HistoryDB:
                 "time_range": {"from": None, "to": None},
             }
 
-        # Fetch all rows for those issuances in one query
+        # Fetch all rows for those issuances in one query, applying the
+        # same filter so we never re-introduce rotated-out rows that
+        # happen to share an issued_at with the kept cohort.
         placeholders = ",".join("?" * len(issued_ats))
         try:
             cursor.execute(
                 f"SELECT issued_at, target_dt, predicted "
                 f"FROM forecast_log "
-                f"WHERE experiment = ? AND issued_at IN ({placeholders}) "
+                f"WHERE experiment = ? AND issued_at IN ({placeholders})"
+                f"{model_filter_sql} "
                 f"ORDER BY issued_at ASC, target_dt ASC",
-                (experiment, *issued_ats),
+                (experiment, *issued_ats, *model_filter_param),
             )
             rows = cursor.fetchall()
         except sqlite3.Error as e:

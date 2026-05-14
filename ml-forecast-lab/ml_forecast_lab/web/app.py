@@ -33,6 +33,7 @@ def _safe_error(exc: BaseException) -> str:
 from ml_forecast_lab import __version__ as APP_VERSION
 
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -410,9 +411,33 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     templates.env.filters["humanise"] = _humanise_name
 
-    # Mount static files
+    # Mount static files with a long Cache-Control on the third-party
+    # JS bundles. The Plotly bundle is ~1 MB and is version-locked at
+    # build time (the filename is the cache-busting handle), so there's
+    # no reason to revalidate it on every page navigation. Templates
+    # and our own CSS/JS get a short cache so addon updates take effect
+    # quickly without a hard refresh.
+    class CachedStaticFiles(StaticFiles):
+        async def get_response(self, path: str, scope):
+            response = await super().get_response(path, scope)
+            if path.endswith((".min.js", ".min.css")):
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            else:
+                response.headers["Cache-Control"] = "public, max-age=300"
+            return response
+
     if static_dir.exists():
-        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+        app.mount(
+            "/static",
+            CachedStaticFiles(directory=str(static_dir)),
+            name="static",
+        )
+
+    # GZip the JSON analytics responses (forecast-accuracy, stability,
+    # evolution, trajectory) and the Plotly bundle. Cuts the cold-load
+    # cost of the Forecast Accuracy and Covariate Analysis tabs by ~70%.
+    # minimum_size=1024 avoids the overhead on the small flag responses.
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     # The add-on is reached only via Home Assistant ingress (same-origin),
     # so cross-origin requests have no legitimate use case. No CORSMiddleware
@@ -1388,17 +1413,49 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 content={"success": False, "error": "No completed covariate analysis results"},
             )
 
-        # Score every covariate label by its average MAE across models
+        # Score every covariate label against the PRODUCTION model. The
+        # previous behaviour (mean MAE across every tested model) could
+        # pick a config that helps a weak model but hurts the model
+        # actually publishing forecasts. When the production model
+        # wasn't in the run (e.g. user picked "All models" but the
+        # champion was disabled when the analysis ran), fall back to
+        # the cross-model mean so the action still resolves.
+        exp_status_for_score = app.state.appstate.experiment_statuses.get(name)
+        production_model = (
+            getattr(exp_status_for_score, "selected_model", None)
+            or getattr(exp_status_for_score, "best_model", None)
+            if exp_status_for_score else None
+        )
+
+        def _is_nan(v):
+            return isinstance(v, float) and v != v
+
+        score_source = "mean"  # finalised below
         label_scores: Dict[str, float] = {}
-        for label in result.covariate_labels:
-            cells = result.results.get(label, {})
-            maes = [
-                cell.mae for cell in cells.values()
-                if cell is not None and cell.mae is not None
-                and not (isinstance(cell.mae, float) and (cell.mae != cell.mae))  # NaN check
-            ]
-            if maes:
-                label_scores[label] = sum(maes) / len(maes)
+        if production_model and any(
+            production_model in result.results.get(lbl, {})
+            for lbl in result.covariate_labels
+        ):
+            score_source = "production_model"
+            for label in result.covariate_labels:
+                cells = result.results.get(label, {})
+                cell = cells.get(production_model)
+                if cell is not None and cell.mae is not None and not _is_nan(cell.mae):
+                    label_scores[label] = cell.mae
+            # If the production model has NaN for every label, fall back
+            # to the cross-model mean so the action still resolves.
+            if not label_scores:
+                score_source = "mean"
+
+        if score_source == "mean":
+            for label in result.covariate_labels:
+                cells = result.results.get(label, {})
+                maes = [
+                    cell.mae for cell in cells.values()
+                    if cell is not None and cell.mae is not None and not _is_nan(cell.mae)
+                ]
+                if maes:
+                    label_scores[label] = sum(maes) / len(maes)
 
         if not label_scores:
             return JSONResponse(
@@ -1481,6 +1538,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "improvement_pct": round(improvement_pct, 2) if improvement_pct is not None else None,
                 "removed": removed_covariates,
                 "retraining": retrain_scheduled,
+                "score_source": score_source,
+                "production_model": production_model if score_source == "production_model" else None,
             })
         except Exception as e:
             logger.error(f"Failed to apply covariate-best: {e}", exc_info=True)
@@ -2104,27 +2163,46 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # so a freshly-promoted experiment doesn't leave the user
         # wondering why the bands tile says "—" with no explanation.
         try:
+            level = float(getattr(exp_cfg, 'conformal_coverage', 0.8))
+            # NEW-D1.2: scale `min_samples` with the requested coverage
+            # level. The conformal quantile at level=0.8 is the 90th
+            # percentile of absolute residuals; at level=0.95 it's the
+            # 97.5th. Higher percentiles need more samples for stable
+            # estimates. Rule-of-thumb: max(10, ceil(10 / (1 - level)))
+            # — at level=0.8 that's 50, at level=0.95 it's 200. The
+            # floor of 10 keeps backwards compatibility for the
+            # default 0.8 case.
+            import math as _math
+            n_need = max(10, int(_math.ceil(10.0 / max(1e-6, 1.0 - level))))
             cq = await asyncio.to_thread(
                 db.get_conformal_quantiles,
                 name, actuals_table,
-                float(getattr(exp_cfg, 'conformal_coverage', 0.8)),
+                level,
                 model_name,
                 exp_cfg.interval_minutes,
                 14,
-                10,
+                n_need,
                 model_version,
             )
             n_have = int(cq.get("total_samples") or 0)
-            n_need = 10
             forecast_every = exp_cfg.forecast_every_minutes or 30
             ready = bool(cq.get("fallback_quantile") is not None) or n_have >= n_need
-            cycles_remaining = max(0, n_need - n_have)
+            # NEW-D1.1: each forecast cycle produces `future_periods`
+            # residuals as actuals arrive (one per horizon step), not 1.
+            # Previously we computed ETA as cycles_remaining * cycle_period
+            # which over-estimates by ~future_periods. Divide by an
+            # estimate of residuals-per-cycle so the displayed ETA is
+            # actually meaningful. Conservative floor of 1 in case
+            # future_periods isn't set.
+            residuals_per_cycle = max(1, int(getattr(exp_cfg, 'future_periods', 1)))
+            samples_remaining = max(0, n_need - n_have)
+            cycles_remaining_eff = max(0.0, samples_remaining / float(residuals_per_cycle))
             result["calibration"] = {
                 "ready": ready,
                 "total_samples": n_have,
                 "min_samples": n_need,
                 "forecast_every_minutes": forecast_every,
-                "eta_minutes": cycles_remaining * forecast_every if not ready else 0,
+                "eta_minutes": int(round(cycles_remaining_eff * forecast_every)) if not ready else 0,
                 "level": cq.get("level", 0.8),
             }
         except Exception as e:
@@ -2392,11 +2470,67 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             n_cycles = 12
         n_cycles = max(2, min(48, n_cycles))
 
-        result = db.get_forecast_evolution(
-            name, actuals_table,
-            n_cycles=n_cycles,
-            interval_minutes=exp_cfg.interval_minutes,
-        )
+        # Apply the same default-then-widen ladder as /forecast-accuracy
+        # so the fan chart never mixes rotated-out predictions with the
+        # current champion. Without this, a retrain mid-window mixes
+        # two weight regimes on the same axes and the "Latest run" line
+        # is incoherent against the band.
+        model_name, model_version = _resolve_model_filter(name, request)
+        model_param = request.query_params.get("model")
+        version_param = request.query_params.get("version")
+        model_fallback: Optional[Dict[str, Any]] = None
+
+        def _fetch(mn, mv):
+            return db.get_forecast_evolution(
+                name, actuals_table,
+                n_cycles=n_cycles,
+                interval_minutes=exp_cfg.interval_minutes,
+                model_name=mn, model_version=mv,
+            )
+
+        result = _fetch(model_name, model_version)
+
+        def _empty(res):
+            return not res.get("cycles")
+
+        if _empty(result) and model_version and not version_param:
+            relaxed = _fetch(model_name, None)
+            if not _empty(relaxed):
+                logger.info(
+                    f"/forecast-evolution fallback for {name}: no cycles "
+                    f"for {model_name!r} v={model_version!r}; widening to all versions."
+                )
+                result = relaxed
+                model_fallback = {
+                    "requested_model": model_name,
+                    "requested_version": model_version,
+                    "used_model": model_name,
+                    "used_version": None,
+                    "reason": "No forecasts logged for this version yet; showing all versions of this model.",
+                }
+                model_version = None
+        if _empty(result) and model_name and not model_param:
+            relaxed = _fetch(None, None)
+            if not _empty(relaxed):
+                logger.info(
+                    f"/forecast-evolution fallback for {name}: no cycles "
+                    f"for {model_name!r}; widening to all models."
+                )
+                result = relaxed
+                model_fallback = {
+                    "requested_model": model_name,
+                    "requested_version": model_version,
+                    "used_model": None,
+                    "used_version": None,
+                    "reason": "No forecasts logged for this model in the selected window.",
+                }
+                model_name = None
+                model_version = None
+
+        result["model_name"] = model_name
+        result["model_version"] = model_version
+        if model_fallback:
+            result["model_fallback"] = model_fallback
         return JSONResponse(content=result)
 
     @app.get("/experiment/{name}/forecast-stability")

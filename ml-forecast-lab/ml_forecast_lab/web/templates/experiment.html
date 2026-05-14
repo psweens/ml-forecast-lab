@@ -1217,9 +1217,33 @@
 
 <!-- ====== TAB: Covariate Analysis ====== -->
 {% if covariate_analysis or benchmark_result %}
+{# MED-6: pre-compute the row with the lowest cross-model mean MAE
+   server-side so the table highlights the row that's actually best,
+   not the baseline. Falls back to None when no completed results. #}
+{% set ns_best = namespace(label=None, mae=None) %}
+{% if covariate_analysis and covariate_analysis.status == 'completed' and covariate_analysis.results %}
+    {% for label in covariate_analysis.covariate_labels %}
+        {% set ns_row = namespace(total=0.0, count=0) %}
+        {% for model in covariate_analysis.model_names %}
+            {% set cell = covariate_analysis.results.get(label, {}).get(model) %}
+            {% if cell and cell.mae is not none and cell.mae == cell.mae %}
+                {% set ns_row.total = ns_row.total + cell.mae %}
+                {% set ns_row.count = ns_row.count + 1 %}
+            {% endif %}
+        {% endfor %}
+        {% if ns_row.count > 0 %}
+            {% set avg_mae = ns_row.total / ns_row.count %}
+            {% if ns_best.mae is none or avg_mae < ns_best.mae %}
+                {% set ns_best.label = label %}
+                {% set ns_best.mae = avg_mae %}
+            {% endif %}
+        {% endif %}
+    {% endfor %}
+{% endif %}
+{% set best_label = ns_best.label %}
 <div class="tab-section" id="sec-covariate-analysis" style="display:none;">
 <section class="section">
-    <h2>Covariate Analysis <span class="info-tip">?<span class="tip-text">Tests every model with different covariate combinations to find which external features help and which ones hurt. The % change column shows impact relative to the "All covariates" baseline. Positive = worse, negative = better.</span></span></h2>
+    <h2>Covariate Analysis <span class="info-tip">?<span class="tip-text">Tests every model with different covariate combinations to find which external features help and which ones hurt. The % change column shows how typical forecast error (MAE — Mean Absolute Error) shifts versus the "All covariates" baseline. <strong>Green = error got smaller</strong> (good), <strong>red = error got larger</strong> (bad). Rankings come from a single 80/20 train/test split — rerun the analysis to confirm borderline results.</span></span></h2>
 
     <!-- Controls -->
     <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin-bottom:1.5rem;">
@@ -1233,11 +1257,13 @@
                 <option value="all">All models</option>
             </select>
         </div>
-        <button class="btn btn-purple"
+        {# MED-9: btn-primary keeps the palette consistent with every
+           other primary action; ⚗ glyph keeps the "heavyweight" cue. #}
+        <button class="btn btn-primary"
                 id="covariate-analysis-btn"
                 onclick="runCovariateAnalysis('{{ experiment.name }}', this)"
                 {% if covariate_analysis and covariate_analysis.status == 'running' %}disabled{% endif %}>
-            {% if covariate_analysis and covariate_analysis.status == 'running' %}Analysing...{% else %}Run Covariate Analysis{% endif %}
+            {% if covariate_analysis and covariate_analysis.status == 'running' %}Analysing...{% else %}⚗ Run Covariate Analysis{% endif %}
         </button>
     </div>
 
@@ -1251,7 +1277,17 @@
     </div>
     {% endif %}
 
-    {% if covariate_analysis.status == 'completed' and covariate_analysis.results %}
+    {# MED-8: cold-start empty state — benchmark exists but this
+       analysis has never been run. Tells the user what Run will do. #}
+    {% if not covariate_analysis %}
+    <div class="empty-state" style="margin-top:1rem;">
+        <span class="empty-state-icon">🔬</span>
+        <p>No covariate analysis yet for this experiment.</p>
+        <p class="empty-state-hint">Click <strong>Run Covariate Analysis</strong> above to retrain {{ exp_models_enabled | length if exp_models_enabled else (models | length if models else '?') }} model(s) with each covariate turned off in turn. The run trains every enabled model {% if exp_config and exp_config.covariates %}{{ 2 + (exp_config.covariates | length) }} times each{% else %}twice each (baseline + no-covariates){% endif %} — give it a few minutes for tree models, longer for neural backends.</p>
+    </div>
+    {% endif %}
+
+    {% if covariate_analysis and covariate_analysis.status == 'completed' and covariate_analysis.results %}
     <!-- One-click apply: pick the winning covariate set + retrain immediately -->
     <div style="margin: 0.5rem 0 1.25rem 0; padding: 0.85rem 1rem; background: rgba(46,204,113,0.08); border: 1px solid rgba(46,204,113,0.25); border-radius: 0.5rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.75rem;">
         <div style="flex: 1 1 320px; min-width: 0;">
@@ -1259,7 +1295,7 @@
                 Apply best covariate configuration
             </div>
             <div style="color: var(--text-secondary); font-size: 0.85rem;">
-                Picks the row with the lowest average MAE across models, removes any covariates it tells you to drop, and starts an immediate retrain — no manual editing needed.
+                Picks the row with the lowest typical forecast error for {% if sel_model %}<strong>{{ sel_model | model_display }}</strong> (the production model){% else %}your selected model{% endif %}, edits <code>mlfl.yaml</code> accordingly, and starts an immediate retrain — no manual editing needed.{% if best_label %} Current winner: <strong>{{ best_label }}</strong>.{% endif %}
             </div>
         </div>
         <button class="btn btn-success" style="padding: 0.5rem 1.1rem; font-size: 0.85rem; white-space: nowrap;"
@@ -1268,6 +1304,15 @@
                 title="Read the latest analysis, edit mlfl.yaml accordingly, and retrain in the background.">
             Apply Best &amp; Retrain
         </button>
+    </div>
+
+    {# HIGH-5 legend strip — colour key directly above the table so a
+       reader doesn't need to hunt for the info-tip to decode cells. #}
+    <div style="display:flex;flex-wrap:wrap;gap:0.75rem 1.5rem;align-items:center;margin:0.5rem 0 0.75rem 0;padding:0.5rem 0.75rem;background:rgba(0,0,0,0.15);border:1px solid var(--border);border-radius:6px;font-size:0.8rem;color:var(--text-secondary);">
+        <span><strong>Cell colour key:</strong></span>
+        <span><span style="color:#2ecc71;font-weight:600;">−x%</span> typical error dropped (this scenario forecasts <em>better</em>)</span>
+        <span><span style="color:#e74c3c;font-weight:600;">+x%</span> typical error grew (this scenario forecasts <em>worse</em>)</span>
+        <span><span style="color:var(--text-secondary);">±0–2%</span> within noise</span>
     </div>
 
     <div class="table-container">
@@ -1283,7 +1328,9 @@
             <tbody>
                 {% for label in covariate_analysis.covariate_labels %}
                 {% set is_drop = label.startswith('Without ') %}
-                {# Check if dropping this covariate improves the average MAE across models #}
+                {# Compute mean change_pct across models for the per-row
+                   Remove button. MED-7: aligned to ±2% to match the
+                   recommendation thresholds in main.py. #}
                 {% if is_drop %}
                 {% set ns_avg = namespace(total=0, count=0) %}
                 {% for model in covariate_analysis.model_names %}
@@ -1295,11 +1342,29 @@
                 {% endfor %}
                 {% set avg_change = ns_avg.total / ns_avg.count if ns_avg.count > 0 else 0 %}
                 {% endif %}
-                <tr {% if label == 'All covariates' %}class="best-model"{% endif %}>
+                {# HIGH-5 reversed colour macro: positive change_pct
+                   (worse MAE) → red, negative (better) → green.
+                   Cell colour now follows the value direction instead
+                   of the (confusing) "is this covariate good" semantic. #}
+                {% macro pct_color(val) %}{% if val is not none %}{% if val > 2 %}#e74c3c{% elif val < -2 %}#2ecc71{% else %}var(--text-secondary){% endif %}{% endif %}{% endmacro %}
+                {# MED-6: highlight the row with the lowest cross-model
+                   mean MAE, not always the baseline. Mark the baseline
+                   with a separate "baseline" pill. #}
+                <tr {% if label == best_label %}class="best-model"{% endif %}>
                     <td style="font-weight: 600;white-space:nowrap;">
                         {% if label == 'All covariates' %}📊{% elif label == 'No covariates' %}🚫{% else %}➖{% endif %}
                         {{ label }}
-                        {% if is_drop and avg_change < -1 %}
+                        {% if label == covariate_analysis.baseline_label %}
+                        <span style="margin-left:0.4rem;padding:0.05rem 0.4rem;font-size:0.65rem;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);border-radius:999px;">baseline</span>
+                        {% endif %}
+                        {% if label == best_label and label != covariate_analysis.baseline_label %}
+                        <span style="margin-left:0.4rem;padding:0.05rem 0.4rem;font-size:0.65rem;background:rgba(46,204,113,0.15);color:var(--success);border:1px solid rgba(46,204,113,0.3);border-radius:999px;">best</span>
+                        {% endif %}
+                        {# MED-7: button threshold aligned with the −2%
+                           used by recommendations and the new cell
+                           colour bands, so the affordance and the rec
+                           no longer disagree. #}
+                        {% if is_drop and avg_change < -2 %}
                         <button class="btn" style="padding:0.1rem 0.4rem;font-size:0.7rem;margin-left:0.5rem;background:rgba(231,76,60,0.15);color:#e74c3c;border:1px solid rgba(231,76,60,0.3);"
                                 onclick="removeCovFromAnalysis('{{ experiment.name }}', '{{ label.replace('Without ', '') }}', this)">
                             Remove
@@ -1310,20 +1375,19 @@
                     {% set cell = covariate_analysis.results.get(label, {}).get(model) %}
                     <td style="padding:0.5rem 0.75rem;">
                         {% if cell %}
-                        {% macro pct_color(val) %}{% if val is not none %}{% if val > 2 %}#2ecc71{% elif val < -2 %}#e74c3c{% else %}var(--text-secondary){% endif %}{% endif %}{% endmacro %}
                         <table style="border:none;border-collapse:collapse;width:100%;font-size:0.82rem;">
                             <tr style="border:none;">
-                                <td style="border:none;padding:0.1rem 0;color:var(--text-secondary);width:3rem;">MAE</td>
+                                <td style="border:none;padding:0.1rem 0;color:var(--text-secondary);width:3rem;" title="Mean Absolute Error — typical forecast error in your sensor's units.">MAE</td>
                                 <td style="border:none;padding:0.1rem 0;"><span class="metric-value" style="font-size:0.9rem;">{{ "%.4f" | format(cell.mae) }}</span></td>
                                 <td style="border:none;padding:0.1rem 0;text-align:right;">{% if cell.change_pct is not none %}<span style="color:{{ pct_color(cell.change_pct) }};font-weight:600;">{{ "%+.1f"|format(cell.change_pct) }}%</span>{% endif %}</td>
                             </tr>
                             <tr style="border:none;">
-                                <td style="border:none;padding:0.1rem 0;color:var(--text-secondary);">RMSE</td>
+                                <td style="border:none;padding:0.1rem 0;color:var(--text-secondary);" title="Root Mean Squared Error — penalises large misses more than MAE does.">RMSE</td>
                                 <td style="border:none;padding:0.1rem 0;">{{ "%.4f" | format(cell.rmse) }}</td>
                                 <td style="border:none;padding:0.1rem 0;text-align:right;">{% if cell.rmse_change_pct is not none %}<span style="color:{{ pct_color(cell.rmse_change_pct) }};font-weight:600;">{{ "%+.1f"|format(cell.rmse_change_pct) }}%</span>{% endif %}</td>
                             </tr>
                             <tr style="border:none;">
-                                <td style="border:none;padding:0.1rem 0;color:var(--text-secondary);">MASE</td>
+                                <td style="border:none;padding:0.1rem 0;color:var(--text-secondary);" title="Mean Absolute Scaled Error — &lt;1 means the model beats a naive 1-step forecast.">MASE</td>
                                 <td style="border:none;padding:0.1rem 0;">{% if cell.mase == cell.mase %}{{ "%.3f" | format(cell.mase) }}{% else %}—{% endif %}</td>
                                 <td style="border:none;padding:0.1rem 0;text-align:right;">{% if cell.mase_change_pct is not none %}<span style="color:{{ pct_color(cell.mase_change_pct) }};font-weight:600;">{{ "%+.1f"|format(cell.mase_change_pct) }}%</span>{% endif %}</td>
                             </tr>
@@ -1342,8 +1406,19 @@
     {% if covariate_analysis.recommendations %}
     <div style="margin-top: 1.5rem; padding: 1.5rem; background: var(--bg-tertiary); border-radius: 0.5rem;">
         <h3 style="color: var(--accent-secondary); margin-bottom: 1rem;">Recommendations</h3>
+        {# LOW-5: map semantic variant → CSS var rather than reading a
+           backend-supplied hex. Falls back to legacy rec.color for
+           pydantic objects produced by older add-on versions. #}
         {% for rec in covariate_analysis.recommendations %}
-        <p style="margin-bottom: 0.5rem; color: {{ rec.color }};">
+        {% set variant = rec.variant if rec.variant is defined else None %}
+        {% set rec_color = (
+            'var(--success)' if variant == 'good'
+            else 'var(--warning)' if variant == 'warning'
+            else 'var(--error)' if variant == 'bad'
+            else 'var(--text-secondary)' if variant == 'info'
+            else rec.color if rec.color is defined else 'var(--text-primary)'
+        ) %}
+        <p style="margin-bottom: 0.5rem; color: {{ rec_color }};">
             {{ rec.icon }} {{ rec.text }}
         </p>
         {% endfor %}
@@ -1522,18 +1597,38 @@
                  live session, no ingress-token URL surgery required.
                  Useful when the chart shows empty and you need to know
                  *why* the lead-time aggregation came back without data. -->
-            <div style="display:flex;gap:0.5rem;align-items:center;margin-top:0.75rem;flex-wrap:wrap;">
-                <button type="button" class="btn-secondary" onclick="window.viewAccuracyJson()" style="padding:0.4rem 0.9rem;">View raw JSON</button>
-                <button type="button" class="btn-secondary" onclick="window.downloadAccuracyJson()" style="padding:0.4rem 0.9rem;">Download as file</button>
-                <span style="color:var(--text-muted);font-size:0.8rem;">For debugging: shows / saves the response body that drives this chart.</span>
-            </div>
-            <pre id="accuracy-json-out" style="display:none;margin-top:0.75rem;padding:0.75rem;background:rgba(0,0,0,0.25);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.8rem;white-space:pre-wrap;max-height:420px;overflow:auto;"></pre>
+            <!-- LOW-1: the raw-JSON dump is a developer aid, not a
+                 primary affordance. Collapsed by default so it doesn't
+                 compete for attention with the chart and empty-state
+                 above. Stays one click away for debugging. -->
+            <details style="margin-top:0.75rem;color:var(--text-secondary);font-size:0.8rem;">
+                <summary style="cursor:pointer;user-select:none;">Debug — view raw JSON</summary>
+                <div style="display:flex;gap:0.5rem;align-items:center;margin-top:0.5rem;flex-wrap:wrap;">
+                    <button type="button" class="btn-secondary" onclick="window.viewAccuracyJson()" style="padding:0.4rem 0.9rem;">View raw JSON</button>
+                    <button type="button" class="btn-secondary" onclick="window.downloadAccuracyJson()" style="padding:0.4rem 0.9rem;">Download as file</button>
+                    <span style="color:var(--text-muted);font-size:0.8rem;">Shows / saves the response body that drives this chart.</span>
+                </div>
+                <pre id="accuracy-json-out" style="display:none;margin-top:0.75rem;padding:0.75rem;background:rgba(0,0,0,0.25);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.8rem;white-space:pre-wrap;max-height:420px;overflow:auto;"></pre>
+            </details>
             <script>
             // Defined right next to the buttons so they work even if the
             // big IIFE further down throws — same belt-and-braces pattern
             // as loadForecastLogStats. Both helpers re-fetch fresh rather
             // than reuse _lastAccuracyData so the dump always reflects the
             // current days/mode selection.
+            // Inherit any active ?model / ?version filter from the URL
+            // so the dump matches what the chart is rendering. Standalone
+            // (lives outside the IIFE so it's reachable even if the IIFE
+            // throws — same belt-and-braces pattern as loadForecastLogStats).
+            function _debugFilterQs() {
+                try {
+                    var sp = new URLSearchParams(window.location.search);
+                    var bits = [];
+                    if (sp.get('model'))   bits.push('model=' + encodeURIComponent(sp.get('model')));
+                    if (sp.get('version')) bits.push('version=' + encodeURIComponent(sp.get('version')));
+                    return bits.length ? ('&' + bits.join('&')) : '';
+                } catch (e) { return ''; }
+            }
             window.viewAccuracyJson = function() {
                 var out = document.getElementById('accuracy-json-out');
                 if (!out) return;
@@ -1542,7 +1637,8 @@
                 var url = {{ base_path | tojson }}
                     + '/experiment/' + {{ experiment.name | tojson }}
                     + '/forecast-accuracy?days='
-                    + (document.getElementById('accuracy-window') ? document.getElementById('accuracy-window').value : '30');
+                    + (document.getElementById('accuracy-window') ? document.getElementById('accuracy-window').value : '30')
+                    + _debugFilterQs();
                 fetch(url)
                     .then(function(r) { return r.json(); })
                     .then(function(data) { out.textContent = JSON.stringify(data, null, 2); })
@@ -1552,7 +1648,8 @@
                 var url = {{ base_path | tojson }}
                     + '/experiment/' + {{ experiment.name | tojson }}
                     + '/forecast-accuracy?days='
-                    + (document.getElementById('accuracy-window') ? document.getElementById('accuracy-window').value : '30');
+                    + (document.getElementById('accuracy-window') ? document.getElementById('accuracy-window').value : '30')
+                    + _debugFilterQs();
                 fetch(url)
                     .then(function(r) { return r.json(); })
                     .then(function(data) {
@@ -1605,11 +1702,16 @@
             <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
                 Raw summary of <code>forecast_log</code>. Useful when the Accuracy chart looks empty or the verdict doesn't match expectations.
             </p>
-            <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
-                <button type="button" class="btn-secondary" onclick="try{loadForecastLogStats()}catch(e){var o=document.getElementById('forecast-log-stats-out');if(o){o.style.display='block';var msg='Button handler failed: '+(e && e.message ? e.message : e);if(window.__mlflFirstError){msg+='\n\nRoot cause (first script error on this page):\n'+window.__mlflFirstError.message;if(window.__mlflFirstError.line){msg+=' (line '+window.__mlflFirstError.line+')';}}msg+='\n\nTry the direct link to the right →';o.textContent=msg;}}" style="padding:0.4rem 0.9rem;">Load Log Summary</button>
-                <a href="{{ base_path }}/experiment/{{ experiment.name }}/forecast-log-stats" target="_blank" rel="noopener" style="color:var(--accent-secondary);font-size:0.85rem;">open in new tab</a>
-            </div>
-            <pre id="forecast-log-stats-out" style="display:none;margin-top:0.75rem;padding:0.75rem;background:rgba(0,0,0,0.25);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.8rem;white-space:pre-wrap;max-height:420px;overflow:auto;"></pre>
+            <!-- LOW-1: collapsed by default — diagnostic, not a primary
+                 user affordance. Users who need it can expand. -->
+            <details>
+                <summary style="cursor:pointer;user-select:none;color:var(--text-secondary);font-size:0.85rem;">Debug — load log summary</summary>
+                <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin-top:0.5rem;">
+                    <button type="button" class="btn-secondary" onclick="try{loadForecastLogStats()}catch(e){var o=document.getElementById('forecast-log-stats-out');if(o){o.style.display='block';var msg='Button handler failed: '+(e && e.message ? e.message : e);if(window.__mlflFirstError){msg+='\n\nRoot cause (first script error on this page):\n'+window.__mlflFirstError.message;if(window.__mlflFirstError.line){msg+=' (line '+window.__mlflFirstError.line+')';}}msg+='\n\nTry the direct link to the right →';o.textContent=msg;}}" style="padding:0.4rem 0.9rem;">Load Log Summary</button>
+                    <a href="{{ base_path }}/experiment/{{ experiment.name }}/forecast-log-stats" target="_blank" rel="noopener" style="color:var(--accent-secondary);font-size:0.85rem;">open in new tab</a>
+                </div>
+                <pre id="forecast-log-stats-out" style="display:none;margin-top:0.75rem;padding:0.75rem;background:rgba(0,0,0,0.25);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.8rem;white-space:pre-wrap;max-height:420px;overflow:auto;"></pre>
+            </details>
             <script>
             // Defined right next to the button — outside the big IIFE
             // lower in the template — so a throw elsewhere in that
@@ -1663,6 +1765,10 @@
                 {% endif %}
             </div>
             <div id="accuracy-evolution-chart" style="width:100%;height:420px;"></div>
+            <div id="accuracy-evolution-empty"
+                 style="display:none;color:var(--text-secondary);font-size:0.9rem;padding:1rem 0;text-align:center;">
+                Convergence chart needs at least two forecast cycles in this window.
+            </div>
         </div>
 
         <!-- Forecast trajectory — sort by worst error by default -->
@@ -1815,7 +1921,22 @@ window.mlflLoadPlotly = (function() {
                 }
                 resolve();
             };
-            s.onerror = function() { p = null; reject(new Error('Plotly load failed')); };
+            s.onerror = function() {
+                // NEW-B1.1: surface the failure so a user on a flaky
+                // connection isn't left with a tab full of blank divs
+                // and no signal. `p = null` so a subsequent call (e.g.
+                // tab re-activation) can retry.
+                p = null;
+                // NEW-B1.2: reset the deferred-call queue to release
+                // memory pinned by aborted plot args.
+                _pendingPlotlyCalls = [];
+                try {
+                    if (window.mlfl && mlfl.toast) {
+                        mlfl.toast('Charts unavailable — check network connection.', 'error');
+                    }
+                } catch (e) { /* ignore */ }
+                reject(new Error('Plotly load failed'));
+            };
             document.head.appendChild(s);
         });
         return p;
@@ -1826,9 +1947,16 @@ window.mlflLoadPlotly = (function() {
 // window.Plotly.* (and window.Plotly.Plots.*) are queued and replayed
 // in order once the script lands. This means existing call sites in
 // fetch handlers can keep their `Plotly.newPlot(...)` pattern unchanged.
+// NEW-B1.2: cap the queue so we never grow unboundedly under a
+// reload storm while the network keeps failing — drop the oldest
+// call rather than the newest so the freshest plot intent wins.
 var _pendingPlotlyCalls = [];
+var _PENDING_PLOTLY_CALLS_MAX = 64;
 function _makePlotlyStub(path) {
     var fn = function() {
+        if (_pendingPlotlyCalls.length >= _PENDING_PLOTLY_CALLS_MAX) {
+            _pendingPlotlyCalls.shift();
+        }
         _pendingPlotlyCalls.push({path: path, args: Array.prototype.slice.call(arguments)});
     };
     fn.__mlflStub = true;
@@ -2455,6 +2583,266 @@ window.showTab = function(el) {
     // lighter dashed marker so the reader can tell it's noisy.
     var LEADBUCKET_MIN_N = 10;
 
+    // ============================================================
+    // accuracyFetch — JSON fetch with one-shot retry + memoisation.
+    // Resolves to parsed JSON; rejects on persistent failure.
+    //
+    // Two responsibilities (MED-4 + MED-11):
+    //   1. Retry once with 2 s backoff on network / HTTP error. The
+    //      4-fetch storm that fires on tab open is the most common
+    //      place an ingress hiccup leaves a partial render; one
+    //      retry covers ~all of them.
+    //   2. Cache the last response per URL so the user can flip the
+    //      Window selector between 30/90 days without paying the
+    //      full SQL round-trip each time. The cache is busted by
+    //      `accuracyFetchInvalidate()` from pageshow and from the
+    //      `pipeline_end` SSE handler.
+    // ============================================================
+    var _accuracyCache = {};
+    var _accuracyCacheOrder = [];
+    var ACCURACY_CACHE_MAX = 8;
+    function _accuracyCachePut(url, data) {
+        _accuracyCache[url] = data;
+        var idx = _accuracyCacheOrder.indexOf(url);
+        if (idx >= 0) _accuracyCacheOrder.splice(idx, 1);
+        _accuracyCacheOrder.push(url);
+        while (_accuracyCacheOrder.length > ACCURACY_CACHE_MAX) {
+            delete _accuracyCache[_accuracyCacheOrder.shift()];
+        }
+    }
+    window.accuracyFetchInvalidate = function() {
+        _accuracyCache = {};
+        _accuracyCacheOrder = [];
+    };
+    // bfcache restore busts the cache — page state may not match.
+    window.addEventListener('pageshow', function(e) {
+        if (e.persisted) window.accuracyFetchInvalidate();
+    });
+
+    function _doFetchOnce(url) {
+        return fetch(url).then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        });
+    }
+    window.accuracyFetch = function(url, opts) {
+        opts = opts || {};
+        if (!opts.bustCache && Object.prototype.hasOwnProperty.call(_accuracyCache, url)) {
+            return Promise.resolve(_accuracyCache[url]);
+        }
+        return _doFetchOnce(url)
+            .catch(function(err) {
+                console.warn('accuracyFetch retry:', url, err);
+                return new Promise(function(resolve) { setTimeout(resolve, 2000); })
+                    .then(function() { return _doFetchOnce(url); });
+            })
+            .then(function(data) {
+                _accuracyCachePut(url, data);
+                return data;
+            })
+            .catch(function(err) {
+                // Both attempts failed — surface a non-blocking toast so
+                // the user gets a signal, then rethrow so the caller's
+                // .catch can render its empty/error state.
+                if (window.mlfl && mlfl.toast) {
+                    mlfl.toast('Could not load forecast data (' + err.message + ')', 'warning');
+                }
+                throw err;
+            });
+    };
+
+    // Toggle a loading skeleton on a chart container (HIGH-1).
+    // The `chart-loading` class (style.css) adds a shimmer overlay.
+    // Off by default; loaders flip it on before fetch and off on
+    // settle (success OR empty), so an empty card never inherits the
+    // "still computing" look.
+    function _setCardLoading(elId, on) {
+        var el = document.getElementById(elId);
+        if (!el) return;
+        if (on) el.classList.add('chart-loading');
+        else el.classList.remove('chart-loading');
+    }
+
+    // Trajectory loop guard (CRIT-2). One-shot retry counter; if the
+    // server keeps returning a target_dt that doesn't match the
+    // client's want, we bail rather than spam the Pi.
+    window._trajRetries = window._trajRetries || 0;
+
+    // ============================================================
+    // Retrain-history filter state (NEW-D3.2 soft filter).
+    // The page may load with ?model=…&version=… in the URL — when
+    // a chip is clicked, we update the URL via pushState and reload
+    // the accuracy data without a full navigation. Loaders read
+    // _filterQs() to append the active filter to their fetch URLs.
+    // ============================================================
+    function _readUrlFilter() {
+        try {
+            var sp = new URLSearchParams(window.location.search);
+            return {
+                model: sp.get('model') || null,
+                version: sp.get('version') || null,
+            };
+        } catch (e) {
+            return { model: null, version: null };
+        }
+    }
+    var _activeFilter = _readUrlFilter();
+
+    function _filterQs() {
+        var bits = [];
+        if (_activeFilter.model) bits.push('model=' + encodeURIComponent(_activeFilter.model));
+        if (_activeFilter.version) bits.push('version=' + encodeURIComponent(_activeFilter.version));
+        return bits.length ? ('&' + bits.join('&')) : '';
+    }
+
+    // Format a chip timestamp using the active accuracyTz (NEW-D3.4).
+    // Falls back to UTC-naive slice if Intl fails.
+    function _formatChipTs(isoStr) {
+        if (!isoStr) return '—';
+        var d = toLocalDate(isoStr);
+        if (!d || isNaN(d.getTime())) return isoStr.slice(5, 16).replace('T', ' ');
+        try {
+            var fmt = new Intl.DateTimeFormat('en-GB', {
+                timeZone: _effectiveTzName(),
+                day: '2-digit', month: 'short',
+                hour: '2-digit', minute: '2-digit', hour12: false,
+            });
+            return fmt.format(d);
+        } catch (e) {
+            return isoStr.slice(5, 16).replace('T', ' ');
+        }
+    }
+
+    // Render the retrain-history chip strip. Pulled out so we can call
+    // it from loadForecastAccuracy without inlining 50 lines.
+    //  - NEW-D3.1: highlight the chip that matches the active filter
+    //              (resolved by the server into data.model_name/version)
+    //  - NEW-D3.2: chip click → pushState + soft reload (no full navigation)
+    //  - NEW-D3.3: cap to 12 most recent; "Show all (N)" reveals the rest
+    //  - NEW-D3.4: timestamps follow the user's accuracyTz selection
+    var _retrainChipsExpanded = false;
+    var RETRAIN_CHIPS_CAP = 12;
+    function _renderRetrainChips(data) {
+        var rh = (data && data.retrain_events) || [];
+        var card = document.getElementById('retrain-history-card');
+        var chipsHost = document.getElementById('retrain-history-chips');
+        var summary = document.getElementById('retrain-history-summary');
+        if (!card || !chipsHost) return;
+        chipsHost.innerHTML = '';
+        if (!rh.length) {
+            card.style.display = 'none';
+            return;
+        }
+        var activeModel = data.model_name || null;
+        var activeVersion = data.model_version || null;
+        // Sort newest-first (server already does this, defensive).
+        var sorted = rh.slice().sort(function(a, b) {
+            return (a.first_seen < b.first_seen) ? 1 : -1;
+        });
+        var visible = _retrainChipsExpanded ? sorted : sorted.slice(0, RETRAIN_CHIPS_CAP);
+        visible.forEach(function(ev) {
+            var isActive = (ev.model_name === activeModel)
+                        && (ev.model_version === activeVersion);
+            var chip = document.createElement('a');
+            chip.href = '?version=' + encodeURIComponent(ev.model_version)
+                + (ev.model_name ? '&model=' + encodeURIComponent(ev.model_name) : '')
+                + '#sec-forecast-accuracy';
+            chip.title = ev.model_name + ' v=' + ev.model_version
+                + '\nFirst seen: ' + ev.first_seen
+                + '\n' + ev.n_forecasts + ' forecast row(s)';
+            var base = 'display:inline-flex;align-items:center;gap:0.4rem;'
+                + 'padding:0.25rem 0.7rem;border-radius:1.2rem;'
+                + 'font-size:0.78rem;text-decoration:none;cursor:pointer;';
+            if (isActive) {
+                chip.style.cssText = base
+                    + 'border:1px solid var(--accent-secondary);'
+                    + 'background:rgba(0,212,255,0.12);'
+                    + 'color:var(--text-primary);';
+            } else {
+                chip.style.cssText = base
+                    + 'border:1px solid var(--border);'
+                    + 'background:var(--bg-tertiary);'
+                    + 'color:var(--text-secondary);';
+            }
+            chip.innerHTML =
+                '<span style="color:var(--accent-secondary);font-weight:600;">'
+                + _formatChipTs(ev.first_seen) + '</span>'
+                + '<span style="color:var(--text-primary);">'
+                + (ev.model_name || '—') + '</span>'
+                + '<span style="color:var(--text-muted);">'
+                + ev.n_forecasts + ' rows</span>'
+                + (isActive ? '<span style="color:var(--accent-secondary);font-size:0.65rem;font-weight:600;">active</span>' : '');
+            // NEW-D3.2: soft filter — pushState + reload data, don't
+            // navigate. Falls back to the href on middle-click /
+            // ctrl-click (which we want to preserve so users can open
+            // a filtered view in a new tab).
+            chip.addEventListener('click', function(e) {
+                if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
+                e.preventDefault();
+                _applyChipFilter(ev.model_name, ev.model_version);
+            });
+            chipsHost.appendChild(chip);
+        });
+        // NEW-D3.3: "Show all" / "Show fewer" toggle when overflow.
+        if (sorted.length > RETRAIN_CHIPS_CAP) {
+            var toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.style.cssText = 'background:transparent;border:1px dashed var(--border);'
+                + 'border-radius:1.2rem;padding:0.25rem 0.7rem;font-size:0.78rem;'
+                + 'color:var(--accent-secondary);cursor:pointer;';
+            toggle.textContent = _retrainChipsExpanded
+                ? 'Show fewer'
+                : 'Show all (' + sorted.length + ')';
+            toggle.addEventListener('click', function() {
+                _retrainChipsExpanded = !_retrainChipsExpanded;
+                _renderRetrainChips(data);
+            });
+            chipsHost.appendChild(toggle);
+        }
+        // "Clear filter" pill when a filter is active.
+        if (activeModel || activeVersion) {
+            var clearBtn = document.createElement('button');
+            clearBtn.type = 'button';
+            clearBtn.style.cssText = 'background:transparent;border:1px solid var(--border);'
+                + 'border-radius:1.2rem;padding:0.25rem 0.7rem;font-size:0.78rem;'
+                + 'color:var(--text-secondary);cursor:pointer;';
+            clearBtn.textContent = '× Clear filter';
+            clearBtn.addEventListener('click', function() {
+                _applyChipFilter(null, null);
+            });
+            chipsHost.appendChild(clearBtn);
+        }
+        if (summary) {
+            summary.textContent = sorted.length + ' retrain'
+                + (sorted.length !== 1 ? 's' : '') + ' in window · click to filter';
+        }
+        card.style.display = '';
+    }
+
+    // Apply a (model, version) filter softly — update URL + state +
+    // re-fetch all FA endpoints. null/null clears the filter.
+    function _applyChipFilter(model, version) {
+        _activeFilter = { model: model || null, version: version || null };
+        try {
+            var sp = new URLSearchParams(window.location.search);
+            if (model) sp.set('model', model); else sp.delete('model');
+            if (version) sp.set('version', version); else sp.delete('version');
+            var qs = sp.toString();
+            var newUrl = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash;
+            window.history.pushState({}, '', newUrl);
+        } catch (e) { /* old browsers — just reload */ }
+        // The filter changes what each endpoint returns, so the cache
+        // would serve stale data. Bust it before reloading.
+        if (window.accuracyFetchInvalidate) window.accuracyFetchInvalidate();
+        if (window.reloadAccuracyAll) window.reloadAccuracyAll();
+    }
+    // Keep state in sync with back/forward navigation.
+    window.addEventListener('popstate', function() {
+        _activeFilter = _readUrlFilter();
+        if (window.accuracyFetchInvalidate) window.accuracyFetchInvalidate();
+        if (window.reloadAccuracyAll) window.reloadAccuracyAll();
+    });
+
     function _accuracyDays() {
         var sel = document.getElementById('accuracy-window');
         var d = sel ? parseInt(sel.value, 10) : 30;
@@ -2675,10 +3063,12 @@ window.showTab = function(el) {
 
     function loadForecastAccuracy() {
         var url = BASE + '/experiment/' + EXP_NAME + '/forecast-accuracy'
-            + '?mode=' + accuracyMode + '&days=' + _accuracyDays();
-        fetch(url)
-        .then(function(r) { return r.json(); })
+            + '?mode=' + accuracyMode + '&days=' + _accuracyDays()
+            + _filterQs();
+        _setCardLoading('accuracy-lead-chart', true);
+        accuracyFetch(url)
         .then(function(data) {
+            _setCardLoading('accuracy-lead-chart', false);
             if (data.error || !data.lead_time_curve || !data.lead_time_curve.lead_minutes.length) {
                 _renderAccuracyEmpty(data);
                 return;
@@ -2690,47 +3080,7 @@ window.showTab = function(el) {
             // (model_name, model_version) the response carries. Best-
             // effort: a missing or empty array hides the card.
             try {
-                var rh = data.retrain_events || [];
-                var card = document.getElementById('retrain-history-card');
-                var chips = document.getElementById('retrain-history-chips');
-                var summary = document.getElementById('retrain-history-summary');
-                if (card && chips) {
-                    chips.innerHTML = '';
-                    if (rh.length) {
-                        rh.forEach(function(ev) {
-                            var chip = document.createElement('a');
-                            // Build a URL that filters the page to this
-                            // version. ?version=… is picked up by
-                            // _resolve_model_filter on the server.
-                            chip.href = '?version=' + encodeURIComponent(ev.model_version)
-                                + (ev.model_name ? '&model=' + encodeURIComponent(ev.model_name) : '')
-                                + '#sec-forecast-accuracy';
-                            chip.title = ev.model_name + ' v=' + ev.model_version
-                                + '\nFirst seen: ' + ev.first_seen
-                                + '\n' + ev.n_forecasts + ' forecast row(s)';
-                            chip.style.cssText = 'display:inline-flex;align-items:center;gap:0.4rem;'
-                                + 'padding:0.25rem 0.7rem;border-radius:1.2rem;'
-                                + 'border:1px solid var(--border);background:var(--bg-tertiary);'
-                                + 'color:var(--text-secondary);font-size:0.78rem;text-decoration:none;';
-                            var ts = (ev.first_seen || '').slice(5, 16).replace('T', ' ');
-                            chip.innerHTML =
-                                '<span style="color:var(--accent-secondary);font-weight:600;">'
-                                + ts + '</span>'
-                                + '<span style="color:var(--text-primary);">'
-                                + (ev.model_name || '—') + '</span>'
-                                + '<span style="color:var(--text-muted);">'
-                                + ev.n_forecasts + ' rows</span>';
-                            chips.appendChild(chip);
-                        });
-                        if (summary) {
-                            summary.textContent = rh.length + ' retrain'
-                                + (rh.length !== 1 ? 's' : '') + ' in window · click to filter';
-                        }
-                        card.style.display = '';
-                    } else {
-                        card.style.display = 'none';
-                    }
-                }
+                _renderRetrainChips(data);
             } catch (e) { console.error('retrain-history render:', e); }
 
             // Surface which model + version the metrics are for, and
@@ -2832,13 +3182,20 @@ window.showTab = function(el) {
                 traces.push({
                     x: xHours, y: ltc.me, name: 'Bias (ME)',
                     type: 'scatter', mode: 'lines+markers',
-                    line: { color: '#6dd67c', width: 2, dash: 'dash' },
+                    // LOW-4: neutral yellow — bias is signed, no "good"
+                    // direction; green encodes "good" elsewhere in the UI
+                    // (verdict, "Keep X" rec) so green for bias was
+                    // misleading.
+                    line: { color: '#facc15', width: 2, dash: 'dash' },
                     marker: { size: 4 },
                     hovertemplate: 'Bias %{y:.3f}<extra></extra>',
                 });
             }
             var yTitle = 'Error'
                 + (EXP_UNITS ? (accuracyMode === 'increment' ? ' (' + EXP_UNITS + ' per bin)' : ' (' + EXP_UNITS + ')') : '');
+            // LOW-2: no `colorway` — every trace pins its own colour
+            // (red MAE / blue RMSE / yellow Bias) so the colourway
+            // setting was unused. Removed to avoid confusion.
             var layout = {
                 xaxis: { title: 'Lead time (hours)', color: '#b0b0b0', gridcolor: '#2d3561' },
                 yaxis: {
@@ -2851,7 +3208,6 @@ window.showTab = function(el) {
                 font: { color: '#e0e0e0' },
                 legend: { x: 0.02, y: 0.98 },
                 margin: { t: 20, r: 30 },
-                colorway: PLOT_COLORWAY,
             };
             Plotly.newPlot('accuracy-lead-chart', traces, layout, { responsive: true });
 
@@ -2906,7 +3262,8 @@ window.showTab = function(el) {
         })
         .catch(function(err) {
             console.error('Forecast accuracy load failed:', err);
-            _renderAccuracyEmpty({ error: String(err) });
+            _setCardLoading('accuracy-lead-chart', false);
+            _renderAccuracyEmpty({ error: (err && err.message) ? err.message : String(err) });
         });
     }
 
@@ -2914,17 +3271,32 @@ window.showTab = function(el) {
         document.getElementById('verdict-card').style.display = 'none';
         document.getElementById('accuracy-revision-card').style.display = 'none';
         document.getElementById('accuracy-empty').style.display = 'block';
+        _setCardLoading('accuracy-lead-chart', false);
         // Clear the lead-time chart container so it doesn't linger
         // looking like it's still loading.
         try { Plotly.purge('accuracy-lead-chart'); } catch (e) {}
         var title = document.getElementById('accuracy-empty-title');
         var hint = document.getElementById('accuracy-empty-hint');
-        if (data && data.error && /table|actuals/i.test(data.error)) {
+        // MED-1: branch on backend-emitted empty_reason first; fall
+        // back to substring matching only for pre-network errors raised
+        // from .catch() (where data.error came from a JS Error message).
+        var reason = data && (data.empty_reason
+            || (data.error ? '__error__' : null));
+        if (reason === 'no_actuals'
+            || (data && data.error && /table|actuals/i.test(data.error))) {
             title.textContent = 'Waiting for actuals from Home Assistant.';
             hint.textContent = 'The target sensor hasn\'t been read into history yet. First numbers appear once a fresh production cycle runs AND the sensor has reported.';
-        } else if (data && data.total_logged === 0) {
+        } else if (reason === 'warming_up'
+            || (data && data.total_logged === 0)) {
             title.textContent = 'No forecasts logged yet.';
             hint.textContent = 'Metrics accumulate each production cycle — check back after the next run.';
+        } else if (reason === 'no_overlap') {
+            title.textContent = 'Forecasts logged, but no matching actuals in this window.';
+            hint.textContent = 'The target sensor may have stopped reporting, or every interval delta was clipped by a daily reset. Open the Forecast-log inspector in the diagnostics accordion to see what was logged.';
+        } else if (reason === '__error__') {
+            title.textContent = 'Could not load forecast accuracy data.';
+            hint.textContent = (data && data.error) ? String(data.error)
+                : 'Backend returned an error — open the diagnostics accordion for the raw JSON.';
         } else {
             title.textContent = 'No forecast accuracy data in this window.';
             hint.textContent = 'Try widening the window at the top of this tab, or wait for more forecast cycles to complete.';
@@ -3137,6 +3509,24 @@ window.showTab = function(el) {
             if (o.value === accuracyTz) opt.selected = true;
             sel.appendChild(opt);
         });
+        // LOW-3: when HA didn't report a timezone, the dropdown only
+        // offers Browser local + UTC. Surface a small inline note so
+        // the user knows midnight resets are bucketed by their
+        // *browser* timezone, not HA's.
+        if (!EXP_HA_TIME_ZONE) {
+            var wrap = document.getElementById('acc-tz-wrapper');
+            if (wrap && !document.getElementById('acc-tz-warning')) {
+                var note = document.createElement('span');
+                note.id = 'acc-tz-warning';
+                note.style.color = 'var(--warning)';
+                note.style.fontSize = '0.75rem';
+                note.style.marginLeft = '0.35rem';
+                note.title = 'Home Assistant did not report a timezone; '
+                    + 'charts use your browser\'s local timezone for day boundaries.';
+                note.textContent = '⚠ HA TZ unknown';
+                wrap.appendChild(note);
+            }
+        }
     })();
 
     // Forecast-log inspector handler is defined next to the button
@@ -3189,15 +3579,27 @@ window.showTab = function(el) {
         var viewMode = modeSel ? modeSel.value : 'interval';
         var isCumulative = (viewMode === 'cumulative' && EXP_SOURCE_CUMULATIVE);
 
-        fetch(BASE + '/experiment/' + EXP_NAME + '/forecast-evolution?cycles=' + n)
-        .then(function(r) { return r.json(); })
+        _setCardLoading('accuracy-evolution-chart', true);
+        accuracyFetch(BASE + '/experiment/' + EXP_NAME + '/forecast-evolution?cycles=' + n + _filterQs())
         .then(function(data) {
+            _setCardLoading('accuracy-evolution-chart', false);
             var wrap = document.getElementById('accuracy-evolution-wrapper');
+            var emptyEl = document.getElementById('accuracy-evolution-empty');
             if (data.error || !data.cycles || !data.cycles.length) {
-                if (wrap) wrap.style.display = 'none';
+                // MED-2: keep the card visible with an explicit message
+                // instead of silently disappearing the whole panel.
+                if (wrap) wrap.style.display = '';
+                try { Plotly.purge('accuracy-evolution-chart'); } catch (e) {}
+                if (emptyEl) {
+                    emptyEl.style.display = 'block';
+                    emptyEl.textContent = (data && data.error)
+                        ? 'Could not load convergence data: ' + data.error
+                        : 'Convergence chart needs at least two forecast cycles in this window.';
+                }
                 return;
             }
             if (wrap) wrap.style.display = '';
+            if (emptyEl) emptyEl.style.display = 'none';
 
             var cycles = data.cycles;
             var nCycles = cycles.length;
@@ -3339,8 +3741,19 @@ window.showTab = function(el) {
         })
         .catch(function(err) {
             console.error('Forecast evolution load failed:', err);
+            _setCardLoading('accuracy-evolution-chart', false);
+            // MED-2: keep the card visible; surface the failure inside
+            // it so the user knows the diagnostic exists but couldn't
+            // load. Previously the whole wrapper vanished silently.
             var wrap = document.getElementById('accuracy-evolution-wrapper');
-            if (wrap) wrap.style.display = 'none';
+            if (wrap) wrap.style.display = '';
+            try { Plotly.purge('accuracy-evolution-chart'); } catch (e) {}
+            var emptyEl = document.getElementById('accuracy-evolution-empty');
+            if (emptyEl) {
+                emptyEl.style.display = 'block';
+                emptyEl.textContent = 'Could not load convergence data — '
+                    + (err && err.message ? err.message : 'see console for details');
+            }
         });
     };
 
@@ -3359,16 +3772,19 @@ window.showTab = function(el) {
     window.loadForecastTrajectory = function(pickDefault) {
         var sel = document.getElementById('trajectory-target-select');
         var chosen = (!pickDefault && sel && sel.value) ? sel.value : '';
-        var url = BASE + '/experiment/' + EXP_NAME + '/forecast-trajectory'
-            + (chosen ? '?target_dt=' + encodeURIComponent(chosen) : '');
-        fetch(url)
-        .then(function(r) { return r.json(); })
+        var qs = chosen ? ('?target_dt=' + encodeURIComponent(chosen) + _filterQs())
+                        : (_filterQs() ? ('?' + _filterQs().slice(1)) : '');
+        var url = BASE + '/experiment/' + EXP_NAME + '/forecast-trajectory' + qs;
+        _setCardLoading('accuracy-trajectory-chart', true);
+        accuracyFetch(url)
         .then(function(data) {
+            _setCardLoading('accuracy-trajectory-chart', false);
             var empty = document.getElementById('trajectory-empty');
             if (data.error || !data.available_targets || !data.available_targets.length) {
                 if (empty) empty.style.display = 'block';
-                Plotly.purge('accuracy-trajectory-chart');
+                try { Plotly.purge('accuracy-trajectory-chart'); } catch (e) {}
                 if (sel) { sel.innerHTML = '<option value="">No eligible targets</option>'; }
+                window._trajRetries = 0;
                 return;
             }
             if (empty) empty.style.display = 'none';
@@ -3401,7 +3817,17 @@ window.showTab = function(el) {
                     var d = toLocalDate(m.target_dt);
                     var stamp = d ? d.toLocaleString() : m.target_dt;
                     if (sortMode === 'worst' && m.max_abs_error != null) {
-                        opt.textContent = stamp + '  (miss ' + m.max_abs_error.toFixed(2) + ')';
+                        // MED-12: include units and (when available) a
+                        // "% of typical" suffix so "miss 0.85" is
+                        // comparable across sensors with different
+                        // ranges.
+                        var missLabel = m.max_abs_error.toFixed(2);
+                        if (EXP_UNITS) missLabel += ' ' + EXP_UNITS;
+                        var typ = _lastAccuracyData && _lastAccuracyData.typical_interval_demand;
+                        if (typ && typ > 1e-9) {
+                            missLabel += ', ' + Math.round((m.max_abs_error / typ) * 100) + '% of typical';
+                        }
+                        opt.textContent = stamp + '  (miss ' + missLabel + ')';
                     } else {
                         opt.textContent = stamp;
                     }
@@ -3412,13 +3838,29 @@ window.showTab = function(el) {
                 // server picked.
                 var want = pickDefault ? meta[0].target_dt : (data.target_dt || meta[0].target_dt);
                 sel.value = want;
-                // If the server didn't return the target the UI wants,
-                // re-request it and bail — the subsequent load will
-                // draw the chart.
+                // CRIT-2: if the server keeps returning a non-matching
+                // target_dt, retry once and then bail rather than
+                // looping forever (could happen if the target was
+                // purged from forecast_log between fetches).
                 if (want && want !== data.target_dt) {
+                    if (++window._trajRetries > 1) {
+                        console.warn('Forecast trajectory: server kept returning '
+                            + JSON.stringify(data.target_dt) + ' when client wanted '
+                            + JSON.stringify(want) + '. Giving up after one retry.');
+                        window._trajRetries = 0;
+                        var emptyEl = document.getElementById('trajectory-empty');
+                        if (emptyEl) {
+                            emptyEl.style.display = 'block';
+                            emptyEl.textContent = 'Couldn\'t load the requested target — '
+                                + 'pick another from the dropdown.';
+                        }
+                        try { Plotly.purge('accuracy-trajectory-chart'); } catch (e) {}
+                        return;
+                    }
                     window.loadForecastTrajectory(false);
                     return;
                 }
+                window._trajRetries = 0;
             }
 
             // Build trajectory dots: x = issued_at (local), y = predicted.
@@ -3474,6 +3916,8 @@ window.showTab = function(el) {
                 trajXAxis.tickvals = trajTicks.tickvals;
                 trajXAxis.ticktext = trajTicks.ticktext;
             }
+            // LOW-2: drop dead `colorway` — same reason as the lead-time
+            // chart above (every trace pins its own colour).
             var layout = {
                 xaxis: trajXAxis,
                 yaxis: { title: 'Predicted value{{ " (" + units + ")" if units else "" }}', color: '#b0b0b0', gridcolor: '#2d3561' },
@@ -3482,14 +3926,22 @@ window.showTab = function(el) {
                 font: { color: '#e0e0e0' },
                 legend: { x: 0.02, y: 0.98 },
                 margin: { t: 20, r: 30 },
-                colorway: PLOT_COLORWAY,
             };
             Plotly.newPlot('accuracy-trajectory-chart', traces, layout, { responsive: true });
         })
         .catch(function(err) {
             console.error('Forecast trajectory load failed:', err);
+            _setCardLoading('accuracy-trajectory-chart', false);
+            // MED-3: clear the previous chart so a stale render doesn't
+            // sit underneath the empty-state text on a transient failure.
+            try { Plotly.purge('accuracy-trajectory-chart'); } catch (e) {}
+            window._trajRetries = 0;
             var empty = document.getElementById('trajectory-empty');
-            if (empty) empty.style.display = 'block';
+            if (empty) {
+                empty.style.display = 'block';
+                empty.textContent = 'Could not load trajectory data — '
+                    + (err && err.message ? err.message : 'see console for details');
+            }
         });
     };
 
@@ -3504,9 +3956,12 @@ window.showTab = function(el) {
     // without waiting for the accordion to open. Charts defer to
     // _renderStabilityCharts once the wrapper is visible.
     window.loadForecastStability = function() {
-        fetch(BASE + '/experiment/' + EXP_NAME + '/forecast-stability?days=' + _accuracyDays())
-        .then(function(r) { return r.json(); })
+        _setCardLoading('stability-std-chart', true);
+        _setCardLoading('stability-daily-chart', true);
+        accuracyFetch(BASE + '/experiment/' + EXP_NAME + '/forecast-stability?days=' + _accuracyDays() + _filterQs())
         .then(function(data) {
+            _setCardLoading('stability-std-chart', false);
+            _setCardLoading('stability-daily-chart', false);
             if (data.error || !data.per_timestep || !data.per_timestep.target_dt.length) {
                 _lastStabilityData = null;
                 _renderVerdict();
@@ -3570,6 +4025,8 @@ window.showTab = function(el) {
         })
         .catch(function(err) {
             console.error('Forecast stability load failed:', err);
+            _setCardLoading('stability-std-chart', false);
+            _setCardLoading('stability-daily-chart', false);
             _lastStabilityData = null;
             _renderVerdict();
         });
@@ -3633,10 +4090,14 @@ window.showTab = function(el) {
             var means = data.daily_totals.map(function(d) { return d.mean_total; });
             var stdsT = data.daily_totals.map(function(d) { return d.std_total; });
             var nCycs = data.daily_totals.map(function(d) { return d.n_cycles; });
+            // HIGH-6: bars are coloured AND have threshold lines + a
+            // legend, so the encoding still works for colourblind
+            // readers. Colour is now a redundant channel.
             var colors = cvs.map(cvColor);
             var barTrace = [{
                 x: days, y: cvs,
                 type: 'bar',
+                name: 'Daily-total disagreement',
                 marker: { color: colors },
                 customdata: days.map(function(_, i) {
                     return [means[i], stdsT[i], nCycs[i]];
@@ -3647,7 +4108,12 @@ window.showTab = function(el) {
                              + '<br>std: %{customdata[1]:.2f}'
                              + '<br>runs: %{customdata[2]}'
                              + '<extra></extra>',
+                showlegend: false,
             }];
+            // Threshold reference lines so the green/amber/red bands
+            // are still readable without relying on hue alone.
+            var STAB_GOOD = 10;
+            var STAB_FAIR = 25;
             var barLayout = {
                 xaxis: { title: { text: 'Day', font: { size: 11 } },
                          color: '#b0b0b0', gridcolor: '#2d3561', type: 'category' },
@@ -3659,6 +4125,34 @@ window.showTab = function(el) {
                 showlegend: false,
                 margin: { t: 10, r: 30, l: 70, b: 60 },
                 bargap: 0.3,
+                shapes: [
+                    {
+                        type: 'line', xref: 'paper', x0: 0, x1: 1,
+                        yref: 'y', y0: STAB_GOOD, y1: STAB_GOOD,
+                        line: { color: '#2ecc71', width: 1, dash: 'dot' },
+                    },
+                    {
+                        type: 'line', xref: 'paper', x0: 0, x1: 1,
+                        yref: 'y', y0: STAB_FAIR, y1: STAB_FAIR,
+                        line: { color: '#e74c3c', width: 1, dash: 'dot' },
+                    },
+                ],
+                annotations: [
+                    {
+                        xref: 'paper', x: 1.0, xanchor: 'right',
+                        yref: 'y', y: STAB_GOOD, yanchor: 'bottom',
+                        text: 'Stable (≤' + STAB_GOOD + '%)',
+                        showarrow: false,
+                        font: { color: '#2ecc71', size: 10 },
+                    },
+                    {
+                        xref: 'paper', x: 1.0, xanchor: 'right',
+                        yref: 'y', y: STAB_FAIR, yanchor: 'bottom',
+                        text: 'Unstable (>' + STAB_FAIR + '%)',
+                        showarrow: false,
+                        font: { color: '#e74c3c', size: 10 },
+                    },
+                ],
             };
             Plotly.newPlot('stability-daily-chart', barTrace, barLayout, { responsive: true });
         }
@@ -4210,8 +4704,24 @@ window.showTab = function(el) {
     };
 
     // ======== Covariate analysis ========
+    // HIGH-4: a single click on Apply Best rewrites mlfl.yaml AND
+    // triggers a retrain. Wrap in mlfl.confirm so a misclick doesn't
+    // silently overwrite the experiment configuration.
     window.applyCovariateBest = function(name, btn) {
         var origLabel = btn ? btn.textContent : '';
+        var prodModel = {{ (experiment.selected_model or experiment.best_model or '') | tojson }};
+        var msg = 'Apply the winning covariate set'
+            + (prodModel ? ' for ' + prodModel : '')
+            + ' and start a retrain?\n\n'
+            + 'This will edit mlfl.yaml and immediately retrain the model. '
+            + 'Existing covariate settings will be overwritten.';
+        if (window.mlfl && mlfl.confirm) {
+            mlfl.confirm(msg, function() { _doApplyCovariateBest(name, btn, origLabel); });
+        } else if (window.confirm(msg)) {
+            _doApplyCovariateBest(name, btn, origLabel);
+        }
+    };
+    function _doApplyCovariateBest(name, btn, origLabel) {
         if (btn) {
             btn.disabled = true;
             btn.textContent = 'Applying…';
@@ -4238,7 +4748,7 @@ window.showTab = function(el) {
             }
             if (data.improvement_pct !== null && data.improvement_pct !== undefined) {
                 msg += ' (' + (data.improvement_pct > 0 ? '−' : '+') +
-                       Math.abs(data.improvement_pct).toFixed(1) + '% MAE)';
+                       Math.abs(data.improvement_pct).toFixed(1) + '% typical error)';
             }
             if (data.retraining) {
                 msg += ' — retraining started';
@@ -4255,7 +4765,7 @@ window.showTab = function(el) {
             if (btn) { btn.disabled = false; btn.textContent = origLabel; }
             mlfl.toast('Failed: ' + err, 'error');
         });
-    };
+    }
 
     window.runCovariateAnalysis = function(name, btn) {
         btn.disabled = true; btn.classList.add('btn-loading'); btn.textContent = 'Analysing...';
@@ -4264,12 +4774,14 @@ window.showTab = function(el) {
         fetch(BASE + '/experiment/' + name + '/run-covariate-analysis', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: selectedModel }) })
         .then(function(r) { return r.json(); })
         .then(function() {
+            // MED-10: 2 s poll feels noticeably more responsive than
+            // 5 s and the per-row JSON is still tiny.
             var pollId = setInterval(function() {
                 fetch(BASE + '/experiment/' + name + '/covariate-analysis')
                     .then(function(r) { if (r.ok) return r.json(); throw new Error('not ready'); })
                     .then(function(result) { if (result.status === 'completed') { clearInterval(pollId); _reloadToTab('sec-covariate-analysis'); } })
                     .catch(function() {});
-            }, 5000);
+            }, 2000);
         })
         .catch(function(err) { mlfl.toast('Failed to start covariate analysis: ' + err, 'error'); btn.disabled = false; btn.textContent = 'Run Covariate Analysis'; });
     };
@@ -4404,6 +4916,14 @@ window.showTab = function(el) {
                 doneBtn.disabled = false; doneBtn.classList.remove('btn-loading');
                 document.getElementById('btn-run-text').textContent = 'Run Pipeline';
                 pipelineRunning = false;
+                // MED-4: the cache is now stale — a new champion or
+                // new model_version invalidates previous accuracy
+                // payloads. The location.reload() below clears the
+                // in-memory cache anyway, but invalidate explicitly
+                // so the replay path (no reload) is also covered.
+                if (typeof window.accuracyFetchInvalidate === 'function') {
+                    window.accuracyFetchInvalidate();
+                }
                 if (evtSource) evtSource.close();
                 // Reload after a short delay so the user sees "Pipeline complete"
                 if (!isReplaying) setTimeout(function() { location.reload(); }, 2000);
