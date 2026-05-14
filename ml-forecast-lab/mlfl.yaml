@@ -113,7 +113,6 @@ experiments:
     output_units: "%"
     country: "GB"
     log_transform: false
-    database: true
 
   # ==========================================================================
   # Experiment 2: Mixergy heat energy (kWh consumed per interval)
@@ -167,4 +166,3 @@ experiments:
   #   units: "kWh"
   #   output_units: "kWh"
   #   country: "GB"
-  #   database: true

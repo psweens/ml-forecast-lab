@@ -3,6 +3,17 @@
    partial refreshes. Receives `exp`, `running_experiments`,
    `queued_experiments`, `training_summaries`, `base_path` in context. #}
 <div class="experiment-card">
+    {# Top-right corner delete button. Lives outside the header so it
+       can sit absolutely in the card corner without disturbing the
+       title / mode-badge flex layout below. The button itself is
+       always-visible (faintly tinted red) and brightens on hover so a
+       destructive action is never invisible. #}
+    <button class="btn-card-delete" aria-label="Delete experiment"
+            title="Delete experiment"
+            {% if exp.name in running_experiments or queued_experiments.get(exp.name) %}disabled{% endif %}
+            onclick="deleteExperiment('{{ exp.name }}', this)">
+        &times;
+    </button>
     <div class="card-header">
         <h3 class="card-title">{{ exp.name | humanise }}</h3>
         <span class="status-badge status-{{ exp.mode | lower }} {% if exp.last_benchmark_status == 'running' %}training{% endif %}">
@@ -102,12 +113,6 @@
         <a href="{{ base_path | default('') }}/experiment/{{ exp.name }}" class="btn btn-secondary flex-center">
             View Details
         </a>
-        <button class="btn-icon-danger" aria-label="Delete experiment"
-                title="Delete experiment"
-                {% if exp.name in running_experiments or queued_experiments.get(exp.name) %}disabled{% endif %}
-                onclick="deleteExperiment('{{ exp.name }}', this)">
-            &times;
-        </button>
         {% if exp.name in running_experiments %}
         <button class="btn btn-danger flex-center nowrap" style="font-size:0.85rem;padding:0.4rem 1rem;"
                 onclick="stopTraining('{{ exp.name }}', this)"

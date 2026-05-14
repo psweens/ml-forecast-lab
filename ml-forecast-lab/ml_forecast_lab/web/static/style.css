@@ -154,6 +154,51 @@ main { flex: 1; }
     background: var(--bg-secondary); border: 1px solid var(--border);
     border-radius: 0.75rem; overflow: hidden; transition: all 0.3s;
     display: flex; flex-direction: column;
+    /* v2.33.1: corner-positioned delete button anchors against this. */
+    position: relative;
+}
+
+/* v2.33.1: corner delete button on each dashboard card. Replaces the
+ * old inline `×` between View Details and Retrain (which read as a
+ * separator, not a destructive action). Always-visible faint red so a
+ * destructive control is never invisible; brightens fully on hover. */
+.btn-card-delete {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 0.4rem;
+    border: 1px solid rgba(231, 76, 60, 0.35);
+    background: rgba(231, 76, 60, 0.08);
+    color: rgba(231, 76, 60, 0.75);
+    font-size: 1.2rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    /* Sit above card-header content so the status badge can't overlap on
+     * very narrow cards. */
+    z-index: 2;
+}
+.btn-card-delete:hover:not(:disabled) {
+    background: var(--error);
+    color: #fff;
+    border-color: var(--error);
+    box-shadow: 0 0 8px rgba(231, 76, 60, 0.4);
+}
+.btn-card-delete:disabled {
+    opacity: 0.25;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+/* The mode badge in card-header could collide with the corner X on very
+ * narrow viewports. Reserve a bit of right-side margin so the badge
+ * never sits flush against the absolute button. */
+.experiment-card .card-header .status-badge {
+    margin-right: 2rem;
 }
 .experiment-card:hover {
     border-color: var(--accent-secondary);

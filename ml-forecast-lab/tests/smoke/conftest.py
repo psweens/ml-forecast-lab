@@ -49,7 +49,6 @@ MINIMAL_MLFL_YAML = textwrap.dedent(
         units: "%"
         output_units: "%"
         country: "GB"
-        database: true
     """
 )
 
