@@ -297,6 +297,39 @@ class TestProbeForecastRows:
             "exp", "lgb", None, max_age_days=GENEROUS_WINDOW,
         ) is True
 
+    def test_future_only_targets_do_not_register(self, db, actuals_monotonic):
+        # Reproduces the v2.34.0 retrain bug: a freshly-retrained cohort
+        # has only future-targeting predictions, no actuals to join. The
+        # probe must return False so the widening ladder falls back to
+        # older versions of the same model.
+        issued = datetime.utcnow() - timedelta(seconds=30)
+        future_targets = [
+            issued + timedelta(minutes=30 * (i + 1)) for i in range(48)
+        ]
+        _log_cycle(
+            db, "exp", issued, future_targets, [1.0] * 48,
+            model_name="lgb", model_version="v_new",
+        )
+        # Strict (model + version) — all rows target the future → False.
+        assert db.probe_forecast_rows(
+            "exp", "lgb", "v_new", max_age_days=30,
+        ) is False
+        # Adding an older cycle with elapsed targets to a different
+        # version makes the model-only probe register, while strict on
+        # the new version still returns False.
+        old_issued = datetime.utcnow() - timedelta(days=2)
+        _log_cycle(
+            db, "exp", old_issued,
+            [old_issued + timedelta(minutes=30)],
+            [1.0], model_name="lgb", model_version="v_old",
+        )
+        assert db.probe_forecast_rows(
+            "exp", "lgb", "v_new", max_age_days=30,
+        ) is False
+        assert db.probe_forecast_rows(
+            "exp", "lgb", None, max_age_days=30,
+        ) is True
+
 
 # ---------------------------------------------------------------------
 # Coverage

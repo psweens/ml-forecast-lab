@@ -410,15 +410,23 @@ class HistoryDB:
         calling the full query up to three times when the strict filter
         returns empty. Served by idx_flog_exp_model_ver — O(log N).
 
+        We also require ``target_dt <= now`` so a freshly-retrained
+        cohort (only future-targeting predictions, no actuals possible
+        yet) doesn't look "alive" to the probe — without this, the
+        widening ladder won't kick in for the first ~horizon-worth of
+        time after every retrain, and the user sees an empty chart even
+        though older versions of the same model would render fine.
+
         False positives (rows exist in forecast_log but none land in
         the accuracy INNER JOIN with actuals) still trigger one
         redundant full query, but that was the baseline cost anyway.
         """
+        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         cutoff_str = (
             datetime.utcnow() - pd.Timedelta(days=max_age_days)
         ).strftime("%Y-%m-%d %H:%M:%S")
-        where = ["experiment = ?", "issued_at >= ?"]
-        params: list = [experiment, cutoff_str]
+        where = ["experiment = ?", "issued_at >= ?", "target_dt <= ?"]
+        params: list = [experiment, cutoff_str, now_str]
         if model_name:
             where.append("model_name = ?")
             params.append(model_name)

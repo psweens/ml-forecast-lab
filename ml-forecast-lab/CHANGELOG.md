@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.34.1
+
+### Fixed
+
+- **Forecast Accuracy stayed empty for the first ~horizon-worth of
+  time after every retrain.** `probe_forecast_rows` — the cheap
+  EXISTS check the widening ladder uses to decide whether the strict
+  `(model, version)` cohort has any data — only checked
+  `issued_at >= cutoff`. Immediately after a retrain, the new
+  cohort has a full horizon's worth of predictions logged (e.g. 96
+  rows at 30-min × 48), but every one targets the future, so the
+  INNER JOIN against actuals comes back empty. The probe said
+  "rows exist" → ladder didn't widen → user saw an empty lead-time
+  curve with `empty_reason: "no_overlap"` even though 24 older
+  versions of the same model would have rendered fine. Probe now
+  also requires `target_dt <= now`, so a future-only cohort
+  correctly falls back to the model-only (or all-models) filter.
+
+  Pinned with a new probe test (`test_future_only_targets_do_not_register`).
+
+### Changed
+
+- **"How predictions converge on a single moment" — Actual is now
+  a marker anchored to the target moment, not a horizontal line.**
+  The previous solid white line spanned the X-axis (the issued-at
+  range, often several days), which read as "the actual demand was
+  0.8 across all those days". The actual is one observation at one
+  moment; a star marker placed at (target_dt, value) plus a dim
+  dashed Y-reference (showlegend off) makes that geometry explicit.
+  Label changed to "Actual at target (per-interval demand)" for
+  the same reason. The green dotted target-time vertical line is
+  unchanged.
+
+### Removed
+
+- Bare lead-in paragraph above the Forecast Accuracy heading
+  ("Is your forecast working well? …") — the heading and the
+  diagnostic cards explain themselves.
+
 ## 2.34.0
 
 Multi-cohort Forecast Accuracy view. The user asked "how does the

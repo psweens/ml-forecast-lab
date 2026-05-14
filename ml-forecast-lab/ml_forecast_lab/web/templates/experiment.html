@@ -1445,9 +1445,6 @@
 <div class="tab-section" id="sec-forecast-accuracy" style="display:none;">
 <section class="section">
     <h2>Forecast Accuracy</h2>
-    <p style="color:var(--text-secondary);margin-bottom:1rem;">
-        Is your forecast working well? Start with the verdict below; expand the diagnostic tools if something looks off.
-    </p>
 
     <!-- ============================================================ -->
     <!-- TOP CONTROLS: window, evaluation mode, model badge            -->
@@ -4154,29 +4151,60 @@ window.showTab = function(el) {
             ];
 
             if (data.actual !== null && data.actual !== undefined && xs.length) {
-                var xMin = xs[0], xMax = xs[xs.length - 1];
                 var targetTs = toLocalDate(data.target_dt);
-                if (targetTs && targetTs > xMax) xMax = targetTs;
-                var actualLabel = (data.actual_space === 'delta')
-                    ? 'Actual (per-interval demand)'
-                    : 'Actual';
-                traces.push({
-                    x: [xMin, xMax], y: [data.actual, data.actual],
-                    name: actualLabel,
-                    type: 'scatter', mode: 'lines',
-                    line: { color: '#e0e0e0', width: 2, dash: 'solid' },
-                    hovertemplate: actualLabel + ' %{y:.3f}<extra></extra>',
-                });
+                var unitsSuffix = (data.actual_space === 'delta')
+                    ? ' (per-interval demand)' : '';
+                var actualLabel = 'Actual at target' + unitsSuffix;
                 if (targetTs) {
+                    // Anchor the actual to (target_dt, value) as a single
+                    // marker, not a horizontal line across the X-axis. The
+                    // X-axis is issued_at; a horizontal line reads as
+                    // "actual was 0.8 across all those days", which is
+                    // wrong — the actual is one observation at one moment.
+                    // Subtle dashed Y-reference is kept so each forecast
+                    // still has something to compare against visually.
+                    var yMin = Math.min(data.actual, Math.min.apply(null, ys));
+                    var yMax = Math.max(data.actual, Math.max.apply(null, ys));
+                    var xMin = xs[0];
+                    var xMax = xs[xs.length - 1];
+                    if (targetTs > xMax) xMax = targetTs;
                     traces.push({
-                        x: [targetTs, targetTs],
-                        y: [Math.min(data.actual, Math.min.apply(null, ys)),
-                            Math.max(data.actual, Math.max.apply(null, ys))],
+                        x: [xMin, xMax], y: [data.actual, data.actual],
+                        name: actualLabel + ' (ref)',
+                        type: 'scatter', mode: 'lines',
+                        line: { color: '#9098a8', width: 1, dash: 'dash' },
+                        hovertemplate: actualLabel + ' %{y:.3f}<extra></extra>',
+                        showlegend: false,
+                    });
+                    traces.push({
+                        x: [targetTs], y: [data.actual],
+                        name: actualLabel,
+                        type: 'scatter', mode: 'markers',
+                        marker: {
+                            color: '#e0e0e0', size: 14, symbol: 'star',
+                            line: { color: '#1a1a2e', width: 1 },
+                        },
+                        hovertemplate: actualLabel + ' %{y:.3f}<br>at %{x|%d %b %H:%M}<extra></extra>',
+                    });
+                    traces.push({
+                        x: [targetTs, targetTs], y: [yMin, yMax],
                         name: 'Target time',
                         type: 'scatter', mode: 'lines',
                         line: { color: '#6dd67c', width: 1, dash: 'dot' },
                         hoverinfo: 'skip',
                         showlegend: true,
+                    });
+                } else {
+                    // Fallback when target_dt is unparseable — degrade
+                    // gracefully to the old dashed reference line so the
+                    // actual isn't dropped entirely.
+                    var xMin = xs[0], xMax = xs[xs.length - 1];
+                    traces.push({
+                        x: [xMin, xMax], y: [data.actual, data.actual],
+                        name: actualLabel,
+                        type: 'scatter', mode: 'lines',
+                        line: { color: '#9098a8', width: 1, dash: 'dash' },
+                        hovertemplate: actualLabel + ' %{y:.3f}<extra></extra>',
                     });
                 }
             }
