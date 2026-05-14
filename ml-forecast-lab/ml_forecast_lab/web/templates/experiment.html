@@ -3744,9 +3744,18 @@ window.showTab = function(el) {
         var tz = _effectiveTzName();
         if (!tz) return null;  // browser mode — let Plotly auto-tick
         // Pick ~6-10 tick candidates uniformly spaced through the range.
-        var first = dates[0].getTime();
-        var last = dates[dates.length - 1].getTime();
-        if (last <= first) return null;
+        // Use min/max across the array, not dates[0]/dates[last] — the
+        // convergence chart concatenates fanX + actuals.targets which
+        // isn't sorted, so the trailing actuals can be earlier than the
+        // last fanX target and the ticks would bunch up on the left.
+        var first = Infinity, last = -Infinity;
+        for (var k = 0; k < dates.length; k++) {
+            var t = dates[k] && dates[k].getTime();
+            if (t == null || isNaN(t)) continue;
+            if (t < first) first = t;
+            if (t > last) last = t;
+        }
+        if (!isFinite(first) || !isFinite(last) || last <= first) return null;
         var n = 8;
         var vals = [], text = [];
         var fmt = new Intl.DateTimeFormat('en-GB', {
