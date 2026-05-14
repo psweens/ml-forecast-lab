@@ -2104,7 +2104,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             cq = await asyncio.to_thread(
                 db.get_conformal_quantiles,
                 name, actuals_table,
-                0.8,
+                float(getattr(exp_cfg, 'conformal_coverage', 0.8)),
                 model_name,
                 exp_cfg.interval_minutes,
                 14,
@@ -3219,6 +3219,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             # users can still override the default λ without UI churn.
             "daily_loss_weight": lambda v: (0.5 if v else 0.0) if isinstance(v, bool) else max(0.0, float(v)),
             "max_increment": lambda v: float(v) if float(v) > 0 else None,
+            "conformal_coverage": lambda v: float(v) if 0.5 <= float(v) <= 0.99 else None,
             "gap_handling": lambda v: v if v in ("ffill", "interpolate", "mask") else None,
             "gap_max_minutes": lambda v: int(v) if int(v) >= 1 else None,
             "outlier_method": lambda v: v if v in ("quantile", "mad", "off") else None,

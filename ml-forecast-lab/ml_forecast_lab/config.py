@@ -474,6 +474,32 @@ class ExperimentCfg:
     higher weight during training so models prioritise current patterns.
     Set to 0 to disable recency weighting (all samples weighted equally)."""
 
+    conformal_coverage: float = 0.8
+    """Nominal coverage for the conformal prediction interval published with
+    every forecast. Default 0.8 (80%) — the band that catches the actual
+    value 80% of the time under the residual-exchangeability assumption.
+
+    Higher values (e.g. 0.9) widen the band; useful when the downstream
+    automation must avoid false-negatives ("definitely not empty before
+    6pm" needs > 90%). Lower values (e.g. 0.5) collapse the band to the
+    median residual — useful only for diagnostic plots.
+
+    Empirical coverage may differ from the nominal target when residuals
+    are non-exchangeable across the forecast horizon (seasonal drift,
+    regime change). The Results tab surfaces achieved coverage so users
+    can diagnose calibration gaps."""
+
+    quantiles: List[float] = field(default_factory=list)
+    """Optional list of quantiles in (0, 1) for native-quantile training.
+    Empty (default) trains a point forecast and wraps it in a post-hoc
+    conformal band. Non-empty (e.g. [0.1, 0.5, 0.9]) routes the supported
+    neural backends (DLinear) through a multi-quantile output head trained
+    with the pinball loss, replacing the point loss for those backends.
+
+    Backends without a quantile head (currently every backend except
+    DLinear) fall back to the point-loss path and the conformal band
+    continues to wrap their median prediction."""
+
     gap_handling: str = 'interpolate'
     """How to fill gaps after resampling:
     - ``ffill``: legacy behaviour — propagate the last observed value across

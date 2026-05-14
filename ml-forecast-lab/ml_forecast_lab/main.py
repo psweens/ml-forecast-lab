@@ -2110,6 +2110,13 @@ class MLForecastLabApp:
                 if (m.is_neural and hasattr(m, 'optimiser')
                         and 'optimiser' not in overrides):
                     m.set_params(optimiser=exp_cfg.optimiser)
+                # Quantile-aware backends (currently DLinear) pick up the
+                # experiment-level quantiles list when one is configured.
+                # Backends without the attribute silently ignore it.
+                if (m.is_neural and hasattr(m, 'quantiles')
+                        and 'quantiles' not in overrides
+                        and exp_cfg.quantiles):
+                    m.set_params(quantiles=list(exp_cfg.quantiles))
                 if overrides:
                     m.set_params(**overrides)
                     logger.info(f"Applied {len(overrides)} override(s) for {model_name}"
@@ -3770,7 +3777,11 @@ class MLForecastLabApp:
                 actuals_table = self.history_db.safe_table_name(
                     exp_cfg.target_entity
                 )
-                target_level = interval_level if interval_level is not None else 0.8
+                target_level = (
+                    interval_level
+                    if interval_level is not None
+                    else float(getattr(exp_cfg, 'conformal_coverage', 0.8))
+                )
                 # Pin residual quantiles to the current model_version
                 # when we have enough calibrated residuals for it;
                 # otherwise pool across all weight regimes of this
