@@ -575,9 +575,16 @@ class HistoryDB:
                 "  FROM actuals_grid"
                 ")"
             )
+            # v2.34.0: forecast_vals carries model_version so the
+            # per-cohort lead-time query below can GROUP BY it. The
+            # LAG window still PARTITIONs by issued_at, which is
+            # naturally within one (model_name, model_version)
+            # cohort — adding model_version to the partition would
+            # be redundant.
             forecast_vals_cte = (
                 "forecast_vals AS ("
-                "  SELECT experiment, model_name, issued_at, target_dt, lead_minutes,"
+                "  SELECT experiment, model_name, model_version,"
+                "         issued_at, target_dt, lead_minutes,"
                 "    CASE"
                 "      WHEN CAST(strftime('%s', target_dt) AS INTEGER)"
                 "           - CAST(strftime('%s', LAG(target_dt) OVER ("
@@ -602,7 +609,8 @@ class HistoryDB:
             )
             forecast_vals_cte = (
                 "forecast_vals AS ("
-                "  SELECT experiment, model_name, issued_at, target_dt, lead_minutes,"
+                "  SELECT experiment, model_name, model_version,"
+                "         issued_at, target_dt, lead_minutes,"
                 "         predicted AS value"
                 "  FROM forecast_log"
                 "  WHERE experiment = ? AND target_dt <= ? AND issued_at >= ?"
@@ -687,6 +695,84 @@ class HistoryDB:
             "me": [round(r[3], 4) for r in lead_rows],
             "sample_count": [r[4] for r in lead_rows],
         }
+
+        # v2.34.0: per-cohort breakdown of the same lead-time curve.
+        # The pooled `lead_time_curve` above stays unchanged (still
+        # meaningful as a headline error number) and is what the
+        # verdict-card chip + headline reads. The per-cohort
+        # decomposition feeds the multi-trace lead-time chart so the
+        # user can see how each retrain's error curve compares.
+        #
+        # Grouped by (lead_bucket, model_name, model_version) — every
+        # distinct cohort gets its own row per bucket. Skipped when
+        # the caller has already pinned a single cohort via the
+        # filter (only one cohort in the data, multi-trace would be
+        # a single line, runtime saved).
+        cohorts: list = []
+        if not (model_name and model_version):
+            try:
+                cursor.execute(f"""
+                    WITH actuals_grid AS (
+                        SELECT
+                            strftime('%Y-%m-%d %H:%M:%S',
+                                (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                                'unixepoch') AS grid_dt,
+                            AVG(value) AS value
+                        FROM {actuals_table}
+                        WHERE SUBSTR(ds, 1, 19) >= ?
+                        GROUP BY grid_dt
+                    ),
+                    {actuals_vals_cte},
+                    {forecast_vals_cte}
+                    SELECT
+                        fv.model_name,
+                        fv.model_version,
+                        CAST((fv.lead_minutes / ?) * ? AS INTEGER) AS lead_bucket,
+                        AVG(ABS(fv.value - av.value)) AS mae,
+                        SQRT(AVG((fv.value - av.value) * (fv.value - av.value))) AS rmse,
+                        AVG(fv.value - av.value) AS me,
+                        COUNT(*) AS n
+                    FROM forecast_vals fv
+                    INNER JOIN actuals_vals av
+                        ON av.grid_dt = fv.target_dt
+                    WHERE 1=1 {mode_filter}
+                    GROUP BY fv.model_name, fv.model_version, lead_bucket
+                    ORDER BY fv.model_name, fv.model_version, lead_bucket
+                """, (
+                    *actuals_grid_params,
+                    *actuals_vals_params,
+                    *forecast_vals_params,
+                    bucket_min, bucket_min,
+                ))
+                cohort_rows = cursor.fetchall()
+            except sqlite3.Error as e:
+                logger.warning(f"Per-cohort lead-time query failed: {e}")
+                cohort_rows = []
+
+            # Reshape: rows → list of cohort dicts, each with a
+            # lead_time_curve in the same shape as the pooled one.
+            cohort_map: dict = {}
+            for mn, mv, lb, mae, rmse, me_val, n in cohort_rows:
+                key = (mn, mv)
+                if key not in cohort_map:
+                    cohort_map[key] = {
+                        "model_name": mn,
+                        "model_version": mv,
+                        "lead_time_curve": {
+                            "lead_minutes": [],
+                            "mae": [],
+                            "rmse": [],
+                            "me": [],
+                            "sample_count": [],
+                        },
+                    }
+                ltc = cohort_map[key]["lead_time_curve"]
+                ltc["lead_minutes"].append(int(lb))
+                ltc["mae"].append(round(mae, 4))
+                ltc["rmse"].append(round(rmse, 4))
+                ltc["me"].append(round(me_val, 4))
+                ltc["sample_count"].append(int(n))
+            cohorts = list(cohort_map.values())
 
         # --- Revision improvement ---
         # Compare the FIRST forecast for each target_dt vs the LAST.
@@ -844,6 +930,7 @@ class HistoryDB:
             "experiment": experiment,
             "evaluation_mode": "increment" if increment else "raw",
             "lead_time_curve": lead_time_curve,
+            "cohorts": cohorts,
             "revision_improvement": revision,
             "typical_interval_demand": typical,
             "total_logged": total_logged,
@@ -1940,6 +2027,74 @@ class HistoryDB:
         except sqlite3.Error:
             cyc_row = (0, None, None)
 
+        # v2.34.0: per-cohort breakdown of run-to-run std.
+        # The main `per_timestep` arrays above carry the
+        # dominant-cohort value per target_dt (post-Commit-1
+        # partitioning). The `cohorts` array gives the full
+        # per-(model_name, model_version) breakdown so the
+        # frontend multi-trace stability chart can render one
+        # line per cohort. Skipped when the caller has pinned
+        # a specific cohort (only one cohort in data, multi-
+        # trace would be redundant).
+        stability_cohorts: list = []
+        if not (model_name and model_version):
+            try:
+                cursor.execute(
+                    f"""
+                    SELECT
+                        target_dt, model_name, model_version,
+                        AVG(predicted) AS mean_p,
+                        AVG(predicted * predicted) AS mean_pp,
+                        COUNT(DISTINCT issued_at) AS n_cycles
+                    FROM forecast_log
+                    WHERE experiment = ?
+                      AND issued_at >= ?
+                      {model_filter_sql}
+                    GROUP BY target_dt, model_name, model_version
+                    HAVING n_cycles >= 2
+                    ORDER BY model_name, model_version, target_dt
+                    """,
+                    (experiment, cutoff_str, *model_filter_param),
+                )
+                cohort_rows = cursor.fetchall()
+            except sqlite3.Error as e:
+                logger.warning(f"Per-cohort stability query failed: {e}")
+                cohort_rows = []
+
+            cohort_map: dict = {}
+            for tdt, mn, mv, mean_p, mean_pp, nc in cohort_rows:
+                mean_p = float(mean_p or 0)
+                mean_pp = float(mean_pp or 0)
+                var = mean_pp - mean_p * mean_p
+                std_p = (var ** 0.5) if var > 0 else 0.0
+                if abs(mean_p) < 1e-9:
+                    if std_p < 1e-9:
+                        cv = 0.0
+                    else:
+                        continue
+                else:
+                    cv = 100.0 * std_p / abs(mean_p)
+                key = (mn, mv)
+                if key not in cohort_map:
+                    cohort_map[key] = {
+                        "model_name": mn,
+                        "model_version": mv,
+                        "per_timestep": {
+                            "target_dt": [],
+                            "mean": [],
+                            "std": [],
+                            "cv_pct": [],
+                            "n_cycles": [],
+                        },
+                    }
+                pt = cohort_map[key]["per_timestep"]
+                pt["target_dt"].append(tdt)
+                pt["mean"].append(round(mean_p, 4))
+                pt["std"].append(round(std_p, 4))
+                pt["cv_pct"].append(round(cv, 2))
+                pt["n_cycles"].append(int(nc))
+            stability_cohorts = list(cohort_map.values())
+
         return {
             "experiment": experiment,
             "per_timestep": {
@@ -1949,6 +2104,7 @@ class HistoryDB:
                 "cv_pct": cv_pcts,
                 "n_cycles": n_cycles_list,
             },
+            "cohorts": stability_cohorts,
             "daily_totals": daily_totals,
             "summary": {
                 "median_step_cv_pct": median_step_cv,

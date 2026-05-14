@@ -2362,6 +2362,39 @@ window.showTab = function(el) {
         '#fb923c', '#a78bfa', '#34d399', '#f87171', '#facc15'
     ];
 
+    // v2.34.0: stable per-cohort colour mapping. The multi-trace
+    // lead-time chart, stability std chart, and retrain-history chip
+    // strip ALL use this so the same cohort wears the same colour
+    // across the whole page. Hashing model_version (or model_name when
+    // version is null) into PLOT_COLORWAY gives deterministic colour
+    // per cohort without state — refreshing the page picks the same
+    // colour for the same cohort.
+    function _cohortColor(modelName, modelVersion) {
+        var key = String(modelName || '') + '|' + String(modelVersion || '');
+        var h = 0;
+        for (var i = 0; i < key.length; i++) {
+            h = ((h << 5) - h) + key.charCodeAt(i);
+            h |= 0;  // 32-bit
+        }
+        return PLOT_COLORWAY[Math.abs(h) % PLOT_COLORWAY.length];
+    }
+    // Short cohort label for legends / tooltips. Falls back gracefully
+    // when model_version is null (legacy rows from before the retrain-
+    // tagging work landed).
+    function _cohortLabel(modelName, modelVersion) {
+        var name = modelName || '—';
+        if (!modelVersion) return name;
+        // Trim ISO timestamp to "DD MMM HH:MM" so the legend stays compact.
+        var d = toLocalDate(modelVersion.replace('Z', ''));
+        if (d && !isNaN(d.getTime())) {
+            var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            return name + ' (' + d.getDate() + ' ' + months[d.getMonth()]
+                + ' ' + d.getHours().toString().padStart(2, '0')
+                + ':' + d.getMinutes().toString().padStart(2, '0') + ')';
+        }
+        return name + ' (' + modelVersion + ')';
+    }
+
     // Model-id → display-name mapping, derived from MODEL_CATALOG server-side
     // so chart legends and live training labels show proper-cased names.
     var MODEL_DISPLAY = {{ model_catalog | map(attribute='name') | list | tojson }}.reduce(function(acc, n, i) {
@@ -2764,8 +2797,15 @@ window.showTab = function(el) {
                     + 'background:var(--bg-tertiary);'
                     + 'color:var(--text-secondary);';
             }
+            // v2.34.0: per-cohort colour dot — same hash as the
+            // lead-time + stability multi-trace charts, so the chip
+            // and its line on the charts wear matching colour.
+            var chipColour = _cohortColor(ev.model_name, ev.model_version);
             chip.innerHTML =
-                '<span style="color:var(--accent-secondary);font-weight:600;">'
+                '<span style="display:inline-block;width:8px;height:8px;'
+                + 'border-radius:50%;background:' + chipColour + ';'
+                + 'flex-shrink:0;"></span>'
+                + '<span style="color:var(--accent-secondary);font-weight:600;">'
                 + _formatChipTs(ev.first_seen) + '</span>'
                 + '<span style="color:var(--text-primary);">'
                 + (ev.model_name || '—') + '</span>'
@@ -3152,8 +3192,57 @@ window.showTab = function(el) {
             function maskBy(arr, pred) { return arr.map(function(v, i) { return pred(i) ? v : null; }); }
             var strong = function(i) { return (ltc.sample_count[i] || 0) >= LEADBUCKET_MIN_N; };
             var weak   = function(i) { return (ltc.sample_count[i] || 0) <  LEADBUCKET_MIN_N; };
-            var traces = [
-                {
+            var traces = [];
+
+            // v2.34.0: multi-cohort MAE overlay. When the response
+            // carries ≥2 (model_name, model_version) cohorts (i.e. the
+            // user hasn't pinned one via the chip strip and the
+            // window contains a retrain or model switch), emit one
+            // MAE trace per cohort instead of the single pooled line.
+            // Each cohort is coloured deterministically via
+            // _cohortColor so the chart, legend, and retrain-history
+            // chips all agree. Plotly's legend supports click-to-
+            // hide natively. RMSE / Bias stay single-cohort (the
+            // pooled values from lead_time_curve) so the chart
+            // doesn't get cluttered with N×3 lines.
+            var cohorts = (data.cohorts && data.cohorts.length >= 2) ? data.cohorts : null;
+            if (cohorts) {
+                cohorts.forEach(function(c) {
+                    var c_ltc = c.lead_time_curve || {};
+                    var c_x = (c_ltc.lead_minutes || []).map(function(m) { return m / 60; });
+                    var c_strong = function(i) { return (c_ltc.sample_count[i] || 0) >= LEADBUCKET_MIN_N; };
+                    var c_weak   = function(i) { return (c_ltc.sample_count[i] || 0) <  LEADBUCKET_MIN_N; };
+                    var colour = _cohortColor(c.model_name, c.model_version);
+                    var label = _cohortLabel(c.model_name, c.model_version);
+                    traces.push({
+                        x: c_x,
+                        y: maskBy(c_ltc.mae || [], c_strong),
+                        name: label,
+                        type: 'scatter',
+                        mode: 'lines+markers',
+                        line: { color: colour, width: 2.5 },
+                        marker: { size: 6, color: colour },
+                        hovertemplate: label + '<br>MAE %{y:.3f} (n=%{customdata})<extra></extra>',
+                        customdata: c_ltc.sample_count || [],
+                        connectgaps: true,
+                        legendgroup: label,
+                    });
+                    traces.push({
+                        x: c_x,
+                        y: maskBy(c_ltc.mae || [], c_weak),
+                        type: 'scatter',
+                        mode: 'markers',
+                        marker: { size: 6, color: colour, opacity: 0.35, symbol: 'circle-open' },
+                        hovertemplate: label + '<br>MAE %{y:.3f} (n=%{customdata}, low confidence)<extra></extra>',
+                        customdata: c_ltc.sample_count || [],
+                        legendgroup: label,
+                        showlegend: false,
+                    });
+                });
+            } else {
+                // Single-cohort path (user has pinned a cohort, or only
+                // one exists in the window). Identical to v2.33.x.
+                traces.push({
                     x: xHours, y: maskBy(ltc.mae, strong), name: 'MAE',
                     type: 'scatter', mode: 'lines+markers',
                     line: { color: '#ff6b6b', width: 2.5 },
@@ -3161,26 +3250,30 @@ window.showTab = function(el) {
                     hovertemplate: 'MAE %{y:.3f} (n=%{customdata})<extra></extra>',
                     customdata: ltc.sample_count,
                     connectgaps: true,
-                },
-                {
+                });
+                traces.push({
                     x: xHours, y: maskBy(ltc.mae, weak), name: 'MAE (low n)',
                     type: 'scatter', mode: 'markers',
                     marker: { size: 6, color: '#ff6b6b', opacity: 0.35, symbol: 'circle-open' },
                     hovertemplate: 'MAE %{y:.3f} (n=%{customdata}, low confidence)<extra></extra>',
                     customdata: ltc.sample_count,
                     showlegend: false,
-                },
-            ];
+                });
+            }
             if (showDetail) {
+                // RMSE / Bias are read from the pooled lead_time_curve —
+                // adding per-cohort variants would clutter the chart
+                // with N×3 traces. Toggle them on when a deeper view is
+                // wanted; the multi-cohort MAE is the headline.
                 traces.push({
-                    x: xHours, y: ltc.rmse, name: 'RMSE',
+                    x: xHours, y: ltc.rmse, name: 'RMSE (all cohorts)',
                     type: 'scatter', mode: 'lines+markers',
                     line: { color: '#4d96ff', width: 2, dash: 'dot' },
                     marker: { size: 4 },
                     hovertemplate: 'RMSE %{y:.3f}<extra></extra>',
                 });
                 traces.push({
-                    x: xHours, y: ltc.me, name: 'Bias (ME)',
+                    x: xHours, y: ltc.me, name: 'Bias (all cohorts)',
                     type: 'scatter', mode: 'lines+markers',
                     // LOW-4: neutral yellow — bias is signed, no "good"
                     // direction; green encodes "good" elsewhere in the UI
@@ -4041,28 +4134,69 @@ window.showTab = function(el) {
         }
         var pt = data.per_timestep;
         var ptDates = toLocalDates(pt.target_dt);
-        var traces = [{
-            x: ptDates,
-            y: pt.std,
-            type: 'scatter', mode: 'lines',
-            line: { color: '#f0b429', width: 2 },
-            fill: 'tozeroy', fillcolor: 'rgba(240,180,41,0.15)',
-            customdata: pt.target_dt.map(function(_, i) {
-                return [pt.mean[i], pt.cv_pct[i], pt.n_cycles[i]];
-            }),
-            hovertemplate: '<b>%{x|%d %b %H:%M}</b>'
-                         + '<br>std across runs: %{y:.3f}'
-                         + '<br>mean prediction: %{customdata[0]:.3f}'
-                         + '<br>disagreement: ±%{customdata[1]:.1f}%'
-                         + '<br>runs: %{customdata[2]}'
-                         + '<extra></extra>',
-            name: 'Cross-run std',
-        }];
+
+        // v2.34.0: multi-cohort std overlay. When the response carries
+        // ≥2 cohorts, render one line per (model_name, model_version)
+        // — each retrain becomes its own time-tiled trace, coloured
+        // to match the lead-time chart and retrain-history chip.
+        // Cohorts naturally tile in time (their target_dt ranges
+        // typically don't overlap because each cohort owns a window
+        // between retrains) so legibility stays high.
+        var traces = [];
+        var stab_cohorts = (data.cohorts && data.cohorts.length >= 2) ? data.cohorts : null;
+        var allDates = ptDates;
+        if (stab_cohorts) {
+            stab_cohorts.forEach(function(c) {
+                var c_pt = c.per_timestep || {};
+                var c_dates = toLocalDates(c_pt.target_dt || []);
+                var colour = _cohortColor(c.model_name, c.model_version);
+                var label = _cohortLabel(c.model_name, c.model_version);
+                traces.push({
+                    x: c_dates,
+                    y: c_pt.std || [],
+                    type: 'scatter', mode: 'lines',
+                    line: { color: colour, width: 2 },
+                    customdata: (c_pt.target_dt || []).map(function(_, i) {
+                        return [c_pt.mean[i], c_pt.cv_pct[i], c_pt.n_cycles[i]];
+                    }),
+                    hovertemplate: label
+                                 + '<br><b>%{x|%d %b %H:%M}</b>'
+                                 + '<br>std across runs: %{y:.3f}'
+                                 + '<br>mean prediction: %{customdata[0]:.3f}'
+                                 + '<br>disagreement: ±%{customdata[1]:.1f}%'
+                                 + '<br>runs: %{customdata[2]}'
+                                 + '<extra></extra>',
+                    name: label,
+                });
+                // Pre-compute the merged date range for axis ticks.
+                if (c_dates.length) {
+                    allDates = allDates.concat(c_dates);
+                }
+            });
+        } else {
+            traces.push({
+                x: ptDates,
+                y: pt.std,
+                type: 'scatter', mode: 'lines',
+                line: { color: '#f0b429', width: 2 },
+                fill: 'tozeroy', fillcolor: 'rgba(240,180,41,0.15)',
+                customdata: pt.target_dt.map(function(_, i) {
+                    return [pt.mean[i], pt.cv_pct[i], pt.n_cycles[i]];
+                }),
+                hovertemplate: '<b>%{x|%d %b %H:%M}</b>'
+                             + '<br>std across runs: %{y:.3f}'
+                             + '<br>mean prediction: %{customdata[0]:.3f}'
+                             + '<br>disagreement: ±%{customdata[1]:.1f}%'
+                             + '<br>runs: %{customdata[2]}'
+                             + '<extra></extra>',
+                name: 'Cross-run std',
+            });
+        }
         var stabXAxis = {
             title: { text: 'Target time' + _axisTzSuffix(), font: { size: 12 } },
             color: '#b0b0b0', gridcolor: '#2d3561', type: 'date',
         };
-        var stabTicks = _tzTicks(ptDates);
+        var stabTicks = _tzTicks(allDates);
         if (stabTicks) {
             stabXAxis.tickvals = stabTicks.tickvals;
             stabXAxis.ticktext = stabTicks.ticktext;
@@ -4077,7 +4211,10 @@ window.showTab = function(el) {
             plot_bgcolor: 'rgba(0,0,0,0)',
             paper_bgcolor: 'rgba(0,0,0,0)',
             font: { color: '#e0e0e0' },
-            showlegend: false,
+            // Show the legend only in multi-cohort mode (single-cohort
+            // doesn't need it — the title already says "Cross-run std").
+            showlegend: !!stab_cohorts,
+            legend: { font: { size: 10 } },
             margin: { t: 20, r: 30, l: 70, b: 50 },
             hovermode: 'closest',
         };
