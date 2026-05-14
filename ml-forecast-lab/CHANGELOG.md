@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.34.3
+
+### Changed
+
+- **Retrain-history chip strip — easier escape from a focused
+  cohort back to the multi-cohort overlay.** Three small fixes for
+  the same reported friction ("I selected one chip and can't get
+  back to all"):
+  - Clicking the currently-focused chip now toggles it off (back to
+    "show all"), matching how every chip-style filter elsewhere
+    behaves.
+  - The "× Clear filter" pill is renamed "× Show all cohorts" so the
+    escape hatch reads as what it does.
+  - The summary line under the strip now spells out the escape
+    ("click the chip again (or 'Show all') to restore overlay")
+    when a single cohort is focused.
+
 ## 2.34.2
 
 ### Fixed
