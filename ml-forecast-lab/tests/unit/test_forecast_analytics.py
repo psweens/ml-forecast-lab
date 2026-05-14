@@ -506,6 +506,69 @@ class TestTrajectory:
 
 
 # ---------------------------------------------------------------------
+# Evolution (fan chart actuals)
+# ---------------------------------------------------------------------
+
+class TestEvolutionActuals:
+    def test_cumulative_source_returns_deltas(self, db, actuals_monotonic):
+        # Predictions for a cumulative source are stored in delta space.
+        # If the evolution endpoint returns raw cumulative actuals, the
+        # fan chart plots a 0 → N climb against tiny delta predictions —
+        # the bug the user reported on v2.34.1. With source_is_cumulative
+        # the actuals must arrive pre-diffed.
+        issued = datetime(2024, 6, 15, 8, 0)
+        targets = _targets_30min(issued, 4)
+        _log_cycle(db, "exp", issued, targets, [1.0, 1.0, 1.0, 1.0])
+        r = db.get_forecast_evolution(
+            "exp", actuals_monotonic,
+            n_cycles=12, interval_minutes=30,
+            source_is_cumulative=True,
+        )
+        vals = r["actuals"]["values"]
+        # Monotonic fixture increments by 1 per 30-min bin → delta = 1.0.
+        assert all(abs(v - 1.0) < 1e-9 for v in vals)
+
+    def test_raw_source_returns_raw_values(self, db, actuals_monotonic):
+        # Non-cumulative source: actuals should pass through untouched.
+        issued = datetime(2024, 6, 15, 8, 0)
+        targets = _targets_30min(issued, 4)
+        _log_cycle(db, "exp", issued, targets, [16.0, 17.0, 18.0, 19.0])
+        r = db.get_forecast_evolution(
+            "exp", actuals_monotonic,
+            n_cycles=12, interval_minutes=30,
+            source_is_cumulative=False,
+        )
+        vals = r["actuals"]["values"]
+        # Monotonic seeded value[i] = i. Targets 08:30..10:00 → row
+        # indices 17..20.
+        assert vals[:4] == [17.0, 18.0, 19.0, 20.0]
+
+    def test_cumulative_source_clamps_negative_resets(self, db):
+        # Daily-reset sensor: cumulative climbs through the day then
+        # snaps back to 0 at midnight. Naive diff would emit a large
+        # negative spike at the reset; the clamp should pin that to 0.
+        table = db.safe_table_name("sensor.reset")
+        idx = pd.date_range("2024-06-15 22:00", periods=6, freq="30min")
+        # Values: 5, 6, 7, 0, 1, 2  (reset at index 3)
+        db.store_history(table, pd.DataFrame({
+            "ds": idx,
+            "value": [5.0, 6.0, 7.0, 0.0, 1.0, 2.0],
+        }))
+        issued = datetime(2024, 6, 15, 21, 30)
+        targets = [idx[i].to_pydatetime() for i in range(6)]
+        _log_cycle(db, "exp", issued, targets, [1.0] * 6)
+        r = db.get_forecast_evolution(
+            "exp", table,
+            n_cycles=12, interval_minutes=30,
+            source_is_cumulative=True,
+        )
+        vals = r["actuals"]["values"]
+        # First entry is NULL (no prior bin) and excluded. Then deltas:
+        # 1.0, 1.0, max(0, -7) = 0, 1.0, 1.0
+        assert vals == [1.0, 1.0, 0.0, 1.0, 1.0]
+
+
+# ---------------------------------------------------------------------
 # Stability
 # ---------------------------------------------------------------------
 

@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.34.2
+
+### Fixed
+
+- **Forecast convergence (fan chart) — measured actuals were plotted
+  in the wrong space for cumulative sources.** `get_forecast_evolution`
+  returned raw values from the actuals table; `forecast_log` stores
+  predictions in delta space when `source_is_cumulative=True`. With
+  both rendered on the same Y-axis, the "Measured (actual)" line
+  climbed the day's accumulation (0 → 30 % in the user's report) while
+  predictions hugged zero. Backend now diffs actuals via SQL LAG with
+  an adjacency guard, and clamps negative deltas to zero so a midnight
+  reset doesn't produce a huge negative spike. The cumulative-view
+  path also benefits: it was previously double-cumulating (raw
+  actuals → `toCumulative` on the client) and now correctly
+  integrates the deltas.
+
+  Three new tests cover (a) cumulative source returns deltas,
+  (b) non-cumulative source passes through, (c) reset clamps to 0.
+
+### Changed
+
+- **"Actual at target" marker on the trajectory chart was too
+  prominent.** v2.34.1 introduced a size-14 white star; tone it down
+  to a size-9 diamond on user feedback — still anchored to
+  `(target_dt, value)`, just less attention-grabbing.
+
 ## 2.34.1
 
 ### Fixed
@@ -27,7 +54,7 @@
   The previous solid white line spanned the X-axis (the issued-at
   range, often several days), which read as "the actual demand was
   0.8 across all those days". The actual is one observation at one
-  moment; a star marker placed at (target_dt, value) plus a dim
+  moment; a marker placed at (target_dt, value) plus a dim
   dashed Y-reference (showlegend off) makes that geometry explicit.
   Label changed to "Actual at target (per-interval demand)" for
   the same reason. The green dotted target-time vertical line is

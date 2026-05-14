@@ -2486,6 +2486,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 n_cycles=n_cycles,
                 interval_minutes=exp_cfg.interval_minutes,
                 model_name=mn, model_version=mv,
+                source_is_cumulative=bool(exp_cfg.source_is_cumulative),
             )
 
         result = _fetch(model_name, model_version)
