@@ -1533,7 +1533,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"success": False, "error": "entity is required"})
 
         cov_dict = {"entity": entity}
-        for opt_field in ("role", "aggregation", "scale", "is_binary"):
+        for opt_field in (
+            "role", "aggregation", "scale", "is_binary",
+            "future_attribute", "future_value_key",
+        ):
             if opt_field in body and body[opt_field] is not None:
                 cov_dict[opt_field] = body[opt_field]
 
@@ -3202,6 +3205,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         editable = {
             "cv_strategy": lambda v: v if v in ("walk_forward", "sliding_window") else None,
             "cv_folds": lambda v: int(v) if int(v) >= 2 else None,
+            "cv_embargo_periods": lambda v: int(v) if int(v) >= 0 else None,
             "recency_half_life_days": lambda v: float(v) if float(v) >= 0 else None,
             "days_history": lambda v: int(v) if int(v) >= 1 else None,
             "interval_minutes": lambda v: int(v) if int(v) >= 1 else None,
@@ -3220,6 +3224,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "daily_loss_weight": lambda v: max(0.0, float(v)),
             "max_increment": lambda v: float(v) if float(v) > 0 else None,
             "conformal_coverage": lambda v: float(v) if 0.5 <= float(v) <= 0.99 else None,
+            "country": lambda v: (str(v).strip().upper() or None) if v else None,
             "gap_handling": lambda v: v if v in ("ffill", "interpolate", "mask") else None,
             "gap_max_minutes": lambda v: int(v) if int(v) >= 1 else None,
             "outlier_method": lambda v: v if v in ("quantile", "mad", "off") else None,
@@ -3233,7 +3238,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         }
 
         # Fields where None/null means "use global default" (valid, not an error)
-        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment"}
+        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country"}
 
         updates = {}
         for field, validator in editable.items():

@@ -2839,7 +2839,12 @@ class MLForecastLabApp:
                     cov_name = cov_cfg.entity.split(".")[-1]
                     if cov_name in covariate_cols and cov_cfg.role in ('future', 'both'):
                         try:
-                            cov_dict = {"entity_id": cov_cfg.entity, "name": cov_name}
+                            cov_dict = {
+                                "entity_id": cov_cfg.entity,
+                                "name": cov_name,
+                                "future_attribute": getattr(cov_cfg, "future_attribute", "forecast"),
+                                "future_value_key": getattr(cov_cfg, "future_value_key", None),
+                            }
                             future_series = await self.covariate_resolver.fetch_future(
                                 cov_dict, future_index,
                             )
@@ -4476,7 +4481,12 @@ class MLForecastLabApp:
                     cov_name = cov_cfg.entity.split(".")[-1]
                     if cov_name in raw_cov_cols and cov_cfg.role in ('future', 'both'):
                         try:
-                            cov_dict = {"entity_id": cov_cfg.entity, "name": cov_name}
+                            cov_dict = {
+                                "entity_id": cov_cfg.entity,
+                                "name": cov_name,
+                                "future_attribute": getattr(cov_cfg, "future_attribute", "forecast"),
+                                "future_value_key": getattr(cov_cfg, "future_value_key", None),
+                            }
                             future_series = await self.covariate_resolver.fetch_future(
                                 cov_dict, future_index,
                             )

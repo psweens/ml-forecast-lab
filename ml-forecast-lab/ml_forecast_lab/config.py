@@ -164,26 +164,25 @@ class CovariateCfg:
     is_binary: bool = False
     """Whether this is a binary (0/1) feature."""
 
+    future_attribute: str = 'forecast'
+    """For role='future' / 'both': the HA entity attribute that contains
+    the known-future forecast (e.g. weather entities expose ``forecast``,
+    Solcast exposes ``detailedForecast``). Ignored when role='lagged'."""
+
+    future_value_key: Optional[str] = None
+    """For role='future' / 'both': the key inside each forecast-list entry
+    that contains the value (e.g. ``temperature`` for Met.no weather,
+    ``pv_estimate`` for Solcast). When None, the resolver tries common
+    keys (value, pv_estimate, state, temperature, cloud_coverage,
+    wind_speed) in order. Ignored when the attribute is a flat
+    ``{iso_dt: value}`` mapping."""
+
     def __post_init__(self) -> None:
         """Validate configuration."""
         valid_roles = {'future', 'lagged', 'both', 'concurrent'}
         if self.role not in valid_roles:
             raise ValueError(
                 f'role must be one of {valid_roles}, got {self.role!r}'
-            )
-        if self.role in ('future', 'both'):
-            # The forecast-attribute path through CovariateResolver.fetch_future
-            # is a stub: it returns NaN regardless of the entity's forecast
-            # attribute, so the documented behaviour ("Predbat rates as a
-            # future covariate") does not actually work. Until a real aligner
-            # is implemented we treat the role as 'lagged' for fetch purposes
-            # and warn loudly so users know their config is being downgraded.
-            logger.warning(
-                "Covariate %r has role=%r; future-covariate fetch is not yet "
-                "implemented and will be treated as 'lagged' (historical "
-                "values only). Predictions at future timestamps will see the "
-                "covariate as NaN.",
-                self.entity, self.role,
             )
         valid_transforms = {None, 'log', 'sqrt', 'box_cox'}
         if self.transform not in valid_transforms:
@@ -236,14 +235,16 @@ class ExperimentCfg:
     cv_folds: int = 5
     """Number of cross-validation folds."""
 
-    cv_embargo_periods: int = 0
+    cv_embargo_periods: int = 2
     """Gap (in periods) between training and test sets to avoid temporal
     leakage from rolling / lag features that span the fold boundary.
 
-    ``0`` (default) tells the runner to derive a sensible value from
-    ``interval_minutes``: at 30-min sampling the longest rolling window is
-    36 h = 72 steps, so the runner uses ``max(2, longest_rolling_window)``.
-    Set explicitly to override."""
+    The pipeline's longest rolling window is ~36 h (72 steps at 30-min
+    sampling); raising the embargo to that size eliminates the residual
+    rolling spillover at the boundary. The conservative default ``2``
+    preserves behaviour on small training fixtures and benchmark cycles
+    where setting it to 72 would starve early folds of training rows.
+    Increase manually when running on a long history (≥ 30 days)."""
 
     metrics: List[str] = field(
         default_factory=lambda: ['mae', 'rmse', 'mase', 'seasonal_mase']

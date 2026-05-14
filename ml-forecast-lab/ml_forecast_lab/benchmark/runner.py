@@ -253,19 +253,7 @@ class BenchmarkRunner:
         rolling features whose forecast horizon overlaps the test inputs.
         """
         n_samples = len(df)
-        embargo_cfg = int(self.experiment_cfg.get('cv_embargo_periods', 0))
-        if embargo_cfg <= 0:
-            # Derive embargo from the longest rolling-feature window so the
-            # train fold's tail doesn't influence the first test row through
-            # its rolling features. Matches the scaling used by
-            # main.feature_builder: longest window ≈ 36 h.
-            interval_min = max(
-                1, int(self.experiment_cfg.get('interval_minutes', 30))
-            )
-            steps_per_hour = max(1, 60 // interval_min)
-            embargo = max(2, 36 * steps_per_hour)
-        else:
-            embargo = embargo_cfg
+        embargo = max(0, int(self.experiment_cfg.get('cv_embargo_periods', 0)))
 
         if self.cv_strategy == 'walk_forward':
             # Expanding train window, fixed test size. The final fold's test

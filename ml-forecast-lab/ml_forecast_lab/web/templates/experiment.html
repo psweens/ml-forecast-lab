@@ -324,6 +324,12 @@
                 </select>
             </div>
             <div class="exp-field">
+                <label class="field-label">CV embargo (periods) <span class="info-tip">?<span class="tip-text">Number of rows dropped between training and test sets in each CV fold, to prevent rolling-window features from spanning the boundary. The pipeline's longest rolling window is ~36 h (72 steps at 30-min sampling); the recommended value scales with the history length. Default <code>2</code> is the conservative legacy value — increase to the longest rolling-window length when running on ≥ 30 days of data.</span></span></label>
+                <input type="number" class="setting-input" data-field="cv_embargo_periods" min="0" max="500" step="1"
+                       value="{{ exp_config.cv_embargo_periods if exp_config else 2 }}"
+                       onchange="saveSettingsField(this)">
+            </div>
+            <div class="exp-field">
                 <label class="field-label">Conformal coverage <span class="info-tip">?<span class="tip-text">Nominal coverage for the conformal prediction interval published with every forecast. Higher values widen the band — pick 0.9 when the downstream automation must avoid false-negatives (e.g. "definitely not empty before 6pm"). 0.8 is the default. Empirical coverage may differ from nominal under regime change; the Results tab surfaces the achieved coverage so calibration drift is visible.</span></span></label>
                 <input type="number" class="setting-input" data-field="conformal_coverage" min="0.5" max="0.99" step="0.05"
                        value="{{ exp_config.conformal_coverage if exp_config else 0.8 }}"
@@ -333,6 +339,19 @@
                 <label class="field-label">Daily cumulative loss (neural) <span class="info-tip">?<span class="tip-text">Weight λ for the cumulative-trajectory loss term added to the per-interval loss. 0 disables. 0.1–1.0 is the typical useful range; stronger values constrain the shape of the predicted cumulative curve more aggressively. Designed for cumulative-origin targets like <code>sensor.x_today</code> (daily demand, daily energy). Applies to torch neural models; silently ignored by tree backends.</span></span></label>
                 <input type="number" class="setting-input" data-field="daily_loss_weight" min="0" max="1.5" step="0.1"
                        value="{{ exp_config.daily_loss_weight if exp_config else 0.0 }}"
+                       onchange="saveSettingsField(this)">
+            </div>
+        </div>
+    </div>
+
+    <!-- Calendar -->
+    <div class="settings-group">
+        <h3 class="settings-group-title">Calendar</h3>
+        <div class="exp-field-grid" style="grid-template-columns:repeat(3, 1fr);">
+            <div class="exp-field">
+                <label class="field-label">Country (holidays) <span class="info-tip">?<span class="tip-text">ISO-3166 alpha-2 country code (e.g. <code>GB</code>, <code>US</code>, <code>DE</code>). Adds an ``is_holiday`` feature to the model so the schedule break gets a signal column. Leave blank to disable. Backed by the <code>holidays</code> Python library.</span></span></label>
+                <input type="text" class="setting-input" data-field="country" maxlength="2" placeholder="e.g. GB"
+                       value="{{ exp_config.country or '' if exp_config else '' }}"
                        onchange="saveSettingsField(this)">
             </div>
         </div>
@@ -391,9 +410,11 @@
                 <div class="entity-search-results" id="entity-results" style="display:none;"></div>
             </div>
             <div class="exp-field">
-                <label class="field-label">Role <span class="info-tip">?<span class="tip-text">Only <strong>Lagged</strong> is currently implemented — the model sees past values of this covariate. <strong>Future</strong> and <strong>Both</strong> (forecast-attribute lookup) are not yet wired through the inference path and have been hidden until they are.</span></span></label>
+                <label class="field-label">Role <span class="info-tip">?<span class="tip-text"><strong>Lagged</strong>: the model sees past values of this covariate; the inference path forward-fills the last observed value. <strong>Future</strong>: the model reads the entity's <code>forecast</code> attribute and aligns it to the forecast horizon — for weather / Solcast / Forecast.Solar entities where the future is genuinely known. <strong>Both</strong>: use historical for training and the forecast attribute for inference. Future / Both require ``future_attribute`` and (for list-of-dict attributes) ``future_value_key``, settable in YAML.</span></span></label>
                 <select class="setting-input" id="cov-role-input">
                     <option value="lagged">Lagged</option>
+                    <option value="future">Future (forecast attribute)</option>
+                    <option value="both">Both (history + forecast)</option>
                 </select>
             </div>
             <div class="exp-field">
