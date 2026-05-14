@@ -58,8 +58,7 @@ The add-on searches these in order: explicit `--config-path` (development only) 
 | `country` | ISO code | unset | Two-letter country code for holiday features (`GB`, `US`, `DE`, …). Unset = no holiday feature. |
 | `units` | string | `""` | Target units (`W`, `kWh`, `%`, …). Shown in the UI and on published sensors. |
 | `output_units` | string | unset | Optional unit conversion at publish time (e.g. train on Wh, publish kWh). |
-| `database` | bool | `false` | Whether to cache the target's history in the add-on's SQLite store. Speeds up cold-start retraining. |
-| `max_age` | int (days) | `365` | Cap on rows kept in the SQLite cache. |
+| `max_age` | int (days) | `365` | Cap on rows kept in the SQLite actuals cache. The cache is always-on (v2.33.1+); older rows are pruned each cycle. |
 | `publish_prefix` | string | `mlfl_` | Prefix for every companion sensor. Change only if you have a naming clash. |
 | `publish_name` | string | inherits `name` | Override the experiment's name when constructing companion sensor IDs. |
 

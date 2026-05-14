@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.33.2
+
+Docs follow-up to v2.33.1. The Configuration reference table in
+`DOCS.md` still listed the `database` field that v2.33.1 removed
+from `ExperimentCfg`. Dropped the row and amended the neighbouring
+`max_age` description to call out that the SQLite actuals cache is
+always-on now (`max_age` is the only knob that controls retention).
+No code changes.
+
 ## 2.33.1
 
 Removes the `database` per-experiment flag and improves the dashboard
