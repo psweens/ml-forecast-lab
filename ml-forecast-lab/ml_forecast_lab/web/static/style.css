@@ -951,3 +951,53 @@ input.save-error { border-color: var(--error) !important; box-shadow: 0 0 0 1px 
 .diag-accordion[open] {
     background: rgba(0, 0, 0, 0.18);
 }
+
+/* ========== Chart loading skeleton ==========
+ * HIGH-1: applied to a Plotly host div via _setCardLoading(id, true).
+ * The host has a fixed height (e.g. 360 px), so the skeleton occupies
+ * the same footprint as the eventual chart — no layout jump on
+ * paint. Pure CSS shimmer (no JS animation), so it doesn't fight
+ * Plotly's resize loop. The overlay is z-index 1 / 2 so any
+ * pre-existing Plotly nodes sit under it; Plotly.newPlot replaces
+ * them in place when data arrives.
+ */
+.chart-loading {
+    position: relative;
+}
+.chart-loading::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background:
+        linear-gradient(
+            90deg,
+            rgba(255, 255, 255, 0) 0%,
+            rgba(0, 212, 255, 0.06) 50%,
+            rgba(255, 255, 255, 0) 100%
+        );
+    background-size: 200% 100%;
+    animation: chart-shimmer 1.4s ease-in-out infinite;
+    border-radius: 6px;
+    border: 1px dashed var(--border);
+    z-index: 1;
+    pointer-events: none;
+}
+.chart-loading::after {
+    content: 'Computing…';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    font-style: italic;
+    z-index: 2;
+    pointer-events: none;
+}
+@keyframes chart-shimmer {
+    0%   { background-position: 100% 0; }
+    100% { background-position: -100% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .chart-loading::before { animation: none; }
+}
