@@ -2829,7 +2829,7 @@ window.showTab = function(el) {
             chip.title = ev.model_name + ' v=' + ev.model_version
                 + '\nFirst seen: ' + ev.first_seen
                 + '\n' + ev.n_forecasts + ' forecast row(s)'
-                + '\n\nClick: focus on this cohort'
+                + '\n\nClick: focus on this cohort (click again to show all)'
                 + '\nCmd/Ctrl-click: add/remove from overlay'
                 + '\nShift-click: range select';
             var base = 'display:inline-flex;align-items:center;gap:0.4rem;'
@@ -2874,6 +2874,12 @@ window.showTab = function(el) {
                     _toggleChipInSelection(ev.model_name, ev.model_version);
                 } else if (e.shiftKey) {
                     _rangeSelectChips(sorted, idx);
+                } else if (isSingleActive) {
+                    // Clicking the already-focused chip toggles back to
+                    // "show all cohorts". The standalone "× Show all"
+                    // pill below still works, but most users click the
+                    // chip again expecting deselect (toggle UX).
+                    _applyChipFilter(null, null);
                 } else {
                     _applyChipFilter(ev.model_name, ev.model_version);
                 }
@@ -2904,7 +2910,7 @@ window.showTab = function(el) {
             clearBtn.style.cssText = 'background:transparent;border:1px solid var(--border);'
                 + 'border-radius:1.2rem;padding:0.25rem 0.7rem;font-size:0.78rem;'
                 + 'color:var(--text-secondary);cursor:pointer;';
-            clearBtn.textContent = '× Clear filter';
+            clearBtn.textContent = '× Show all cohorts';
             clearBtn.addEventListener('click', function() {
                 _applyChipFilter(null, null);
             });
@@ -2916,6 +2922,8 @@ window.showTab = function(el) {
                 hint = multi.size + ' cohort'
                     + (multi.size !== 1 ? 's' : '')
                     + ' on overlay · click to focus on one';
+            } else if (activeModel || activeVersion) {
+                hint = '1 cohort focused · click the chip again (or "Show all") to restore overlay';
             } else {
                 hint = sorted.length + ' retrain'
                     + (sorted.length !== 1 ? 's' : '')
