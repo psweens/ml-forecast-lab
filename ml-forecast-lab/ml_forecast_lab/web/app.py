@@ -2490,8 +2490,17 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         result = _fetch(model_name, model_version)
 
+        # Empty if either there are no cycles at all, or every cycle's
+        # targets are still in the future so the actuals query returns
+        # nothing. The latter happens for ~one horizon-worth of time
+        # after every retrain — without it, the chart shows a single
+        # future-only cycle with no actual curve. Same family of bug
+        # as the v2.34.1 probe fix on /forecast-accuracy.
         def _empty(res):
-            return not res.get("cycles")
+            if not res.get("cycles"):
+                return True
+            actuals = res.get("actuals") or {}
+            return not actuals.get("values")
 
         if _empty(result) and model_version and not version_param:
             relaxed = _fetch(model_name, None)
