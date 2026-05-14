@@ -3485,8 +3485,17 @@ window.showTab = function(el) {
                 plot_bgcolor: 'rgba(0,0,0,0)',
                 paper_bgcolor: 'rgba(0,0,0,0)',
                 font: { color: '#e0e0e0' },
-                legend: { x: 0.02, y: 0.98 },
-                margin: { t: 20, r: 30 },
+                // Legend on the right outside the plot, matching the
+                // convergence chart. The lead-time chart often has
+                // 20+ cohort traces; the previous top-left-inside
+                // position made the legend cover the data.
+                legend: {
+                    x: 1.02, y: 1,
+                    xanchor: 'left', yanchor: 'top',
+                    bgcolor: 'rgba(0,0,0,0)',
+                    font: { size: 11 },
+                },
+                margin: { t: 20, r: 180 },
             };
             Plotly.newPlot('accuracy-lead-chart', traces, layout, { responsive: true });
 
@@ -4230,7 +4239,13 @@ window.showTab = function(el) {
                 title: 'Forecast issued at' + _axisTzSuffix(),
                 color: '#b0b0b0', gridcolor: '#2d3561', type: 'date',
             };
-            var trajTicks = _tzTicks(xs);
+            // Include targetTs in the tick range — the chart's X axis
+            // extends to it (we draw the green dotted vertical there
+            // and the actual marker beyond the last forecast point),
+            // so ticks generated from only `xs` would bunch on the
+            // left when the forecasts cluster early.
+            var trajTickDates = targetTs ? xs.concat([targetTs]) : xs;
+            var trajTicks = _tzTicks(trajTickDates);
             if (trajTicks) {
                 trajXAxis.tickvals = trajTicks.tickvals;
                 trajXAxis.ticktext = trajTicks.ticktext;
