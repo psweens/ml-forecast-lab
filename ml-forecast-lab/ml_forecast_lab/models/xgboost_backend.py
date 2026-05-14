@@ -53,6 +53,8 @@ class XGBoostModel(ForecastModel):
         reg_lambda: float = 1.0,
         tree_method: str = "hist",
         verbose: int = 0,
+        loss_fn: str = 'huber',
+        tweedie_variance_power: float = 1.5,
     ):
         """
         Initialise XGBoost forecasting model.
@@ -94,6 +96,8 @@ class XGBoostModel(ForecastModel):
         self.reg_lambda = reg_lambda
         self.tree_method = tree_method
         self.verbose = verbose
+        self.loss_fn = loss_fn
+        self.tweedie_variance_power = tweedie_variance_power
 
         self.model: Optional[xgb.XGBRegressor] = None
         self.feature_names_: Optional[list] = None
@@ -206,9 +210,15 @@ class XGBoostModel(ForecastModel):
                     return False  # Don't stop training
             xgb_callbacks.append(_EpochCB())
 
-        # Create XGBRegressor with specified hyperparameters
-        # callbacks passed to constructor for XGBoost 2.1+ compatibility
-        self.model = xgb.XGBRegressor(
+        # Map user-facing loss_fn to XGBoost native objective.
+        objective_map = {
+            "mse": "reg:squarederror",
+            "mae": "reg:absoluteerror",
+            "huber": "reg:pseudohubererror",
+            "tweedie": "reg:tweedie",
+        }
+        objective = objective_map.get(self.loss_fn, "reg:pseudohubererror")
+        regressor_kwargs = dict(
             n_estimators=self.n_estimators,
             max_depth=self.max_depth,
             learning_rate=self.learning_rate,
@@ -220,8 +230,12 @@ class XGBoostModel(ForecastModel):
             verbosity=self.verbose,
             random_state=42,
             early_stopping_rounds=50,
+            objective=objective,
             callbacks=xgb_callbacks if xgb_callbacks else None,
         )
+        if objective == "reg:tweedie":
+            regressor_kwargs["tweedie_variance_power"] = float(self.tweedie_variance_power)
+        self.model = xgb.XGBRegressor(**regressor_kwargs)
 
         # Train with early stopping
         self.model.fit(
@@ -322,6 +336,8 @@ class XGBoostModel(ForecastModel):
             "reg_lambda": self.reg_lambda,
             "tree_method": self.tree_method,
             "verbose": self.verbose,
+            "loss_fn": self.loss_fn,
+            "tweedie_variance_power": self.tweedie_variance_power,
         })
 
     def set_params(self, **kwargs: Any) -> None:
@@ -340,7 +356,8 @@ class XGBoostModel(ForecastModel):
         """
         valid_params = {
             "n_estimators", "max_depth", "learning_rate", "subsample",
-            "colsample_bytree", "reg_alpha", "reg_lambda", "tree_method", "verbose"
+            "colsample_bytree", "reg_alpha", "reg_lambda", "tree_method", "verbose",
+            "loss_fn", "tweedie_variance_power",
         }
 
         for key, value in kwargs.items():

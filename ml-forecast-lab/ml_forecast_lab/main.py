@@ -1342,7 +1342,11 @@ class MLForecastLabApp:
 
         # --- Resample to regular grid ---
         resample_method = "sum" if exp_cfg.source_is_cumulative else "mean"
-        series = resample_to_grid(series, freq=freq, method=resample_method)
+        series = resample_to_grid(
+            series, freq=freq, method=resample_method,
+            gap_handling=exp_cfg.gap_handling,
+            gap_max_minutes=exp_cfg.gap_max_minutes,
+        )
 
         # --- Load subtract (optional) ---
         #
@@ -1379,7 +1383,13 @@ class MLForecastLabApp:
                     raise
 
         # --- Clip outliers ---
-        series = clip_outliers(series, positive_only=exp_cfg.source_is_cumulative)
+        series = clip_outliers(
+            series,
+            quantile=exp_cfg.outlier_quantile,
+            positive_only=exp_cfg.source_is_cumulative,
+            method=exp_cfg.outlier_method,
+            lower_bound=exp_cfg.outlier_lower,
+        )
 
         # --- Optional log transform ---
         if exp_cfg.log_transform:
@@ -1999,22 +2009,32 @@ class MLForecastLabApp:
             f"{len(feature_cols)} features ({len(feature_cols) - n_cov} temporal + {n_cov} covariates)"
         )
 
-        # 4. Create feature_builder callback for BenchmarkRunner
-        # BenchmarkRunner splits by index and passes df subsets here.
+        # 4. Create feature_builder callback for BenchmarkRunner.
         # Re-compute rolling stats per fold to prevent feature leakage.
-        rolling_windows = [6, 24, 72]
+        # Windows scale with interval_minutes so the daily seasonality is
+        # captured at any sampling rate (legacy 30-min default → [6, 24, 72]).
+        _steps_per_hour = max(1, 60 // max(exp_cfg.interval_minutes, 1))
+        rolling_windows = [
+            max(2, 3 * _steps_per_hour),
+            max(3, 12 * _steps_per_hour),
+            max(4, 36 * _steps_per_hour),
+        ]
 
         steps_per_day = max(1, 1440 // exp_cfg.interval_minutes)
 
         def feature_builder(df_sub, config, purpose="train"):
             df_out = df_sub.copy()
-            # Re-compute rolling stats from fold-local target to avoid leakage
             target = df_out["target"]
+            # Shift before rolling so the feature at row t uses target[t-w..t-1]
+            # only. Without the shift pandas rolling includes target[t] (the
+            # value being predicted): target leakage for tree backends and
+            # a train/inference skew vs the recursive forecast which uses
+            # buf[-w:].
+            shifted_target = target.shift(1)
             for window in rolling_windows:
-                df_out[f"y_rolling_mean_{window}"] = target.rolling(window=window).mean()
-                df_out[f"y_rolling_std_{window}"] = target.rolling(window=window).std()
-                df_out[f"y_rolling_max_{window}"] = target.rolling(window=window).max()
-            # Re-compute periodic lags and diff from fold-local target
+                df_out[f"y_rolling_mean_{window}"] = shifted_target.rolling(window=window).mean()
+                df_out[f"y_rolling_std_{window}"] = shifted_target.rolling(window=window).std()
+                df_out[f"y_rolling_max_{window}"] = shifted_target.rolling(window=window).max()
             for d in [1, 2]:
                 lag_steps = steps_per_day * d
                 if lag_steps <= len(target):
@@ -2022,7 +2042,6 @@ class MLForecastLabApp:
             df_out["y_diff_1"] = target.shift(1) - target.shift(2)
             cols = [c for c in df_out.columns if c != "target"]
             X = df_out[cols].values.astype(np.float32)
-            # Replace any remaining NaN with 0 for model safety
             X = np.nan_to_num(X, nan=0.0)
             return X
 
@@ -2080,15 +2099,30 @@ class MLForecastLabApp:
                 exp_params = getattr(exp_cfg, 'model_params', {}).get(model_name, {})
                 if exp_params:
                     overrides.update(exp_params)
-                # Apply experiment-level loss_fn first, then overrides
-                if m.is_neural and hasattr(m, 'loss_fn') and 'loss_fn' not in overrides:
-                    m.set_params(loss_fn=exp_cfg.loss_fn)
+                # Apply experiment-level loss_fn first, then overrides. Neural
+                # backends accept mse/mae/huber; tree backends additionally
+                # accept tweedie and map huber/mae to their native objectives.
+                if hasattr(m, 'loss_fn') and 'loss_fn' not in overrides:
+                    user_loss = exp_cfg.loss_fn
+                    if m.is_neural and user_loss == 'tweedie':
+                        # Tweedie has no native torch loss; fall back to huber
+                        # for neural backends so the choice still degrades
+                        # gracefully on a mixed-backend benchmark.
+                        user_loss = 'huber'
+                    m.set_params(loss_fn=user_loss)
                 if (m.is_neural and hasattr(m, 'daily_loss_weight')
                         and 'daily_loss_weight' not in overrides):
                     m.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
                 if (m.is_neural and hasattr(m, 'optimiser')
                         and 'optimiser' not in overrides):
                     m.set_params(optimiser=exp_cfg.optimiser)
+                # Quantile-aware backends (currently DLinear) pick up the
+                # experiment-level quantiles list when one is configured.
+                # Backends without the attribute silently ignore it.
+                if (m.is_neural and hasattr(m, 'quantiles')
+                        and 'quantiles' not in overrides
+                        and exp_cfg.quantiles):
+                    m.set_params(quantiles=list(exp_cfg.quantiles))
                 if overrides:
                     m.set_params(**overrides)
                     logger.info(f"Applied {len(overrides)} override(s) for {model_name}"
@@ -2786,6 +2820,12 @@ class MLForecastLabApp:
             # predict, append, and repeat.
             raw_cov_cols = [c for c in covariate_cols if c != 'target']
             steps_per_day = max(1, 1440 // exp_cfg.interval_minutes)
+            _steps_per_hour = max(1, 60 // max(exp_cfg.interval_minutes, 1))
+            rolling_windows = [
+                max(2, 3 * _steps_per_hour),
+                max(3, 12 * _steps_per_hour),
+                max(4, 36 * _steps_per_hour),
+            ]
 
             # Try to fetch future covariate values where available
             future_index = pd.date_range(
@@ -2799,7 +2839,12 @@ class MLForecastLabApp:
                     cov_name = cov_cfg.entity.split(".")[-1]
                     if cov_name in covariate_cols and cov_cfg.role in ('future', 'both'):
                         try:
-                            cov_dict = {"entity_id": cov_cfg.entity, "name": cov_name}
+                            cov_dict = {
+                                "entity_id": cov_cfg.entity,
+                                "name": cov_name,
+                                "future_attribute": getattr(cov_cfg, "future_attribute", "forecast"),
+                                "future_value_key": getattr(cov_cfg, "future_value_key", None),
+                            }
                             future_series = await self.covariate_resolver.fetch_future(
                                 cov_dict, future_index,
                             )
@@ -2871,8 +2916,7 @@ class MLForecastLabApp:
                 for d in [1, 2]:
                     lag_steps = steps_per_day * d
                     row[f'y_lag_{lag_steps}'] = float(buf[-lag_steps]) if lag_steps <= len(buf) else 0.0
-                # Rolling stats
-                for w in [6, 24, 72]:
+                for w in rolling_windows:
                     window = buf[-w:] if len(buf) >= w else buf
                     if window:
                         row[f'y_rolling_mean_{w}'] = float(np.mean(window))
@@ -2882,7 +2926,6 @@ class MLForecastLabApp:
                         row[f'y_rolling_mean_{w}'] = 0.0
                         row[f'y_rolling_std_{w}'] = 0.0
                         row[f'y_rolling_max_{w}'] = 0.0
-                # Rate of change
                 row['y_diff_1'] = float(buf[-1] - buf[-2]) if len(buf) >= 2 else 0.0
                 # Covariates (use future values if available, else last-known)
                 for c in raw_cov_cols:
@@ -3749,7 +3792,11 @@ class MLForecastLabApp:
                 actuals_table = self.history_db.safe_table_name(
                     exp_cfg.target_entity
                 )
-                target_level = interval_level if interval_level is not None else 0.8
+                target_level = (
+                    interval_level
+                    if interval_level is not None
+                    else float(getattr(exp_cfg, 'conformal_coverage', 0.8))
+                )
                 # Pin residual quantiles to the current model_version
                 # when we have enough calibrated residuals for it;
                 # otherwise pool across all weight regimes of this
@@ -4393,6 +4440,12 @@ class MLForecastLabApp:
             ]
 
             steps_per_day = max(1, 1440 // exp_cfg.interval_minutes)
+            _steps_per_hour = max(1, 60 // max(exp_cfg.interval_minutes, 1))
+            rolling_windows = [
+                max(2, 3 * _steps_per_hour),
+                max(3, 12 * _steps_per_hour),
+                max(4, 36 * _steps_per_hour),
+            ]
 
             # Rolling lag buffer — starts with the last observed values,
             # grows as we append predictions.
@@ -4428,7 +4481,12 @@ class MLForecastLabApp:
                     cov_name = cov_cfg.entity.split(".")[-1]
                     if cov_name in raw_cov_cols and cov_cfg.role in ('future', 'both'):
                         try:
-                            cov_dict = {"entity_id": cov_cfg.entity, "name": cov_name}
+                            cov_dict = {
+                                "entity_id": cov_cfg.entity,
+                                "name": cov_name,
+                                "future_attribute": getattr(cov_cfg, "future_attribute", "forecast"),
+                                "future_value_key": getattr(cov_cfg, "future_value_key", None),
+                            }
                             future_series = await self.covariate_resolver.fetch_future(
                                 cov_dict, future_index,
                             )
@@ -4514,8 +4572,7 @@ class MLForecastLabApp:
                 for d in [1, 2]:
                     lag_steps = steps_per_day * d
                     row[f'y_lag_{lag_steps}'] = float(buf[-lag_steps]) if lag_steps <= len(buf) else 0.0
-                # Rolling stats (on most recent window of buffer)
-                for w in [6, 24, 72]:
+                for w in rolling_windows:
                     window = buf[-w:] if len(buf) >= w else buf
                     if window:
                         row[f'y_rolling_mean_{w}'] = float(np.mean(window))
@@ -4693,17 +4750,24 @@ class MLForecastLabApp:
             combined[col] = df[col]
         combined = combined.dropna()
 
-        # Feature builder (same as _run_benchmark)
-        rolling_windows = [6, 24, 72]
+        # Feature builder (same as _run_benchmark). Windows scale with
+        # interval_minutes so daily seasonality is captured at any rate.
+        _steps_per_hour = max(1, 60 // max(exp_cfg.interval_minutes, 1))
+        rolling_windows = [
+            max(2, 3 * _steps_per_hour),
+            max(3, 12 * _steps_per_hour),
+            max(4, 36 * _steps_per_hour),
+        ]
         steps_per_day = max(1, 1440 // exp_cfg.interval_minutes)
 
         def feature_builder(df_sub, config, purpose="train"):
             df_out = df_sub.copy()
             target = df_out["target"]
+            shifted_target = target.shift(1)
             for window in rolling_windows:
-                df_out[f"y_rolling_mean_{window}"] = target.rolling(window=window).mean()
-                df_out[f"y_rolling_std_{window}"] = target.rolling(window=window).std()
-                df_out[f"y_rolling_max_{window}"] = target.rolling(window=window).max()
+                df_out[f"y_rolling_mean_{window}"] = shifted_target.rolling(window=window).mean()
+                df_out[f"y_rolling_std_{window}"] = shifted_target.rolling(window=window).std()
+                df_out[f"y_rolling_max_{window}"] = shifted_target.rolling(window=window).max()
             for d in [1, 2]:
                 lag_steps = steps_per_day * d
                 if lag_steps <= len(target):
@@ -5012,12 +5076,21 @@ class MLForecastLabApp:
                 mae = result.metrics.get("mae", float("inf"))
                 rmse = result.metrics.get("rmse", float("inf"))
                 mase = result.metrics.get("mase", float("inf"))
+                # Tuning objective tracks the user's selected production
+                # metric. Falls back to MAE if production_metric is missing
+                # from the result (e.g. seasonal_mase before the runner
+                # registered it).
+                primary = result.metrics.get(
+                    exp_cfg.production_metric,
+                    result.metrics.get("mae", float("inf")),
+                )
                 status = "completed"
             except Exception as e:
                 logger.warning(f"  Trial {trial.number} failed: {e}", exc_info=True)
                 mae = float("inf")
                 rmse = float("inf")
                 mase = float("inf")
+                primary = float("inf")
                 status = "failed"
             finally:
                 del model
@@ -5034,7 +5107,11 @@ class MLForecastLabApp:
                     f"MAE={mae:.4f}, RMSE={rmse:.4f}, MASE={mase:.3f}"
                 )
 
-            composite = _composite_score(mae, rmse, mase) if anchor["mae"] is not None else float("inf")
+            # Optuna minimises the user's chosen production_metric directly so
+            # tuning, model selection, and the leaderboard agree on what
+            # "better" means. The composite is still computed for the trial
+            # log but no longer drives the search direction.
+            composite = primary if np.isfinite(primary) else float("inf")
 
             duration = _time.time() - t_start
 

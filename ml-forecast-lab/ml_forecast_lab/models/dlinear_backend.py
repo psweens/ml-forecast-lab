@@ -14,7 +14,7 @@ import logging
 import time
 import warnings
 from copy import deepcopy
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -36,12 +36,20 @@ except ImportError:
 
 
 class _DLinearNet(nn.Module):
-    """DLinear: decompose into trend + seasonal, one Linear each."""
+    """DLinear: decompose into trend + seasonal, one Linear each.
+
+    When ``n_quantiles > 1`` the heads output ``n_horizons * n_quantiles``
+    values per sample so the network produces a quantile band per horizon
+    step. The forward returns shape ``(batch, n_horizons, n_quantiles)``
+    in that mode; the existing ``(batch, n_horizons)`` shape is preserved
+    when ``n_quantiles == 1``.
+    """
 
     def __init__(self, seq_len: int, n_channels: int, kernel_size: int,
                  n_horizons: int = 1, output_activation: str = 'linear',
                  sigmoid_scale: float = 1.0,
-                 use_revin: bool = True, target_channel: int = 0):
+                 use_revin: bool = True, target_channel: int = 0,
+                 n_quantiles: int = 1):
         super().__init__()
         self.use_revin = use_revin
         # Reversible instance norm (Kim et al. 2022). Handles distribution
@@ -51,25 +59,28 @@ class _DLinearNet(nn.Module):
         self.seq_len = seq_len
         self.kernel_size = kernel_size
         self.n_horizons = n_horizons
+        self.n_quantiles = max(1, int(n_quantiles))
         self.output_activation = output_activation
         pad = kernel_size // 2
-        # AvgPool1d along time for trend extraction
         self.avg_pool = nn.AvgPool1d(kernel_size, stride=1, padding=pad, count_include_pad=False)
         flat = seq_len * n_channels
-        self.trend_linear = nn.Linear(flat, n_horizons)
-        self.seasonal_linear = nn.Linear(flat, n_horizons)
+        out_dim = n_horizons * self.n_quantiles
+        self.trend_linear = nn.Linear(flat, out_dim)
+        self.seasonal_linear = nn.Linear(flat, out_dim)
         self.activation = _build_activation(output_activation, scale=sigmoid_scale)
 
     def forward(self, x: "torch.Tensor") -> "torch.Tensor":
         # x: (batch, seq_len, n_channels)
         if self.revin is not None:
             x = self.revin.normalize(x)
-        x_t = x.permute(0, 2, 1)  # (batch, n_channels, seq_len)
-        trend = self.avg_pool(x_t)[:, :, :self.seq_len]  # ensure same length
+        x_t = x.permute(0, 2, 1)
+        trend = self.avg_pool(x_t)[:, :, :self.seq_len]
         seasonal = x_t - trend
         trend_flat = trend.reshape(trend.shape[0], -1)
         seasonal_flat = seasonal.reshape(seasonal.shape[0], -1)
         out = self.trend_linear(trend_flat) + self.seasonal_linear(seasonal_flat)
+        if self.n_quantiles > 1:
+            out = out.view(-1, self.n_horizons, self.n_quantiles)
         if self.revin is not None:
             # Denormalise in z-space before the output activation so the
             # activation operates on physical-scale values (matters for
@@ -77,8 +88,10 @@ class _DLinearNet(nn.Module):
             # meaningful in target space).
             out = self.revin.denormalize(out)
         out = self.activation(out)
+        if self.n_quantiles > 1:
+            return out  # (batch, n_horizons, n_quantiles)
         if self.n_horizons == 1:
-            return out.squeeze(-1)  # (batch,) backward compat
+            return out.squeeze(-1)
         return out
 
 
@@ -98,13 +111,14 @@ class DLinearModel(ForecastModel):
         epochs: int = 100,
         batch_size: int = 64,
         sequence_length: Optional[int] = None,
-        loss_fn: str = 'mse',
+        loss_fn: str = 'huber',
         daily_loss_weight: float = 0.0,
         optimiser: str = 'adamw',
         patience: int = 20,
         output_activation: str = 'linear',
         use_revin: bool = True,
         target_channel: int = 0,
+        quantiles: Optional[List[float]] = None,
     ) -> None:
         super().__init__()
         if not TORCH_AVAILABLE:
@@ -124,6 +138,11 @@ class DLinearModel(ForecastModel):
         # the zscore output_activation path — RevIN owns the scale end to end.
         self.use_revin = use_revin
         self.target_channel = target_channel
+        # Optional list of quantiles in (0, 1). When non-empty the network
+        # grows a multi-quantile output head and trains with pinball loss.
+        # The median quantile (or 0.5 if absent) is the point forecast used
+        # everywhere downstream that expects a 1D prediction.
+        self.quantiles: List[float] = list(quantiles) if quantiles else []
 
         self._model: Optional[_DLinearNet] = None
         self._seq_len: Optional[int] = None
@@ -167,6 +186,7 @@ class DLinearModel(ForecastModel):
             sigmoid_scale=self._sigmoid_scale,
             use_revin=self.use_revin,
             target_channel=self.target_channel,
+            n_quantiles=max(1, len(self.quantiles)),
         )
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray, **kwargs: Any) -> Dict[str, Any]:
@@ -258,7 +278,29 @@ class DLinearModel(ForecastModel):
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=self.epochs, eta_min=1e-6)
         _loss_map = {'mse': nn.MSELoss, 'mae': nn.L1Loss, 'l1': nn.L1Loss, 'huber': nn.SmoothL1Loss}
-        criterion = _loss_map.get(self.loss_fn, nn.MSELoss)(reduction='none')
+        criterion = _loss_map.get(self.loss_fn, nn.SmoothL1Loss)(reduction='none')
+
+        # Pinball criterion for multi-quantile mode. y_pred is
+        # (batch, H, Q), y_true is (batch, H) broadcast to (batch, H, 1).
+        # Returns per-sample mean across (H, Q) so the existing
+        # composite_horizon_loss path keeps shape (batch,).
+        quantile_tensor = (
+            torch.tensor(self.quantiles, dtype=torch.float32)
+            if self.quantiles else None
+        )
+
+        def _pinball(yp: "torch.Tensor", yt: "torch.Tensor") -> "torch.Tensor":
+            if yp.dim() == 2:
+                # Single-quantile fallback path: behave like criterion(yp, yt).
+                return criterion(yp, yt)
+            qs = quantile_tensor.to(yp.device).view(1, 1, -1)
+            yt_b = yt.unsqueeze(-1) if yt.dim() == 2 else yt
+            err = yt_b - yp
+            loss = torch.maximum(qs * err, (qs - 1.0) * err)
+            return loss.mean(dim=-1)  # collapse quantile axis → (batch, H)
+
+        if self.quantiles:
+            criterion = _pinball
 
         best_val_loss = float("inf")
         best_state = None
@@ -334,21 +376,17 @@ class DLinearModel(ForecastModel):
     def predict_sequence(self, X: np.ndarray) -> np.ndarray:
         """Multi-horizon prediction from sliding-window input.
 
-        Parameters
-        ----------
-        X : np.ndarray, shape (n_samples, window_size, n_channels)
-
-        Returns
-        -------
-        np.ndarray, shape (n_samples, n_horizons) or (n_samples,) if single-horizon
+        When ``self.quantiles`` is non-empty the network produces a
+        (n_samples, n_horizons, n_quantiles) tensor; this method returns
+        only the median column so the existing single-prediction pipeline
+        (metrics, scoring, conformal-residual logging) is unaffected. Use
+        ``predict_quantiles`` to retrieve the full quantile band.
         """
         self._validate_fitted()
         if self._model is None:
             raise RuntimeError("No model loaded")
 
         X_seq = X.copy()
-        # Dataset-level channel normalisation only applies when RevIN is off —
-        # otherwise RevIN handles per-window normalisation inside forward().
         if not self.use_revin and self._channel_mean is not None and self._channel_std is not None:
             X_seq = (X_seq - self._channel_mean) / self._channel_std
 
@@ -357,15 +395,53 @@ class DLinearModel(ForecastModel):
         with torch.no_grad():
             predictions = self._model(X_t).numpy()
 
-        # Denormalise z-space predictions back to physical units. Floor at
-        # zero because the linear head in z-space is unconstrained and
-        # callers expect physically-valid (non-negative) forecasts. Skipped
-        # when use_revin is True: the network already returns target-space
-        # predictions.
+        if predictions.ndim == 3:
+            # (n_samples, n_horizons, n_quantiles) → take the median column.
+            qs = self.quantiles
+            if 0.5 in qs:
+                idx = qs.index(0.5)
+            else:
+                idx = min(range(len(qs)), key=lambda i: abs(qs[i] - 0.5))
+            predictions = predictions[:, :, idx]
+
         if self.output_activation == 'zscore' and not self.use_revin:
             predictions = predictions * self._y_std + self._y_mean
             predictions = np.clip(predictions, 0.0, None)
 
+        return predictions.astype(np.float32)
+
+    def predict_quantiles(self, X: np.ndarray) -> np.ndarray:
+        """Return the full quantile band (n_samples, n_horizons, n_quantiles).
+
+        Raises ``RuntimeError`` if the model was not trained with a
+        non-empty ``quantiles`` list — there is no band to return.
+        """
+        if not self.quantiles:
+            raise RuntimeError(
+                "predict_quantiles requires quantiles to be configured at "
+                "construction; got an empty list"
+            )
+        self._validate_fitted()
+        if self._model is None:
+            raise RuntimeError("No model loaded")
+
+        X_seq = X.copy()
+        if not self.use_revin and self._channel_mean is not None and self._channel_std is not None:
+            X_seq = (X_seq - self._channel_mean) / self._channel_std
+
+        X_t = torch.FloatTensor(X_seq)
+        self._model.eval()
+        with torch.no_grad():
+            predictions = self._model(X_t).numpy()
+
+        if predictions.ndim != 3:
+            raise RuntimeError(
+                f"DLinear quantile head produced shape {predictions.shape}; "
+                f"expected (batch, H, Q)"
+            )
+        if self.output_activation == 'zscore' and not self.use_revin:
+            predictions = predictions * self._y_std + self._y_mean
+            predictions = np.clip(predictions, 0.0, None)
         return predictions.astype(np.float32)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -404,13 +480,14 @@ class DLinearModel(ForecastModel):
             "output_activation": self.output_activation,
             "use_revin": self.use_revin,
             "target_channel": self.target_channel,
+            "quantiles": list(self.quantiles),
         })
 
     def set_params(self, **kwargs: Any) -> None:
         valid = {"kernel_size", "learning_rate", "epochs", "batch_size",
                  "sequence_length", "loss_fn", "daily_loss_weight", "optimiser", "patience",
                  "output_activation",
-                 "use_revin", "target_channel"}
+                 "use_revin", "target_channel", "quantiles"}
         for k, v in kwargs.items():
             if k not in valid:
                 raise ValueError(f"Unknown parameter: {k}")

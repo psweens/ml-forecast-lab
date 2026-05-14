@@ -155,9 +155,6 @@ class CovariateCfg:
     scale: Optional[float] = None
     """Optional scaling factor; if None, no scaling applied."""
 
-    scaling: Optional[str] = None
-    """Optional scaling strategy name: 'standard', 'minmax', or None."""
-
     transform: Optional[str] = None
     """Optional transformation: 'log', 'sqrt', 'box_cox', or None."""
 
@@ -167,26 +164,25 @@ class CovariateCfg:
     is_binary: bool = False
     """Whether this is a binary (0/1) feature."""
 
+    future_attribute: str = 'forecast'
+    """For role='future' / 'both': the HA entity attribute that contains
+    the known-future forecast (e.g. weather entities expose ``forecast``,
+    Solcast exposes ``detailedForecast``). Ignored when role='lagged'."""
+
+    future_value_key: Optional[str] = None
+    """For role='future' / 'both': the key inside each forecast-list entry
+    that contains the value (e.g. ``temperature`` for Met.no weather,
+    ``pv_estimate`` for Solcast). When None, the resolver tries common
+    keys (value, pv_estimate, state, temperature, cloud_coverage,
+    wind_speed) in order. Ignored when the attribute is a flat
+    ``{iso_dt: value}`` mapping."""
+
     def __post_init__(self) -> None:
         """Validate configuration."""
         valid_roles = {'future', 'lagged', 'both', 'concurrent'}
         if self.role not in valid_roles:
             raise ValueError(
                 f'role must be one of {valid_roles}, got {self.role!r}'
-            )
-        if self.role in ('future', 'both'):
-            # The forecast-attribute path through CovariateResolver.fetch_future
-            # is a stub: it returns NaN regardless of the entity's forecast
-            # attribute, so the documented behaviour ("Predbat rates as a
-            # future covariate") does not actually work. Until a real aligner
-            # is implemented we treat the role as 'lagged' for fetch purposes
-            # and warn loudly so users know their config is being downgraded.
-            logger.warning(
-                "Covariate %r has role=%r; future-covariate fetch is not yet "
-                "implemented and will be treated as 'lagged' (historical "
-                "values only). Predictions at future timestamps will see the "
-                "covariate as NaN.",
-                self.entity, self.role,
             )
         valid_transforms = {None, 'log', 'sqrt', 'box_cox'}
         if self.transform not in valid_transforms:
@@ -240,9 +236,19 @@ class ExperimentCfg:
     """Number of cross-validation folds."""
 
     cv_embargo_periods: int = 2
-    """Gap between training and test sets (in periods) to avoid temporal leakage."""
+    """Gap (in periods) between training and test sets to avoid temporal
+    leakage from rolling / lag features that span the fold boundary.
 
-    metrics: List[str] = field(default_factory=lambda: ['mae', 'rmse', 'mase'])
+    The pipeline's longest rolling window is ~36 h (72 steps at 30-min
+    sampling); raising the embargo to that size eliminates the residual
+    rolling spillover at the boundary. The conservative default ``2``
+    preserves behaviour on small training fixtures and benchmark cycles
+    where setting it to 72 would starve early folds of training rows.
+    Increase manually when running on a long history (≥ 30 days)."""
+
+    metrics: List[str] = field(
+        default_factory=lambda: ['mae', 'rmse', 'mase', 'seasonal_mase']
+    )
     """Standard metrics to compute."""
 
     custom_metrics: Optional[Dict[str, str]] = None
@@ -261,8 +267,12 @@ class ExperimentCfg:
     whichever model the next benchmark cycle ranked first, which
     appeared to users as "I chose XGBoost but the page forgets"."""
 
-    production_metric: str = 'rmse'
-    """Metric to use for automatic model selection."""
+    production_metric: str = 'seasonal_mase'
+    """Metric to use for automatic model selection. Default ``seasonal_mase``
+    (MAE scaled by the same-time-yesterday baseline at the configured
+    ``interval_minutes``) is the right comparison for the daily-seasonal HA
+    sensors most users forecast. ``mase`` (1-step naive) is retained for
+    backwards compatibility but understates skill on seasonal series."""
 
     publish_prefix: str = 'mlfl_'
     """Prefix for published Home Assistant sensor entities."""
@@ -426,8 +436,14 @@ class ExperimentCfg:
     """How often to retrain the model from scratch for this experiment.
     Falls back to AppConfig.retrain_every_hours if None."""
 
-    loss_fn: str = 'mse'
-    """Training loss for neural models: 'mse', 'mae', or 'huber'."""
+    loss_fn: str = 'huber'
+    """Training loss: 'mse', 'mae', 'huber', or 'tweedie' (tree backends).
+    Default ``huber`` (smooth-L1) is appropriate for the typical HA target —
+    quadratic near zero so gradients flow on small errors, linear in the
+    tails so sensor spikes don't dominate. MSE is preserved for backwards
+    compatibility but is rarely the right choice for spiky, near-zero
+    series (power, occupancy, rainfall). ``tweedie`` is honoured only by
+    LightGBM / XGBoost / CatBoost — neural backends fall back to Huber."""
 
     optimiser: str = 'adamw'
     """Optimiser for neural models: 'adamw' (default, decoupled weight decay as
@@ -460,10 +476,83 @@ class ExperimentCfg:
     Typical useful range: 0.1–1.0 (stronger under MSE than MAE due to loss
     geometry)."""
 
-    recency_half_life_days: float = 7.0
-    """Half-life for exponential recency weighting in days. Recent samples receive
-    higher weight during training so models prioritise current patterns.
-    Set to 0 to disable recency weighting (all samples weighted equally)."""
+    recency_half_life_days: float = 0.0
+    """Half-life for exponential recency weighting in days. ``0`` (default,
+    post-audit) gives uniform sample weight — the right choice for the
+    stable household / business sensors most users forecast, where the
+    weekly-seasonal pattern from a fortnight ago is just as informative
+    as yesterday's data. Set to a positive value (e.g. 7) only when the
+    series has recently entered a new regime (heat pump install, EV
+    delivery, schedule change). Pre-audit default was ``7``, which
+    silently down-weighted older training rows by ~75%."""
+
+    conformal_coverage: float = 0.8
+    """Nominal coverage for the conformal prediction interval published with
+    every forecast. Default 0.8 (80%) — the band that catches the actual
+    value 80% of the time under the residual-exchangeability assumption.
+
+    Higher values (e.g. 0.9) widen the band; useful when the downstream
+    automation must avoid false-negatives ("definitely not empty before
+    6pm" needs > 90%). Lower values (e.g. 0.5) collapse the band to the
+    median residual — useful only for diagnostic plots.
+
+    Empirical coverage may differ from the nominal target when residuals
+    are non-exchangeable across the forecast horizon (seasonal drift,
+    regime change). The Results tab surfaces achieved coverage so users
+    can diagnose calibration gaps."""
+
+    quantiles: List[float] = field(default_factory=list)
+    """Optional list of quantiles in (0, 1) for native-quantile training.
+    Empty (default) trains a point forecast and wraps it in a post-hoc
+    conformal band. Non-empty (e.g. [0.1, 0.5, 0.9]) routes the supported
+    neural backends (DLinear) through a multi-quantile output head trained
+    with the pinball loss, replacing the point loss for those backends.
+
+    Backends without a quantile head (currently every backend except
+    DLinear) fall back to the point-loss path and the conformal band
+    continues to wrap their median prediction."""
+
+    gap_handling: str = 'interpolate'
+    """How to fill gaps after resampling:
+    - ``ffill``: legacy behaviour — propagate the last observed value across
+      every gap, large or small. Inserts artificial flat segments on a
+      recorder outage that the model can over-fit.
+    - ``interpolate`` (default): linear-interpolate gaps up to
+      ``gap_max_minutes``; mark longer gaps as NaN so downstream dropna
+      excludes them rather than imputing them with a stale value.
+    - ``mask``: leave every gap as NaN (downstream dropna removes the row).
+      Use when missing data should never be modelled."""
+
+    gap_max_minutes: int = 90
+    """Maximum gap (minutes) eligible for ``gap_handling='interpolate'``.
+    Gaps longer than this are left as NaN regardless of method."""
+
+    outlier_method: str = 'quantile'
+    """Outlier-handling method:
+    - ``quantile`` (default): clip upper tail at ``outlier_quantile``, lower
+      tail per ``outlier_lower``.
+    - ``mad``: Iglewicz-Hoaglin robust clip at ``median ± k · MAD`` with
+      k=3.5. Less aggressive than the quantile clip on heavy-tailed but
+      legitimate data (rainfall, occupancy).
+    - ``off``: no clipping. Pair with a robust ``loss_fn`` (mae, huber) and
+      a probabilistic target if your sensor genuinely has unbounded
+      legitimate values."""
+
+    outlier_quantile: float = 0.999
+    """Upper-tail quantile for ``outlier_method='quantile'``. 0.999 trims the
+    top 0.1% — less aggressive than the previous hardcoded 0.995 because HA
+    sensor noise rarely needs a 0.5% top trim and legitimate peaks were
+    being clipped. Lower this if your target has a clean upper bound."""
+
+    outlier_lower: str = 'auto'
+    """Lower bound for ``outlier_method='quantile'``:
+    - ``auto`` (default): zero for cumulative sources, symmetric quantile
+      otherwise. Matches the legacy ``positive_only=source_is_cumulative``
+      logic.
+    - ``zero``: clip at 0 — for non-negative quantities (power, energy).
+    - ``symmetric``: clip at ``1 - outlier_quantile`` — for two-sided
+      signed sensors (temperature delta, wind direction).
+    - ``off``: no lower clip."""
 
     include_sun_elevation: bool = False
     """Include sun elevation angle (degrees above horizon) as a computed covariate.

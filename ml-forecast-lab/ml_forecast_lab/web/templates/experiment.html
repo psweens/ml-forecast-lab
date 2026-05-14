@@ -218,6 +218,51 @@
         </div>
     </div>
 
+    <!-- Robustness -->
+    <div class="settings-group">
+        <h3 class="settings-group-title">Robustness</h3>
+        <div class="exp-field-grid" style="grid-template-columns:repeat(3, 1fr);">
+            <div class="exp-field">
+                <label class="field-label">Gap handling <span class="info-tip">?<span class="tip-text"><b>Interpolate</b> (default): linearly fill gaps up to the maximum size; longer gaps are dropped. <b>ffill</b> (legacy): forward-fill every gap regardless of length — can inject synthetic flat segments during a recorder outage. <b>Mask</b>: drop every gap row so the model never sees imputed data.</span></span></label>
+                <select class="setting-input" data-field="gap_handling" onchange="saveSettingsField(this)">
+                    <option value="interpolate" {% if not exp_config or exp_config.gap_handling == 'interpolate' %}selected{% endif %}>Interpolate (≤ max)</option>
+                    <option value="ffill" {% if exp_config and exp_config.gap_handling == 'ffill' %}selected{% endif %}>Forward-fill (legacy)</option>
+                    <option value="mask" {% if exp_config and exp_config.gap_handling == 'mask' %}selected{% endif %}>Mask (drop rows)</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Gap max (minutes)</label>
+                <input type="number" class="setting-input" data-field="gap_max_minutes" min="1" max="1440"
+                       value="{{ exp_config.gap_max_minutes if exp_config else 90 }}"
+                       onchange="saveSettingsField(this)">
+            </div>
+            <div class="exp-field"></div>
+            <div class="exp-field">
+                <label class="field-label">Outlier method <span class="info-tip">?<span class="tip-text"><b>Quantile</b> (default): clip the upper tail at the chosen quantile. <b>MAD</b>: robust median ± 3.5 · MAD clip — less aggressive on heavy-tailed but legitimate data like rainfall or occupancy. <b>Off</b>: no clipping — pair with a robust loss (mae / huber) if your sensor has legitimate unbounded values.</span></span></label>
+                <select class="setting-input" data-field="outlier_method" onchange="saveSettingsField(this)">
+                    <option value="quantile" {% if not exp_config or exp_config.outlier_method == 'quantile' %}selected{% endif %}>Quantile</option>
+                    <option value="mad" {% if exp_config and exp_config.outlier_method == 'mad' %}selected{% endif %}>MAD (robust)</option>
+                    <option value="off" {% if exp_config and exp_config.outlier_method == 'off' %}selected{% endif %}>Off</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Outlier quantile</label>
+                <input type="number" class="setting-input" data-field="outlier_quantile" min="0.9" max="0.9999" step="0.0005"
+                       value="{{ exp_config.outlier_quantile if exp_config else 0.999 }}"
+                       onchange="saveSettingsField(this)">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Lower bound <span class="info-tip">?<span class="tip-text"><b>Auto</b>: zero for cumulative sources, symmetric quantile otherwise. <b>Zero</b>: clip at 0 — for non-negative quantities. <b>Symmetric</b>: clip at the matching lower quantile — for two-sided signed sensors. <b>Off</b>: no lower clip.</span></span></label>
+                <select class="setting-input" data-field="outlier_lower" onchange="saveSettingsField(this)">
+                    <option value="auto" {% if not exp_config or exp_config.outlier_lower == 'auto' %}selected{% endif %}>Auto</option>
+                    <option value="zero" {% if exp_config and exp_config.outlier_lower == 'zero' %}selected{% endif %}>Zero</option>
+                    <option value="symmetric" {% if exp_config and exp_config.outlier_lower == 'symmetric' %}selected{% endif %}>Symmetric</option>
+                    <option value="off" {% if exp_config and exp_config.outlier_lower == 'off' %}selected{% endif %}>Off</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
     <!-- Training -->
     <div class="settings-group">
         <h3 class="settings-group-title">Training</h3>
@@ -238,23 +283,25 @@
             <div class="exp-field">
                 <label class="field-label">Recency half-life (days) <span class="info-tip">?<span class="tip-text">Half-life for exponential recency weighting. Recent samples get higher weight. Set to 0 to disable.</span></span></label>
                 <input type="number" class="setting-input" data-field="recency_half_life_days" min="0" max="365" step="0.5"
-                       value="{{ exp_config.recency_half_life_days if exp_config else 7 }}"
+                       value="{{ exp_config.recency_half_life_days if exp_config else 0 }}"
                        onchange="saveSettingsField(this)">
             </div>
             <div class="exp-field">
                 <label class="field-label">Production metric</label>
                 <select class="setting-input" data-field="production_metric" onchange="saveSettingsField(this)">
+                    <option value="seasonal_mase" {% if not exp_config or exp_config.production_metric == 'seasonal_mase' %}selected{% endif %}>Seasonal MASE (vs same time yesterday)</option>
                     <option value="mae" {% if exp_config and exp_config.production_metric == 'mae' %}selected{% endif %}>MAE</option>
                     <option value="rmse" {% if exp_config and exp_config.production_metric == 'rmse' %}selected{% endif %}>RMSE</option>
-                    <option value="mase" {% if exp_config and exp_config.production_metric == 'mase' %}selected{% endif %}>MASE</option>
+                    <option value="mase" {% if exp_config and exp_config.production_metric == 'mase' %}selected{% endif %}>MASE (vs 1-step naive)</option>
                 </select>
             </div>
             <div class="exp-field">
-                <label class="field-label">Loss function (neural)</label>
+                <label class="field-label">Loss function <span class="info-tip">?<span class="tip-text"><b>Huber</b> (default): smooth-L1 — quadratic near zero, linear in the tails. Right default for the typical HA sensor (power, occupancy, intermittent loads) because peak spikes don't dominate the loss. <b>MSE</b>: squared error — choose only when peaks matter more than baseline accuracy. <b>MAE</b>: absolute error — for very clean signals. <b>Tweedie</b>: compound Poisson-Gamma loss for zero-inflated right-skewed targets (rainfall, occupancy count, intermittent EV draw). Honoured by tree backends (LightGBM / XGBoost / CatBoost); neural backends fall back to Huber.</span></span></label>
                 <select class="setting-input" data-field="loss_fn" onchange="saveSettingsField(this)">
+                    <option value="huber" {% if not exp_config or exp_config.loss_fn == 'huber' %}selected{% endif %}>Huber (default)</option>
                     <option value="mse" {% if exp_config and exp_config.loss_fn == 'mse' %}selected{% endif %}>MSE</option>
                     <option value="mae" {% if exp_config and exp_config.loss_fn == 'mae' %}selected{% endif %}>MAE</option>
-                    <option value="huber" {% if exp_config and exp_config.loss_fn == 'huber' %}selected{% endif %}>Huber</option>
+                    <option value="tweedie" {% if exp_config and exp_config.loss_fn == 'tweedie' %}selected{% endif %}>Tweedie (tree backends only)</option>
                 </select>
             </div>
             <div class="exp-field">
@@ -265,25 +312,47 @@
                 </select>
             </div>
             <div class="exp-field">
-                <label class="field-label">Output activation (neural) <span class="info-tip">?<span class="tip-text">Activation applied to the final linear head of neural models, constraining output to a physical range. <b>Auto</b>: zscore for LSTM; for other neural backends, softplus if target is cumulative else linear. <b>Linear</b>: unbounded, signed (temperature, deltas). <b>Softplus</b>: smooth non-negative (0, ∞) for energy / power / counts. <b>ReLU</b>: hard non-negative; may produce dead units if many zero targets. <b>Exp</b>: strictly positive, for orders-of-magnitude variance. <b>Sigmoid</b>: bounded (0, s) where s is learned from training max — for quantities with a physical ceiling (SoC, humidity). <b>Z-score</b>: target z-score normalised during training with linear head, denormalised at inference — keeps gradients O(1) across any target scale. LSTM-only; other backends treat as linear.</span></span></label>
+                <label class="field-label">Output activation (neural) <span class="info-tip">?<span class="tip-text">Activation applied to the final linear head of neural models. <b>Auto</b> (recommended): the backend picks the right activation given the target type (zscore for LSTM, softplus for cumulative targets, linear otherwise). <b>Linear</b>: unbounded, signed (temperature, deltas). <b>Softplus</b>: smooth non-negative (0, ∞) for energy / power / counts. <b>Sigmoid</b>: bounded (0, s) for quantities with a physical ceiling (SoC, humidity). The historical <i>relu</i>, <i>exp</i>, and <i>zscore</i> options are footguns on near-zero targets and are settable via YAML only.</span></span></label>
                 <select class="setting-input" data-field="output_activation" onchange="saveSettingsField(this)">
-                    <option value="auto" {% if not exp_config or exp_config.output_activation == 'auto' %}selected{% endif %}>Auto</option>
+                    <option value="auto" {% if not exp_config or exp_config.output_activation == 'auto' %}selected{% endif %}>Auto (recommended)</option>
                     <option value="linear" {% if exp_config and exp_config.output_activation == 'linear' %}selected{% endif %}>Linear</option>
                     <option value="softplus" {% if exp_config and exp_config.output_activation == 'softplus' %}selected{% endif %}>Softplus (≥ 0, smooth)</option>
-                    <option value="relu" {% if exp_config and exp_config.output_activation == 'relu' %}selected{% endif %}>ReLU (≥ 0, hard)</option>
-                    <option value="exp" {% if exp_config and exp_config.output_activation == 'exp' %}selected{% endif %}>Exp (> 0)</option>
                     <option value="sigmoid" {% if exp_config and exp_config.output_activation == 'sigmoid' %}selected{% endif %}>Sigmoid (bounded)</option>
-                    <option value="zscore" {% if exp_config and exp_config.output_activation == 'zscore' %}selected{% endif %}>Z-score (normalised target, LSTM)</option>
+                    {% if exp_config and exp_config.output_activation in ('relu', 'exp', 'zscore') %}
+                    <option value="{{ exp_config.output_activation }}" selected>{{ exp_config.output_activation }} (advanced, set via YAML)</option>
+                    {% endif %}
                 </select>
             </div>
-            <div class="settings-toggle-field">
-                <label class="toggle-switch">
-                    <input type="checkbox" data-field="daily_loss_weight"
-                           {% if exp_config and exp_config.daily_loss_weight and exp_config.daily_loss_weight > 0 %}checked{% endif %}
-                           onchange="saveSettingsToggle(this, 'daily_loss_weight')">
-                    <span class="toggle-slider"></span>
-                </label>
-                <span class="field-label">Daily cumulative loss (neural) <span class="info-tip">?<span class="tip-text">Adds a loss term that penalises error in the predicted cumulative curve at every horizon step. Unlike the per-interval loss (which only cares about local values and tends to regress to the mean on sparse targets), this constrains the SHAPE of the cumulative trajectory — so predictions have to match the actual cumulative curve as it accumulates through the day. Designed for cumulative-origin targets like <code>sensor.x_today</code> (daily demand, daily energy), where users evaluate on the cumulative curve rather than per-interval values. Applies to torch neural models (LSTM, CNN, N-BEATS, N-HiTS, TiDE, DLinear, TSMixer, PatchTST, iTransformer, Crossformer, TimesNet, SparseTSF); silently ignored by tree models (LightGBM, XGBoost).</span></span></span>
+            <div class="exp-field">
+                <label class="field-label">CV embargo (periods) <span class="info-tip">?<span class="tip-text">Number of rows dropped between training and test sets in each CV fold, to prevent rolling-window features from spanning the boundary. The pipeline's longest rolling window is ~36 h (72 steps at 30-min sampling); the recommended value scales with the history length. Default <code>2</code> is the conservative legacy value — increase to the longest rolling-window length when running on ≥ 30 days of data.</span></span></label>
+                <input type="number" class="setting-input" data-field="cv_embargo_periods" min="0" max="500" step="1"
+                       value="{{ exp_config.cv_embargo_periods if exp_config else 2 }}"
+                       onchange="saveSettingsField(this)">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Conformal coverage <span class="info-tip">?<span class="tip-text">Nominal coverage for the conformal prediction interval published with every forecast. Higher values widen the band — pick 0.9 when the downstream automation must avoid false-negatives (e.g. "definitely not empty before 6pm"). 0.8 is the default. Empirical coverage may differ from nominal under regime change; the Results tab surfaces the achieved coverage so calibration drift is visible.</span></span></label>
+                <input type="number" class="setting-input" data-field="conformal_coverage" min="0.5" max="0.99" step="0.05"
+                       value="{{ exp_config.conformal_coverage if exp_config else 0.8 }}"
+                       onchange="saveSettingsField(this)">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Daily cumulative loss (neural) <span class="info-tip">?<span class="tip-text">Weight λ for the cumulative-trajectory loss term added to the per-interval loss. 0 disables. 0.1–1.0 is the typical useful range; stronger values constrain the shape of the predicted cumulative curve more aggressively. Designed for cumulative-origin targets like <code>sensor.x_today</code> (daily demand, daily energy). Applies to torch neural models; silently ignored by tree backends.</span></span></label>
+                <input type="number" class="setting-input" data-field="daily_loss_weight" min="0" max="1.5" step="0.1"
+                       value="{{ exp_config.daily_loss_weight if exp_config else 0.0 }}"
+                       onchange="saveSettingsField(this)">
+            </div>
+        </div>
+    </div>
+
+    <!-- Calendar -->
+    <div class="settings-group">
+        <h3 class="settings-group-title">Calendar</h3>
+        <div class="exp-field-grid" style="grid-template-columns:repeat(3, 1fr);">
+            <div class="exp-field">
+                <label class="field-label">Country (holidays) <span class="info-tip">?<span class="tip-text">ISO-3166 alpha-2 country code (e.g. <code>GB</code>, <code>US</code>, <code>DE</code>). Adds an ``is_holiday`` feature to the model so the schedule break gets a signal column. Leave blank to disable. Backed by the <code>holidays</code> Python library.</span></span></label>
+                <input type="text" class="setting-input" data-field="country" maxlength="2" placeholder="e.g. GB"
+                       value="{{ exp_config.country or '' if exp_config else '' }}"
+                       onchange="saveSettingsField(this)">
             </div>
         </div>
     </div>
@@ -341,9 +410,11 @@
                 <div class="entity-search-results" id="entity-results" style="display:none;"></div>
             </div>
             <div class="exp-field">
-                <label class="field-label">Role <span class="info-tip">?<span class="tip-text">Only <strong>Lagged</strong> is currently implemented — the model sees past values of this covariate. <strong>Future</strong> and <strong>Both</strong> (forecast-attribute lookup) are not yet wired through the inference path and have been hidden until they are.</span></span></label>
+                <label class="field-label">Role <span class="info-tip">?<span class="tip-text"><strong>Lagged</strong>: the model sees past values of this covariate; the inference path forward-fills the last observed value. <strong>Future</strong>: the model reads the entity's <code>forecast</code> attribute and aligns it to the forecast horizon — for weather / Solcast / Forecast.Solar entities where the future is genuinely known. <strong>Both</strong>: use historical for training and the forecast attribute for inference. Future / Both require ``future_attribute`` and (for list-of-dict attributes) ``future_value_key``, settable in YAML.</span></span></label>
                 <select class="setting-input" id="cov-role-input">
                     <option value="lagged">Lagged</option>
+                    <option value="future">Future (forecast attribute)</option>
+                    <option value="both">Both (history + forecast)</option>
                 </select>
             </div>
             <div class="exp-field">

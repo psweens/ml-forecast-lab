@@ -250,8 +250,13 @@ try:
                 y = (y - b_t) / (w_t + self.eps)
             if y.dim() == 1:
                 return y * stdev_t + mean_t
-            # Multi-horizon: broadcast over the horizon axis.
-            return y * stdev_t.unsqueeze(-1) + mean_t.unsqueeze(-1)
+            if y.dim() == 2:
+                # Multi-horizon: broadcast over the horizon axis.
+                return y * stdev_t.unsqueeze(-1) + mean_t.unsqueeze(-1)
+            # Multi-horizon × multi-quantile: broadcast over both trailing
+            # axes so DLinear's (batch, H, Q) quantile output denormalises
+            # correctly.
+            return y * stdev_t.view(-1, 1, 1) + mean_t.view(-1, 1, 1)
 
 except ImportError:
     # Torch not installed — activation factory will raise at call time.

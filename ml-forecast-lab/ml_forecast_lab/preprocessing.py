@@ -163,29 +163,22 @@ def resample_to_grid(
     series: pd.Series,
     freq: str,
     method: Literal['mean', 'sum', 'max', 'min', 'last', 'forward_fill'] = 'mean',
+    gap_handling: str = 'ffill',
+    gap_max_minutes: int = 90,
 ) -> pd.Series:
     """
-    Resample time series to a regular frequency grid.
-
-    Fills gaps using specified method and forward-fills remaining NaNs.
+    Resample time series to a regular frequency grid with controlled gap fill.
 
     Parameters
     ----------
-    series : pd.Series
-        Time series with DatetimeIndex.
-    freq : str
-        Resampling frequency (e.g. '30min', '1H', '1D').
-    method : str, default 'mean'
-        Aggregation method: 'mean', 'sum', 'max', 'min', 'last', or 'forward_fill'.
-
-    Returns
-    -------
-    pd.Series
-        Resampled series on regular grid.
-
-    Notes
-    -----
-    Always applies forward-fill after aggregation to handle sparse data gracefully.
+    gap_handling : {'ffill', 'interpolate', 'mask'}, default 'ffill'
+        How to fill the gaps that resampling introduces. ``ffill`` is the
+        legacy behaviour (propagate the last observed value across any gap).
+        ``interpolate`` linearly interpolates gaps up to ``gap_max_minutes``
+        and leaves longer gaps as NaN. ``mask`` leaves every gap as NaN so
+        downstream dropna removes the rows entirely.
+    gap_max_minutes : int, default 90
+        Maximum interpolation horizon when ``gap_handling='interpolate'``.
     """
     if not isinstance(series, pd.Series):
         raise TypeError('series must be a pandas Series')
@@ -193,105 +186,135 @@ def resample_to_grid(
         raise TypeError('series must have DatetimeIndex')
 
     series = series.copy().dropna()
-
     if len(series) == 0:
         logger.warning('Empty series after dropna')
         return pd.Series([], dtype='float64')
 
-    # Resample
     if method == 'forward_fill':
         resampled = series.resample(freq).last()
     else:
         resampled = getattr(series.resample(freq), method)()
 
-    # Forward-fill gaps
+    if gap_handling == 'mask':
+        return resampled.astype('float64')
+
+    if gap_handling == 'interpolate':
+        # Linear interpolation, but capped at gap_max_minutes so a multi-hour
+        # outage isn't smoothed into a synthetic ramp.
+        try:
+            inferred = pd.Timedelta(freq)
+            interval_min = max(1, int(inferred.total_seconds() // 60))
+        except Exception:
+            interval_min = 30
+        max_steps = max(1, int(gap_max_minutes // interval_min))
+        resampled = resampled.interpolate(
+            method='linear', limit=max_steps, limit_direction='forward'
+        )
+        # Leading NaNs (before the first observation) still need a value;
+        # back-fill those so the dataframe construction doesn't drop them.
+        resampled = resampled.bfill()
+        return resampled.astype('float64')
+
+    # Default / legacy: forward-fill, then back-fill leading NaNs.
     resampled = resampled.ffill()
-
-    # Back-fill any leading NaNs
     resampled = resampled.bfill()
-
     return resampled.astype('float64')
 
 
 def clip_outliers(
     series: pd.Series,
-    quantile: float = 0.995,
+    quantile: float = 0.999,
     positive_only: bool = False,
+    method: str = 'quantile',
+    lower_bound: str = 'auto',
 ) -> pd.Series:
     """
-    Clip extreme outliers using quantile-based bounds.
+    Clip extreme outliers.
 
     Parameters
     ----------
     series : pd.Series
         Input series to process.
-    quantile : float, default 0.95
-        Quantile for upper bound; lower bound is 1 - quantile.
+    quantile : float, default 0.999
+        Upper-tail quantile when ``method='quantile'``.
     positive_only : bool, default False
-        If True, only clip upper tail (assume data is non-negative).
-
-    Returns
-    -------
-    pd.Series
-        Series with outliers clipped to bounds.
-
-    Notes
-    -----
-    Uses symmetric quantiles: lower = (1-q), upper = q.
-    If positive_only=True, lower bound is 0.
+        Legacy alias for ``lower_bound='zero'`` when ``lower_bound='auto'``.
+    method : {'quantile', 'mad', 'off'}, default 'quantile'
+        ``mad`` uses median ± 3.5 · MAD (Iglewicz-Hoaglin). ``off`` returns
+        the series unchanged.
+    lower_bound : {'auto', 'zero', 'symmetric', 'off'}, default 'auto'
+        Lower-bound policy for ``method='quantile'``. ``auto`` uses zero
+        when ``positive_only`` is True else the symmetric (1-q) quantile.
     """
-    if not 0 < quantile < 1:
+    if method == 'off':
+        return series.copy()
+    if method not in ('quantile', 'mad'):
+        raise ValueError(
+            f"method must be 'quantile', 'mad', or 'off', got {method!r}"
+        )
+    if method == 'quantile' and not 0 < quantile < 1:
         raise ValueError(f'quantile must be in (0, 1), got {quantile}')
 
     series = series.copy()
     non_null = series.dropna()
-
     if len(non_null) < 2:
         logger.warning('Insufficient data for outlier clipping')
         return series
 
-    if positive_only:
-        lower = 0.0
-        upper = non_null.quantile(quantile)
+    if method == 'mad':
+        median = float(non_null.median())
+        mad = float((non_null - median).abs().median())
+        if mad == 0:
+            return series
+        k = 3.5
+        lower = median - k * mad
+        upper = median + k * mad
+        if positive_only:
+            lower = max(lower, 0.0)
     else:
-        lower = non_null.quantile(1 - quantile)
         upper = non_null.quantile(quantile)
+        if lower_bound == 'off':
+            lower = float(non_null.min())
+        elif lower_bound == 'zero':
+            lower = 0.0
+        elif lower_bound == 'symmetric':
+            lower = non_null.quantile(1 - quantile)
+        else:  # 'auto'
+            lower = 0.0 if positive_only else non_null.quantile(1 - quantile)
 
     clipped = series.clip(lower, upper)
     n_clipped = (clipped != series).sum()
     if n_clipped > 0:
         logger.debug(f'Clipped {n_clipped} outlier values')
-
     return clipped
 
 
-def apply_log_transform(series: pd.Series, shift: float = 1.0) -> pd.Series:
+def apply_log_transform(
+    series: pd.Series, shift: Optional[float] = None
+) -> pd.Series:
     """
-    Apply log transformation with shift for non-positive values.
+    Apply ``log(x + shift)`` to a series.
 
-    Parameters
-    ----------
-    series : pd.Series
-        Input series.
-    shift : float, default 1.0
-        Shift applied before log: log(x + shift).
-
-    Returns
-    -------
-    pd.Series
-        Log-transformed series.
-
-    Notes
-    -----
-    Stores shift value as attribute for later inversion.
+    When ``shift`` is None the shift is derived from the data:
+    ``max(1.0, abs(min(series)) + 1.0)`` so the transform is well-defined
+    even on signed targets, while remaining identical to the legacy
+    ``shift=1.0`` path for the non-negative HA targets the rest of the
+    pipeline produces. The chosen shift is stored on ``series.attrs`` so
+    ``invert_log_transform`` can read it back without the caller having
+    to thread it through.
     """
+    series = series.copy()
+    if shift is None:
+        try:
+            min_val = float(series.min())
+        except (TypeError, ValueError):
+            min_val = 0.0
+        shift = 1.0 if min_val >= 0 else abs(min_val) + 1.0
     if shift < 0:
         raise ValueError(f'shift must be >= 0, got {shift}')
 
-    series = series.copy()
     transformed = np.log(series + shift)
     transformed.attrs['log_shift'] = shift
-
     return transformed
 
 

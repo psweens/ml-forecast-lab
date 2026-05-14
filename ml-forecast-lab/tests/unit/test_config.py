@@ -12,9 +12,9 @@ class TestExperimentCfg:
         cfg = ExperimentCfg(name="test", target_entity="sensor.test")
         assert cfg.interval_minutes == 30
         assert cfg.cv_folds == 5
-        # Default flipped from mae → rmse pre-v2.27 (uses RMSE for ranking;
-        # tracks MAE/RMSE/MASE for display) but the test wasn't updated.
-        assert cfg.production_metric == "rmse"
+        # production_metric is seasonal_mase post-H-1 (vs same-time-yesterday
+        # baseline, matching the daily seasonality of typical HA sensors).
+        assert cfg.production_metric == "seasonal_mase"
         assert not cfg.source_is_cumulative
 
     def test_models_enabled_default(self):

@@ -134,7 +134,17 @@ def build_features(
         raise ValueError(f'interval_minutes must be >= 1, got {interval_minutes}')
 
     if lag_windows is None:
-        lag_windows = [6, 24, 72]
+        # Pick rolling windows by their hour-of-history meaning rather than
+        # by row count. At 30-min interval this resolves to [6, 24, 72] —
+        # the legacy default — and at 5-min interval it scales to [36, 144,
+        # 432] so the longest window still spans 36 h. Without this the
+        # model never sees the daily seasonality on small intervals.
+        steps_per_hour = max(1, 60 // max(interval_minutes, 1))
+        lag_windows = [
+            max(2, 3 * steps_per_hour),    # ~3 h
+            max(3, 12 * steps_per_hour),   # ~12 h
+            max(4, 36 * steps_per_hour),   # ~36 h
+        ]
 
     features = pd.DataFrame(index=df.index)
 
@@ -184,13 +194,17 @@ def build_features(
     for lag in range(1, n_lags + 1):
         features[f'y_lag_{lag}'] = _gate_by_past_ghi(target.shift(lag), lag)
 
-    # Rolling statistics (unchanged — training targets are already 0 at
-    # night for solar-driven sensors, so the rolling window naturally
-    # reflects the day+night mix and the model learns the pattern.)
+    # Rolling statistics — shift by 1 before rolling so the feature at row t
+    # spans target[t-w..t-1] (strictly past). Without the shift, pandas
+    # rolling is right-closed and includes target[t], which is the value
+    # being predicted: a hard look-ahead leak for tree backends and a
+    # train/inference distribution mismatch for the recursive forecast
+    # path that uses buf[-w:] (strictly past).
+    shifted_target = target.shift(1)
     for window in lag_windows:
-        features[f'y_rolling_mean_{window}'] = target.rolling(window=window).mean()
-        features[f'y_rolling_std_{window}'] = target.rolling(window=window).std()
-        features[f'y_rolling_max_{window}'] = target.rolling(window=window).max()
+        features[f'y_rolling_mean_{window}'] = shifted_target.rolling(window=window).mean()
+        features[f'y_rolling_std_{window}'] = shifted_target.rolling(window=window).std()
+        features[f'y_rolling_max_{window}'] = shifted_target.rolling(window=window).max()
 
     # Periodic lags — "same time yesterday/2-days-ago"
     steps_per_day = max(1, 1440 // interval_minutes)  # e.g. 48 for 30-min

@@ -1533,7 +1533,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"success": False, "error": "entity is required"})
 
         cov_dict = {"entity": entity}
-        for opt_field in ("role", "aggregation", "scale", "is_binary"):
+        for opt_field in (
+            "role", "aggregation", "scale", "is_binary",
+            "future_attribute", "future_value_key",
+        ):
             if opt_field in body and body[opt_field] is not None:
                 cov_dict[opt_field] = body[opt_field]
 
@@ -2104,7 +2107,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             cq = await asyncio.to_thread(
                 db.get_conformal_quantiles,
                 name, actuals_table,
-                0.8,
+                float(getattr(exp_cfg, 'conformal_coverage', 0.8)),
                 model_name,
                 exp_cfg.interval_minutes,
                 14,
@@ -3202,6 +3205,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         editable = {
             "cv_strategy": lambda v: v if v in ("walk_forward", "sliding_window") else None,
             "cv_folds": lambda v: int(v) if int(v) >= 2 else None,
+            "cv_embargo_periods": lambda v: int(v) if int(v) >= 0 else None,
             "recency_half_life_days": lambda v: float(v) if float(v) >= 0 else None,
             "days_history": lambda v: int(v) if int(v) >= 1 else None,
             "interval_minutes": lambda v: int(v) if int(v) >= 1 else None,
@@ -3211,14 +3215,21 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "log_transform": lambda v: bool(v),
             "forecast_every_minutes": lambda v: int(v) if int(v) >= 1 else None,
             "retrain_every_hours": lambda v: float(v) if float(v) >= 0.1 else None,
-            "production_metric": lambda v: v if v in ("mae", "rmse", "mase") else None,
-            "loss_fn": lambda v: v if v in ("mse", "mae", "huber") else None,
+            "production_metric": lambda v: v if v in ("mae", "rmse", "mase", "seasonal_mase") else None,
+            "loss_fn": lambda v: v if v in ("mse", "mae", "huber", "tweedie") else None,
             "optimiser": lambda v: v if v in ("adamw", "adam") else None,
             # UI sends bool (toggle); we map true→0.5, false→0.0. Raw float values
             # (e.g. from hand-edited YAML) pass through clamped to ≥ 0 so sophisticated
             # users can still override the default λ without UI churn.
-            "daily_loss_weight": lambda v: (0.5 if v else 0.0) if isinstance(v, bool) else max(0.0, float(v)),
+            "daily_loss_weight": lambda v: max(0.0, float(v)),
             "max_increment": lambda v: float(v) if float(v) > 0 else None,
+            "conformal_coverage": lambda v: float(v) if 0.5 <= float(v) <= 0.99 else None,
+            "country": lambda v: (str(v).strip().upper() or None) if v else None,
+            "gap_handling": lambda v: v if v in ("ffill", "interpolate", "mask") else None,
+            "gap_max_minutes": lambda v: int(v) if int(v) >= 1 else None,
+            "outlier_method": lambda v: v if v in ("quantile", "mad", "off") else None,
+            "outlier_quantile": lambda v: float(v) if 0.5 < float(v) < 1.0 else None,
+            "outlier_lower": lambda v: v if v in ("auto", "zero", "symmetric", "off") else None,
             "include_sun_elevation": lambda v: bool(v),
             "include_clear_sky_irradiance": lambda v: bool(v),
             "output_activation": lambda v: v if v in (
@@ -3227,7 +3238,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         }
 
         # Fields where None/null means "use global default" (valid, not an error)
-        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment"}
+        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country"}
 
         updates = {}
         for field, validator in editable.items():
