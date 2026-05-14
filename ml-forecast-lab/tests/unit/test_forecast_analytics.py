@@ -332,6 +332,17 @@ class TestCoverage:
         assert cov["overall"]["coverage"] == 1.0
 
     def test_model_filter_affects_counts(self, db, actuals_monotonic):
+        # v2.34.0: each model_name produces its own coverage value.
+        # When the caller passes model_name=None, the query no longer
+        # POOLS coverage across models (which produced a number
+        # that didn't correspond to any actually-published band).
+        # Instead, the SQL partitions per cohort and the result
+        # picks the single dominant cohort by sample count then
+        # by most recent model_version. With both cohorts at n=2 and
+        # no model_version pinned, the LIMIT 1 picks ONE of the two
+        # — either is correct semantically; what matters is that
+        # the value is one of the per-cohort coverages and never
+        # something like 0.5 (the pre-fix pooled mean).
         t = _targets_30min(datetime(2024, 6, 15, 8, 0), 2)
         # lgb: band covers actual
         _log_cycle(db, "exp", datetime(2024, 6, 15, 8, 0),
@@ -349,7 +360,29 @@ class TestCoverage:
             "exp", actuals_monotonic, max_age_days=GENEROUS_WINDOW, model_name=None)
         assert lgb["overall"]["coverage"] == 1.0
         assert tinker["overall"]["coverage"] == 0.0
-        assert mixed["overall"]["coverage"] == 0.5
+        # Mixed result is the dominant cohort's value — never the pooled mean.
+        assert mixed["overall"]["coverage"] in (0.0, 1.0)
+
+    def test_mixed_filter_picks_dominant_cohort_by_count(self, db, actuals_monotonic):
+        # When two cohorts have unequal sample counts, the larger
+        # cohort wins. This is the v2.34.0 invariant that prevents
+        # cross-cohort pooling silently producing meaningless numbers.
+        t = _targets_30min(datetime(2024, 6, 15, 8, 0), 3)
+        # lgb: 3 rows, band covers
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 8, 0),
+                   t, [16.0, 17.0, 18.0],
+                   upper=[17.0, 18.0, 19.0], lower=[15.0, 16.0, 17.0],
+                   model_name="lgb")
+        # tinker: 2 rows, band misses
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 8, 0),
+                   t[:2], [100.0, 100.0],
+                   upper=[101.0, 101.0], lower=[99.0, 99.0],
+                   model_name="tinker")
+        mixed = db.get_forecast_coverage(
+            "exp", actuals_monotonic, max_age_days=GENEROUS_WINDOW, model_name=None)
+        # lgb has more samples → wins. Coverage = lgb's 1.0, not pooled.
+        assert mixed["overall"]["coverage"] == 1.0
+        assert mixed["overall"]["n"] == 3
 
 
 # ---------------------------------------------------------------------
@@ -474,9 +507,15 @@ class TestStability:
         assert s["per_timestep"]["target_dt"] == []
 
     def test_model_filter_excludes_other_models(self, db):
-        # Same target, two distinct cycles each. lgb predicts tight;
-        # tinker predicts wildly. Stability should switch from
-        # artificially high (mixed) to low (filtered).
+        # v2.34.0: when model_name=None the query no longer pools
+        # cross-model cycles into a single inflated CV. The SQL
+        # partitions by cohort and picks ONE winner per target_dt
+        # (here both cohorts have n_cycles=2 so tie-break runs by
+        # most recent model_version — both NULL, so SQLite's row
+        # ordering decides). What matters is the result equals ONE
+        # of the per-model CVs, never the pre-fix pooled value of
+        # >20% that mixed lgb's tight predictions with tinker's wild
+        # ones.
         t = datetime(2024, 6, 15, 9, 0)
         _log_cycle(db, "exp", datetime(2024, 6, 15, 7, 0), [t], [5.0], "lgb")
         _log_cycle(db, "exp", datetime(2024, 6, 15, 8, 0), [t], [5.1], "lgb")
@@ -490,8 +529,36 @@ class TestStability:
             "exp", max_age_days=GENEROUS_WINDOW, source_is_cumulative=False,
             model_name="lgb",
         )
-        assert mixed["summary"]["median_step_cv_pct"] > 20
+        tinker = db.get_forecast_stability(
+            "exp", max_age_days=GENEROUS_WINDOW, source_is_cumulative=False,
+            model_name="tinker",
+        )
+        # Per-cohort values still bracket the truth.
         assert lgb["summary"]["median_step_cv_pct"] < 5
+        assert tinker["summary"]["median_step_cv_pct"] > 20
+        # Mixed: must equal ONE cohort's value, never the pooled mean.
+        mixed_cv = mixed["summary"]["median_step_cv_pct"]
+        assert mixed_cv == pytest.approx(lgb["summary"]["median_step_cv_pct"]) \
+            or mixed_cv == pytest.approx(tinker["summary"]["median_step_cv_pct"])
+
+    def test_mixed_filter_picks_dominant_cohort_by_count(self, db):
+        # v2.34.0 invariant: when cohorts differ in cycle count, the
+        # larger cohort wins. Prevents cross-cohort pooling silently
+        # producing a misleading "run-to-run swing".
+        t = datetime(2024, 6, 15, 9, 0)
+        # lgb has 3 cycles (more data) — should win
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 6, 0), [t], [5.0], "lgb")
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 7, 0), [t], [5.1], "lgb")
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 8, 0), [t], [5.2], "lgb")
+        # tinker has 2 cycles
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 7, 0), [t], [100], "tinker")
+        _log_cycle(db, "exp", datetime(2024, 6, 15, 8, 0), [t], [200], "tinker")
+        mixed = db.get_forecast_stability(
+            "exp", max_age_days=GENEROUS_WINDOW, source_is_cumulative=False,
+            model_name=None,
+        )
+        # Should match lgb's CV (low), not the pooled mean (huge).
+        assert mixed["summary"]["median_step_cv_pct"] < 5
 
     def test_daily_total_gates_on_full_coverage(self, db):
         """
@@ -644,8 +711,13 @@ class TestModelVersion:
     def test_version_filter_segregates_weight_regimes(self, db):
         """
         Same model_name, two weight regimes: v1 predicts ~100, v2
-        predicts ~5. Pooled stability CV is astronomical; filtered to
-        v2 only it collapses to the real single-regime disagreement.
+        predicts ~5.
+
+        v2.34.0: The SQL now self-protects against cross-cohort
+        pooling. Even with `model_version=None` (which previously
+        pooled v1 and v2 into a single astronomical CV), the result
+        is now one cohort's CV — never the pooled mean. v2-only
+        still collapses to the real single-regime disagreement.
         """
         t = datetime(2024, 6, 15, 9, 0)
         # v1: old weights, noisy-around-100 predictions
@@ -667,9 +739,20 @@ class TestModelVersion:
             "exp", max_age_days=GENEROUS_WINDOW, source_is_cumulative=False,
             model_name="lgb", model_version="v2",
         )
-        # Mixed: huge CV from pooling two regimes. v2-only: tight.
-        assert mixed["summary"]["median_step_cv_pct"] > 50
+        v1_only = db.get_forecast_stability(
+            "exp", max_age_days=GENEROUS_WINDOW, source_is_cumulative=False,
+            model_name="lgb", model_version="v1",
+        )
+        # Per-version values still bracket the true regimes.
         assert v2_only["summary"]["median_step_cv_pct"] < 5
+        assert v1_only["summary"]["median_step_cv_pct"] > 4   # ~5% of 105
+        # Mixed: cohort partitioning forces selection of ONE regime.
+        # With both at n_cycles=2 the tie-break picks the newer
+        # model_version (v2 > v1), so mixed should equal v2_only.
+        mixed_cv = mixed["summary"]["median_step_cv_pct"]
+        assert mixed_cv == pytest.approx(v2_only["summary"]["median_step_cv_pct"])
+        # Critically: never the pre-fix pooled value of >50.
+        assert mixed_cv < 10
 
     def test_version_filter_excludes_null_legacy_rows(self, db):
         """

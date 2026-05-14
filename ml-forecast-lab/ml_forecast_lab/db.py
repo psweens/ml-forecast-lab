@@ -575,9 +575,16 @@ class HistoryDB:
                 "  FROM actuals_grid"
                 ")"
             )
+            # v2.34.0: forecast_vals carries model_version so the
+            # per-cohort lead-time query below can GROUP BY it. The
+            # LAG window still PARTITIONs by issued_at, which is
+            # naturally within one (model_name, model_version)
+            # cohort — adding model_version to the partition would
+            # be redundant.
             forecast_vals_cte = (
                 "forecast_vals AS ("
-                "  SELECT experiment, model_name, issued_at, target_dt, lead_minutes,"
+                "  SELECT experiment, model_name, model_version,"
+                "         issued_at, target_dt, lead_minutes,"
                 "    CASE"
                 "      WHEN CAST(strftime('%s', target_dt) AS INTEGER)"
                 "           - CAST(strftime('%s', LAG(target_dt) OVER ("
@@ -602,7 +609,8 @@ class HistoryDB:
             )
             forecast_vals_cte = (
                 "forecast_vals AS ("
-                "  SELECT experiment, model_name, issued_at, target_dt, lead_minutes,"
+                "  SELECT experiment, model_name, model_version,"
+                "         issued_at, target_dt, lead_minutes,"
                 "         predicted AS value"
                 "  FROM forecast_log"
                 "  WHERE experiment = ? AND target_dt <= ? AND issued_at >= ?"
@@ -687,6 +695,84 @@ class HistoryDB:
             "me": [round(r[3], 4) for r in lead_rows],
             "sample_count": [r[4] for r in lead_rows],
         }
+
+        # v2.34.0: per-cohort breakdown of the same lead-time curve.
+        # The pooled `lead_time_curve` above stays unchanged (still
+        # meaningful as a headline error number) and is what the
+        # verdict-card chip + headline reads. The per-cohort
+        # decomposition feeds the multi-trace lead-time chart so the
+        # user can see how each retrain's error curve compares.
+        #
+        # Grouped by (lead_bucket, model_name, model_version) — every
+        # distinct cohort gets its own row per bucket. Skipped when
+        # the caller has already pinned a single cohort via the
+        # filter (only one cohort in the data, multi-trace would be
+        # a single line, runtime saved).
+        cohorts: list = []
+        if not (model_name and model_version):
+            try:
+                cursor.execute(f"""
+                    WITH actuals_grid AS (
+                        SELECT
+                            strftime('%Y-%m-%d %H:%M:%S',
+                                (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                                'unixepoch') AS grid_dt,
+                            AVG(value) AS value
+                        FROM {actuals_table}
+                        WHERE SUBSTR(ds, 1, 19) >= ?
+                        GROUP BY grid_dt
+                    ),
+                    {actuals_vals_cte},
+                    {forecast_vals_cte}
+                    SELECT
+                        fv.model_name,
+                        fv.model_version,
+                        CAST((fv.lead_minutes / ?) * ? AS INTEGER) AS lead_bucket,
+                        AVG(ABS(fv.value - av.value)) AS mae,
+                        SQRT(AVG((fv.value - av.value) * (fv.value - av.value))) AS rmse,
+                        AVG(fv.value - av.value) AS me,
+                        COUNT(*) AS n
+                    FROM forecast_vals fv
+                    INNER JOIN actuals_vals av
+                        ON av.grid_dt = fv.target_dt
+                    WHERE 1=1 {mode_filter}
+                    GROUP BY fv.model_name, fv.model_version, lead_bucket
+                    ORDER BY fv.model_name, fv.model_version, lead_bucket
+                """, (
+                    *actuals_grid_params,
+                    *actuals_vals_params,
+                    *forecast_vals_params,
+                    bucket_min, bucket_min,
+                ))
+                cohort_rows = cursor.fetchall()
+            except sqlite3.Error as e:
+                logger.warning(f"Per-cohort lead-time query failed: {e}")
+                cohort_rows = []
+
+            # Reshape: rows → list of cohort dicts, each with a
+            # lead_time_curve in the same shape as the pooled one.
+            cohort_map: dict = {}
+            for mn, mv, lb, mae, rmse, me_val, n in cohort_rows:
+                key = (mn, mv)
+                if key not in cohort_map:
+                    cohort_map[key] = {
+                        "model_name": mn,
+                        "model_version": mv,
+                        "lead_time_curve": {
+                            "lead_minutes": [],
+                            "mae": [],
+                            "rmse": [],
+                            "me": [],
+                            "sample_count": [],
+                        },
+                    }
+                ltc = cohort_map[key]["lead_time_curve"]
+                ltc["lead_minutes"].append(int(lb))
+                ltc["mae"].append(round(mae, 4))
+                ltc["rmse"].append(round(rmse, 4))
+                ltc["me"].append(round(me_val, 4))
+                ltc["sample_count"].append(int(n))
+            cohorts = list(cohort_map.values())
 
         # --- Revision improvement ---
         # Compare the FIRST forecast for each target_dt vs the LAST.
@@ -844,6 +930,7 @@ class HistoryDB:
             "experiment": experiment,
             "evaluation_mode": "increment" if increment else "raw",
             "lead_time_curve": lead_time_curve,
+            "cohorts": cohorts,
             "revision_improvement": revision,
             "typical_interval_demand": typical,
             "total_logged": total_logged,
@@ -1194,6 +1281,13 @@ class HistoryDB:
             params.append(model_version)
         model_filter = ("AND " + " AND ".join(_clauses)) if _clauses else ""
 
+        # v2.34.0: SELECT now carries (model_name, model_version) so
+        # the Python aggregation below can partition residuals by
+        # cohort and pick one winning cohort per lead bucket.
+        # Conformal quantiles calibrated against mixed-cohort residuals
+        # don't correspond to any actually-published band; the bands
+        # the user sees on the chart come from one specific weight
+        # regime, so the calibration target should too.
         try:
             cursor.execute(f"""
                 WITH actuals_grid AS (
@@ -1207,7 +1301,9 @@ class HistoryDB:
                 )
                 SELECT
                     CAST((fl.lead_minutes / ?) * ? AS INTEGER) AS lead_bucket,
-                    ABS(fl.predicted - ag.value) AS abs_residual
+                    ABS(fl.predicted - ag.value) AS abs_residual,
+                    fl.model_name,
+                    fl.model_version
                 FROM forecast_log fl
                 INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
                 WHERE fl.experiment = ?
@@ -1235,8 +1331,33 @@ class HistoryDB:
                 "level": level,
             }
 
-        df = pd.DataFrame(rows, columns=["lead_bucket", "abs_residual"])
-        df = df.dropna()
+        df = pd.DataFrame(
+            rows,
+            columns=["lead_bucket", "abs_residual", "model_name", "model_version"],
+        )
+        df = df.dropna(subset=["lead_bucket", "abs_residual"])
+
+        # Pick one cohort per lead_bucket — the one with the most
+        # residuals, breaking ties by newest model_version. Filters
+        # df down to residuals from the winning (lead_bucket, cohort)
+        # combinations before quantile estimation.
+        cohort_counts = (
+            df.groupby(["lead_bucket", "model_name", "model_version"], dropna=False)
+              .size()
+              .reset_index(name="n")
+              .sort_values(
+                  ["lead_bucket", "n", "model_version"],
+                  ascending=[True, False, False],
+              )
+        )
+        winners = cohort_counts.drop_duplicates("lead_bucket")[
+            ["lead_bucket", "model_name", "model_version"]
+        ]
+        df = df.merge(
+            winners,
+            on=["lead_bucket", "model_name", "model_version"],
+            how="inner",
+        )
 
         alpha = max(0.0, min(1.0, 1.0 - level))
         q = 1.0 - alpha / 2.0
@@ -1322,6 +1443,14 @@ class HistoryDB:
         model_filter_sql = (" AND " + " AND ".join(_clauses)) if _clauses else ""
         model_filter_param = tuple(_params)
 
+        # v2.34.0: per-lead coverage is computed per cohort and one
+        # winner picked per bucket (most rows, ties broken by newest
+        # version). Previously, when the caller's filter widened
+        # across versions or models, the coverage rate at a given lead
+        # would blend rows from differently-calibrated weight regimes
+        # — meaningful as an aggregate, but the verdict-card chip
+        # uses this number to judge whether THE current bands are
+        # well calibrated, which the blended value misrepresents.
         try:
             cursor.execute(f"""
                 WITH actuals_grid AS (
@@ -1332,21 +1461,35 @@ class HistoryDB:
                         AVG(value) AS value
                     FROM {actuals_table}
                     GROUP BY grid_dt
+                ),
+                per_cohort AS (
+                    SELECT
+                        CAST((fl.lead_minutes / ?) * ? AS INTEGER) AS lead_bucket,
+                        fl.model_name,
+                        fl.model_version,
+                        AVG(CASE WHEN ag.value BETWEEN fl.lower AND fl.upper
+                                 THEN 1.0 ELSE 0.0 END) AS coverage,
+                        COUNT(*) AS n
+                    FROM forecast_log fl
+                    INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
+                    WHERE fl.experiment = ?
+                      AND fl.target_dt <= ?
+                      AND fl.issued_at >= ?
+                      AND fl.upper IS NOT NULL
+                      AND fl.lower IS NOT NULL
+                      {model_filter_sql}
+                    GROUP BY lead_bucket, fl.model_name, fl.model_version
+                ),
+                ranked AS (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY lead_bucket
+                        ORDER BY n DESC, model_version DESC
+                    ) AS rn
+                    FROM per_cohort
                 )
-                SELECT
-                    CAST((fl.lead_minutes / ?) * ? AS INTEGER) AS lead_bucket,
-                    AVG(CASE WHEN ag.value BETWEEN fl.lower AND fl.upper
-                             THEN 1.0 ELSE 0.0 END) AS coverage,
-                    COUNT(*) AS n
-                FROM forecast_log fl
-                INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
-                WHERE fl.experiment = ?
-                  AND fl.target_dt <= ?
-                  AND fl.issued_at >= ?
-                  AND fl.upper IS NOT NULL
-                  AND fl.lower IS NOT NULL
-                  {model_filter_sql}
-                GROUP BY lead_bucket
+                SELECT lead_bucket, coverage, n
+                FROM ranked
+                WHERE rn = 1
                 ORDER BY lead_bucket
             """, (
                 interval_sec, interval_sec,
@@ -1365,6 +1508,13 @@ class HistoryDB:
             "n": [int(r[2]) for r in by_lead_rows],
         }
 
+        # v2.34.0: overall coverage picks the dominant cohort the same
+        # way the per-lead query does, so the headline number that
+        # feeds the verdict-card chip reflects ONE weight regime's
+        # calibration. Mixing regimes here previously produced a
+        # number that didn't correspond to any actually-published
+        # band, which made calibration drift look better or worse
+        # than it really was for the current champion.
         try:
             cursor.execute(f"""
                 WITH actuals_grid AS (
@@ -1375,19 +1525,28 @@ class HistoryDB:
                         AVG(value) AS value
                     FROM {actuals_table}
                     GROUP BY grid_dt
+                ),
+                per_cohort AS (
+                    SELECT
+                        fl.model_name,
+                        fl.model_version,
+                        AVG(CASE WHEN ag.value BETWEEN fl.lower AND fl.upper
+                                 THEN 1.0 ELSE 0.0 END) AS coverage,
+                        COUNT(*) AS n
+                    FROM forecast_log fl
+                    INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
+                    WHERE fl.experiment = ?
+                      AND fl.target_dt <= ?
+                      AND fl.issued_at >= ?
+                      AND fl.upper IS NOT NULL
+                      AND fl.lower IS NOT NULL
+                      {model_filter_sql}
+                    GROUP BY fl.model_name, fl.model_version
                 )
-                SELECT
-                    AVG(CASE WHEN ag.value BETWEEN fl.lower AND fl.upper
-                             THEN 1.0 ELSE 0.0 END) AS coverage,
-                    COUNT(*) AS n
-                FROM forecast_log fl
-                INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
-                WHERE fl.experiment = ?
-                  AND fl.target_dt <= ?
-                  AND fl.issued_at >= ?
-                  AND fl.upper IS NOT NULL
-                  AND fl.lower IS NOT NULL
-                  {model_filter_sql}
+                SELECT coverage, n
+                FROM per_cohort
+                ORDER BY n DESC, model_version DESC
+                LIMIT 1
             """, (
                 interval_sec, interval_sec,
                 experiment, now_str, cutoff_str,
@@ -1638,12 +1797,28 @@ class HistoryDB:
         # identity: Var(X) = E[X^2] - E[X]^2. The subtraction can go
         # very slightly negative on perfectly-constant columns due to
         # float rounding, so clamp before SQRT.
+        #
+        # v2.34.0: partition by (model_name, model_version) so cross-
+        # cohort pooling is impossible. The previous query grouped by
+        # target_dt alone — when the caller's filter widened (e.g.
+        # `model=catboost` with no version pin, or `model=all`), a
+        # single target_dt could pool predictions from old + new
+        # weight regimes, mixing tuning runs together and inflating
+        # the std as "model instability" when it was actually
+        # "different weights making different predictions". With this
+        # change, each (target_dt, model_name, model_version) cohort
+        # produces its own mean/std; ROW_NUMBER picks one cohort per
+        # target_dt — preferring the one with most data, breaking
+        # ties by most recent version. The output shape is unchanged
+        # so the caller stays oblivious.
         try:
             cursor.execute(
                 f"""
-                WITH per_target AS (
+                WITH per_cohort AS (
                     SELECT
                         target_dt,
+                        model_name,
+                        model_version,
                         AVG(predicted)              AS mean_p,
                         AVG(predicted * predicted) AS mean_pp,
                         COUNT(DISTINCT issued_at)  AS n_cycles
@@ -1651,8 +1826,15 @@ class HistoryDB:
                     WHERE experiment = ?
                       AND issued_at >= ?
                       {model_filter_sql}
-                    GROUP BY target_dt
+                    GROUP BY target_dt, model_name, model_version
                     HAVING n_cycles >= 2
+                ),
+                ranked AS (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY target_dt
+                        ORDER BY n_cycles DESC, model_version DESC
+                    ) AS rn
+                    FROM per_cohort
                 )
                 SELECT
                     target_dt,
@@ -1661,7 +1843,8 @@ class HistoryDB:
                          THEN SQRT(mean_pp - mean_p * mean_p)
                          ELSE 0 END AS std_p,
                     n_cycles
-                FROM per_target
+                FROM ranked
+                WHERE rn = 1
                 ORDER BY target_dt ASC
                 """,
                 (experiment, cutoff_str, *model_filter_param),
@@ -1739,11 +1922,22 @@ class HistoryDB:
                 )
                 day_params = (off_seconds,)
             try:
+                # v2.34.0: per_cycle_day now also tracks model identity
+                # so the day_max + full_cov + final aggregation each
+                # respect cohort boundaries. A retrain mid-window
+                # produced two regimes' worth of daily totals being
+                # pooled into a single day's std — meaningless and
+                # alarming. Now each (day, model_name, model_version)
+                # cohort produces its own mean/std; ROW_NUMBER picks
+                # the cohort with most cycles per day (ties broken by
+                # most recent version) and returns its scalars.
                 cursor.execute(
                     f"""
                     WITH per_cycle_day AS (
                         SELECT
                             issued_at,
+                            model_name,
+                            model_version,
                             {day_expr}                   AS day,
                             SUM(predicted)               AS daily_total,
                             COUNT(*)                     AS n_bins
@@ -1751,29 +1945,54 @@ class HistoryDB:
                         WHERE experiment = ?
                           AND issued_at >= ?
                           {model_filter_sql}
-                        GROUP BY issued_at, day
+                        GROUP BY issued_at, model_name, model_version, day
                     ),
-                    day_max AS (
-                        SELECT day, MAX(n_bins) AS max_bins
+                    day_cohort_max AS (
+                        SELECT day, model_name, model_version,
+                               MAX(n_bins) AS max_bins
                         FROM per_cycle_day
-                        GROUP BY day
+                        GROUP BY day, model_name, model_version
                     ),
                     full_cov AS (
                         SELECT pcd.*
                         FROM per_cycle_day pcd
-                        INNER JOIN day_max dm
-                          ON dm.day = pcd.day
-                         AND pcd.n_bins = dm.max_bins
+                        INNER JOIN day_cohort_max dcm
+                          ON dcm.day = pcd.day
+                         AND dcm.model_name = pcd.model_name
+                         AND (
+                             (dcm.model_version IS NULL AND pcd.model_version IS NULL)
+                             OR dcm.model_version = pcd.model_version
+                         )
+                         AND pcd.n_bins = dcm.max_bins
+                    ),
+                    per_cohort AS (
+                        SELECT
+                            day,
+                            model_name,
+                            model_version,
+                            AVG(daily_total)                AS mean_total,
+                            AVG(daily_total * daily_total) AS mean_tt,
+                            COUNT(DISTINCT issued_at)       AS n_cycles,
+                            MAX(n_bins)                     AS max_bins_in_day
+                        FROM full_cov
+                        GROUP BY day, model_name, model_version
+                        HAVING n_cycles >= 2
+                    ),
+                    ranked AS (
+                        SELECT *, ROW_NUMBER() OVER (
+                            PARTITION BY day
+                            ORDER BY n_cycles DESC, model_version DESC
+                        ) AS rn
+                        FROM per_cohort
                     )
                     SELECT
                         day,
-                        AVG(daily_total)                  AS mean_total,
-                        AVG(daily_total * daily_total)   AS mean_tt,
-                        COUNT(DISTINCT issued_at)         AS n_cycles,
-                        MAX(n_bins)                       AS max_bins_in_day
-                    FROM full_cov
-                    GROUP BY day
-                    HAVING n_cycles >= 2
+                        mean_total,
+                        mean_tt,
+                        n_cycles,
+                        max_bins_in_day
+                    FROM ranked
+                    WHERE rn = 1
                     ORDER BY day ASC
                     """,
                     (*day_params, experiment, cutoff_str, *model_filter_param),
@@ -1808,6 +2027,74 @@ class HistoryDB:
         except sqlite3.Error:
             cyc_row = (0, None, None)
 
+        # v2.34.0: per-cohort breakdown of run-to-run std.
+        # The main `per_timestep` arrays above carry the
+        # dominant-cohort value per target_dt (post-Commit-1
+        # partitioning). The `cohorts` array gives the full
+        # per-(model_name, model_version) breakdown so the
+        # frontend multi-trace stability chart can render one
+        # line per cohort. Skipped when the caller has pinned
+        # a specific cohort (only one cohort in data, multi-
+        # trace would be redundant).
+        stability_cohorts: list = []
+        if not (model_name and model_version):
+            try:
+                cursor.execute(
+                    f"""
+                    SELECT
+                        target_dt, model_name, model_version,
+                        AVG(predicted) AS mean_p,
+                        AVG(predicted * predicted) AS mean_pp,
+                        COUNT(DISTINCT issued_at) AS n_cycles
+                    FROM forecast_log
+                    WHERE experiment = ?
+                      AND issued_at >= ?
+                      {model_filter_sql}
+                    GROUP BY target_dt, model_name, model_version
+                    HAVING n_cycles >= 2
+                    ORDER BY model_name, model_version, target_dt
+                    """,
+                    (experiment, cutoff_str, *model_filter_param),
+                )
+                cohort_rows = cursor.fetchall()
+            except sqlite3.Error as e:
+                logger.warning(f"Per-cohort stability query failed: {e}")
+                cohort_rows = []
+
+            cohort_map: dict = {}
+            for tdt, mn, mv, mean_p, mean_pp, nc in cohort_rows:
+                mean_p = float(mean_p or 0)
+                mean_pp = float(mean_pp or 0)
+                var = mean_pp - mean_p * mean_p
+                std_p = (var ** 0.5) if var > 0 else 0.0
+                if abs(mean_p) < 1e-9:
+                    if std_p < 1e-9:
+                        cv = 0.0
+                    else:
+                        continue
+                else:
+                    cv = 100.0 * std_p / abs(mean_p)
+                key = (mn, mv)
+                if key not in cohort_map:
+                    cohort_map[key] = {
+                        "model_name": mn,
+                        "model_version": mv,
+                        "per_timestep": {
+                            "target_dt": [],
+                            "mean": [],
+                            "std": [],
+                            "cv_pct": [],
+                            "n_cycles": [],
+                        },
+                    }
+                pt = cohort_map[key]["per_timestep"]
+                pt["target_dt"].append(tdt)
+                pt["mean"].append(round(mean_p, 4))
+                pt["std"].append(round(std_p, 4))
+                pt["cv_pct"].append(round(cv, 2))
+                pt["n_cycles"].append(int(nc))
+            stability_cohorts = list(cohort_map.values())
+
         return {
             "experiment": experiment,
             "per_timestep": {
@@ -1817,6 +2104,7 @@ class HistoryDB:
                 "cv_pct": cv_pcts,
                 "n_cycles": n_cycles_list,
             },
+            "cohorts": stability_cohorts,
             "daily_totals": daily_totals,
             "summary": {
                 "median_step_cv_pct": median_step_cv,

@@ -2362,6 +2362,39 @@ window.showTab = function(el) {
         '#fb923c', '#a78bfa', '#34d399', '#f87171', '#facc15'
     ];
 
+    // v2.34.0: stable per-cohort colour mapping. The multi-trace
+    // lead-time chart, stability std chart, and retrain-history chip
+    // strip ALL use this so the same cohort wears the same colour
+    // across the whole page. Hashing model_version (or model_name when
+    // version is null) into PLOT_COLORWAY gives deterministic colour
+    // per cohort without state — refreshing the page picks the same
+    // colour for the same cohort.
+    function _cohortColor(modelName, modelVersion) {
+        var key = String(modelName || '') + '|' + String(modelVersion || '');
+        var h = 0;
+        for (var i = 0; i < key.length; i++) {
+            h = ((h << 5) - h) + key.charCodeAt(i);
+            h |= 0;  // 32-bit
+        }
+        return PLOT_COLORWAY[Math.abs(h) % PLOT_COLORWAY.length];
+    }
+    // Short cohort label for legends / tooltips. Falls back gracefully
+    // when model_version is null (legacy rows from before the retrain-
+    // tagging work landed).
+    function _cohortLabel(modelName, modelVersion) {
+        var name = modelName || '—';
+        if (!modelVersion) return name;
+        // Trim ISO timestamp to "DD MMM HH:MM" so the legend stays compact.
+        var d = toLocalDate(modelVersion.replace('Z', ''));
+        if (d && !isNaN(d.getTime())) {
+            var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            return name + ' (' + d.getDate() + ' ' + months[d.getMonth()]
+                + ' ' + d.getHours().toString().padStart(2, '0')
+                + ':' + d.getMinutes().toString().padStart(2, '0') + ')';
+        }
+        return name + ' (' + modelVersion + ')';
+    }
+
     // Model-id → display-name mapping, derived from MODEL_CATALOG server-side
     // so chart legends and live training labels show proper-cased names.
     var MODEL_DISPLAY = {{ model_catalog | map(attribute='name') | list | tojson }}.reduce(function(acc, n, i) {
@@ -2678,21 +2711,60 @@ window.showTab = function(el) {
     function _readUrlFilter() {
         try {
             var sp = new URLSearchParams(window.location.search);
+            // v2.34.0: `?versions=` is the multi-select form. When
+            // present, single-select `?model=&version=` are ignored
+            // (multi takes precedence). Empty `versions` (e.g.
+            // `?versions=`) is treated as "no selection" — same as
+            // omitting the param.
+            var raw = sp.get('versions');
+            var versions = null;
+            if (raw !== null && raw !== '') {
+                versions = new Set(raw.split(',').filter(Boolean));
+            }
             return {
                 model: sp.get('model') || null,
                 version: sp.get('version') || null,
+                versions: versions,
             };
         } catch (e) {
-            return { model: null, version: null };
+            return { model: null, version: null, versions: null };
         }
     }
     var _activeFilter = _readUrlFilter();
 
     function _filterQs() {
+        // Multi-select path: the backend doesn't receive a filter —
+        // it returns the full `cohorts` array, and the frontend
+        // filters which to render. Keeps the backend simple (no need
+        // to parse a list, no SQL `IN (?, ?, …)` rewrite) and lets
+        // a single API call serve any multi-cohort selection on the
+        // page without re-fetching.
+        if (_activeFilter.versions && _activeFilter.versions.size > 0) {
+            return '';
+        }
         var bits = [];
         if (_activeFilter.model) bits.push('model=' + encodeURIComponent(_activeFilter.model));
         if (_activeFilter.version) bits.push('version=' + encodeURIComponent(_activeFilter.version));
         return bits.length ? ('&' + bits.join('&')) : '';
+    }
+
+    // Per-cohort key used by the multi-select Set. Combines model_name
+    // and model_version so cohorts from different models don't alias
+    // each other if they happen to share a timestamp (extremely rare,
+    // but the cost of the model_name prefix is small).
+    function _versionKey(modelName, modelVersion) {
+        return String(modelName || '') + '::' + String(modelVersion || '');
+    }
+    // Apply the multi-select to a cohort array. Empty selection → show
+    // all. Non-empty → keep only matching cohorts (preserving order so
+    // the chart trace order stays stable).
+    function _filterCohortsBySelection(cohorts) {
+        if (!cohorts || !cohorts.length) return cohorts;
+        var sel = _activeFilter.versions;
+        if (!sel || sel.size === 0) return cohorts;
+        return cohorts.filter(function(c) {
+            return sel.has(_versionKey(c.model_name, c.model_version));
+        });
     }
 
     // Format a chip timestamp using the active accuracyTz (NEW-D3.4).
@@ -2739,21 +2811,34 @@ window.showTab = function(el) {
         var sorted = rh.slice().sort(function(a, b) {
             return (a.first_seen < b.first_seen) ? 1 : -1;
         });
+        // v2.34.0: multi-select mode reads `_activeFilter.versions`
+        // (a Set keyed by `model::version`). Plain click = single
+        // focus (legacy behaviour). Cmd/Ctrl-click = toggle inclusion
+        // in the multi-set. Shift-click = range select between the
+        // last clicked chip and this one.
+        var multi = _activeFilter.versions;
+        var multiActive = !!(multi && multi.size > 0);
         var visible = _retrainChipsExpanded ? sorted : sorted.slice(0, RETRAIN_CHIPS_CAP);
-        visible.forEach(function(ev) {
-            var isActive = (ev.model_name === activeModel)
-                        && (ev.model_version === activeVersion);
+        visible.forEach(function(ev, idx) {
+            var key = _versionKey(ev.model_name, ev.model_version);
+            var isSingleActive = (ev.model_name === activeModel)
+                              && (ev.model_version === activeVersion);
+            var isMultiSelected = multiActive && multi.has(key);
+            var isHighlighted = isSingleActive || isMultiSelected;
             var chip = document.createElement('a');
             chip.href = '?version=' + encodeURIComponent(ev.model_version)
                 + (ev.model_name ? '&model=' + encodeURIComponent(ev.model_name) : '')
                 + '#sec-forecast-accuracy';
             chip.title = ev.model_name + ' v=' + ev.model_version
                 + '\nFirst seen: ' + ev.first_seen
-                + '\n' + ev.n_forecasts + ' forecast row(s)';
+                + '\n' + ev.n_forecasts + ' forecast row(s)'
+                + '\n\nClick: focus on this cohort'
+                + '\nCmd/Ctrl-click: add/remove from overlay'
+                + '\nShift-click: range select';
             var base = 'display:inline-flex;align-items:center;gap:0.4rem;'
                 + 'padding:0.25rem 0.7rem;border-radius:1.2rem;'
                 + 'font-size:0.78rem;text-decoration:none;cursor:pointer;';
-            if (isActive) {
+            if (isHighlighted) {
                 chip.style.cssText = base
                     + 'border:1px solid var(--accent-secondary);'
                     + 'background:rgba(0,212,255,0.12);'
@@ -2764,22 +2849,37 @@ window.showTab = function(el) {
                     + 'background:var(--bg-tertiary);'
                     + 'color:var(--text-secondary);';
             }
+            // v2.34.0: per-cohort colour dot — same hash as the
+            // lead-time + stability multi-trace charts, so the chip
+            // and its line on the charts wear matching colour.
+            var chipColour = _cohortColor(ev.model_name, ev.model_version);
+            var statusBadge = '';
+            if (isSingleActive) {
+                statusBadge = '<span style="color:var(--accent-secondary);font-size:0.65rem;font-weight:600;">active</span>';
+            } else if (isMultiSelected) {
+                statusBadge = '<span style="color:var(--accent-secondary);font-size:0.65rem;font-weight:600;">✓</span>';
+            }
             chip.innerHTML =
-                '<span style="color:var(--accent-secondary);font-weight:600;">'
+                '<span style="display:inline-block;width:8px;height:8px;'
+                + 'border-radius:50%;background:' + chipColour + ';'
+                + 'flex-shrink:0;"></span>'
+                + '<span style="color:var(--accent-secondary);font-weight:600;">'
                 + _formatChipTs(ev.first_seen) + '</span>'
                 + '<span style="color:var(--text-primary);">'
                 + (ev.model_name || '—') + '</span>'
                 + '<span style="color:var(--text-muted);">'
                 + ev.n_forecasts + ' rows</span>'
-                + (isActive ? '<span style="color:var(--accent-secondary);font-size:0.65rem;font-weight:600;">active</span>' : '');
-            // NEW-D3.2: soft filter — pushState + reload data, don't
-            // navigate. Falls back to the href on middle-click /
-            // ctrl-click (which we want to preserve so users can open
-            // a filtered view in a new tab).
+                + statusBadge;
             chip.addEventListener('click', function(e) {
-                if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
+                if (e.button === 1) return;  // middle-click → open in new tab
                 e.preventDefault();
-                _applyChipFilter(ev.model_name, ev.model_version);
+                if (e.metaKey || e.ctrlKey) {
+                    _toggleChipInSelection(ev.model_name, ev.model_version);
+                } else if (e.shiftKey) {
+                    _rangeSelectChips(sorted, idx);
+                } else {
+                    _applyChipFilter(ev.model_name, ev.model_version);
+                }
             });
             chipsHost.appendChild(chip);
         });
@@ -2799,8 +2899,9 @@ window.showTab = function(el) {
             });
             chipsHost.appendChild(toggle);
         }
-        // "Clear filter" pill when a filter is active.
-        if (activeModel || activeVersion) {
+        // "Clear filter" pill — shown whenever ANY filter is active
+        // (single-select OR multi-select).
+        if (activeModel || activeVersion || multiActive) {
             var clearBtn = document.createElement('button');
             clearBtn.type = 'button';
             clearBtn.style.cssText = 'background:transparent;border:1px solid var(--border);'
@@ -2813,20 +2914,34 @@ window.showTab = function(el) {
             chipsHost.appendChild(clearBtn);
         }
         if (summary) {
-            summary.textContent = sorted.length + ' retrain'
-                + (sorted.length !== 1 ? 's' : '') + ' in window · click to filter';
+            var hint;
+            if (multiActive) {
+                hint = multi.size + ' cohort'
+                    + (multi.size !== 1 ? 's' : '')
+                    + ' on overlay · click to focus on one';
+            } else {
+                hint = sorted.length + ' retrain'
+                    + (sorted.length !== 1 ? 's' : '')
+                    + ' in window · click to focus, Cmd/Ctrl-click to compare';
+            }
+            summary.textContent = hint;
         }
         card.style.display = '';
     }
 
-    // Apply a (model, version) filter softly — update URL + state +
-    // re-fetch all FA endpoints. null/null clears the filter.
+    // Plain chip click — focus on a single cohort. Sets URL
+    // `?model=&version=`, clears any multi-selection, re-fetches.
     function _applyChipFilter(model, version) {
-        _activeFilter = { model: model || null, version: version || null };
+        _activeFilter = {
+            model: model || null,
+            version: version || null,
+            versions: null,
+        };
         try {
             var sp = new URLSearchParams(window.location.search);
             if (model) sp.set('model', model); else sp.delete('model');
             if (version) sp.set('version', version); else sp.delete('version');
+            sp.delete('versions');
             var qs = sp.toString();
             var newUrl = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash;
             window.history.pushState({}, '', newUrl);
@@ -2835,6 +2950,102 @@ window.showTab = function(el) {
         // would serve stale data. Bust it before reloading.
         if (window.accuracyFetchInvalidate) window.accuracyFetchInvalidate();
         if (window.reloadAccuracyAll) window.reloadAccuracyAll();
+    }
+
+    // v2.34.0: Cmd/Ctrl-click — toggle a cohort in the multi-select
+    // set. Updates URL `?versions=key1,key2`. When the set drops to
+    // empty, the filter clears (charts revert to "show all cohorts").
+    function _toggleChipInSelection(modelName, modelVersion) {
+        var key = _versionKey(modelName, modelVersion);
+        var sel = _activeFilter.versions
+            ? new Set(_activeFilter.versions)
+            : new Set();
+        if (sel.has(key)) {
+            sel.delete(key);
+        } else {
+            sel.add(key);
+        }
+        _activeFilter = {
+            model: null,
+            version: null,
+            versions: sel.size ? sel : null,
+        };
+        try {
+            var sp = new URLSearchParams(window.location.search);
+            sp.delete('model');
+            sp.delete('version');
+            if (sel.size) {
+                sp.set('versions', Array.from(sel).join(','));
+            } else {
+                sp.delete('versions');
+            }
+            var qs = sp.toString();
+            var newUrl = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash;
+            window.history.pushState({}, '', newUrl);
+        } catch (e) {}
+        // No fetch invalidation needed — the backend response is the
+        // same (full cohorts array). The frontend re-filters its
+        // already-cached payload. Re-render directly using the last
+        // accuracy + stability data so we don't pay the SQL round-
+        // trip just to flip a checkbox.
+        if (_lastAccuracyData) {
+            try { loadForecastAccuracy(); } catch (e) {}
+        }
+        if (_lastStabilityData) {
+            try { _renderStabilityCharts(_lastStabilityData); } catch (e) {}
+        }
+        // Re-render the chip strip itself so selection highlights and
+        // "Clear filter" pill reflect the new state.
+        if (_lastAccuracyData) {
+            try { _renderRetrainChips(_lastAccuracyData); } catch (e) {}
+        }
+    }
+
+    // v2.34.0: Shift-click — range select. Adds every chip from the
+    // last clicked one to this one (inclusive). When no last-clicked
+    // exists yet, treated as a plain Cmd-click.
+    var _lastChipClickIdx = null;
+    function _rangeSelectChips(sortedChips, idx) {
+        if (_lastChipClickIdx === null) {
+            // No anchor yet — fall through to single-toggle behaviour.
+            var ev = sortedChips[idx];
+            _toggleChipInSelection(ev.model_name, ev.model_version);
+            _lastChipClickIdx = idx;
+            return;
+        }
+        var lo = Math.min(_lastChipClickIdx, idx);
+        var hi = Math.max(_lastChipClickIdx, idx);
+        var sel = _activeFilter.versions
+            ? new Set(_activeFilter.versions)
+            : new Set();
+        for (var i = lo; i <= hi; i++) {
+            var c = sortedChips[i];
+            sel.add(_versionKey(c.model_name, c.model_version));
+        }
+        _activeFilter = {
+            model: null,
+            version: null,
+            versions: sel.size ? sel : null,
+        };
+        try {
+            var sp = new URLSearchParams(window.location.search);
+            sp.delete('model');
+            sp.delete('version');
+            sp.set('versions', Array.from(sel).join(','));
+            var qs = sp.toString();
+            var newUrl = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash;
+            window.history.pushState({}, '', newUrl);
+        } catch (e) {}
+        _lastChipClickIdx = idx;
+        if (_lastAccuracyData) {
+            try { loadForecastAccuracy(); } catch (e) {}
+        }
+        if (_lastStabilityData) {
+            try { _renderStabilityCharts(_lastStabilityData); } catch (e) {}
+        }
+        if (_lastAccuracyData) {
+            try { _renderRetrainChips(_lastAccuracyData); } catch (e) {}
+        }
     }
     // Keep state in sync with back/forward navigation.
     window.addEventListener('popstate', function() {
@@ -3152,8 +3363,67 @@ window.showTab = function(el) {
             function maskBy(arr, pred) { return arr.map(function(v, i) { return pred(i) ? v : null; }); }
             var strong = function(i) { return (ltc.sample_count[i] || 0) >= LEADBUCKET_MIN_N; };
             var weak   = function(i) { return (ltc.sample_count[i] || 0) <  LEADBUCKET_MIN_N; };
-            var traces = [
-                {
+            var traces = [];
+
+            // v2.34.0: multi-cohort MAE overlay. When the response
+            // carries ≥2 (model_name, model_version) cohorts (i.e. the
+            // user hasn't pinned one via the chip strip and the
+            // window contains a retrain or model switch), emit one
+            // MAE trace per cohort instead of the single pooled line.
+            // Each cohort is coloured deterministically via
+            // _cohortColor so the chart, legend, and retrain-history
+            // chips all agree. Plotly's legend supports click-to-
+            // hide natively. RMSE / Bias stay single-cohort (the
+            // pooled values from lead_time_curve) so the chart
+            // doesn't get cluttered with N×3 lines.
+            // v2.34.0: apply the multi-select to the cohort list
+            // before checking the ≥2 threshold. If the user has
+            // narrowed to a single cohort via the chip strip, the
+            // chart falls back to the single-trace path (using the
+            // pooled lead_time_curve — which now reflects that
+            // single cohort because the backend was filtered, OR
+            // because the SQL partitioning + Commit 1's correctness
+            // pass ensures the dominant cohort wins).
+            var _allCohorts = data.cohorts || [];
+            var _vCohorts = _filterCohortsBySelection(_allCohorts);
+            var cohorts = (_vCohorts && _vCohorts.length >= 2) ? _vCohorts : null;
+            if (cohorts) {
+                cohorts.forEach(function(c) {
+                    var c_ltc = c.lead_time_curve || {};
+                    var c_x = (c_ltc.lead_minutes || []).map(function(m) { return m / 60; });
+                    var c_strong = function(i) { return (c_ltc.sample_count[i] || 0) >= LEADBUCKET_MIN_N; };
+                    var c_weak   = function(i) { return (c_ltc.sample_count[i] || 0) <  LEADBUCKET_MIN_N; };
+                    var colour = _cohortColor(c.model_name, c.model_version);
+                    var label = _cohortLabel(c.model_name, c.model_version);
+                    traces.push({
+                        x: c_x,
+                        y: maskBy(c_ltc.mae || [], c_strong),
+                        name: label,
+                        type: 'scatter',
+                        mode: 'lines+markers',
+                        line: { color: colour, width: 2.5 },
+                        marker: { size: 6, color: colour },
+                        hovertemplate: label + '<br>MAE %{y:.3f} (n=%{customdata})<extra></extra>',
+                        customdata: c_ltc.sample_count || [],
+                        connectgaps: true,
+                        legendgroup: label,
+                    });
+                    traces.push({
+                        x: c_x,
+                        y: maskBy(c_ltc.mae || [], c_weak),
+                        type: 'scatter',
+                        mode: 'markers',
+                        marker: { size: 6, color: colour, opacity: 0.35, symbol: 'circle-open' },
+                        hovertemplate: label + '<br>MAE %{y:.3f} (n=%{customdata}, low confidence)<extra></extra>',
+                        customdata: c_ltc.sample_count || [],
+                        legendgroup: label,
+                        showlegend: false,
+                    });
+                });
+            } else {
+                // Single-cohort path (user has pinned a cohort, or only
+                // one exists in the window). Identical to v2.33.x.
+                traces.push({
                     x: xHours, y: maskBy(ltc.mae, strong), name: 'MAE',
                     type: 'scatter', mode: 'lines+markers',
                     line: { color: '#ff6b6b', width: 2.5 },
@@ -3161,26 +3431,30 @@ window.showTab = function(el) {
                     hovertemplate: 'MAE %{y:.3f} (n=%{customdata})<extra></extra>',
                     customdata: ltc.sample_count,
                     connectgaps: true,
-                },
-                {
+                });
+                traces.push({
                     x: xHours, y: maskBy(ltc.mae, weak), name: 'MAE (low n)',
                     type: 'scatter', mode: 'markers',
                     marker: { size: 6, color: '#ff6b6b', opacity: 0.35, symbol: 'circle-open' },
                     hovertemplate: 'MAE %{y:.3f} (n=%{customdata}, low confidence)<extra></extra>',
                     customdata: ltc.sample_count,
                     showlegend: false,
-                },
-            ];
+                });
+            }
             if (showDetail) {
+                // RMSE / Bias are read from the pooled lead_time_curve —
+                // adding per-cohort variants would clutter the chart
+                // with N×3 traces. Toggle them on when a deeper view is
+                // wanted; the multi-cohort MAE is the headline.
                 traces.push({
-                    x: xHours, y: ltc.rmse, name: 'RMSE',
+                    x: xHours, y: ltc.rmse, name: 'RMSE (all cohorts)',
                     type: 'scatter', mode: 'lines+markers',
                     line: { color: '#4d96ff', width: 2, dash: 'dot' },
                     marker: { size: 4 },
                     hovertemplate: 'RMSE %{y:.3f}<extra></extra>',
                 });
                 traces.push({
-                    x: xHours, y: ltc.me, name: 'Bias (ME)',
+                    x: xHours, y: ltc.me, name: 'Bias (all cohorts)',
                     type: 'scatter', mode: 'lines+markers',
                     // LOW-4: neutral yellow — bias is signed, no "good"
                     // direction; green encodes "good" elsewhere in the UI
@@ -4041,28 +4315,74 @@ window.showTab = function(el) {
         }
         var pt = data.per_timestep;
         var ptDates = toLocalDates(pt.target_dt);
-        var traces = [{
-            x: ptDates,
-            y: pt.std,
-            type: 'scatter', mode: 'lines',
-            line: { color: '#f0b429', width: 2 },
-            fill: 'tozeroy', fillcolor: 'rgba(240,180,41,0.15)',
-            customdata: pt.target_dt.map(function(_, i) {
-                return [pt.mean[i], pt.cv_pct[i], pt.n_cycles[i]];
-            }),
-            hovertemplate: '<b>%{x|%d %b %H:%M}</b>'
-                         + '<br>std across runs: %{y:.3f}'
-                         + '<br>mean prediction: %{customdata[0]:.3f}'
-                         + '<br>disagreement: ±%{customdata[1]:.1f}%'
-                         + '<br>runs: %{customdata[2]}'
-                         + '<extra></extra>',
-            name: 'Cross-run std',
-        }];
+
+        // v2.34.0: multi-cohort std overlay. When the response carries
+        // ≥2 cohorts, render one line per (model_name, model_version)
+        // — each retrain becomes its own time-tiled trace, coloured
+        // to match the lead-time chart and retrain-history chip.
+        // Cohorts naturally tile in time (their target_dt ranges
+        // typically don't overlap because each cohort owns a window
+        // between retrains) so legibility stays high.
+        var traces = [];
+        // v2.34.0: respect the chip-strip multi-select. Same logic as
+        // the lead-time chart — when the selection narrows to a
+        // single cohort, fall back to the single-line render.
+        var _allStabCohorts = data.cohorts || [];
+        var _vStabCohorts = _filterCohortsBySelection(_allStabCohorts);
+        var stab_cohorts = (_vStabCohorts && _vStabCohorts.length >= 2) ? _vStabCohorts : null;
+        var allDates = ptDates;
+        if (stab_cohorts) {
+            stab_cohorts.forEach(function(c) {
+                var c_pt = c.per_timestep || {};
+                var c_dates = toLocalDates(c_pt.target_dt || []);
+                var colour = _cohortColor(c.model_name, c.model_version);
+                var label = _cohortLabel(c.model_name, c.model_version);
+                traces.push({
+                    x: c_dates,
+                    y: c_pt.std || [],
+                    type: 'scatter', mode: 'lines',
+                    line: { color: colour, width: 2 },
+                    customdata: (c_pt.target_dt || []).map(function(_, i) {
+                        return [c_pt.mean[i], c_pt.cv_pct[i], c_pt.n_cycles[i]];
+                    }),
+                    hovertemplate: label
+                                 + '<br><b>%{x|%d %b %H:%M}</b>'
+                                 + '<br>std across runs: %{y:.3f}'
+                                 + '<br>mean prediction: %{customdata[0]:.3f}'
+                                 + '<br>disagreement: ±%{customdata[1]:.1f}%'
+                                 + '<br>runs: %{customdata[2]}'
+                                 + '<extra></extra>',
+                    name: label,
+                });
+                // Pre-compute the merged date range for axis ticks.
+                if (c_dates.length) {
+                    allDates = allDates.concat(c_dates);
+                }
+            });
+        } else {
+            traces.push({
+                x: ptDates,
+                y: pt.std,
+                type: 'scatter', mode: 'lines',
+                line: { color: '#f0b429', width: 2 },
+                fill: 'tozeroy', fillcolor: 'rgba(240,180,41,0.15)',
+                customdata: pt.target_dt.map(function(_, i) {
+                    return [pt.mean[i], pt.cv_pct[i], pt.n_cycles[i]];
+                }),
+                hovertemplate: '<b>%{x|%d %b %H:%M}</b>'
+                             + '<br>std across runs: %{y:.3f}'
+                             + '<br>mean prediction: %{customdata[0]:.3f}'
+                             + '<br>disagreement: ±%{customdata[1]:.1f}%'
+                             + '<br>runs: %{customdata[2]}'
+                             + '<extra></extra>',
+                name: 'Cross-run std',
+            });
+        }
         var stabXAxis = {
             title: { text: 'Target time' + _axisTzSuffix(), font: { size: 12 } },
             color: '#b0b0b0', gridcolor: '#2d3561', type: 'date',
         };
-        var stabTicks = _tzTicks(ptDates);
+        var stabTicks = _tzTicks(allDates);
         if (stabTicks) {
             stabXAxis.tickvals = stabTicks.tickvals;
             stabXAxis.ticktext = stabTicks.ticktext;
@@ -4077,7 +4397,10 @@ window.showTab = function(el) {
             plot_bgcolor: 'rgba(0,0,0,0)',
             paper_bgcolor: 'rgba(0,0,0,0)',
             font: { color: '#e0e0e0' },
-            showlegend: false,
+            // Show the legend only in multi-cohort mode (single-cohort
+            // doesn't need it — the title already says "Cross-run std").
+            showlegend: !!stab_cohorts,
+            legend: { font: { size: 10 } },
             margin: { t: 20, r: 30, l: 70, b: 50 },
             hovermode: 'closest',
         };
