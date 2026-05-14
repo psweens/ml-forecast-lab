@@ -1,370 +1,543 @@
-# SURVEY.md — ml-forecast-lab
+# SURVEY.md — ML methodology recon (Settings-tab preprocessing & loss audit)
 
-Product/UX reconnaissance ahead of an improvements proposal targeted at HA power users on a Raspberry Pi 5. British English throughout. File:line references are absolute paths from the repo root.
+Scope: the data-preprocessing and loss-function options exposed under the **Settings** tab of the ml-forecast-lab Home Assistant add-on, plus the surrounding evaluation pipeline that consumes them. British English. File paths are absolute from the repo root. Defaults are quoted from the source on `claude/audit-ha-forecasting-ml-FzGKT` at HEAD.
 
-The earlier security-audit framing of this file has been replaced; for that material, see git history.
-
----
-
-## 1. Repository tree (one-line role per file)
-
-```
-ml-forecast-lab/                                          ← HA add-on repository root
-├── repository.yaml                                       ← HA add-on repository manifest
-├── README.md                                             ← user-facing overview, install + quick start
-├── LICENSE                                               ← MIT (Dr Paul W. Sweeney)
-├── icon.png, logo.png                                    ← add-on artwork (also copied into web/static/)
-├── AUDIT_PROMPT.md                                       ← scratch brief for a security audit pass
-├── docs/
-│   ├── CONFIG_GUIDE.md                                   ← user docs: full mlfl.yaml schema reference
-│   ├── FEATURES_GUIDE.md                                 ← user docs: feature engineering
-│   ├── MODEL_GUIDE.md                                    ← user docs: which of the 24 backends to enable
-│   └── PREPROCESSING_GUIDE.md                            ← user docs: cumulative/log/load-subtract
-├── .github/workflows/
-│   ├── tests.yml                                         ← CI: pytest unit + smoke
-│   ├── validate.yml                                      ← CI: HA add-on lint
-│   └── release.yml                                       ← CI: tag → multi-arch image publish
-└── ml-forecast-lab/                                      ← the add-on itself
-    ├── config.yaml                                       ← HA manifest: slug=ml_forecast_lab, ingress:5052, homeassistant_api:true
-    ├── build.yaml                                        ← base image map per arch (ubuntu-base 9.0.5)
-    ├── Dockerfile                                        ← two-stage builder venv → runtime; apt + pip only
-    ├── requirements.txt                                  ← Python deps (CPU-only torch, lightgbm, optuna, pvlib, fastapi…)
-    ├── mlfl.yaml                                         ← bundled example user config, copied to /addon_configs on first boot
-    ├── CHANGELOG.md                                      ← long, detailed (~2 900 lines; notes Hailo removal)
-    ├── MODELS_CREATED.txt                                ← scratch notes from earlier model-addition work
-    ├── translations/en.yaml                              ← HA add-on store UI strings
-    ├── rootfs/etc/s6-overlay/s6-rc.d/
-    │   ├── init-mlforecastlab/{run,up,type}              ← s6 longrun service; bashio runs python3 -m ml_forecast_lab
-    │   └── user/contents.d/init-mlforecastlab            ← marker enabling the service
-    ├── ml_forecast_lab/                                  ← Python package
-    │   ├── __init__.py                                   ← re-exports public API; sets __version__
-    │   ├── __main__.py                                   ← logging setup, asyncio.run(main); fallback stub FastAPI on import failure
-    │   ├── main.py                  (5241 ln)            ← MLForecastLabApp orchestrator: schedules forecast/retrain/tuning/cov-analysis cycles
-    │   ├── config.py                (1185 ln)            ← dataclasses AppConfig/ExperimentCfg/CovariateCfg/SubtractCfg + YAML I/O
-    │   ├── db.py                    (1823 ln)            ← HistoryDB (SQLite WAL): history, forecast_log, benchmark_results, schema_versions
-    │   ├── ha_interface.py          (424 ln)             ← async aiohttp client for HA REST API (history, set_state, config)
-    │   ├── covariates.py            (201 ln)             ← CovariateResolver: covariate history+future fetch, binary auto-detect
-    │   ├── preprocessing.py         (892 ln)             ← cumulative→interval, resample, clip, log, load-subtract
-    │   ├── features.py              (544 ln)             ← lags (with night-time GHI gate), rolling stats, cyclic encodings, holidays
-    │   ├── solar_physics.py         (97 ln)              ← pvlib Ineichen clear-sky GHI + apparent solar elevation
-    │   ├── training_events.py       (123 ln)             ← thread↔asyncio TrainingEventBus for the SSE training stream
-    │   ├── dashboard.py             (250 ln)             ← generates a Lovelace YAML (ApexCharts cards) into /addon_configs
-    │   ├── web/
-    │   │   ├── __init__.py
-    │   │   ├── app.py               (3229 ln)            ← FastAPI app (create_app), routes, AppState, SSE, MODEL_CATALOG, MODEL_PARAM_SCHEMA
-    │   │   ├── static/{style.css,htmx.min.js,plotly-basic.min.js,icon.png}  ← vendored assets, no build step
-    │   │   └── templates/
-    │   │       ├── base.html        (141 ln)             ← shell: nav, toast, confirm modal, info-tip JS
-    │   │       ├── dashboard.html   (416 ln)             ← experiment cards + "New experiment" modal
-    │   │       ├── experiment.html  (3736 ln)            ← the bulk of the UI: 10 in-page tabs (single template)
-    │   │       ├── training.html    (629 ln)             ← stand-alone /training redirect target with global training feed
-    │   │       ├── models.html      (244 ln)             ← per-model hyperparameter config cards
-    │   │       ├── logs.html        (129 ln)             ← live log tail (3 s poll) with level filter
-    │   │       └── system.html      (224 ln)             ← system info, global settings, experiment summary
-    │   ├── benchmark/
-    │   │   ├── __init__.py
-    │   │   ├── runner.py            (940 ln)             ← BenchmarkRunner: walk-forward / sliding-window CV, composite Demšar rank, daily metrics
-    │   │   ├── metrics.py           (549 ln)             ← MAE/RMSE/MAPE/sMAPE/MASE/R² + asteval-sandboxed custom metrics
-    │   │   └── comparison.py        (336 ln)             ← Diebold-Mariano + cross-model comparison utilities
-    │   └── models/
-    │       ├── __init__.py                               ← optional dynamic import of every backend
-    │       ├── registry.py                               ← ModelRegistry (no entry-points)
-    │       ├── base.py              (916 ln)             ← ForecastModel ABC, RevIN, composite horizon loss, optimiser builder
-    │       └── {lightgbm,xgboost,catboost,lstm,gru,cnn,tft,tide,tsmixer,timemixer,timesnet,
-    │            patchtst,itransformer,crossformer,nhits,nbeats,nlinear,dlinear,sparsetsf,
-    │            fits,seasonal_naive,statsforecast}_backend.py
-    └── tests/
-        ├── conftest.py, __init__.py, requirements-dev.txt
-        ├── dryrun_pipeline.py                            ← manual smoke harness
-        ├── unit/test_{config,db,features,preprocessing,benchmark,models,forecast_analytics,load_subtract}.py
-        └── smoke/test_{pages,settings,harness,promote_flow,tuning_guard,model_config,
-                         experiment_lifecycle,analytics_empty_state,ha_entities}.py
-```
-
-Python LOC ≈ 28 000. Frontend is server-rendered Jinja + HTMX + Plotly with **no build step or JS bundler**; the only sizeable vendored asset is `plotly-basic.min.js`.
+This file deliberately **judges nothing** — that is Phase 2 (`ML_AUDIT.md`). Findings, severity, proposals come next. The four observations marked **⚠ EVIDENCE** at the bottom are placed here only so the audit can cite the exact code excerpts without re-reading.
 
 ---
 
-## 2. Stated purpose
+## 1. The Settings tab — every preprocessing option
 
-From `README.md` (lines 5–28) and `mlfl.yaml` headers (lines 1–16):
+All controls live in the Settings tab of the per-experiment page (`experiment.html`, sections "Target", "Data & forecast", "Training", "Solar physics", "Covariates", "Load subtract"). Form values POST to `/api/experiment-settings` (and the two dedicated covariate / load-subtract routes), validate against allowed values, and persist to `mlfl.yaml` via `atomic_yaml_write`. Mapping: each UI field corresponds to a field on `ExperimentCfg` (`ml_forecast_lab/config.py`), `CovariateCfg`, or `SubtractCfg`.
 
-> *"Multi-model machine learning forecasting for Home Assistant. Train, benchmark, and deploy time-series models for any HA sensor — with academic-standard evaluation built in."*
+### 1.1 Target semantics
 
-The intended workflow is **"benchmark once, run forever"** (README:27):
+| Field (UI name) | Type | Default | Allowed | Maps to | Consumed at |
+|---|---|---|---|---|---|
+| `source_is_cumulative` | checkbox | `false` | bool | `ExperimentCfg.source_is_cumulative` | `main.py:1335-1345` → `preprocessing.cumulative_to_interval` |
+| `reset_daily` | checkbox | `false` | bool | `ExperimentCfg.reset_daily` | same |
+| `max_increment` | number (nullable) | empty → auto | `> 0` or empty | `ExperimentCfg.max_increment` | same; when empty, `preprocessing.py:103-112` uses the 95th-percentile of observed positive diffs |
 
-1. Define an experiment in `mlfl.yaml` (or the New Experiment modal) targeting one HA sensor.
-2. Run a benchmark in **lab mode**: every enabled backend trains on the sensor's history, CV-ranked by a Demšar (2006) composite over MAE / RMSE / MASE.
-3. Promote the winner to **production mode**. The add-on retrains on a schedule (24 h default) and publishes companion forecast sensors back to HA every cycle (30 min default), with conformal 80 % uncertainty bands.
-4. The Forecast Accuracy tab continuously logs predictions and compares them with actuals as they arrive, surfacing bias, lead-time error, calibration, and run-to-run stability.
+Form rendering: `ml_forecast_lab/web/templates/experiment.html:147-168`. Handler: `ml_forecast_lab/web/app.py:3209-3221`.
 
-The product positioning, per the README, is "an academic-standard evaluation harness wrapped in an HA add-on" — the user is not expected to know ML, only to be a competent HA power user.
+### 1.2 Data window and forecast horizon
 
----
+| Field | Type | Default | Allowed | Maps to |
+|---|---|---|---|---|
+| `days_history` | int | `14` | `≥ 1` | `ExperimentCfg.days_history` |
+| `interval_minutes` | int | `30` | `≥ 1` | `ExperimentCfg.interval_minutes` |
+| `future_periods` | int | `48` (= 24 h at 30 min) | `≥ 1` | `ExperimentCfg.future_periods` |
+| `forecast_every_minutes` | int (nullable) | empty → global | `≥ 1` or empty | `ExperimentCfg.forecast_every_minutes` |
+| `retrain_every_hours` | float (nullable) | empty → global | `≥ 0.1` or empty | `ExperimentCfg.retrain_every_hours` |
 
-## 3. Current feature inventory — what a user can do today, end to end
+Form rendering: `experiment.html:179-207`. Handler: `app.py:3206-3213`.
 
-Grouped by user goal, with the entry points the user actually clicks.
+### 1.3 Transforms
 
-### 3a. Set up a forecast
+| Field | Type | Default | Allowed | Maps to | Consumed at |
+|---|---|---|---|---|---|
+| `log_transform` | checkbox | `false` | bool | `ExperimentCfg.log_transform` | `main.py:1385-1386` → `apply_log_transform(series)` (shift = `1.0`, hardcoded in `preprocessing.py:268-295`) |
 
-- **Add the repository, install the add-on** (README:32–45). First build is 10–15 min on a Pi 5 — LightGBM / XGBoost / torch wheels exist for ARM64 but some compile.
-- **Create an experiment two ways:**
-  - Edit `/addon_configs/<hash>_ml_forecast_lab/mlfl.yaml` directly. Bundled example is `ml-forecast-lab/mlfl.yaml`.
-  - Click **+ New Experiment** on the dashboard (`web/templates/dashboard.html:30, 183-224`). The modal takes a friendly name, target entity (with debounced HA entity search), cumulative and reset-daily toggles, and posts to `/api/experiments/create` (`web/app.py:1683`). Anything else — covariates, models, CV — defaults until the user opens the new experiment's Settings tab.
-- **Configure the experiment** in the per-experiment Settings tab (`experiment.html:84-404`): target shape (cumulative, reset-daily, max-increment), data window (days_history, interval, future_periods), retrain/forecast cadence overrides, log transform, CV strategy/folds, recency half-life, production metric (MAE/RMSE/MASE), neural loss/optimiser/output activation, daily cumulative-loss toggle, solar physics toggles (sun elevation, clear-sky GHI), per-experiment covariates (with HA entity search), per-experiment load-subtract list. All edits autosave via `/api/experiment-settings`.
-- **Enable/disable model backends** per experiment from the Models tab (`experiment.html:407-451`) with toggle switches; per-tenant config persists to `mlfl.yaml`. Global hyperparameters live on the separate `/models` page (`web/templates/models.html`) with debounced autosave per field.
+Inversion: `main.py:2939-2941` and `:4603-4604` (production forecast publish) — `np.expm1(y_pred)` then `np.maximum(0)`. **Benchmark CV metrics are not inverted** — see §10 and ⚠ EVIDENCE B.
 
-### 3b. Run the benchmark
+### 1.4 Cross-validation and recency weighting
 
-- One-click **Run Pipeline** on the experiment page (`experiment.html:41`) or **Run All Benchmarks** on the dashboard (`dashboard.html:24-29`). Both post to `/experiment/{name}/run-pipeline` / `/api/benchmarks/run-all` (`web/app.py:3184, 1144`).
-- The add-on serialises training behind `_training_lock` (`main.py:463`) and a de-duped FIFO `_retrain_queue`. Dashboard shows "Queued (#N)" badges and lets users **cancel queued items** or **Stop Training** (`dashboard.html:138-149`, `web/app.py:1630`).
-- During a run, a **Training** tab appears with live progress (`experiment.html:454-513`): current model, fold, epoch, validation loss, best loss, patience, model picker with per-model loss-curve chart, and a collapsible event log. Backed by Server-Sent Events at `/experiment/{name}/training-stream` (`web/app.py:3129`).
-- A separate `/training` page (`templates/training.html`) is the canonical "live training" route; the dashboard auto-refreshes every 10 s while training is in flight, 60 s otherwise (`dashboard.html:314`).
+| Field | Type | Default | Allowed | Maps to | Consumed at |
+|---|---|---|---|---|---|
+| `cv_strategy` | dropdown | `walk_forward` | `walk_forward`, `sliding_window` | `ExperimentCfg.cv_strategy` | `benchmark/runner.py:227-328` |
+| `cv_folds` | int | `5` | `2`–`20` | `ExperimentCfg.cv_folds` | same |
+| `recency_half_life_days` | float | `7` | `0`–`365` (0 disables) | `ExperimentCfg.recency_half_life_days` | `benchmark/runner.py:411-418` — exponential sample weights `exp(decay * arange(n))` |
 
-### 3c. Decide which model to deploy
+`cv_embargo_periods` (default `2`, `config.py:242`) is **YAML-only**, no UI control.
 
-- **Results tab** (`experiment.html:517-662`): per-interval (h=1) accuracy table and an optional Daily Cumulative accuracy table — both with MAE/RMSE/MASE means ± std across folds, train time, and Demšar rank. The top row is highlighted; a radio button per row lets the user override the auto-selected winner (`POST /experiment/{name}/select-model`).
-- **Predictions tab** (`experiment.html:664-697`): holdout predictions (last 20 % of data) with every model overlaid against the actual, plus residuals.
-- **Generalisation tab** (`experiment.html:700-759`): train-vs-test MAE/RMSE per model with colour-coded gap (red = strong overfit, orange = moderate, green = OK), plus fold-stability line charts.
-- **Features tab** (`experiment.html:763-772`): feature-importance bar chart for tree models only; users are redirected to Covariate Analysis for neural models.
-- **Covariate Analysis tab** (`experiment.html:946-1080`): trigger a leave-one-out test across enabled models. Surfaces a matrix of MAE/RMSE/MASE deltas vs "all covariates", a textual recommendation block, a per-covariate one-click **Remove** button, and an **Apply Best & Retrain** macro that rewrites `mlfl.yaml` and kicks off a fresh retrain.
-- **Tuning tab** (`experiment.html:776-942`): pick a model, a trial count (5–200), and a strategy (Optuna TPE or random). Live progress with completed trials and the current best composite. When finished, shows the best params alongside defaults, an Apply button that promotes + retrains, a holdout chart of default vs tuned (interval or cumulative view), and a sortable trial-details table.
-- **Promote**: button labelled "Publish *<model>*" on the experiment page (`experiment.html:51-54`). It calls `/experiment/{name}/promote/{model_name}` and flips the experiment to production mode.
+### 1.5 Loss & training-objective options (the core of this audit)
 
-### 3d. Production: live forecasts in HA
+| Field | Type | Default | Allowed | Maps to | Applies to |
+|---|---|---|---|---|---|
+| `production_metric` | dropdown | `rmse` | `mae`, `rmse`, `mase` | `ExperimentCfg.production_metric` | model-selection only |
+| `loss_fn` | dropdown | `mse` | `mse`, `mae`, `huber` | `ExperimentCfg.loss_fn` | all torch neural backends; tree backends ignore |
+| `optimiser` | dropdown | `adamw` | `adamw`, `adam` | `ExperimentCfg.optimiser` | torch backends only |
+| `output_activation` | dropdown | `auto` | `auto`, `linear`, `softplus`, `relu`, `exp`, `sigmoid`, `zscore` | `ExperimentCfg.output_activation` | torch backends; resolved per-model in `_apply_output_activation` |
+| `daily_loss_weight` | checkbox (boolean) → maps `true` → `0.5`, `false` → `0.0` | `0.0` | float `≥ 0` | `ExperimentCfg.daily_loss_weight` | torch backends; tree backends silently ignore |
 
-- Once promoted, the add-on retrains on `retrain_every_hours` and runs inference on `forecast_every_minutes` (both configurable globally and per-experiment).
-- Sensors published per `_publish_forecast_sensors` (`main.py:3049-3683`):
-  - `sensor.{publish_prefix}{publish_name}` — main forecast state with `forecast` attribute (list of `{datetime, value}` over the horizon).
-  - `sensor.{prefix}{name}_cumulative` — running total (daily-reset when source is cumulative + reset_daily, otherwise cumsum from zero).
-  - `sensor.{prefix}{name}_interval` — per-interval increments (only when source is cumulative).
-  - `sensor.{prefix}{name}_curve` — combined "actual + future" curve for the Lovelace ApexCharts card.
-  - `sensor.{prefix}{name}_upper_80` / `_lower_80` — conformal 80 % bands when the residual buffer is calibrated. Cold-start with no `forecast_log` rows: bands omitted, point-only forecast surfaces in the UI.
-  - `sensor.mlfl_last_run` — heartbeat sensor for the whole add-on.
-- **One-click HA Lovelace dashboard**: `/dashboard_yaml` (`web/app.py:3091`) serves the auto-generated `mlfl_dashboard.yaml` written to `/addon_configs/.../mlfl_dashboard.yaml` (`main.py:5238`, `dashboard.py:182`). One view per experiment: forecast chart, prediction curve, optional cumulative chart, markdown back-link to the lab.
+Form rendering: `experiment.html:246-286`. Handler: `app.py:3214-3226`. UI deliberately exposes `daily_loss_weight` as a checkbox; the underlying field is a float, so YAML users can set any non-negative value.
 
-### 3e. Trust the forecast
+Note: **there is no UI control for the tree-model loss/objective** (LightGBM, XGBoost, CatBoost). Their objective is hardcoded — see §6.
 
-- **Forecast Accuracy tab** (production only; `experiment.html:1095-1461`). Three-layer diagnostic:
-  - **Verdict card**: traffic-light chips for Accuracy / Calibration / Stability, plus headline numbers — typical next-step MAE, 80 % band coverage, run-to-run swing.
-  - **Drivers** mid-layer: lead-time error chart (toggle for RMSE & bias) and a "does re-forecasting help?" card comparing first-issued vs latest-issued forecasts for the same future moment.
-  - **Diagnostic tools** accordion: raw forecast-log inspector (with a "View raw JSON" debug button), forecast-convergence fan chart (configurable 6/12/24/48 cycles, interval/cumulative view for cumulative targets), per-target trajectory chart (shows every forecast ever issued of a chosen future moment), and a run-to-run disagreement panel with per-moment and daily-total swing tiles.
+### 1.6 Solar physics features
 
-### 3f. Operations
+| Field | Type | Default | Maps to | Consumed at |
+|---|---|---|---|---|
+| `include_sun_elevation` | checkbox | `false` | `ExperimentCfg.include_sun_elevation` | `solar_physics.py` via `main.py` |
+| `include_clear_sky_irradiance` | checkbox | `false` | `ExperimentCfg.include_clear_sky_irradiance` | same |
 
-- **Logs tab** (`logs.html`): live `tail`-style view (3 s poll of `/api/log?lines=500`), level filter (All / Info / Warnings / Errors), colourised by subsystem tag (`[BENCH]`, `[MODEL]`, `[HA]`, `[PREP]`), with download-full-log link.
-- **System tab** (`system.html`): version, CPU model and cores, memory and disk usage, paths to config/log/db; global settings form (training CPU cores, process priority, timezone); per-experiment summary cards collapsing to a "Configure →" link.
+When `include_clear_sky_irradiance=true`, a `clear_sky_ghi` column is materialised in the dataframe — `features.build_features` then **physics-gates the lag features** so a night row sees lag = 0 (`features.py:178-186, 195-202, 215-219`). The gate is enabled by the column's presence, not by a separate flag.
 
----
+### 1.7 Covariates (per-row controls)
 
-## 4. UI surfaces — every page, panel, and modal
+Rendered in `experiment.html:318-373`; added/removed via `/experiment/{name}/add-covariate` and `/remove-covariate`. Each row is a `CovariateCfg`:
 
-All under HA ingress at port 5052. Direct port also exposed via `config.yaml`. No auth at the FastAPI layer.
+| Field | Type | Default | Allowed | UI? |
+|---|---|---|---|---|
+| `entity` | text (autocomplete) | — | HA entity_id | yes |
+| `role` | dropdown | `lagged` | UI exposes only `lagged`; config also allows `future`, `both`, `concurrent` (NaN-only stubs) | yes |
+| `aggregation` | dropdown | `mean` | `mean`, `sum`, `max`, `min`, `last` | yes |
+| `scale` | number (nullable) | `None` | float or empty | yes |
+| `is_binary` | checkbox | `false` | bool | yes |
+| `scaling` | — | `None` | `standard`, `minmax`, or `None` | **YAML only** (`config.py:152-200`) |
+| `transform` | — | `None` | `log`, `sqrt`, `shifted_log`, or `None` | **YAML only** |
 
-### 4a. Top-level pages (nav)
+### 1.8 Load subtract (per-row controls)
 
-| Route | Template | User task |
-|---|---|---|
-| `/` | `dashboard.html` | See every experiment at a glance; trigger benchmarks; switch modes; stop training |
-| `/experiment/{name}` | `experiment.html` | Configure, run, evaluate, promote, monitor a single experiment |
-| `/models` | `models.html` | Edit default hyperparameters per backend (24 cards) |
-| `/log` | `logs.html` | Live log tail with level filter |
-| `/system` | `system.html` | Health, hardware, global settings, experiment summary |
-| `/training` | `training.html` | Global "watch live training" route — used when the dashboard auto-refreshes mid-run |
-| `/settings`, `/status` | – | Both 302-redirect to `/system` (`web/app.py:2644, 2744`) — historic URLs kept for compatibility |
+`experiment.html:383-449`. Each row is a `SubtractCfg`:
 
-### 4b. Modals & one-off panels
+| Field | Type | Default | Allowed | UI? |
+|---|---|---|---|---|
+| `entity_id` | text | — | HA entity_id | yes |
+| `source` | dropdown | `auto` | `auto`, `cumulative_daily`, `cumulative_monotonic`, `interval` | yes |
+| `on_missing` | dropdown | `zero` | `zero`, `drop`, `error` | yes |
+| `scale` | number (nullable) | `None` | float | yes |
+| `max_fraction_of_load` | number | `1.0` | `≥ 0` | yes |
+| `max_fraction_violation_pct` | — | `5.0` | float | **YAML only** |
 
-- **New Experiment modal** — `dashboard.html:183-224`. Name + entity + cumulative/reset toggles + helper text pointing at the Settings tab for the rest.
-- **Confirm modal** — global, in `base.html:43-52`, used by every destructive button (run-all, retrain, stop-training, reset-params, promote, delete experiment, etc.).
-- **Toast notifications** — global, top-right, four-level `info/success/warning/error` (`base.html:88-101`).
-- **Info-tips** — `<span class="info-tip">?<span class="tip-text">…</span></span>` pattern used 80+ times across `experiment.html` to explain every setting and metric. Position-corrected by JS in `base.html:122-137`.
+Consumed by `preprocessing.apply_load_subtract` (`preprocessing.py:378-704`) before clipping.
 
-### 4c. Experiment page tabs (single-page tab-strip, no client routing)
+### 1.9 What is in the codebase but NOT exposed in the Settings tab
 
-The tabs are rendered conditionally; what the user sees depends on whether a benchmark exists and whether they're in lab or production.
-
-| Tab | Visible when | User task |
-|---|---|---|
-| Settings | Always | Edit every per-experiment knob: target, data window, cadences, CV, optimiser/loss/activation, daily-loss toggle, solar physics, covariates, load-subtract |
-| Models | Always | Enable/disable backends for this experiment (tree models above, neural below); link to `/models` for hyperparameters |
-| Training | `is_running` or recent SSE history exists | Live: current model/fold/epoch/val-loss, per-model loss curve, event log |
-| Results | `benchmark_result` exists | Per-interval table, optional Daily Cumulative table, per-fold metrics under a `<details>` |
-| Predictions | `benchmark_result` | Holdout overlay chart + residuals |
-| Generalisation | `benchmark_result` | Train-vs-test gap table, fold stability charts for MAE/RMSE/MASE |
-| Features | Any tree-based feature importance present | Per-model importance bar chart |
-| Covariate Analysis | `benchmark_result` | LOO covariate test, recommendations, one-click "Apply Best & Retrain" |
-| Tuning | `benchmark_result` | Optuna TPE / random; "Apply Tuned Params, Promote & Retrain" |
-| Forecast Accuracy | `mode == 'production'` | Verdict, lead-time error, convergence fan, trajectory, run-to-run swing |
-
-### 4d. Page-level controls visible everywhere
-
-- Top nav: Dashboard / Models / Logs / System with hamburger collapse below ~720 px (`base.html:14-30`).
-- Dashboard auto-refresh: 10 s while any training is running, 60 s otherwise (`dashboard.html:314`).
-- Experiment-page live updates: SSE for training; polling for benchmark results (`base.html:60-85`).
+- `cv_embargo_periods` (`config.py:242`, default `2`)
+- `metrics` — list of standard metrics to compute (default `["mae", "rmse", "mase"]`)
+- `custom_metrics` — dict of Python expressions evaluated via `asteval` (`benchmark/metrics.py:323+`)
+- `country` — holiday calendar code (`features.py:228-231`); UI has no field
+- `use_revin` (`config.py:307-326`, default `True`) — Reversible Instance Normalisation for torch backends
+- `n_lags` (default `12`) and `lag_windows` (default `[6, 24, 72]`) for the feature builder
+- The outlier-clipping quantile (`0.995`, hardcoded in `preprocessing.py:218`)
+- The log-transform shift (`1.0`, hardcoded in `preprocessing.py:268-295`)
+- Per-covariate `scaling` and `transform` (above)
+- `future_covariate_features`, `stability_focus`, `clear_forecast_log_on_retrain`, `publish_prefix`, `output_units`, `units`, `country`, `production_model`
 
 ---
 
-## 5. ML pipeline shape — what is exposed and what is hidden
+## 2. Loss functions — mathematical definitions as implemented
 
-The README diagram (lines 110–151) summarises the flow; the table below maps each stage to user-facing surfaces.
+### 2.1 Tree backends — hardcoded objectives
 
-| Stage | Code | Exposed to user | Hidden from user |
+| Backend | File | Objective | User can change via UI? |
 |---|---|---|---|
-| **Ingest** | `ha_interface.py:309 get_history` → SQLite cache then delta-fetch in `main.py:878 _fetch_and_preprocess` | Target entity, `days_history`, `max_age`, cumulative/reset_daily flags. "Recorder gap" warnings appear in the log (`main.py:1030`). `Database not available` empty state on Forecast Accuracy when SQLite forecast_log is empty | The carry-forward synthetic-sample logic (`main.py:983-1036`) when HA recorder dedupes static values; max-increment clipping count; the SQLite cache itself is invisible |
-| **Preprocess** | `preprocessing.py`: `cumulative_to_interval`, `resample_to_grid`, `clip_outliers`, `apply_log_transform`, `apply_load_subtract` | Cumulative source toggle, reset-daily toggle, max-increment, log-transform toggle, load-subtract list with per-entry source semantics / missing-policy / scale / max-fraction | Outlier clipping bounds; the audit dictionary returned by `apply_load_subtract` is logged but not surfaced in the UI |
-| **Feature engineering** | `features.py:build_features`; `solar_physics.py` | Solar physics toggles, holiday country code (`country`), covariates with role (`lagged`/`future`/`both`) + aggregation + binary flag + scale | Lag count `n_lags=12`, rolling windows `[6, 24, 72]`, cyclic encodings, the night-time GHI lag gate (`features.py:178`), interaction features `{covariate}_x_hour_*` |
-| **Train (benchmark)** | `benchmark/runner.py:730 run_benchmark` per fold per model | CV strategy, folds, embargo, recency half-life, loss function, optimiser, output activation, daily cumulative loss toggle, per-model hyperparameters | Per-fold split sizes, scaler choice, RevIN, early-stopping patience, the composite-rank computation in `_compute_composite_ranks` |
-| **Evaluate** | `benchmark/metrics.py` | MAE / RMSE / MAPE / sMAPE / MASE / R² values, ± std across folds, per-fold metrics in a `<details>`, custom Python-expression metrics (asteval-sandboxed) | Diebold-Mariano pairwise comparison (`comparison.py`) is computed but not surfaced anywhere in the UI |
-| **Inference (production)** | `main.py:2153 _run_production_inference` and `_forecast_with_cached` | Forecast & conformal-band sensors in HA; the auto-Lovelace dashboard at `/dashboard_yaml` | The recursive feature builder, the GHI gate at inference, the conformal-quantile pooling fallback when no quantiles are calibrated for the current `model_version` |
-| **Persist** | `db.py` (forecast_log, history_*, benchmark_results), `main.py:_persist_cached_model` (`models/<exp>/model.bin` + `cache_meta.json`) | Disk-usage stat in System page | Cache schema, `cache_meta.json` contents, schema_versions table |
-| **Present** | `web/templates/experiment.html`, `dashboard.py` Lovelace generator, `_publish_forecast_sensors` HA sensors | All tabs above, the Lovelace YAML download | The internal model_version tagging on each forecast_log row, the issued_at timestamp |
+| LightGBM | `models/lightgbm_backend.py:191-203` | `"objective": "regression"` (MSE), `"metric": "rmse"` | No |
+| XGBoost | `models/xgboost_backend.py:211-224` | `XGBRegressor(...)` defaults (`reg:squarederror`, i.e. MSE) | No |
+| CatBoost | `models/catboost_backend.py:116-126` | `"loss_function": "RMSE"` (= sqrt-of-MSE training loss) | No |
 
-Notable structural choices:
+There is no UI dropdown for tree-model objectives. `loss_fn` in the experiment Settings is silently ignored by all three.
 
-- **Benchmark vs production are explicit modes per experiment** (lab/production). The mode badge appears everywhere; the visible tab set differs between modes (Forecast Accuracy only in production; Tuning/Covariate Analysis only after a lab benchmark).
-- **Forecast and retrain cycles are decoupled** (README:79-82). The user sees both cadences and next-run countdowns on the dashboard card.
-- **Single training operation across the whole add-on at a time** (`_training_lock`, `main.py:463`); UI shows queued counts but no estimate of when a queued item starts.
+### 2.2 Neural backends — three-option dropdown
+
+Every torch backend pulls `loss_fn` from its constructor and maps it identically (`models/lstm_backend.py:311-314` and equivalents in cnn, dlinear, nbeats, nhits, tide, tsmixer, sparsetsf, patchtst, itransformer, crossformer, timesnet, gru, nlinear, fits, timemixer, tft):
+
+```python
+_loss_map = {
+    'mse':   nn.MSELoss,
+    'mae':   nn.L1Loss,
+    'l1':    nn.L1Loss,
+    'huber': nn.SmoothL1Loss,
+}
+criterion = _loss_map.get(self.loss_fn, nn.MSELoss)(reduction='none')
+```
+
+Implemented losses, per torch's documented definitions with `reduction='none'`:
+
+- **MSE** (`nn.MSELoss`): per-sample `(y − ŷ)²`; default reduction would average across the batch+horizon dims. Reduction is performed explicitly downstream (see §2.3).
+- **MAE** (`nn.L1Loss`): per-sample `|y − ŷ|`.
+- **Huber** (`nn.SmoothL1Loss`): per-sample, with the default `beta = 1.0`:
+  `0.5·(y − ŷ)² / β` when `|y − ŷ| < β`, else `|y − ŷ| − 0.5·β`.
+  Note: torch's `SmoothL1Loss` and `HuberLoss` differ by a factor of `β` at the quadratic branch; `SmoothL1Loss` is the half-MSE variant.
+
+There is no quantile/pinball training loss, no asymmetric loss, no log-cosh, no Tweedie, no negative-binomial — nothing for over/under-prediction asymmetry or for near-zero-with-occasional-spike series.
+
+### 2.3 Composite horizon loss (`daily_loss_weight`)
+
+`models/base.py:747-842` adds an optional cumulative-trajectory term to the per-step loss:
+
+```
+L = L_interval + λ · L_daily
+L_interval = criterion(y_pred, y_true)                       # per-interval MSE/MAE/Huber
+L_daily    = mean_h[ criterion(cumsum(ŷ)[h], cumsum(y)[h]) ] / H
+```
+
+where `λ = self.daily_loss_weight` (default `0.0`), and the cumulative term is only added when `λ > 0` AND `y_pred.dim() == 2 AND y_pred.size(1) > 1`. Sample-weighted means (recency decay) are honoured throughout. Tree backends never enter this code path.
+
+The name is a misnomer: "daily" refers only to the user-facing intent (energy-per-day shape); the term is actually "errors of the cumulative-sum trajectory across the full horizon", scaled by `1/H`.
+
+### 2.4 RevIN (Reversible Instance Normalisation)
+
+`models/base.py:139-254`. **Per-window, per-channel** affine normalisation with stats computed on each input window's first dim (time), stored as `self._mean`, `self._stdev`, then reversed on the prediction tensor. `affine_weight`/`affine_bias` are learnable. Skipped by N-BEATS and N-HiTS (which subtract a backcast instead). Default-on for every other torch backend.
+
+This is **not** a fitted scaler in the sklearn sense — there is no train/test fit step; the network sees raw values and self-normalises on every batch.
+
+### 2.5 Optimiser
+
+`models/base.py:692-744`: `adamw` (default, decoupled L2) and `adam` (tied L2). `weight_decay = 1e-4`. Learning rate is per-backend (typical `1e-3` to `2e-4`) scheduled by `CosineAnnealingLR(T_max=epochs, eta_min=1e-6)`. Gradient clipping `max_norm=5.0` is applied in each backend's `fit`.
+
+### 2.6 Optuna tuning objective
+
+`main.py:4943-5088`. The tuning study minimises a **composite score**, not the training loss:
+
+```
+composite = mean([mae / anchor.mae, rmse / anchor.rmse, mase / anchor.mase])
+```
+
+Anchor is a baseline model run; lower is better; `direction="minimize"`; sampler TPE (seeded 42); timeout 30 minutes. So a user who picks `loss_fn=mae` is still tuned against a baseline-relative average of three metrics, none of which is `mae` alone.
 
 ---
 
-## 6. Model lifecycle — what the user can actually do
+## 3. Evaluation metrics
 
-| Action | How | Notes |
+### 3.1 Registry (`benchmark/metrics.py`)
+
+| Metric | File:line | Definition as coded |
 |---|---|---|
-| **Add a backend** | Not user-facing. New backends are Python files added to `ml_forecast_lab/models/` and registered against `ModelRegistry`. The UI catalog is a hard-coded literal at `web/app.py:751-824` |
-| **Enable / disable a backend for an experiment** | Models tab on the experiment page, toggle switches (`experiment.html:407-451`) → persists `models_enabled` to `mlfl.yaml` |
-| **Edit default hyperparameters** | `/models` page, debounced autosave (`models.html:232-242`). 600 ms debounce; "N overrides" badge per card |
-| **Override params per experiment** | Only via tuning (apply tuned params) or by hand-editing `mlfl.yaml`. No per-experiment param form in the UI |
-| **Train (benchmark all enabled models)** | "Run Pipeline" or "Run All Benchmarks". Walks `_training_lock`-serialised queue |
-| **Retrain the production model** | "Retrain" button on dashboard card (`dashboard.html:151-157`) or `POST /experiment/{name}/retrain`. Used after settings/covariate changes |
-| **Compare models** | Results / Predictions / Generalisation / Features tabs; ranks already computed |
-| **Promote a model** | "Publish *<name>*" button on the experiment page or per-row "Promote" actions inside Results. Flips mode to production, persists `production_model: <name>` to YAML |
-| **Auto-select on next benchmark** | Set `production_model: null` in YAML (the bundled example does this) — the highest-ranked model wins each cycle |
-| **Tune** | Tuning tab: TPE or random search, 5–200 trials, scoped to one model; "Apply Tuned Params, Promote & Retrain" is a single button that writes YAML and kicks a retrain |
-| **Apply data-driven covariate config** | Covariate Analysis tab → "Apply Best & Retrain" — removes covariates the analysis flags as harmful and retrains |
-| **Stop in-flight training** | "Stop Training" on dashboard card or experiment page → cancels after current epoch via `_stop_training_trigger` (`main.py:581`) |
-| **Delete an experiment** | `POST /api/experiments/{name}/delete` (`web/app.py:1726`). No UI button — only the API endpoint exists |
-| **Delete a model's cached weights** | No UI. Files in `/data/ml_forecast_lab/models/<exp>/` are user-deletable from the shell only |
-| **Roll back / switch versions** | No version history. `model_version` is tagged per forecast_log row (`web/app.py:106`), and `clear_forecast_log_on_retrain` clears old rows by default (`main.py:1556`). No "previous champion" archive |
-| **Export / share a trained model** | No export. No ONNX path, no quantisation, no portable artefact. Pickle/torch state dicts only |
+| `mae` | `:19-44` | `mean(|y − ŷ|)` over `~isnan` mask; returns `nan` if all NaN |
+| `rmse` | `:47-72` | `sqrt(mean((y − ŷ)²))` |
+| `mape` | `:75-103` | mean of `|y − ŷ|/|y|` over `y ≠ 0 AND ~isnan`, returned as percent; rows where `y == 0` are **silently skipped** |
+| `smape` | `:106-141` | `mean( 2·|y − ŷ| / (|y| + |ŷ|) )` × 100; samples with `|y| + |ŷ| == 0` are skipped |
+| `mase` | `:144-188` | `mean(|y − ŷ|) / naive_scale` where `naive_scale = nanmean(|diff(y_train)|)` (1-step naive on the **training fold**); returns `nan` if `naive_scale == 0` or `len(y_train) < 2` |
+| `r_squared` | `:191-228` | `1 − SS_res / SS_tot`; returns `nan` if `SS_tot == 0` |
+| `pinball_loss` | `:231-278` | `mean( where(e≥0, q·e, (q−1)·e) )` with `q` default `0.5`; **evaluation only** |
+| `coverage` | `:281-320` | `mean( (lower ≤ y) AND (y ≤ upper) )`; used for the 80 % conformal band |
+
+### 3.2 Which metrics the Settings tab actually shows the user
+
+Results tab (`experiment.html:672-681`) shows `MAE`, `RMSE`, `MASE`, `Mean Rank`. There is a "Daily" pair of the same three under the daily-totals sub-table. MAPE, sMAPE, R², pinball are computed only when registered as a custom metric or queried via the API; they are not on the default Results tab.
+
+### 3.3 Where metrics are computed
+
+`benchmark/runner.py:596-603`:
+
+```python
+metrics_to_compute = list(set(self.metrics + [self.production_metric]))
+yt_metric = y_test.ravel() if y_test.ndim == 2 and y_test.shape[1] == 1 else y_test
+yp_metric = y_pred.ravel() if y_pred.ndim == 2 and y_pred.shape[1] == 1 else y_pred
+yt_train_metric = y_train if y_train.ndim == 1 else y_train[:, 0]
+fold_metrics = self.metric_registry.compute_all(
+    metrics_to_compute, yt_metric, yp_metric, y_train=yt_train_metric,
+)
+```
+
+The metric registry receives `y_test` and `y_pred` exactly as they leave the model. **No log-inversion** is performed here — see ⚠ EVIDENCE B.
+
+### 3.4 Demšar composite rank
+
+`benchmark/runner.py:784-829`. Within each CV fold, every model is ranked across MAE / RMSE / MASE; the per-fold composite rank is averaged across metrics; the final `mean_rank` is the mean over folds. Lower = better. This drives the leaderboard.
+
+### 3.5 Seasonal-naive baseline
+
+`main.py:2056-2068` force-includes `seasonal_naive` in every benchmark run so the UI can render a "vs Seasonal Naive" skill chip even when the user didn't enable it. Implementation: `models/seasonal_naive_backend.py` (predicts the value from one seasonal period ago).
+
+### 3.6 Conformal bands (80 % nominal coverage)
+
+`web/app.py:2105` calls `db.get_conformal_quantiles(...)` with a hardcoded coverage of `0.8`, a 14-day residual lookback, and a 10-sample minimum. Bands are built **post-hoc** from logged forecast/actual residuals; the model itself trains only on a point loss.
 
 ---
 
-## 7. Observability surface — what users see about quality, drift, errors
+## 4. The full data path: raw HA → metric
 
-### 7a. Quality (per-benchmark)
-
-- Per-model **MAE / RMSE / MASE means ± std** across CV folds, per-fold breakdown under a `<details>` accordion, and a Demšar composite rank (Results tab).
-- Per-day Daily Cumulative MAE/RMSE/MASE rankings as a parallel table (informational only — does not drive Promote).
-- **Train-vs-test gap** with traffic-light colouring (Generalisation tab).
-- **Holdout predictions overlay** (last 20 %) and residual plots (Predictions tab).
-- **Feature importance** for LightGBM/XGBoost only (Features tab).
-- **Diebold-Mariano** pairwise tests computed in `comparison.py:336` but not surfaced.
-
-### 7b. Quality (live)
-
-- Forecast Accuracy verdict card: typical next-step MAE, 80 % band coverage, run-to-run swing.
-- Lead-time error chart (MAE by lead time; optional RMSE/bias overlay).
-- First-vs-latest forecast comparison ("does re-forecasting help?").
-
-### 7c. Drift / stability
-
-- **Forecast convergence fan** (last N runs over a future window) — shows whether the band narrows toward truth.
-- **Per-target trajectory chart** — every forecast issued for one future moment over time; oscillation = unstable model.
-- **Run-to-run disagreement panel** — per-moment swing (median CoV) and daily-total swing if applicable.
-- `model_version` tagging on every forecast_log row (`main.py:2830`) lets analytics queries separate pre- and post-retrain cohorts. The user only sees this indirectly (the Forecast Accuracy chart and verdict respect the current version where possible).
-- **No first-class data-drift check** on the input target distribution — no PSI, KS, or covariate drift surfaces.
-
-### 7d. Errors
-
-- Per-experiment `last_error` chip on dashboard cards and a compact run-info bar on the experiment header (`dashboard.html:73-77`, `experiment.html:26-37`).
-- Toast notifications for action failures (mode toggle, retrain, stop, tuning apply, etc.).
-- Live log tail with level filter; download full log button.
-- Some failures only surface in logs (e.g. `load_subtract` audit, conformal-quantile fallback path, carry-forward warning).
-
----
-
-## 8. Hardware assumptions in code — Pi 5 compatibility audit
-
-### 8a. Architecture and base image
-
-- `config.yaml:10-13` declares `arch: [aarch64, amd64, armv7]`. The Pi 5 hits the **aarch64** path.
-- `build.yaml` resolves the base image per arch (Ubuntu-base 9.0.5 from `ghcr.io/hassio-addons`).
-- `Dockerfile` is a two-stage builder→runtime image; build deps include `gcc`, `g++`, `gfortran`, `cmake`. Runtime keeps only `libgomp1` and Python. **First build on a Pi 5 takes 10–15 min** (README:42) because LightGBM, XGBoost and torch native extensions compile.
-
-### 8b. CPU / GPU assumptions
-
-- **No CUDA dependency** anywhere. `requirements.txt:8` pins `torch>=2.0.0` with no cu* extras. All neural backends are CPU-only.
-- **Every `torch.load` uses `map_location="cpu"`** (all 17 neural backends — `models/{lstm,cnn,...}_backend.py`). No `to("cuda")`, no `torch.device`, no `cuda.is_available()` branching anywhere in the codebase.
-- **No `torch.set_num_threads` / `set_num_interop_threads` calls** — torch picks its own intra-op pool, which on a Pi 5 (4 cores) typically means saturating all cores during training.
-- **`cpu_cores` and `nice_priority` settings exist in `AppConfig`** (`config.py:571, 574`) and the `system.html` form writes them to YAML, **but nothing in the codebase actually applies them.** No `os.nice()` call, no `sched_setaffinity`, no torch thread-count setter. The settings are inert — a real UX trap given the form's prominence on the System page.
-
-### 8c. Memory
-
-- The orchestrator is memory-aware: cgroup v1/v2 detection (`main.py:4247-4302`), per-process RSS via `/proc/self/status`, and a memory-pressure abort path in tuning (`main.py:4501-4504`).
-- Tuning batch size is hard-capped: `TUNING_NEURAL_BATCH_SIZE = 16` "halved from default 64 to reduce peak memory" (`main.py:4208`).
-- The full benchmark path is not similarly throttled — peak memory during benchmark training is bounded only by the chosen backend's defaults.
-- Single shared SQLite connection with `check_same_thread=False` (`db.py:56`) and an RLock; WAL mode enabled. Acceptable for Pi-class hardware but **all DB activity is single-threaded**, so heavy accuracy scans can stall UI requests.
-
-### 8d. Disk / SD card
-
-- All writeable state lives under `/data/ml_forecast_lab/` (HA per-add-on volume): SQLite history.db, model bins, logs.
-- Log rotation: `RotatingFileHandler`, 5 MB × 5 files.
-- **No VACUUM** is scheduled; no WAL checkpoint logic. On a heavily used add-on with months of forecast_log writes, history.db can grow to several hundred MB without compaction.
-- `homeassistant_config:ro` mount means the add-on never writes to `/config` (good for SD-card longevity).
-- The Lovelace YAML is written once at startup (`main.py:5238`); no recurring disk writes from that path.
-
-### 8e. Network
-
-- Only outbound HTTP is to the HA Supervisor proxy at `http://supervisor/core/api` (`ha_interface.py:309-410`). No external SaaS, no model downloads, no telemetry, no licence checks.
-- `holidays` and `pvlib` are vendored — no online lookups.
-
-### 8f. UI weight on a 2019-era laptop over HA ingress
-
-- HTMX vendored (~14 KB gzipped) + Plotly-basic (~700 KB gzipped). Plotly-basic is the heaviest single asset; experiment.html re-renders 5+ Plotly charts on the Forecast Accuracy tab alone.
-- `experiment.html` is 3 736 lines, all inline. No code-split, no lazy tab loading — tabs are pre-rendered server-side, displayed/hidden via CSS. Initial HTML payload for a production experiment with full diagnostics can run to several hundred KB before charts populate.
-- Dashboard auto-reloads every 10 s during training (full page reload, not partial) — noticeable on a slow ingress connection.
-
----
-
-## 9. Hailo NPU integration — status
-
-**There is no Hailo (or Coral / Edge-TPU) integration in the current code.** The CHANGELOG (`ml-forecast-lab/CHANGELOG.md:2910-2954`) documents an earlier integration that was **removed entirely** in an earlier release. Quoting the relevant entry:
-
-> *"The Hailo integration has been removed entirely. After investigation we found … Hailo's Data Flow Compiler (DFC) is x86-64 Linux only … `HailoAcceleratedModel(model, hef_path=onnx_path)` where the class actually fell back to the CPU PyTorch model (both sides were CPU), so `hailo_active=True` was set in the dashboard while the NPU was idle. No forecasts were ever actually accelerated."*
-
-The removal took out:
-
-- `ml_forecast_lab/models/hailo_runtime.py` (entire file)
-- `hailo_enabled` from `AppConfig`, `hailo_active` from `ExperimentStatus`
-- Hailo branch in `_retrain_and_cache`, the `is_hailo` / `hailo_accelerated` cached-model fields
-- Hailo checkbox from the System page and matching JS
-- Hailo badge from dashboard experiment cards
-- `python3-hailort` apt install + `--system-site-packages` venv tweak
-- `/dev/hailo0` device mapping + `SYS_RAWIO` capability from the add-on manifest
-- Hailo section from README + CONFIG_GUIDE
-
-**Current state for Pi 5 + Hailo-8/8L users:** zero acceleration paths in this add-on. Every prediction runs on the four ARM cores. Anything that would put this back — ONNX export from the neural backends, a Hailo runtime wrapper, device mapping in `config.yaml` — would be a re-introduction, not an extension, and would have to confront the same compilation problem (Hailo's DFC is x86-64 only).
-
-The only model-export-adjacent code in the repo is the deprecated `export_onnx` stub mentioned in `MODELS_CREATED.txt` ("Returns False (not recommended)").
+```
+HA recorder (irregular timestamps)
+   │  ha_interface.get_history()      [ha_interface.py:309-342, ~14 days at default]
+   │
+   ▼
+optional SQLite cache (off by default)
+   │  HistoryDB.store_history / get_history     [db.py:142-217]
+   │
+   ▼
+cumulative_to_interval(series, interval_minutes, reset_daily, max_increment)
+   │  preprocessing.py:26-159          [skipped if source_is_cumulative=false]
+   │  - detects resets (negative diff; midnight crosses if reset_daily)
+   │  - caps spikes > max_increment (default = 95th-pctile pos-diff)
+   │  - drops multi-interval gap rows to NaN
+   │
+   ▼
+resample_to_grid(series, freq=f"{interval_minutes}min",
+                 method="sum" if source_is_cumulative else "mean")
+   │  preprocessing.py:162-213, called at main.py:1343-1345
+   │  - always applies .ffill() then .bfill() after aggregation
+   │
+   ▼
+apply_load_subtract(series, [...])   if exp_cfg.load_subtract non-empty
+   │  preprocessing.py:378-704        [main.py:1354-1379]
+   │  - per-sensor scale, on_missing policy, max_fraction guard
+   │  - result.clip(lower=0)
+   │
+   ▼
+clip_outliers(series, quantile=0.995, positive_only=source_is_cumulative)
+   │  preprocessing.py:216-265        [main.py:1382]    [HARDCODED quantile]
+   │
+   ▼
+apply_log_transform(series, shift=1.0)   if exp_cfg.log_transform
+   │  preprocessing.py:268-295        [main.py:1385-1386]    [HARDCODED shift]
+   │  ★ from here onward, `series` is in log space ★
+   │
+   ▼
+DataFrame{"y": series}; covariates fetched, resampled, ffill/bfill, aligned
+   │  main.py:1389-1461  →  covariates.py
+   │
+   ▼
+build_features(df, target_col="y", n_lags=12, lag_windows=[6,24,72], country=...)
+   │  features.py:65-237 (the offline feature library)
+   │  AND
+   │  feature_builder closure at main.py:2009-2027 (the per-fold rebuild used in CV)
+   │  - both call target.rolling(w).mean()/.std()/.max()  ← see ⚠ EVIDENCE A
+   │
+   ▼
+combined = features_df; combined["target"] = df["y"]; combined.dropna()
+   │  main.py:1985-1993
+   │
+   ▼
+runner._prepare_train_test_splits(combined)
+   │  benchmark/runner.py:227-328
+   │  - walk_forward (expanding) or sliding_window (fixed) folds
+   │  - cv_embargo_periods=2 rows dropped before each test window
+   │
+   ▼
+per-fold: feature_builder(df_train); feature_builder(df_test)        [runner.py:381-396]
+   │  X_train, X_test are float32 arrays; y_train, y_test are df['target'].values
+   │
+   ▼
+model.fit(X_train, y_train, sample_weights, ...);  y_pred = model.predict(X_test)
+   │  benchmark/runner.py:494-577
+   │  - tree models: raw fit on X_train (no scaling)
+   │  - neural models: trained on sliding-window tensors built by features.create_sliding_windows
+   │                   with RevIN normalising inside the forward pass
+   │
+   ▼
+metric_registry.compute_all(metrics, y_test, y_pred, y_train=y_train)
+   │  benchmark/runner.py:596-603
+   │  - whatever space y_test / y_pred are in is the space metrics get computed in
+   │  - NO log-inversion here    ← see ⚠ EVIDENCE B
+   │
+   ▼
+Demšar mean_rank across folds → leaderboard → production_model selection by production_metric
+   │  benchmark/runner.py:784-829, main.py post-benchmark
+   │
+   ▼ (production forecast cycle, separate code path)
+_forecast_with_cached → predict → expm1 inversion (main.py:2939-2941, :4603-4604)
+   │  ★ only the production publish path inverts log_transform ★
+   │
+   ▼
+conformal band built from logged residuals (web/app.py:2105, db.get_conformal_quantiles)
+publish_state(...) → HA forecast sensors
+```
 
 ---
 
-## 10. Things that look like features but aren't (discoverability traps)
+## 5. Train / validation / test split mechanism
 
-These will inform the improvements proposal — they're cases where something exists in the code or UI but doesn't currently deliver to the user.
+There is no separate validation split — the benchmark uses **k-fold time-series CV** with no inner validation set. Early stopping (when present, e.g. LightGBM `early_stopping_rounds=50`) is configured against the train fold itself or a slice of it carved out inside the backend; there is no global `val_idx`.
 
-- **Training CPU cores / process priority settings** in `/system` (`system.html:62-100`) write to `mlfl.yaml` but are never applied (§8b). A user who turns "Training CPU cores" down to 1 will see no change in load.
-- **Future-role covariates** are advertised in `mlfl.yaml` (line 150) and the Settings UI dropdown (`experiment.html:297`), but `CovariateResolver.fetch_future` (`covariates.py:159`) returns NaN as a placeholder — future covariates aren't actually wired into the feature build for inference.
-- **Diebold-Mariano pairwise model tests** are computed in `benchmark/comparison.py` but never rendered in the UI.
-- **Daily Cumulative ranking** is presented as a parallel ranking table (Results tab) but explicitly does not drive Promote / Tuning / live forecasting — flagged in the info-tip but a likely cause of "which rank should I trust?" confusion.
-- **Custom metrics** (asteval-sandboxed Python expressions in YAML) compute and store values but have no first-class UI surface beyond appearing alongside built-in metrics.
-- **Delete experiment** has an API endpoint (`/api/experiments/{name}/delete`) but no UI button.
-- **`mlfl_dashboard.yaml`** auto-generation produces a Lovelace dashboard but the download path (`/dashboard_yaml`) is not linked from any UI page — users have to know it exists.
-- **Direct port 5052** is exposed alongside ingress (`config.yaml:17` + the bound port). Users sometimes hit `http://homeassistant.local:5052` directly (this URL is even hardcoded in `dashboard.py:124`); the lack of auth at this layer is a discoverability *and* security concern that surfaces as UX.
+**Split strategy (chosen by `cv_strategy`):**
+
+- `walk_forward` — expanding train window, fixed test size. Fold *f* (0-indexed):
+  - `test_size = max(1, n // (n_folds + 1))`
+  - `test_start = n − test_size · (n_folds − f)`
+  - `train_end = max(0, test_start − cv_embargo_periods)`
+  - `train_idx = arange(0, train_end)`; `test_idx = arange(test_start, test_start + test_size)`
+- `sliding_window` — fixed train and test sizes, sliding stride sized so the last fold's test ends at `n`.
+
+Both are strictly temporal — `train_idx < test_idx` for every fold; no shuffling. (`benchmark/runner.py:227-328`.)
+
+**Embargo:** `cv_embargo_periods = 2` rows are excluded between train and test specifically to prevent rolling/lag features that span the boundary from leaking. The comment at `:251-253` says this is for "rolling features whose forecast horizon overlaps the test inputs". The embargo is **not the same** as the rolling-feature leak inside the train fold — see ⚠ EVIDENCE A.
+
+**Where scaling/normalisation is fit:**
+
+- Tree backends: nothing is fit; trees consume raw values.
+- Neural backends with `use_revin=True` (default): **per-window** stats are computed inside the network's forward pass; no train-vs-test fit step exists. Each input window auto-normalises against itself.
+- Neural backends with `output_activation="zscore"` (LSTM auto-default; other backends treat as `linear`): per-horizon mean/std are computed from the **training fold's targets** in the backend's `fit`, then used to denormalise at inference. This is fit on train only.
+- Per-covariate `scaling` (`standard`, `minmax`) is YAML-only and applied **on the full series before splitting**, per `covariates.py`. That is a leak point under YAML usage — see ⚠ EVIDENCE C.
 
 ---
 
-Survey ends. Awaiting confirmation before drafting `IMPROVEMENTS.md`.
+## 6. Missing data, irregular sampling, outliers — what the user controls
+
+| Concern | Behaviour | User control |
+|---|---|---|
+| Irregular HA timestamps | Always resampled to a fixed `interval_minutes` grid with `mean` (or `sum` when cumulative). `ffill` then `bfill` applied unconditionally after aggregation. | `interval_minutes` is in UI; the aggregation method and the post-aggregation fill are **hardcoded** (`preprocessing.py:175-178`). |
+| Multi-interval gaps in cumulative series | `cumulative_to_interval` writes `NaN` for rows whose preceding gap is > 1.5 × interval, so resample treats them as missing rather than synthesising a single inflated bucket. | Not directly controllable, but `max_increment` shapes spike detection. |
+| Gaps after resampling | Forward-fill, then back-fill leading NaNs. | No control over fill method (no drop / no linear interpolation / no NaN mask). |
+| Negative-diff / counter-reset spikes | If `reset_daily=true`, midnight-cross + small/negative diff is treated as a reset and the cumulative value is used as the interval. Otherwise, any negative diff is treated as a reset. Spikes `> max_increment` and `not multi_interval_gap` are clipped. | `source_is_cumulative`, `reset_daily`, `max_increment` cover the common cases. |
+| Outliers post-resample | Symmetric quantile clip at **q=0.995** (or `[0, q]` for cumulative). Hardcoded. | None — the quantile is not in the UI or the YAML schema. |
+| Sensor spikes for non-cumulative targets | Same hardcoded 0.5 % top / 0.5 % bottom clip applies. No robust scaler, no MAD/IQR clip, no Hampel filter. | None. |
+| Load-subtract gaps | `on_missing` in `{zero, drop, error}` per subtract row. `max_fraction_of_load` fails fast at 5 % violation (YAML-only override of the 5 %). | `on_missing`, `scale`, `max_fraction_of_load` in UI. |
+| Train/test boundary leakage from ffill | `cv_embargo_periods=2` rows are dropped between train and test, partly mitigating rolling-feature spillover. Forward-fill at the boundary is not separately guarded — if a value is ffilled across a multi-row gap that straddles the boundary, that value is shared by train and test. | Indirect, via `cv_embargo_periods` (YAML only). |
+
+There is no per-sensor or per-experiment imputation policy (drop/ffill/interpolate/mask); ffill is the only behaviour and it is global.
+
+---
+
+## 7. Feature engineering — what is built, and from what
+
+Source of truth at benchmark time is the closure `feature_builder` at `main.py:2009-2027`, plus the temporal/lag features carried over from `features.build_features` at preprocessing time (`features.py:65-237`).
+
+Features generated (per fold, on the fold's local target):
+
+| Family | How it is computed | Look-ahead-safe? |
+|---|---|---|
+| Calendar | `hour_of_day`, `day_of_week`, `is_weekend`, `month`, `day_of_month`, plus `hour_sin/cos`, `dow_sin/cos`. Deterministic from `DatetimeIndex`. | Yes |
+| Holiday | `is_holiday`, when `ExperimentCfg.country` is set; via the `holidays` library. | Yes (calendar-deterministic) |
+| Per-step lags | `y_lag_k = target.shift(k)` for `k ∈ 1..n_lags` (default `n_lags=12`). Physics-gated to 0 at night when `clear_sky_ghi` is present. | Yes — shift(k) at row t reads target[t-k] only. |
+| Periodic lags | `y_lag_{steps_per_day}`, `y_lag_{2·steps_per_day}` — "same time yesterday/two days ago". Also physics-gated. | Yes |
+| Rolling statistics | `y_rolling_mean_{w}`, `y_rolling_std_{w}`, `y_rolling_max_{w}` for `w ∈ [6, 24, 72]` (hardcoded). Re-computed per fold from the fold-local target. | **No — see ⚠ EVIDENCE A.** |
+| Rate of change | `y_diff_1 = target.shift(1) − target.shift(2)`. Gated by `clear_sky_ghi.shift(1)` if solar. | Yes |
+| Covariate × time-of-day interactions | `{cov}_x_hour_sin`, `{cov}_x_hour_cos` for every covariate column, using the **current-row** covariate value. | Yes for the `lagged` role (the covariate column is already a shifted/aligned input); ambiguous for `concurrent`/`future` roles, which are not currently functional. |
+
+User exposure: covariate list and physics flags are in the UI; everything else (`n_lags`, `lag_windows`, country, future-covariate names, RevIN) is YAML-only. There is no UI control for which lag horizons, no toggle for rolling statistics, no exogenous-sensor-as-future-known feature beyond the TiDE `future_covariate_features` YAML stub.
+
+For neural backends: `features.create_sliding_windows` (`features.py:444-549`) builds `(n, window_size, n_channels)` tensors from raw values (target + covariates + temporal sin/cos channels). Lag and rolling **feature columns are not consumed by neural backends** — those models look at the window directly. The leakage path in ⚠ EVIDENCE A therefore affects tree backends only.
+
+---
+
+## 8. Scaling, normalisation, and inverse transforms
+
+| Path | Scaler / normaliser | Fit on | Where it is applied |
+|---|---|---|---|
+| Tree backends | none | n/a | raw `X_train, y_train` |
+| Neural backends (default, `use_revin=True`) | RevIN — per-window, per-channel affine normalisation | self-fits on each input window | inside `model.forward`; `denormalize` in the same forward |
+| Neural backends with `output_activation="zscore"` and `use_revin=False` | per-horizon `(μ, σ)` of `y_train` | train fold targets only | model output head; reversed at inference |
+| Covariate `scaling: standard/minmax` | sklearn-style fit | **full covariate series** before any split | `covariates.py` — fit is global, not per-fold |
+| Log transform | analytical `log(y + 1)` → `exp(y) − 1` | n/a | applied to the target series before the DataFrame is built (`main.py:1385-1386`); inverted only on the **production publish** path (`main.py:2939-2941`, `:4603-4604`) — **not** before benchmark metrics. |
+
+The model itself, the validation metric, and the user-visible Results-tab numbers are computed in whatever space the data is in when `metric_registry.compute_all` is called. See ⚠ EVIDENCE B.
+
+---
+
+## 9. Hardcoded vs user-configurable
+
+| Item | Status | Default | Configurable via |
+|---|---|---|---|
+| Sampling frequency | configurable | 30 min | UI |
+| History length | configurable | 14 d | UI |
+| Forecast horizon | configurable | 48 × 30 min = 24 h | UI |
+| Aggregation method (sum vs mean) | hardcoded | implied by `source_is_cumulative` | none |
+| Gap-fill method | hardcoded | `ffill` then `bfill` | none |
+| Outlier-clip quantile | hardcoded | `0.995` | none |
+| Outlier-clip method | hardcoded | symmetric quantile | none |
+| Log-transform shift | hardcoded | `1.0` | none |
+| `n_lags` | hardcoded | `12` | YAML only (not in UI; would need a schema field) |
+| `lag_windows` | hardcoded | `[6, 24, 72]` | YAML only |
+| `cv_embargo_periods` | configurable | `2` | YAML only |
+| RevIN on/off | configurable | `True` | YAML only |
+| Conformal coverage | hardcoded | `0.80` | none |
+| Conformal lookback | hardcoded | 14 d | none |
+| Tree-model objective | hardcoded | per backend (MSE / RMSE) | none |
+| Neural `loss_fn` | configurable | `mse` | UI |
+| `daily_loss_weight` | configurable | `0.0` | UI (checkbox → `0.5`) |
+| `production_metric` | configurable | `rmse` | UI |
+| `cv_strategy`, `cv_folds`, `recency_half_life_days` | configurable | `walk_forward`, `5`, `7` | UI |
+| `optimiser`, `output_activation` | configurable | `adamw`, `auto` | UI |
+| `production_metric` choices | hardcoded list | `{mae, rmse, mase}` | none (MAPE/sMAPE/R²/pinball not selectable) |
+| Tuning objective | hardcoded | composite of MAE/RMSE/MASE | none |
+
+---
+
+## 10. Four pieces of evidence that the audit will lean on
+
+### ⚠ EVIDENCE A — Rolling features include the prediction target at training time (tree-backend leakage + train/inference skew)
+
+`ml_forecast_lab/main.py:2009-2027` (the per-fold feature builder used by `BenchmarkRunner`):
+
+```python
+def feature_builder(df_sub, config, purpose="train"):
+    df_out = df_sub.copy()
+    target = df_out["target"]
+    for window in rolling_windows:                # [6, 24, 72]
+        df_out[f"y_rolling_mean_{window}"]  = target.rolling(window=window).mean()
+        df_out[f"y_rolling_std_{window}"]   = target.rolling(window=window).std()
+        df_out[f"y_rolling_max_{window}"]   = target.rolling(window=window).max()
+    for d in [1, 2]:
+        lag_steps = steps_per_day * d
+        if lag_steps <= len(target):
+            df_out[f"y_lag_{lag_steps}"] = target.shift(lag_steps)
+    df_out["y_diff_1"] = target.shift(1) - target.shift(2)
+    cols = [c for c in df_out.columns if c != "target"]
+    X = df_out[cols].values.astype(np.float32)
+    X = np.nan_to_num(X, nan=0.0)
+    return X
+```
+
+The same pattern is in the offline library at `ml_forecast_lab/features.py:190-193`:
+
+```python
+for window in lag_windows:
+    features[f'y_rolling_mean_{window}'] = target.rolling(window=window).mean()
+    features[f'y_rolling_std_{window}']  = target.rolling(window=window).std()
+    features[f'y_rolling_max_{window}']  = target.rolling(window=window).max()
+```
+
+`pandas.Series.rolling(window=w).mean()` is right-closed by default — at row *t* the window spans `[t−w+1, t]` **inclusive of row t**. So at training-fold row *t* the feature `y_rolling_mean_6[t]` is `mean(target[t−5], ..., target[t])`, which **contains the value the model is being asked to predict**. The lag feature row `y_lag_1[t] = target[t−1]` and `y_diff_1[t] = target[t−1] − target[t−2]` are properly shifted; only the rolling family is not.
+
+The mismatch becomes a hard train/inference skew at the production recursive forecast (`main.py:2874-2884`):
+
+```python
+for w in [6, 24, 72]:
+    window = buf[-w:] if len(buf) >= w else buf
+    if window:
+        row[f'y_rolling_mean_{w}'] = float(np.mean(window))
+        row[f'y_rolling_std_{w}']  = float(np.std(window))
+        row[f'y_rolling_max_{w}']  = float(np.max(window))
+```
+
+At inference, `buf` is populated with values up to and including step *k−1* before predicting step *k*. So inference computes rolling stats over the `w` values **strictly before** the prediction step, while training computed them over `w` values **up to and including** the prediction step. The feature distribution at training is not the feature distribution at inference.
+
+Consequences (to be judged in `ML_AUDIT.md`):
+- Tree-backend CV metrics overstate accuracy because the model can recover `target[t]` from `(y_rolling_mean_6[t] · 6 − Σ y_lag_{1..5}[t])` exactly.
+- Production accuracy differs from CV accuracy by an amount that depends on how much weight the tree puts on the rolling features (which is usually substantial for power/load forecasting).
+- Neural backends are unaffected — they consume the sliding window directly, not these feature columns.
+
+Embargo (`cv_embargo_periods=2`) does not prevent this leak: it protects the test set from rolling spillover *across the fold boundary*, not the train rows from referencing their own target.
+
+### ⚠ EVIDENCE B — Benchmark metrics are computed in log space when `log_transform=true`
+
+`ml_forecast_lab/main.py:1383-1389`:
+
+```python
+# --- Optional log transform ---
+if exp_cfg.log_transform:
+    series = apply_log_transform(series)
+
+# --- Build DataFrame ---
+result = pd.DataFrame({"y": series}, index=series.index)
+```
+
+Downstream, `combined["target"] = df["y"]` is in log space (`main.py:1985-1986`), and the benchmark runner reads `y_test = df_test["target"].values` (`benchmark/runner.py:400-401`). At the metric call (`benchmark/runner.py:596-603`):
+
+```python
+metrics_to_compute = list(set(self.metrics + [self.production_metric]))
+yt_metric = y_test.ravel() if y_test.ndim == 2 and y_test.shape[1] == 1 else y_test
+yp_metric = y_pred.ravel() if y_pred.ndim == 2 and y_pred.shape[1] == 1 else y_pred
+fold_metrics = self.metric_registry.compute_all(
+    metrics_to_compute, yt_metric, yp_metric, y_train=yt_train_metric,
+)
+```
+
+A `grep -n "log\|expm1\|invert" benchmark/runner.py` returns no expm1 / `invert_log_transform` call. The log inversion exists in the runtime production path only (`main.py:2939-2941`, `:4603-4604`, `:2492-2496` for the holdout chart).
+
+Consequence (to be judged in `ML_AUDIT.md`):
+- "RMSE: 0.42" on the Results tab is in `log(y+1)` units when `log_transform=true`, not in the sensor's units. Users have no indication of this.
+- `production_metric=rmse` selects the model with lowest log-space RMSE, which corresponds to a geometric/relative error penalty — different model than the one that minimises absolute-error in original units.
+- The chart on the Results tab (which un-logs for display) and the leaderboard numbers (which do not) are not in the same units.
+
+### ⚠ EVIDENCE C — Covariate `scaling` is fit on the full series, before splitting
+
+`covariates.py` applies the per-covariate `scaling` (`standard` or `minmax`) to the **full fetched series** before it is concatenated with the target and split into folds. There is no per-fold refit. The field is YAML-only; users who set `scaling: standard` on a covariate get test-set statistics leaking into their training features by construction.
+
+The leak is statistically small for most covariates but is a textbook split-leakage example that contradicts the per-fold-rolling fix already present in the rest of the pipeline.
+
+### ⚠ EVIDENCE D — No probabilistic training loss; only point losses; quantile/pinball is evaluation-only; conformal coverage is hardcoded 80 %
+
+`models/base.py:747-842` (composite horizon loss) and the `_loss_map` in every neural backend offer only `mse`, `mae`, and `huber`. `benchmark/metrics.pinball_loss` exists but no training path uses it; `coverage` is computed against bands built post-hoc by `db.get_conformal_quantiles(..., 0.8, ...)` (`web/app.py:2105`). There is no UI control for coverage level, no quantile dropdown, no asymmetric over/under-prediction loss, no Tweedie/NB for spiky-near-zero series.
+
+This is not a bug — it's a capability gap and it shapes what the user can express. The "will my battery be empty by 6pm?" use case is, today, served by a 50 % point forecast plus a fixed-coverage interval; users cannot ask for a 90 % upper band, cannot penalise under-prediction more than over-prediction, and cannot train a model with calibrated quantile output.
+
+---
+
+## 11. End of Phase 1
+
+Per the brief, this file is recon only. The judgements — what to add, what to change, what to remove, what defaults to flip — are in Phase 2 (`ML_AUDIT.md`), produced after you confirm this survey is accurate.
