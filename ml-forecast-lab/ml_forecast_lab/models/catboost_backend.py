@@ -57,6 +57,9 @@ class CatBoostModel(ForecastModel):
         min_data_in_leaf: int = 10,
         bootstrap_type: str = "Bernoulli",
         verbose: int = 0,
+        loss_fn: str = 'huber',
+        tweedie_variance_power: float = 1.5,
+        huber_delta: float = 1.0,
     ) -> None:
         super().__init__()
         if not CATBOOST_AVAILABLE:
@@ -75,6 +78,9 @@ class CatBoostModel(ForecastModel):
         # tiny datasets. Kept configurable for parity with CatBoost upstream.
         self.bootstrap_type = bootstrap_type
         self.verbose = verbose
+        self.loss_fn = loss_fn
+        self.tweedie_variance_power = tweedie_variance_power
+        self.huber_delta = huber_delta
 
         self.model: Optional[CatBoostRegressor] = None
         self.feature_names_: Optional[list] = None
@@ -113,13 +119,29 @@ class CatBoostModel(ForecastModel):
             X_val, y_val = eval_set
             w_tr = sample_weight
 
+        # CatBoost native loss-function names. mse → RMSE (CatBoost's
+        # squared-error implementation), mae → MAE, huber takes a delta
+        # parameter, tweedie takes a variance_power.
+        if self.loss_fn == "mse":
+            loss_function = "RMSE"
+        elif self.loss_fn == "mae":
+            loss_function = "MAE"
+        elif self.loss_fn == "tweedie":
+            loss_function = f"Tweedie:variance_power={float(self.tweedie_variance_power):.3f}"
+        else:  # huber (default) and anything unknown
+            loss_function = f"Huber:delta={float(self.huber_delta):.3f}"
+
         params: Dict[str, Any] = {
             "iterations": self.n_estimators,
             "depth": self.max_depth,
             "learning_rate": self.learning_rate,
             "l2_leaf_reg": self.l2_leaf_reg,
             "min_data_in_leaf": self.min_data_in_leaf,
-            "loss_function": "RMSE",
+            "loss_function": loss_function,
+            # Pin RMSE as the eval metric so early stopping and the
+            # epoch callback always have a stable key to read, even when
+            # loss_function is Huber / Tweedie / MAE.
+            "eval_metric": "RMSE",
             "verbose": self.verbose,
             "allow_writing_files": False,
             "random_seed": 42,
@@ -230,6 +252,9 @@ class CatBoostModel(ForecastModel):
             "min_data_in_leaf": self.min_data_in_leaf,
             "bootstrap_type": self.bootstrap_type,
             "verbose": self.verbose,
+            "loss_fn": self.loss_fn,
+            "tweedie_variance_power": self.tweedie_variance_power,
+            "huber_delta": self.huber_delta,
         })
 
     def set_params(self, **kwargs: Any) -> None:
@@ -237,6 +262,7 @@ class CatBoostModel(ForecastModel):
             "n_estimators", "max_depth", "learning_rate", "l2_leaf_reg",
             "subsample", "colsample_bylevel", "min_data_in_leaf",
             "bootstrap_type", "verbose",
+            "loss_fn", "tweedie_variance_power", "huber_delta",
         }
         for k, v in kwargs.items():
             if k not in valid:

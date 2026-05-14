@@ -188,6 +188,47 @@ def mase(
     return float(np.mean(abs_errors) / naive_scale)
 
 
+def seasonal_mase(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_train: np.ndarray,
+    season: int = 48,
+) -> float:
+    """
+    Seasonal MASE — MAE scaled by the seasonal-naive baseline error.
+
+    The seasonal baseline forecast is ``ŷ_t = y_{t-season}`` (e.g. same time
+    yesterday at season=48 with 30-min sampling). For HA sensors with a
+    dominant daily cycle this is the meaningful comparison; the 1-step
+    naive used by classical MASE under-states the baseline because
+    consecutive 30-min values are heavily correlated.
+
+    Falls back to 1-step naive when ``len(y_train) <= season``.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    y_train = np.asarray(y_train, dtype=float)
+
+    valid_mask = ~(np.isnan(y_true) | np.isnan(y_pred))
+    if not np.any(valid_mask):
+        return np.nan
+
+    if len(y_train) < 2:
+        return np.nan
+
+    if season < 1 or len(y_train) <= season:
+        naive_errors = np.abs(np.diff(y_train))
+    else:
+        naive_errors = np.abs(y_train[season:] - y_train[:-season])
+
+    naive_scale = np.nanmean(naive_errors)
+    if np.isnan(naive_scale) or naive_scale == 0:
+        return np.nan
+
+    abs_errors = np.abs(y_true[valid_mask] - y_pred[valid_mask])
+    return float(np.mean(abs_errors) / naive_scale)
+
+
 def r_squared(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """
     Calculate R² (coefficient of determination).
@@ -340,10 +381,11 @@ class MetricRegistry:
         self.register('mape', mape)
         self.register('smape', smape)
         self.register('mase', mase)
+        self.register('seasonal_mase', seasonal_mase)
         self.register('r_squared', r_squared)
         self.register('pinball_loss', pinball_loss)
         self.register('coverage', coverage)
-        logger.info('Registered 8 standard metrics')
+        logger.info('Registered 9 standard metrics')
 
     def register(self, name: str, func: Callable) -> None:
         """

@@ -218,6 +218,51 @@
         </div>
     </div>
 
+    <!-- Robustness -->
+    <div class="settings-group">
+        <h3 class="settings-group-title">Robustness</h3>
+        <div class="exp-field-grid" style="grid-template-columns:repeat(3, 1fr);">
+            <div class="exp-field">
+                <label class="field-label">Gap handling <span class="info-tip">?<span class="tip-text"><b>Interpolate</b> (default): linearly fill gaps up to the maximum size; longer gaps are dropped. <b>ffill</b> (legacy): forward-fill every gap regardless of length — can inject synthetic flat segments during a recorder outage. <b>Mask</b>: drop every gap row so the model never sees imputed data.</span></span></label>
+                <select class="setting-input" data-field="gap_handling" onchange="saveSettingsField(this)">
+                    <option value="interpolate" {% if not exp_config or exp_config.gap_handling == 'interpolate' %}selected{% endif %}>Interpolate (≤ max)</option>
+                    <option value="ffill" {% if exp_config and exp_config.gap_handling == 'ffill' %}selected{% endif %}>Forward-fill (legacy)</option>
+                    <option value="mask" {% if exp_config and exp_config.gap_handling == 'mask' %}selected{% endif %}>Mask (drop rows)</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Gap max (minutes)</label>
+                <input type="number" class="setting-input" data-field="gap_max_minutes" min="1" max="1440"
+                       value="{{ exp_config.gap_max_minutes if exp_config else 90 }}"
+                       onchange="saveSettingsField(this)">
+            </div>
+            <div class="exp-field"></div>
+            <div class="exp-field">
+                <label class="field-label">Outlier method <span class="info-tip">?<span class="tip-text"><b>Quantile</b> (default): clip the upper tail at the chosen quantile. <b>MAD</b>: robust median ± 3.5 · MAD clip — less aggressive on heavy-tailed but legitimate data like rainfall or occupancy. <b>Off</b>: no clipping — pair with a robust loss (mae / huber) if your sensor has legitimate unbounded values.</span></span></label>
+                <select class="setting-input" data-field="outlier_method" onchange="saveSettingsField(this)">
+                    <option value="quantile" {% if not exp_config or exp_config.outlier_method == 'quantile' %}selected{% endif %}>Quantile</option>
+                    <option value="mad" {% if exp_config and exp_config.outlier_method == 'mad' %}selected{% endif %}>MAD (robust)</option>
+                    <option value="off" {% if exp_config and exp_config.outlier_method == 'off' %}selected{% endif %}>Off</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Outlier quantile</label>
+                <input type="number" class="setting-input" data-field="outlier_quantile" min="0.9" max="0.9999" step="0.0005"
+                       value="{{ exp_config.outlier_quantile if exp_config else 0.999 }}"
+                       onchange="saveSettingsField(this)">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Lower bound <span class="info-tip">?<span class="tip-text"><b>Auto</b>: zero for cumulative sources, symmetric quantile otherwise. <b>Zero</b>: clip at 0 — for non-negative quantities. <b>Symmetric</b>: clip at the matching lower quantile — for two-sided signed sensors. <b>Off</b>: no lower clip.</span></span></label>
+                <select class="setting-input" data-field="outlier_lower" onchange="saveSettingsField(this)">
+                    <option value="auto" {% if not exp_config or exp_config.outlier_lower == 'auto' %}selected{% endif %}>Auto</option>
+                    <option value="zero" {% if exp_config and exp_config.outlier_lower == 'zero' %}selected{% endif %}>Zero</option>
+                    <option value="symmetric" {% if exp_config and exp_config.outlier_lower == 'symmetric' %}selected{% endif %}>Symmetric</option>
+                    <option value="off" {% if exp_config and exp_config.outlier_lower == 'off' %}selected{% endif %}>Off</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
     <!-- Training -->
     <div class="settings-group">
         <h3 class="settings-group-title">Training</h3>
@@ -244,17 +289,19 @@
             <div class="exp-field">
                 <label class="field-label">Production metric</label>
                 <select class="setting-input" data-field="production_metric" onchange="saveSettingsField(this)">
+                    <option value="seasonal_mase" {% if not exp_config or exp_config.production_metric == 'seasonal_mase' %}selected{% endif %}>Seasonal MASE (vs same time yesterday)</option>
                     <option value="mae" {% if exp_config and exp_config.production_metric == 'mae' %}selected{% endif %}>MAE</option>
                     <option value="rmse" {% if exp_config and exp_config.production_metric == 'rmse' %}selected{% endif %}>RMSE</option>
-                    <option value="mase" {% if exp_config and exp_config.production_metric == 'mase' %}selected{% endif %}>MASE</option>
+                    <option value="mase" {% if exp_config and exp_config.production_metric == 'mase' %}selected{% endif %}>MASE (vs 1-step naive)</option>
                 </select>
             </div>
             <div class="exp-field">
-                <label class="field-label">Loss function (neural)</label>
+                <label class="field-label">Loss function <span class="info-tip">?<span class="tip-text"><b>Huber</b> (default): smooth-L1 — quadratic near zero, linear in the tails. Right default for the typical HA sensor (power, occupancy, intermittent loads) because peak spikes don't dominate the loss. <b>MSE</b>: squared error — choose only when peaks matter more than baseline accuracy. <b>MAE</b>: absolute error — for very clean signals. <b>Tweedie</b>: compound Poisson-Gamma loss for zero-inflated right-skewed targets (rainfall, occupancy count, intermittent EV draw). Honoured by tree backends (LightGBM / XGBoost / CatBoost); neural backends fall back to Huber.</span></span></label>
                 <select class="setting-input" data-field="loss_fn" onchange="saveSettingsField(this)">
+                    <option value="huber" {% if not exp_config or exp_config.loss_fn == 'huber' %}selected{% endif %}>Huber (default)</option>
                     <option value="mse" {% if exp_config and exp_config.loss_fn == 'mse' %}selected{% endif %}>MSE</option>
                     <option value="mae" {% if exp_config and exp_config.loss_fn == 'mae' %}selected{% endif %}>MAE</option>
-                    <option value="huber" {% if exp_config and exp_config.loss_fn == 'huber' %}selected{% endif %}>Huber</option>
+                    <option value="tweedie" {% if exp_config and exp_config.loss_fn == 'tweedie' %}selected{% endif %}>Tweedie (tree backends only)</option>
                 </select>
             </div>
             <div class="exp-field">

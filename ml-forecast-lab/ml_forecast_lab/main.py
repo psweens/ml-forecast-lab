@@ -1342,7 +1342,11 @@ class MLForecastLabApp:
 
         # --- Resample to regular grid ---
         resample_method = "sum" if exp_cfg.source_is_cumulative else "mean"
-        series = resample_to_grid(series, freq=freq, method=resample_method)
+        series = resample_to_grid(
+            series, freq=freq, method=resample_method,
+            gap_handling=exp_cfg.gap_handling,
+            gap_max_minutes=exp_cfg.gap_max_minutes,
+        )
 
         # --- Load subtract (optional) ---
         #
@@ -1379,7 +1383,13 @@ class MLForecastLabApp:
                     raise
 
         # --- Clip outliers ---
-        series = clip_outliers(series, positive_only=exp_cfg.source_is_cumulative)
+        series = clip_outliers(
+            series,
+            quantile=exp_cfg.outlier_quantile,
+            positive_only=exp_cfg.source_is_cumulative,
+            method=exp_cfg.outlier_method,
+            lower_bound=exp_cfg.outlier_lower,
+        )
 
         # --- Optional log transform ---
         if exp_cfg.log_transform:
@@ -2083,9 +2093,17 @@ class MLForecastLabApp:
                 exp_params = getattr(exp_cfg, 'model_params', {}).get(model_name, {})
                 if exp_params:
                     overrides.update(exp_params)
-                # Apply experiment-level loss_fn first, then overrides
-                if m.is_neural and hasattr(m, 'loss_fn') and 'loss_fn' not in overrides:
-                    m.set_params(loss_fn=exp_cfg.loss_fn)
+                # Apply experiment-level loss_fn first, then overrides. Neural
+                # backends accept mse/mae/huber; tree backends additionally
+                # accept tweedie and map huber/mae to their native objectives.
+                if hasattr(m, 'loss_fn') and 'loss_fn' not in overrides:
+                    user_loss = exp_cfg.loss_fn
+                    if m.is_neural and user_loss == 'tweedie':
+                        # Tweedie has no native torch loss; fall back to huber
+                        # for neural backends so the choice still degrades
+                        # gracefully on a mixed-backend benchmark.
+                        user_loss = 'huber'
+                    m.set_params(loss_fn=user_loss)
                 if (m.is_neural and hasattr(m, 'daily_loss_weight')
                         and 'daily_loss_weight' not in overrides):
                     m.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
@@ -5016,12 +5034,21 @@ class MLForecastLabApp:
                 mae = result.metrics.get("mae", float("inf"))
                 rmse = result.metrics.get("rmse", float("inf"))
                 mase = result.metrics.get("mase", float("inf"))
+                # Tuning objective tracks the user's selected production
+                # metric. Falls back to MAE if production_metric is missing
+                # from the result (e.g. seasonal_mase before the runner
+                # registered it).
+                primary = result.metrics.get(
+                    exp_cfg.production_metric,
+                    result.metrics.get("mae", float("inf")),
+                )
                 status = "completed"
             except Exception as e:
                 logger.warning(f"  Trial {trial.number} failed: {e}", exc_info=True)
                 mae = float("inf")
                 rmse = float("inf")
                 mase = float("inf")
+                primary = float("inf")
                 status = "failed"
             finally:
                 del model
@@ -5038,7 +5065,11 @@ class MLForecastLabApp:
                     f"MAE={mae:.4f}, RMSE={rmse:.4f}, MASE={mase:.3f}"
                 )
 
-            composite = _composite_score(mae, rmse, mase) if anchor["mae"] is not None else float("inf")
+            # Optuna minimises the user's chosen production_metric directly so
+            # tuning, model selection, and the leaderboard agree on what
+            # "better" means. The composite is still computed for the trial
+            # log but no longer drives the search direction.
+            composite = primary if np.isfinite(primary) else float("inf")
 
             duration = _time.time() - t_start
 

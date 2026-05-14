@@ -54,6 +54,8 @@ class LightGBMModel(ForecastModel):
         reg_alpha: float = 0.5,
         reg_lambda: float = 1.0,
         verbose: int = -1,
+        loss_fn: str = 'huber',
+        tweedie_variance_power: float = 1.5,
     ):
         """
         Initialise LightGBM forecasting model.
@@ -98,6 +100,8 @@ class LightGBMModel(ForecastModel):
         self.reg_alpha = reg_alpha
         self.reg_lambda = reg_lambda
         self.verbose = verbose
+        self.loss_fn = loss_fn
+        self.tweedie_variance_power = tweedie_variance_power
 
         self.model: Optional[lgb.Booster] = None
         self.feature_names_: Optional[list] = None
@@ -187,9 +191,19 @@ class LightGBMModel(ForecastModel):
         )
         val_data.feature_name = self.feature_names_
 
-        # Training parameters
+        # Training parameters. Map user-facing loss_fn to LightGBM's native
+        # objective names. mse/mae/huber are first-party; tweedie is the
+        # right fit for zero-inflated spiky series (rainfall, occupancy,
+        # intermittent load).
+        objective_map = {
+            "mse": "regression",
+            "mae": "regression_l1",
+            "huber": "huber",
+            "tweedie": "tweedie",
+        }
+        objective = objective_map.get(self.loss_fn, "huber")
         params = {
-            "objective": "regression",
+            "objective": objective,
             "metric": "rmse",
             "max_depth": self.max_depth,
             "learning_rate": self.learning_rate,
@@ -201,6 +215,8 @@ class LightGBMModel(ForecastModel):
             "reg_lambda": self.reg_lambda,
             "verbose": self.verbose,
         }
+        if objective == "tweedie":
+            params["tweedie_variance_power"] = float(self.tweedie_variance_power)
 
         # Train with early stopping
         epoch_callback = kwargs.get("epoch_callback")
@@ -335,6 +351,8 @@ class LightGBMModel(ForecastModel):
             "reg_alpha": self.reg_alpha,
             "reg_lambda": self.reg_lambda,
             "verbose": self.verbose,
+            "loss_fn": self.loss_fn,
+            "tweedie_variance_power": self.tweedie_variance_power,
         })
 
     def set_params(self, **kwargs: Any) -> None:
@@ -354,7 +372,8 @@ class LightGBMModel(ForecastModel):
         valid_params = {
             "n_estimators", "max_depth", "learning_rate", "num_leaves",
             "min_child_samples", "subsample", "colsample_bytree",
-            "reg_alpha", "reg_lambda", "verbose"
+            "reg_alpha", "reg_lambda", "verbose",
+            "loss_fn", "tweedie_variance_power",
         }
 
         for key, value in kwargs.items():

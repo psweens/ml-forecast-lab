@@ -608,8 +608,12 @@ class BenchmarkRunner:
                 yp_metric = np.expm1(yp_metric)
                 yt_train_metric = np.expm1(yt_train_metric)
 
+            interval_minutes = int(self.experiment_cfg.get('interval_minutes', 30))
+            season = max(1, 1440 // max(interval_minutes, 1))
+
             fold_metrics = self.metric_registry.compute_all(
-                metrics_to_compute, yt_metric, yp_metric, y_train=yt_train_metric,
+                metrics_to_compute, yt_metric, yp_metric,
+                y_train=yt_train_metric, season=season,
             )
 
             # --- Train metrics for overfitting table ---
@@ -627,7 +631,7 @@ class BenchmarkRunner:
                     fold_train_m = self.metric_registry.compute_all(
                         metrics_to_compute,
                         y_train_for_metric, y_pred_train_for_metric,
-                        y_train=y_train_for_metric,
+                        y_train=y_train_for_metric, season=season,
                     )
                 except Exception:
                     pass
@@ -660,11 +664,14 @@ class BenchmarkRunner:
                     ).groupby(lambda ts: ts.date()).sum()
 
                     if len(daily_test) >= 2 and len(daily_train) >= 2:
+                        # Daily totals have season=1 (compared day-over-day,
+                        # not interval-over-interval).
                         daily_fold_m = self.metric_registry.compute_all(
                             metrics_to_compute,
                             daily_test['y_test'].values,
                             daily_test['y_pred'].values,
                             y_train=daily_train['y_train'].values,
+                            season=1,
                         )
             except Exception as e:
                 logger.debug(

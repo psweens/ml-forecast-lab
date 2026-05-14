@@ -80,11 +80,12 @@ class TestClipOutliers:
         result = clip_outliers(s, positive_only=True)
         assert (result >= 0).all()
 
-    def test_default_quantile_is_995(self):
-        """Verify default changed from 0.95 to 0.995."""
+    def test_default_quantile_is_999(self):
+        """0.999 is the post-H-2 default: 0.5% top trim was clipping
+        legitimate sensor peaks on spiky targets (rainfall, EV draw)."""
         import inspect
         sig = inspect.signature(clip_outliers)
-        assert sig.parameters['quantile'].default == 0.995
+        assert sig.parameters['quantile'].default == 0.999
 
 
 class TestTransformRoundtrip:

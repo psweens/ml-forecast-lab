@@ -239,7 +239,9 @@ class ExperimentCfg:
     cv_embargo_periods: int = 2
     """Gap between training and test sets (in periods) to avoid temporal leakage."""
 
-    metrics: List[str] = field(default_factory=lambda: ['mae', 'rmse', 'mase'])
+    metrics: List[str] = field(
+        default_factory=lambda: ['mae', 'rmse', 'mase', 'seasonal_mase']
+    )
     """Standard metrics to compute."""
 
     custom_metrics: Optional[Dict[str, str]] = None
@@ -258,8 +260,12 @@ class ExperimentCfg:
     whichever model the next benchmark cycle ranked first, which
     appeared to users as "I chose XGBoost but the page forgets"."""
 
-    production_metric: str = 'rmse'
-    """Metric to use for automatic model selection."""
+    production_metric: str = 'seasonal_mase'
+    """Metric to use for automatic model selection. Default ``seasonal_mase``
+    (MAE scaled by the same-time-yesterday baseline at the configured
+    ``interval_minutes``) is the right comparison for the daily-seasonal HA
+    sensors most users forecast. ``mase`` (1-step naive) is retained for
+    backwards compatibility but understates skill on seasonal series."""
 
     publish_prefix: str = 'mlfl_'
     """Prefix for published Home Assistant sensor entities."""
@@ -423,8 +429,14 @@ class ExperimentCfg:
     """How often to retrain the model from scratch for this experiment.
     Falls back to AppConfig.retrain_every_hours if None."""
 
-    loss_fn: str = 'mse'
-    """Training loss for neural models: 'mse', 'mae', or 'huber'."""
+    loss_fn: str = 'huber'
+    """Training loss: 'mse', 'mae', 'huber', or 'tweedie' (tree backends).
+    Default ``huber`` (smooth-L1) is appropriate for the typical HA target —
+    quadratic near zero so gradients flow on small errors, linear in the
+    tails so sensor spikes don't dominate. MSE is preserved for backwards
+    compatibility but is rarely the right choice for spiky, near-zero
+    series (power, occupancy, rainfall). ``tweedie`` is honoured only by
+    LightGBM / XGBoost / CatBoost — neural backends fall back to Huber."""
 
     optimiser: str = 'adamw'
     """Optimiser for neural models: 'adamw' (default, decoupled weight decay as
@@ -461,6 +473,48 @@ class ExperimentCfg:
     """Half-life for exponential recency weighting in days. Recent samples receive
     higher weight during training so models prioritise current patterns.
     Set to 0 to disable recency weighting (all samples weighted equally)."""
+
+    gap_handling: str = 'interpolate'
+    """How to fill gaps after resampling:
+    - ``ffill``: legacy behaviour — propagate the last observed value across
+      every gap, large or small. Inserts artificial flat segments on a
+      recorder outage that the model can over-fit.
+    - ``interpolate`` (default): linear-interpolate gaps up to
+      ``gap_max_minutes``; mark longer gaps as NaN so downstream dropna
+      excludes them rather than imputing them with a stale value.
+    - ``mask``: leave every gap as NaN (downstream dropna removes the row).
+      Use when missing data should never be modelled."""
+
+    gap_max_minutes: int = 90
+    """Maximum gap (minutes) eligible for ``gap_handling='interpolate'``.
+    Gaps longer than this are left as NaN regardless of method."""
+
+    outlier_method: str = 'quantile'
+    """Outlier-handling method:
+    - ``quantile`` (default): clip upper tail at ``outlier_quantile``, lower
+      tail per ``outlier_lower``.
+    - ``mad``: Iglewicz-Hoaglin robust clip at ``median ± k · MAD`` with
+      k=3.5. Less aggressive than the quantile clip on heavy-tailed but
+      legitimate data (rainfall, occupancy).
+    - ``off``: no clipping. Pair with a robust ``loss_fn`` (mae, huber) and
+      a probabilistic target if your sensor genuinely has unbounded
+      legitimate values."""
+
+    outlier_quantile: float = 0.999
+    """Upper-tail quantile for ``outlier_method='quantile'``. 0.999 trims the
+    top 0.1% — less aggressive than the previous hardcoded 0.995 because HA
+    sensor noise rarely needs a 0.5% top trim and legitimate peaks were
+    being clipped. Lower this if your target has a clean upper bound."""
+
+    outlier_lower: str = 'auto'
+    """Lower bound for ``outlier_method='quantile'``:
+    - ``auto`` (default): zero for cumulative sources, symmetric quantile
+      otherwise. Matches the legacy ``positive_only=source_is_cumulative``
+      logic.
+    - ``zero``: clip at 0 — for non-negative quantities (power, energy).
+    - ``symmetric``: clip at ``1 - outlier_quantile`` — for two-sided
+      signed sensors (temperature delta, wind direction).
+    - ``off``: no lower clip."""
 
     include_sun_elevation: bool = False
     """Include sun elevation angle (degrees above horizon) as a computed covariate.

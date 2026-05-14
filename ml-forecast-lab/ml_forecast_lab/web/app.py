@@ -3211,14 +3211,19 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "log_transform": lambda v: bool(v),
             "forecast_every_minutes": lambda v: int(v) if int(v) >= 1 else None,
             "retrain_every_hours": lambda v: float(v) if float(v) >= 0.1 else None,
-            "production_metric": lambda v: v if v in ("mae", "rmse", "mase") else None,
-            "loss_fn": lambda v: v if v in ("mse", "mae", "huber") else None,
+            "production_metric": lambda v: v if v in ("mae", "rmse", "mase", "seasonal_mase") else None,
+            "loss_fn": lambda v: v if v in ("mse", "mae", "huber", "tweedie") else None,
             "optimiser": lambda v: v if v in ("adamw", "adam") else None,
             # UI sends bool (toggle); we map true→0.5, false→0.0. Raw float values
             # (e.g. from hand-edited YAML) pass through clamped to ≥ 0 so sophisticated
             # users can still override the default λ without UI churn.
             "daily_loss_weight": lambda v: (0.5 if v else 0.0) if isinstance(v, bool) else max(0.0, float(v)),
             "max_increment": lambda v: float(v) if float(v) > 0 else None,
+            "gap_handling": lambda v: v if v in ("ffill", "interpolate", "mask") else None,
+            "gap_max_minutes": lambda v: int(v) if int(v) >= 1 else None,
+            "outlier_method": lambda v: v if v in ("quantile", "mad", "off") else None,
+            "outlier_quantile": lambda v: float(v) if 0.5 < float(v) < 1.0 else None,
+            "outlier_lower": lambda v: v if v in ("auto", "zero", "symmetric", "off") else None,
             "include_sun_elevation": lambda v: bool(v),
             "include_clear_sky_irradiance": lambda v: bool(v),
             "output_activation": lambda v: v if v in (
