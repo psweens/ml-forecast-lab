@@ -13,7 +13,8 @@ Train, benchmark, and deploy time-series models for any HA sensor — with acade
 [![Tests][tests-shield]][tests-link]
 [![Home Assistant add-on][ha-shield]][ha-link]
 [![Architectures][arch-shield]][release-link]
-[![Buy Me a Coffee][bmc-shield]][bmc-link]
+
+<a href="https://www.buymeacoffee.com/psweens"><img src="https://img.buymeacoffee.com/button-api/?text=Buy me a coffee&emoji=☕&slug=psweens&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff" alt="Buy Me a Coffee" height="36"></a>
 
 </div>
 
@@ -177,5 +178,3 @@ ML Forecast Lab is free and open-source, and stays that way. If it's saved you t
 [arch-shield]: https://img.shields.io/badge/arch-aarch64%20%7C%20amd64%20%7C%20armv7-41bdf5?style=flat-square
 [openhainstall-shield]: https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg
 [openhainstall-link]: https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fpsweens%2Fml-forecast-lab
-[bmc-shield]: https://img.shields.io/badge/Buy_Me_a_Coffee-FFDD00?style=flat-square&logo=buymeacoffee&logoColor=black
-[bmc-link]: https://www.buymeacoffee.com/psweens
