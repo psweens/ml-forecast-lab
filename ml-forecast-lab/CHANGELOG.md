@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.34.5
+
+### Changed
+
+- **Forecast Accuracy "?" tooltips refreshed across the tab.** Stale
+  copy fixed and new inline help added so the recent v2.34.x UX
+  changes are discoverable without reading the changelog:
+  - **Trajectory chart tooltip** no longer describes the horizontal
+    "Actual" line that v2.34.1 replaced — now mentions the diamond
+    marker and dashed Y-reference.
+  - **Convergence chart tooltip** points users to the "View as"
+    toggle and explains that the white actual is drawn in the same
+    space as the predictions (deltas or cumulative).
+  - **Lead-time chart tooltip** mentions the per-cohort overlay and
+    what RMSE / bias add when toggled on.
+  - **Run-to-run disagreement tooltip** explains the multi-cohort
+    overlay and how chip-strip clicks narrow / expand the view.
+  - **Retrain-history chip strip tooltip** documents the click
+    interactions added in v2.34.3 (single click to focus, click
+    again to deselect, Cmd/Ctrl-click overlay, Shift-click range).
+
+### Added
+
+- Inline "?" tooltips on the **Window**, **Show last**, **View as**,
+  and **Sort by** controls — concise descriptions of what each
+  selector does and when to pick each option, so users don't have
+  to hover the chart heading to find out.
+
 ## 2.34.4
 
 ### Fixed

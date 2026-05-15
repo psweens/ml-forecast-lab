@@ -126,7 +126,7 @@ Both suites are wired into GitHub Actions on every PR and main push (`tests.yml`
      `tests-shield` only needs a manual flip if the suite ever starts
      failing. When the repo is flipped to public, swap these back to
      the dynamic equivalents (commented below). -->
-[release-shield]: https://img.shields.io/badge/release-v2.34.4-41bdf5?style=flat-square
+[release-shield]: https://img.shields.io/badge/release-v2.34.5-41bdf5?style=flat-square
 [release-link]: https://github.com/psweens/ml-forecast-lab/releases/latest
 [licence-shield]: https://img.shields.io/badge/licence-MIT-41bdf5?style=flat-square
 [licence-link]: LICENSE

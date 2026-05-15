@@ -1457,6 +1457,7 @@
                 <option value="30" selected>Last 30 days</option>
                 <option value="90">Last 90 days</option>
             </select>
+            <span class="info-tip">?<span class="tip-text">Time range used by every chart and verdict on this tab. Shorter windows reflect recent behaviour (a freshly-promoted model, an environmental change); longer windows give more samples but mix older cohorts in.</span></span>
         </div>
         <!-- Evaluation mode toggle — cumulative sensors only -->
         <div class="acc-control" id="accuracy-mode-wrapper" style="display:none;">
@@ -1567,7 +1568,7 @@
             <div class="settings-group-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem;">
                 <h3 class="settings-group-title" style="margin:0;">
                     How error grows with forecast horizon
-                    <span class="info-tip">?<span class="tip-text">As the model looks further ahead, error usually grows. A flat curve means the model gains nothing from shorter lead times; a steep curve means the near-term forecast is much better than the long-range one.</span></span>
+                    <span class="info-tip">?<span class="tip-text">MAE binned by lead time (minutes between the forecast's issued_at and target_dt). As the model looks further ahead, error usually grows — a flat curve means the model gains nothing from shorter lead times; a steep curve means the near-term forecast is much better than the long-range one. When multiple retrains are in the window, each (model, version) cohort gets its own coloured line so you can see whether a specific retrain dragged the curve up or down. Toggle "Show RMSE &amp; bias" for diagnostic series — RMSE penalises large misses more, and bias (mean error) tells you whether the model systematically under- or over-predicts at each horizon.</span></span>
                 </h3>
                 <label class="leadtime-detail-toggle" style="color:var(--text-secondary);font-size:0.85rem;cursor:pointer;">
                     <input type="checkbox" id="leadtime-detail" onchange="loadForecastAccuracy()" style="vertical-align:middle;margin-right:0.25rem;">
@@ -1676,7 +1677,7 @@
     <div id="retrain-history-card" class="settings-group" style="display:none;">
         <h3 class="settings-group-title">
             Retrain history
-            <span class="info-tip">?<span class="tip-text">Distinct (model, version) pairs observed in <code>forecast_log</code> for the current window. Each retrain stamps a new <code>model_version</code> on every subsequent log row, so the earliest <code>issued_at</code> per version is when that retrain went live. Click a chip to filter the accuracy view to just that version — useful for answering "did Tuesday's retrain make things better or worse?".</span></span>
+            <span class="info-tip">?<span class="tip-text">Distinct (model, version) pairs observed in <code>forecast_log</code> for the current window. Each retrain stamps a new <code>model_version</code> on every subsequent log row, so the earliest <code>issued_at</code> per version is when that retrain went live. <b>Click</b> a chip to focus the accuracy view on that version; click the same chip again (or "× Show all cohorts") to restore the multi-cohort overlay. <b>Cmd/Ctrl-click</b> adds chips to an overlay set. <b>Shift-click</b> range-selects between two chips. Useful for answering "did Tuesday's retrain make things better or worse?".</span></span>
         </h3>
         <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.5rem 0;">
             <span id="retrain-history-summary">—</span>
@@ -1736,7 +1737,7 @@
         <div class="settings-group" id="accuracy-evolution-wrapper">
             <h3 class="settings-group-title">
                 Forecast convergence
-                <span class="info-tip">?<span class="tip-text">The shaded band shows the range of predictions from recent forecast runs for each moment. The bright line is the latest run. The white line is the actual. The band should narrow around the latest run as lead time shrinks, and land on the actual.</span></span>
+                <span class="info-tip">?<span class="tip-text">For each future moment, the shaded band spans the min/max prediction across the last N forecast cycles, with the bright line being the most recent cycle and the white line the measured actual. A healthy model has the band narrowing around the bright line as lead time shrinks, with both meeting the white line where actuals exist. For cumulative sensors (mixergy, energy-today), the actual is shown in the same space as the predictions — toggle "View as" to switch between per-interval deltas and the integrated daily cumulative.</span></span>
             </h3>
             <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
                 Shaded band = range across recent runs. Bright line = latest run. White line = measured.
@@ -1750,6 +1751,7 @@
                         <option value="24">24 cycles</option>
                         <option value="48">48 cycles</option>
                     </select>
+                    <span class="info-tip">?<span class="tip-text">Number of most-recent forecast issuances pulled into the fan band. Smaller = tighter focus on current behaviour; larger = more cycles to average disagreement across (and a wider band when older cycles disagreed more).</span></span>
                 </div>
                 {% if exp_config and exp_config.source_is_cumulative %}
                 <div style="display:flex;gap:0.5rem;align-items:center;">
@@ -1758,6 +1760,7 @@
                         <option value="interval" selected>Per-interval deltas</option>
                         <option value="cumulative">Cumulative (daily)</option>
                     </select>
+                    <span class="info-tip">?<span class="tip-text"><b>Per-interval deltas</b>: each point is the consumption in one interval (e.g. kWh used in the last 30 min). Best for spotting timing errors and short-spike behaviour. <b>Cumulative (daily)</b>: integrates those deltas into the running daily total, resetting at midnight. Best for "did the model get the day's total right?" — closer to how the underlying sensor reports.</span></span>
                 </div>
                 {% endif %}
             </div>
@@ -1772,7 +1775,7 @@
         <div class="settings-group" id="accuracy-trajectory-wrapper">
             <h3 class="settings-group-title">
                 How predictions converge on a single moment
-                <span class="info-tip">?<span class="tip-text">Pick one future moment; every forecast ever issued of it is plotted at the time it was issued. The horizontal line is the measured actual. A well-behaved model walks toward the line as the target approaches; oscillation or drift is diagnostic.</span></span>
+                <span class="info-tip">?<span class="tip-text">Pick one future moment; every forecast ever issued of it is plotted at the time it was issued. The diamond marker at the right shows the measured actual at that moment, with a faint dashed line as a Y-reference. A well-behaved model walks toward the marker as the target approaches; oscillation or drift is diagnostic.</span></span>
             </h3>
             <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
                 Default shows the biggest miss in the window — the most instructive moments for debugging.
@@ -1783,6 +1786,7 @@
                     <option value="worst" selected>Biggest miss</option>
                     <option value="recent">Most recent</option>
                 </select>
+                <span class="info-tip">?<span class="tip-text">How the Target dropdown is ordered. <b>Biggest miss</b> puts the most-wrong moment first — the most instructive for debugging. <b>Most recent</b> orders by target time, newest first — useful when you're investigating "what did the model say about last night's spike?".</span></span>
                 <label style="color:var(--text-secondary);font-size:0.85rem;">Target:</label>
                 <select id="trajectory-target-select" class="setting-input" style="width:auto;min-width:220px;" onchange="reloadForecastTrajectory(false)">
                     <option value="">Loading…</option>
@@ -1798,7 +1802,7 @@
         <div class="settings-group" id="accuracy-stability-wrapper" style="display:none;">
             <h3 class="settings-group-title">
                 Run-to-run disagreement
-                <span class="info-tip">?<span class="tip-text">How much forecasts for the same future moment vary between consecutive runs. Low disagreement = stable model; high disagreement = predictions depend heavily on when they were issued.</span></span>
+                <span class="info-tip">?<span class="tip-text">How much forecasts for the same future moment vary between consecutive runs. Low disagreement = stable model; high disagreement = predictions depend heavily on when they were issued. Each retrain produces its own (model, version) cohort — the chart overlays one line per cohort so you can spot whether a single retrain is driving the swing. Click a chip in the retrain-history strip above to focus on one cohort; click the same chip again to restore the overlay.</span></span>
             </h3>
             <p style="color:var(--text-secondary);font-size:0.85rem;margin:-0.25rem 0 0.75rem 0;">
                 <span id="stab-plain-sentence">—</span>
