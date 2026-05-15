@@ -26,6 +26,8 @@ The intended mindset is **benchmark once, run forever**. After the first benchma
 
 If you're browsing on GitHub, the install button below is the fastest path. The per-add-on [README](ml-forecast-lab/README.md) and [DOCS](ml-forecast-lab/DOCS.md) render on HA's **Info** and **Documentation** tabs once installed.
 
+![Dashboard with three production experiments](docs/images/dashboard.png)
+
 ## Install
 
 [![Open your Home Assistant instance and show the add add-on repository dialog with this repository pre-filled.][openhainstall-shield]][openhainstall-link]
