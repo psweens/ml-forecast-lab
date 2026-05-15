@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.34.5
+
+### Fixed
+
+- **`UnboundLocalError: local variable 'df' referenced before
+  assignment`** when starting a benchmark with an empty SQLite
+  actuals cache (or when every cached row fell outside
+  `days_history`). `_fetch_and_preprocess` only bound `df` inside
+  the cache-hit branch but referenced it unconditionally on the
+  delta-fetch path. Regression from the v2.33.1 database-flag
+  removal cleanup. Now initialises `df` to an empty DataFrame
+  before the cache lookup so the full-fetch fallback works.
+
+### Changed
+
+- **Forecast Accuracy "?" tooltips refreshed across the tab.** Stale
+  copy fixed and new inline help added so the recent v2.34.x UX
+  changes are discoverable without reading the changelog:
+  - **Trajectory chart tooltip** no longer describes the horizontal
+    "Actual" line that v2.34.1 replaced — now mentions the diamond
+    marker and dashed Y-reference.
+  - **Convergence chart tooltip** points users to the "View as"
+    toggle and explains that the white actual is drawn in the same
+    space as the predictions (deltas or cumulative).
+  - **Lead-time chart tooltip** mentions the per-cohort overlay and
+    what RMSE / bias add when toggled on.
+  - **Run-to-run disagreement tooltip** explains the multi-cohort
+    overlay and how chip-strip clicks narrow / expand the view.
+  - **Retrain-history chip strip tooltip** documents the click
+    interactions added in v2.34.3 (single click to focus, click
+    again to deselect, Cmd/Ctrl-click overlay, Shift-click range).
+
+### Added
+
+- Inline "?" tooltips on the **Window**, **Show last**, **View as**,
+  and **Sort by** controls on the Forecast Accuracy tab — concise
+  descriptions of what each selector does and when to pick each
+  option, so users don't have to hover the chart heading to find out.
+- Hover titles on the **Run Pipeline** and **Publish** action buttons
+  spelling out what each one actually does (benchmark every enabled
+  model with walk-forward CV vs. promote winner + switch to
+  production + start publishing sensors).
+- "?" tooltips on the system **Training CPU cores**, **Process
+  priority**, and **Timezone** fields. Explains what "All available"
+  costs the Pi, what Unix nice values do, and what the timezone is
+  used for (daily-reset midnight boundary).
+
 ## 2.34.4
 
 ### Fixed

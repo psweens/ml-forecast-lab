@@ -71,7 +71,7 @@
     <form id="resource-form" onsubmit="saveSettings(event)">
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; max-width: 600px;">
             <div>
-                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Training CPU cores</label>
+                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Training CPU cores <span class="info-tip">?<span class="tip-text">Maximum cores any single training job is allowed to use. "All available" lets a model fan out across every core during a benchmark — fastest, but the Pi will be unresponsive until it finishes. Lower values keep HA snappy at the cost of longer training. Forecast / inference is single-core regardless of this setting.</span></span></label>
                 <select name="cpu_cores" class="setting-input">
                     <option value="0" {% if config.cpu_cores == 0 %}selected{% endif %}>All available ({{ system.cpu_cores }})</option>
                     {% for i in range(1, system.cpu_cores + 1) %}
@@ -80,7 +80,7 @@
                 </select>
             </div>
             <div>
-                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Process priority</label>
+                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Process priority <span class="info-tip">?<span class="tip-text">Unix <code>nice</code> value applied to the training process — higher number = more polite to the rest of the system. <b>Low (recommended)</b> means HA, the recorder, and other add-ons get scheduling priority whenever they need the CPU; training continues but doesn't starve the rest of the Pi. Pick <b>Minimal</b> if you've had HA become unresponsive during benchmarks.</span></span></label>
                 <select name="nice_priority" class="setting-input">
                     <option value="0" {% if config.nice_priority == 0 %}selected{% endif %}>High (normal)</option>
                     <option value="5" {% if config.nice_priority == 5 %}selected{% endif %}>Medium</option>
@@ -93,7 +93,7 @@
 
         <div style="margin-top: 1.5rem; display: flex; gap: 2rem; flex-wrap: wrap; align-items: flex-end;">
             <div>
-                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Timezone</label>
+                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">Timezone <span class="info-tip">?<span class="tip-text">IANA name (e.g. <code>Europe/London</code>, <code>America/New_York</code>). Used for the daily-reset midnight boundary on cumulative sensors and for human-readable timestamps in the logs. Leave it matching your HA configuration. If you don't set it, the add-on falls back to UTC.</span></span></label>
                 <input type="text" name="timezone" value="{{ config.timezone }}"
                        class="setting-input" style="width: 200px;" placeholder="e.g. Europe/London">
             </div>
