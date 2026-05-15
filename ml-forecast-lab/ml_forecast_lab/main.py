@@ -947,9 +947,8 @@ class MLForecastLabApp:
     def _log_load_subtract_audit(self, exp_cfg, audit: dict) -> None:
         """Emit a human-readable summary of load_subtract audit stats.
 
-        Format matches the Predbat-inspired boxed / ✓ marker style used
-        elsewhere in the runner. Keeps the log readable when several
-        sensors are subtracted.
+        Format matches the boxed / ✓ marker style used elsewhere in the
+        runner. Keeps the log readable when several sensors are subtracted.
         """
         load_total = audit.get("load_total_kwh", 0.0)
         sub_total = audit.get("subtract_total_kwh", 0.0)
@@ -1367,9 +1366,9 @@ class MLForecastLabApp:
         #
         # Runs BEFORE clip_outliers so that outlier bounds are computed on the
         # adjusted (baseline) signal rather than on the raw signal which may
-        # contain subtractable spikes (EV charging, iBoost dumps). If clipping
-        # ran first, those spikes would elevate the 99.5-percentile bound and
-        # mute real baseline peaks after subtraction.
+        # contain subtractable spikes (EV charging, solar-divert dumps). If
+        # clipping ran first, those spikes would elevate the 99.5-percentile
+        # bound and mute real baseline peaks after subtraction.
         if getattr(exp_cfg, "load_subtract", None):
             try:
                 subtract_inputs = await self._prepare_load_subtract_inputs(
@@ -5970,9 +5969,6 @@ class MLForecastLabApp:
             # mlfl.yaml and shown on the System page but never applied.
             self._apply_runtime_resources()
 
-            # Generate dashboard YAML
-            self._generate_dashboard()
-
             # Initialise components
             await self.initialise_components()
 
@@ -6117,27 +6113,6 @@ class MLForecastLabApp:
             self._applied_nice if self._applied_nice is not None else "unchanged",
             system_cores,
         )
-
-    def _generate_dashboard(self):
-        """Generate ApexCharts dashboard YAML from current config."""
-        if not self.config or not self.config.experiments:
-            return
-
-        try:
-            from ml_forecast_lab.dashboard import generate_dashboard
-
-            # Write to addon config dir (same location as mlfl.yaml)
-            import glob
-            config_dirs = glob.glob("/addon_configs/*_ml_forecast_lab")
-            if config_dirs:
-                output_path = Path(config_dirs[0]) / "mlfl_dashboard.yaml"
-            else:
-                output_path = Path("/addon_configs/ml_forecast_lab/mlfl_dashboard.yaml")
-
-            generate_dashboard(self.config.experiments, output_path)
-            logger.info(f"Dashboard YAML generated at {output_path}")
-        except Exception as e:
-            logger.warning(f"Failed to generate dashboard YAML: {e}")
 
     @staticmethod
     def _setup_directories():

@@ -133,7 +133,7 @@ class TestYamlRoundTrip:
                         "on_missing": "zero",
                     },
                     {
-                        "entity_id": "sensor.iboost_today",
+                        "entity_id": "sensor.solar_divert_today",
                         "source": "cumulative_daily",
                         "scale": 0.001,  # Wh → kWh
                     },

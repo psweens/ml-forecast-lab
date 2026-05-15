@@ -51,7 +51,7 @@ Once installed, you'll see an **ML Forecast Lab** entry in the HA sidebar that o
 
 1. Open the web UI via the **ML Forecast Lab** sidebar entry (or **Open Web UI** on the add-on page).
 2. On the dashboard, click **Add Experiment** and fill the form:
-   - **Name** — a short id (`household_load`, `mixergy_demand`, …).
+   - **Name** — a short id (`household_load`, `solar_generation`, …).
    - **Target entity** — the HA sensor you want to forecast. The picker autocompletes from your entity list.
    - **Interval (minutes)** and **Future periods** — interval times future periods = the horizon (e.g. 30 × 48 = 24 h).
    - **Days of history** — how much recorder data to train on.
@@ -117,4 +117,8 @@ The UI re-reads `mlfl.yaml` on each request, so hand edits and UI changes can be
 
 ## Support
 
+This is the first public release of a project that was developed in a private repository. You are amongst the first external users — please open issues for anything that surprises you, including documentation gaps. It's the fastest path to a v2.34.x patch.
+
 Open an issue at https://github.com/psweens/ml-forecast-lab/issues — please include the add-on version, the relevant section of `mlfl.yaml`, and the last 50 lines of the add-on log.
+
+The add-on is maintained on a best-effort basis as a side project. For security issues, follow [`SECURITY.md`](https://github.com/psweens/ml-forecast-lab/blob/main/SECURITY.md) (private disclosure via GitHub).

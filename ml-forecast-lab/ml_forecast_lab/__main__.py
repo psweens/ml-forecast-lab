@@ -102,7 +102,6 @@ _PHASE_PREFIX_MAP = (
     ("ml_forecast_lab.publishing", "PUB"),
     ("ml_forecast_lab.solar_physics", "SOLAR"),
     ("ml_forecast_lab.training_events", "TRAIN"),
-    ("ml_forecast_lab.dashboard", "DASH"),
     ("ml_forecast_lab.config",    "CFG"),
     ("ml_forecast_lab.db",        "DB"),
     ("ml_forecast_lab.main",      "APP"),
