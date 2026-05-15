@@ -14,7 +14,7 @@ Train, benchmark, and deploy time-series models for any HA sensor — with acade
 [![Home Assistant add-on][ha-shield]][ha-link]
 [![Architectures][arch-shield]][release-link]
 
-<a href="https://www.buymeacoffee.com/psweens"><img src="https://img.buymeacoffee.com/button-api/?text=Buy me a coffee&emoji=☕&slug=psweens&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff" alt="Buy Me a Coffee" height="36"></a>
+<a href="https://www.buymeacoffee.com/psweens"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="36"></a>
 
 </div>
 
@@ -160,7 +160,7 @@ The 24 model backends are implementations of published architectures by their re
 
 ML Forecast Lab is free and open-source, and stays that way. If it's saved you time or sharpened your automations, a coffee helps me keep maintaining it, fixing bugs, and adding more model backends.
 
-<a href="https://www.buymeacoffee.com/psweens"><img src="https://img.buymeacoffee.com/button-api/?text=Buy me a coffee&emoji=☕&slug=psweens&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff" alt="Buy Me a Coffee" height="42"></a>
+<a href="https://www.buymeacoffee.com/psweens"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="42"></a>
 
 ## Licence
 
