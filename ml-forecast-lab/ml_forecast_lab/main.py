@@ -1190,6 +1190,15 @@ class MLForecastLabApp:
         freq = f"{exp_cfg.interval_minutes}min"
         table_name = self.history_db.safe_table_name(exp_cfg.target_entity) if self.history_db else None
 
+        # Initialise empty so the cache miss + full-fetch path is well-
+        # defined. Without this `df` is only bound inside the cache-hit
+        # branch below, and the `if len(df) > 0` check further down
+        # raises UnboundLocalError when the cache is empty or all
+        # cached rows fall outside `days_history` (e.g. on a first
+        # benchmark, or when the user widens history). Regression from
+        # the v2.33.1 database-flag removal cleanup.
+        df = pd.DataFrame(columns=["ds", "value"])
+
         # --- Try SQLite cache first ---
         # v2.33.1: actuals caching is unconditional. The previous
         # `exp_cfg.database` gate was removed — the field was a footgun

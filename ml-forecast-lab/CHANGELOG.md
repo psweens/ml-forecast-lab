@@ -2,6 +2,17 @@
 
 ## 2.34.5
 
+### Fixed
+
+- **`UnboundLocalError: local variable 'df' referenced before
+  assignment`** when starting a benchmark with an empty SQLite
+  actuals cache (or when every cached row fell outside
+  `days_history`). `_fetch_and_preprocess` only bound `df` inside
+  the cache-hit branch but referenced it unconditionally on the
+  delta-fetch path. Regression from the v2.33.1 database-flag
+  removal cleanup. Now initialises `df` to an empty DataFrame
+  before the cache lookup so the full-fetch fallback works.
+
 ### Changed
 
 - **Forecast Accuracy "?" tooltips refreshed across the tab.** Stale
