@@ -56,10 +56,6 @@
         </button>
             {% endif %}
         {% endif %}
-        <a href="{{ base_path | default('') }}/dashboard_yaml" class="btn btn-secondary" download="mlfl_dashboard.yaml"
-           title="Download an auto-generated Lovelace dashboard YAML for this and every other experiment.">
-            Lovelace YAML
-        </a>
         {% if experiment.mode == 'production' %}
         <button class="btn btn-secondary" id="btn-rollback" style="display:none;"
                 onclick="rollbackExperiment('{{ experiment.name }}', this)"
@@ -447,14 +443,14 @@
     <!-- Load Subtract -->
     <!--
       Sensors listed here are subtracted from the target load before training.
-      Use case: remove EV charging / iBoost solar-divert contributions from a
+      Use case: remove EV charging / solar-divert contributions from a
       whole-house load sensor so the model learns baseline household patterns.
       Each entry maps to a SubtractCfg — see config.py for field semantics.
     -->
     <div class="settings-group">
         <h3 class="settings-group-title">
             Load Subtract
-            <span class="info-tip">?<span class="tip-text">Sensors to subtract from the target before feature build, e.g. EV charging or iBoost solar dumps. Useful when the target sensor bundles multiple signals and you want the model to learn one. Each entry runs through a robustness layer (unit scale, missing-data policy, fraction guard) — see the audit line in the training logs for per-sensor stats. Note: if the downstream system (e.g. predbat) also subtracts these, don't double-subtract.</span></span>
+            <span class="info-tip">?<span class="tip-text">Sensors to subtract from the target before feature build, e.g. EV charging or solar-divert dumps. Useful when the target sensor bundles multiple signals and you want the model to learn one. Each entry runs through a robustness layer (unit scale, missing-data policy, fraction guard) — see the audit line in the training logs for per-sensor stats. Note: if a downstream automation already subtracts these from its own load model, don't double-subtract.</span></span>
         </h3>
         <div class="covariate-list" id="load-subtract-list">
             {% if exp_config and exp_config.load_subtract %}
@@ -493,7 +489,7 @@
             </div>
             <div class="exp-field">
                 <label class="field-label">On missing
-                    <span class="info-tip">?<span class="tip-text">zero: fill gaps with 0 (EV/iBoost usually OK). drop: drop those rows from training. error: raise — strictest, for pipeline-bug surfacing.</span></span>
+                    <span class="info-tip">?<span class="tip-text">zero: fill gaps with 0 (usually OK for switchable loads like EV chargers or solar-divert dumps). drop: drop those rows from training. error: raise — strictest, for pipeline-bug surfacing.</span></span>
                 </label>
                 <select class="setting-input" id="sub-on-missing-input">
                     <option value="zero">zero</option>
@@ -2597,7 +2593,7 @@ window.showTab = function(el) {
     // predictions at the same target moment — right for setpoint /
     // timing-sensitive consumers. "daily_total" uses cross-cycle std
     // of daily totals — right when the downstream consumer integrates
-    // over the day (Predbat iBoost, EV daily budgets, etc.).
+    // over the day (tank-heating automations, EV daily budgets, etc.).
     var EXP_STABILITY_FOCUS   = {{ (exp_config.stability_focus if exp_config and exp_config.stability_focus else 'per_moment') | tojson }};
 
     // Mode state: "increment" defaults for cumulative sensors (raw value
@@ -3205,8 +3201,8 @@ window.showTab = function(el) {
 
         // --- Stability chip + swing tile ---
         // Which CV the chip reads follows EXP_STABILITY_FOCUS. Aggregate-
-        // focused consumers (Predbat iBoost, daily budgets) only care
-        // about daily-total stability; per-moment swing is noise to
+        // focused consumers (tank-heating, daily-budget automations) only
+        // care about daily-total stability; per-moment swing is noise to
         // them. Timing-sensitive consumers (HVAC setpoints, pre-heat)
         // care about per-moment. The Layer 3 accordion shows both
         // regardless; only this chip + sentence follows the knob.

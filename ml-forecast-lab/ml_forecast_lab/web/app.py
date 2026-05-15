@@ -3496,36 +3496,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             headers={"Content-Disposition": "attachment; filename=mlfl.log"},
         )
 
-    @app.get("/dashboard_yaml", response_class=Response)
-    async def download_dashboard():
-        """
-        Download the auto-generated ApexCharts dashboard YAML.
-        Import this into HA via Settings > Dashboards > Add > From YAML.
-        """
-        import glob
-
-        dashboard_paths = [
-            *[
-                Path(d) / "mlfl_dashboard.yaml"
-                for d in glob.glob(
-                    "/addon_configs/[0-9a-f][0-9a-f][0-9a-f][0-9a-f]"
-                    "[0-9a-f][0-9a-f][0-9a-f][0-9a-f]_ml_forecast_lab"
-                )
-            ],
-            Path("/addon_configs/ml_forecast_lab/mlfl_dashboard.yaml"),
-        ]
-
-        for path in dashboard_paths:
-            if path.exists():
-                with open(path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                return Response(
-                    content=content,
-                    media_type="text/yaml; charset=utf-8",
-                    headers={"Content-Disposition": "attachment; filename=mlfl_dashboard.yaml"},
-                )
-
-        raise HTTPException(status_code=404, detail="Dashboard YAML not generated yet")
 
     # ========== Training Tab: SSE + Routes ==========
 

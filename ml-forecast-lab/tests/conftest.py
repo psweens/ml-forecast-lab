@@ -7,7 +7,7 @@ import pytest
 
 @pytest.fixture
 def synthetic_cumulative_series():
-    """Cumulative demand series that resets daily (like Mixergy demand_today)."""
+    """Cumulative demand series that resets daily (like sensor.energy_today)."""
     idx = pd.date_range("2024-01-01", periods=48 * 14, freq="30min")  # 14 days
     daily_curve = np.sin(np.linspace(0, np.pi, 48)) * 3  # 0-3% per step, peaks midday
     values = np.tile(daily_curve, 14)

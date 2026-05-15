@@ -886,8 +886,9 @@ class TestModelVersion:
         physically-correct one. With offset=0 they straddle two UTC
         days ("2024-04-15" and "2024-04-16") because the first two
         bins spill into UTC Apr 15. The semantic difference is what
-        the fix addresses — a California-based user looking at their
-        UK-hosted Mixergy now sees "Apr 16" meaning BST Apr 16.
+        the fix addresses — a viewer in one timezone looking at a sensor
+        hosted in another (e.g. California viewer, UK-hosted HA) now sees
+        "Apr 16" meaning BST Apr 16.
         """
         # BST Apr 16 00:00→23:30 = UTC Apr 15 23:00 → UTC Apr 16 22:30
         day_targets = [

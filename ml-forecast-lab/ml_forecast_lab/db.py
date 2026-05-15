@@ -1942,7 +1942,7 @@ class HistoryDB:
             # bins of Mon) gets compared against a prior-day issuance
             # that covered all 48 bins of Mon — the partial cycle's
             # SUM is mechanically smaller, and that coverage gap
-            # masquerades as model disagreement. For a Mixergy-style
+            # masquerades as model disagreement. For a daily-cumulative
             # sensor where overnight carries most of the demand, this
             # artefact alone can produce 50–70% CV. Gating to cycles
             # with n_bins = MAX(n_bins) for that day keeps only the

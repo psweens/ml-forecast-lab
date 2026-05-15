@@ -17,10 +17,15 @@
 #      removed in v2.30.0, all access is now through HA's authenticated proxy).
 #   2. Pick the winning model (or let auto-select choose by metric).
 #   3. Switch to production mode — forecasts appear as HA sensor entities.
+#
+# The values below are placeholders. Replace `target_entity` and the
+# covariate entities with sensors that exist in your own Home Assistant
+# install. You can also create experiments from the web UI without ever
+# touching this file.
 # ============================================================================
 
 # --- Global settings --------------------------------------------------------
-timezone: "Europe/London"
+timezone: "UTC"                    # set to your local IANA timezone
 update_every_minutes: 360          # minutes between train/forecast cycles
 
 # --- Experiments ------------------------------------------------------------
@@ -30,43 +35,47 @@ update_every_minutes: 360          # minutes between train/forecast cycles
 experiments:
 
   # ==========================================================================
-  # Experiment 1: Mixergy hot water demand (% charge consumed per interval)
+  # Example: forecast household electrical load (instantaneous power, W)
   # ==========================================================================
-  - name: "mixergy_demand"
-    target_entity: "sensor.mixergy_demand_today"
+  # Replace `sensor.power_consumption_w` with whichever sensor in your HA
+  # install you want to forecast. Defaults assume a non-cumulative, signed
+  # numeric sensor; see DOCS.md for cumulative / daily-reset / energy targets.
+  - name: "household_load"
+    target_entity: "sensor.power_consumption_w"
     mode: "lab"                    # start in lab mode to find the best model
 
     # -- Source characteristics -----------------------------------------------
-    source_is_cumulative: true     # sensor reports a running total for "today"
-    reset_daily: true              # counter resets at local midnight
+    source_is_cumulative: false    # set true if the sensor reports a running total
     interval_minutes: 30           # resample to 30-min buckets
-    max_increment: 40              # cap abnormal 30-min jumps (% points)
 
     # -- Training window ------------------------------------------------------
-    days_history: 60               # use last 60 days for training
+    days_history: 30               # use last 30 days for training
     max_age: 365                   # keep up to 1 year in the SQLite cache
 
     # -- Forecast window ------------------------------------------------------
-    future_periods: 96             # 48 h at 30-min cadence
+    future_periods: 48             # 24 h at 30-min cadence
 
     # -- Covariates -----------------------------------------------------------
+    # Optional external signals. Comment out or remove if you don't have them.
     covariates:
-      - entity: "sensor.current_charge"
-        role: "lagged"             # only historical values available
-        aggregation: "mean"
-        scale: 0.01                # 0–100 % → 0–1 for model input
-
-      - entity: "sensor.external_temperature"
-        role: "lagged"
+      - entity: "sensor.outside_temperature"
+        role: "lagged"             # historical values only
         aggregation: "mean"
 
-      # Uncomment when you have a holiday binary sensor:
-      # - entity: "sensor.holiday_mode"
-      #   role: "lagged"
-      #   is_binary: true
+      # Future weather forecast from a Met.no / Solcast / forecast.solar
+      # entity. Uncomment and adjust if you have one wired in:
+      # - entity: "weather.home"
+      #   role: "future"
+      #   future_attribute: "forecast"
+      #   future_value_key: "temperature"
+      #   aggregation: "mean"
 
     # -- Models to benchmark --------------------------------------------------
+    # Always include `seasonal_naive` as a baseline. The starter set below
+    # is the "Fast" preset; switch to "Balanced" or "Thorough" once you have
+    # confirmed the basics work. See docs/MODEL_GUIDE.md for guidance.
     models_enabled:
+      - "seasonal_naive"
       - "lightgbm"
       - "xgboost"
       - "lstm"
@@ -76,14 +85,14 @@ experiments:
       # - "nhits"                   # Neural Hierarchical Interpolation (Challu et al., 2023)
       # - "tide"                    # Time-series Dense Encoder (Das et al., 2023)
       # - "tsmixer"                 # Time-Series Mixer (Chen et al., 2023)
-      # - "sparsetsf"              # Sparse Time-Series Forecasting (Lin et al., 2024)
-      # - "patchtst"               # Patch Time-Series Transformer (Nie et al., 2023)
-      # - "itransformer"           # Inverted Transformer (Liu et al., 2024)
-      # - "crossformer"            # Cross-variable Transformer (Zhang & Yan, 2023)
-      # - "timesnet"               # TimesNet 2D vision backbone (Wu et al., 2023)
+      # - "sparsetsf"               # Sparse Time-Series Forecasting (Lin et al., 2024)
+      # - "patchtst"                # Patch Time-Series Transformer (Nie et al., 2023)
+      # - "itransformer"            # Inverted Transformer (Liu et al., 2024)
+      # - "crossformer"             # Cross-variable Transformer (Zhang & Yan, 2023)
+      # - "timesnet"                # TimesNet 2D vision backbone (Wu et al., 2023)
 
     # -- Neural model settings ------------------------------------------------
-    loss_fn: "mse"                   # Training loss for neural models: "mse", "mae", "huber"
+    loss_fn: "huber"                 # "mse" / "mae" / "huber" — huber is a good default
 
     # -- Cross-validation settings --------------------------------------------
     cv_strategy: "walk_forward"    # or "sliding_window"
@@ -97,72 +106,14 @@ experiments:
       - "mape"
       - "smape"
       - "mase"
-    production_metric: "rmse"      # metric used to rank models / auto-select
-
-    # -- Custom metrics (Python expressions) ----------------------------------
-    # Variables available: y_true, y_pred, np
-    custom_metrics:
-      peak_hour_mae: >
-        float(np.mean(np.abs(y_true - y_pred)))
+      - "seasonal_mase"
+    production_metric: "seasonal_mase"  # metric used to rank models / auto-select
 
     # -- Production settings (used when mode: production) ---------------------
     production_model: null          # null = auto-select best from last benchmark
     publish_prefix: "mlfl_"
-    publish_name: "mixergy_demand"
-    units: "%"
-    output_units: "%"
-    country: "GB"
+    publish_name: "household_load"
+    units: "W"
+    output_units: "W"
+    country: ""                     # ISO-2 country code (GB, US, DE, …) for holidays; empty = no holiday feature
     log_transform: false
-
-  # ==========================================================================
-  # Experiment 2: Mixergy heat energy (kWh consumed per interval)
-  # ==========================================================================
-  # Uncomment when ready to add a second experiment.
-  #
-  # - name: "mixergy_heat_energy"
-  #   target_entity: "sensor.mixergy_daily_heat_energy"
-  #   mode: "lab"
-  #
-  #   source_is_cumulative: true
-  #   reset_daily: true
-  #   interval_minutes: 30
-  #   max_increment: 1.8            # 3.3 kW × 0.5 h ≈ 1.65 kWh max per bucket
-  #
-  #   days_history: 60
-  #   max_age: 365
-  #
-  #   future_periods: 96
-  #
-  #   covariates:
-  #     - entity: "sensor.current_charge"
-  #       role: "lagged"
-  #       aggregation: "mean"
-  #       scale: 0.01
-  #
-  #     - entity: "sensor.hot_water_temperature"
-  #       role: "lagged"
-  #       aggregation: "mean"
-  #
-  #     # Use the demand prediction from experiment 1 as a covariate:
-  #     # - entity: "sensor.mlfl_mixergy_demand_interval"
-  #     #   role: "lagged"
-  #     #   aggregation: "sum"
-  #
-  #     # Electricity price forecast (if available from Predbat):
-  #     # - entity: "predbat.rates"
-  #     #   role: "future"
-  #     #   aggregation: "mean"
-  #
-  #   models_enabled: ["lightgbm", "xgboost", "lstm", "cnn"]
-  #   cv_strategy: "walk_forward"
-  #   cv_folds: 5
-  #   cv_embargo_periods: 2
-  #   metrics: ["mae", "rmse", "mape"]
-  #   production_metric: "mae"
-  #   production_model: null
-  #
-  #   publish_prefix: "mlfl_"
-  #   publish_name: "mixergy_heat_energy"
-  #   units: "kWh"
-  #   output_units: "kWh"
-  #   country: "GB"

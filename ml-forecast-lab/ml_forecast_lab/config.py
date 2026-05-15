@@ -52,9 +52,9 @@ class SubtractCfg:
     """Configuration for a single load-subtract sensor.
 
     Represents one signal to subtract from the target before training /
-    forecasting — e.g. EV charging or an iBoost solar-divert dump to remove
-    those contributions from a whole-house load signal so the model learns
-    only the baseline household pattern.
+    forecasting — e.g. EV charging or a solar-divert dump to remove those
+    contributions from a whole-house load signal so the model learns only
+    the baseline household pattern.
 
     Robustness fields encode the checklist:
 
@@ -87,9 +87,9 @@ class SubtractCfg:
     on_missing: str = "zero"
     """Policy for unavailable / gap rows in the subtract sensor:
 
-    - ``zero``: fill with 0.0 (common for EV / iBoost — missing often means
-      "wasn't on"). Audit log records the filled count so you can spot
-      pathological cases.
+    - ``zero``: fill with 0.0 (common for switchable loads like EV chargers
+      or solar-divert dumps — missing often means "wasn't on"). Audit log
+      records the filled count so you can spot pathological cases.
     - ``drop``: drop the row from the load series. Shrinks the training
       set but avoids fabricated zeros if "missing" does not mean "idle".
     - ``error``: raise ``ValueError``. Strictest — use when any gap is a
@@ -365,10 +365,10 @@ class ExperimentCfg:
     load_subtract: List[SubtractCfg] = field(default_factory=list)
     """Sensors to subtract from the target before feature build / training.
 
-    Use case: the GivTCP whole-house load sensor includes EV charging and
-    iBoost solar-divert dumps, both of which are noise for a model trying to
-    learn *baseline household* load patterns. Subtracting them produces a
-    cleaner training signal.
+    Use case: a whole-house load sensor includes switchable disturbances
+    like EV charging and solar-divert dumps, both of which are noise for a
+    model trying to learn *baseline household* load patterns. Subtracting
+    them produces a cleaner training signal.
 
     Each entry is a ``SubtractCfg`` — see its docstring for the robustness
     semantics (source type, missing-data policy, unit-scale, fail-fast
@@ -377,8 +377,9 @@ class ExperimentCfg:
     outlier bounds reflect the adjusted (baseline) signal rather than
     spikes from the subtracted component.
 
-    Double-subtraction is the consumer's problem: if the downstream system
-    (e.g. predbat) also subtracts the same sensors, don't do both."""
+    Double-subtraction is the consumer's problem: if a downstream
+    automation also subtracts the same sensors from its own load model,
+    don't do both."""
 
     mode: str = 'lab'
     """Operational mode: 'lab' (benchmark all models) or 'production' (forecast with best model)."""
@@ -403,8 +404,8 @@ class ExperimentCfg:
       timing, battery dispatch).
     - ``daily_total``: chip reads median cross-cycle CV of daily-total
       predictions (cumulative sensors only). Right when the downstream
-      consumer only integrates over the day — e.g. Predbat iBoost
-      deciding how much to heat a hot-water tank, EV daily charging
+      consumer only integrates over the day — e.g. a tank-heating
+      automation deciding how much energy to dispatch, EV daily charging
       budget, solar-export daily planning. For those use cases a
       ±50% per-moment swing may be fine as long as the daily total is
       stable, so reporting per-moment "poor" gives the wrong verdict.
@@ -469,14 +470,14 @@ class ExperimentCfg:
     cumulative trajectory must match the actual cumulative trajectory. With
     ``future_periods=48`` and ``interval_minutes=30`` this is the 24 h
     daily-cumulative curve, directly aligned with what users evaluate on
-    cumulative-origin targets such as ``sensor.mixergy_demand_today`` or
-    daily energy-usage sensors.
+    cumulative-origin targets such as ``sensor.energy_today`` or daily
+    energy-usage sensors.
 
     History: v2.16 used a mean-over-horizons constraint (just the endpoint).
     v2.18 replaced it with the trajectory formulation above after experiments
-    on Mixergy demand showed the mean-only version was too weak to affect
-    training measurably — the mean is already matched by any unbiased model,
-    regardless of the curve shape.
+    on a daily-cumulative demand target showed the mean-only version was too
+    weak to affect training measurably — the mean is already matched by any
+    unbiased model, regardless of the curve shape.
 
     Applied to torch neural backends only; silently ignored by tree models.
     Typical useful range: 0.1–1.0 (stronger under MSE than MAE due to loss

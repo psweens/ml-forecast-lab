@@ -767,12 +767,12 @@ class ForecastModel(ABC):
         Unlike a simple endpoint or mean-over-horizons constraint, this term
         constrains the SHAPE of the cumulative trajectory across the entire
         horizon. For a cumulative-origin target like
-        ``sensor.mixergy_demand_today`` (smooth monotonic cumulative that
-        resets at midnight), this is what the user actually evaluates
-        against — per-interval predictions that regress to the mean still
-        produce a straight-line cumulative ramp that badly misses the
-        actual stepped-curve shape. The trajectory loss penalises that
-        drift directly at every intermediate horizon.
+        ``sensor.energy_today`` (a monotonic cumulative that resets at
+        midnight), this is what the user actually evaluates against —
+        per-interval predictions that regress to the mean still produce a
+        straight-line cumulative ramp that badly misses the actual stepped
+        curve. The trajectory loss penalises that drift directly at every
+        intermediate horizon.
 
         The same ``criterion`` (MSE / MAE / Huber from ``loss_fn``) is
         applied to both the interval and cumulative terms. ``criterion``
@@ -812,10 +812,10 @@ class ForecastModel(ABC):
         -------
         v2.18.0: replaced the previous mean-over-horizons constraint
         (``criterion(mean_h(ŷ), mean_h(y))``) with this trajectory-matching
-        formulation. Experiments on cumulative-origin targets
-        (e.g. Mixergy daily demand) showed the mean-only constraint was
-        too weak to measurably affect training — the mean is approximately
-        matched by any unbiased model, regardless of curve shape.
+        formulation. Experiments on cumulative-origin targets (daily-reset
+        energy demand) showed the mean-only constraint was too weak to
+        measurably affect training — the mean is approximately matched by
+        any unbiased model, regardless of curve shape.
         """
         # Interval term — unchanged.
         interval_per_sample = criterion(y_pred, y_true)

@@ -102,7 +102,7 @@ covariates:
 
 ### Load subtract
 
-Subtract one or more sensors from the target before training. Use when you want to model the *baseline* signal without contributions from a known disturbance (e.g. household load excluding EV charging and iBoost solar-divert dumps).
+Subtract one or more sensors from the target before training. Use when you want to model the *baseline* signal without contributions from a known disturbance (e.g. household load excluding EV charging and solar-divert dumps).
 
 ```yaml
 load_subtract:
@@ -197,7 +197,7 @@ When an experiment is in `mode: production`, the add-on publishes the following 
 |---|---|---|
 | `sensor.mlfl_<name>_forecast` | The next interval's forecast value. | Attributes include the full future curve as a list of `{datetime, value}` pairs. |
 | `sensor.mlfl_<name>_interval` | The next interval's value, expressed as a per-interval increment. | Published only when `source_is_cumulative` is true (otherwise identical to `_forecast`). |
-| `sensor.mlfl_<name>_cumulative` | The integrated forecast curve. Resets at local midnight when `source_is_cumulative` and `reset_daily` are both true; otherwise a `cumsum` anchored at zero. | Useful for daily-budget automations (EV plan, hot-water tank pre-heat). |
+| `sensor.mlfl_<name>_cumulative` | The integrated forecast curve. Resets at local midnight when `source_is_cumulative` and `reset_daily` are both true; otherwise a `cumsum` anchored at zero. | Useful for daily-budget automations (EV planning, hot-water tank pre-heat). |
 | `sensor.mlfl_<name>_upper_<pct>` | Upper conformal band at the `<pct>` coverage level (default `80`). | Renamed to match `conformal_coverage` — e.g. `_upper_90` if you set `0.9`. Appears once enough residuals have been calibrated; cold-start may take ~10 forecast cycles. |
 | `sensor.mlfl_<name>_lower_<pct>` | Lower conformal band. | As above. |
 | `sensor.mlfl_<name>_forecast_accuracy` | Running accuracy summary (bias, MAE, coverage). | Updated whenever a logged prediction's actual arrives. |
@@ -218,7 +218,7 @@ Open the UI via the add-on's **Open Web UI** button (HA ingress).
   - **Results.** Composite Demšar rank across MAE / RMSE / MASE, the always-on "vs Seasonal Naive" skill chip, a pairwise model-comparison matrix (paired-t test on per-fold MAE), the training-window vs test-window drift verdict (PSI), and a "Compare with previous run" strip — the last five benchmarks are retained and diff-able.
   - **Forecast Accuracy.** Three-layer diagnostic: verdict chip, per-horizon error chart, retrain-history chips (filter the chart to a specific `(model_name, model_version)` cohort). Conformal-band calibration countdown surfaces "Calibrating · N of 10 residuals" rather than a silent blank.
   - **Predictions** and **Covariate Analysis.** Forecast-trace overlay and an automatic search across covariate combinations to identify which signals genuinely improve forecasts.
-- **System page.** CPU-core / nice-priority controls (actually applied), Lovelace-dashboard YAML download (one click, drops a ready-to-paste card stack into your downloads folder), and a global "Run all benchmarks" trigger.
+- **System page.** CPU-core / nice-priority controls (actually applied) and a global "Run all benchmarks" trigger.
 
 ---
 
@@ -243,7 +243,6 @@ The add-on log is visible from the HA add-on page or via the Web UI's **Logs** t
 | `[TRAIN]` | Production retrain cycles. |
 | `[PUB]` | Sensor publication back to HA. |
 | `[WEB]` | FastAPI request handling. |
-| `[DASH]` | Dashboard rendering. |
 
 A rotating file copy is written to `/data/ml_forecast_lab/logs/mlfl.log` inside the container (5 MB × 5 backups).
 

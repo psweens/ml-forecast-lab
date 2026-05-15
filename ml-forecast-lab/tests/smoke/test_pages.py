@@ -12,10 +12,9 @@ TOP_LEVEL_PAGES = [
     ("/log", 200, None),
     ("/training", 200, None),  # redirects to /
     ("/api/status", 200, None),
-    # Empty-state contracts: dashboard YAML / debug log return 404 with a
-    # JSON detail when nothing's been generated yet. Locking these in catches
-    # accidental 500s in those branches.
-    ("/dashboard_yaml", 404, None),
+    # Empty-state contract: debug log returns 404 with a JSON detail when
+    # nothing's been generated yet. Locking it in catches accidental 500s
+    # in that branch.
     ("/debug_log", 404, None),
 ]
 
