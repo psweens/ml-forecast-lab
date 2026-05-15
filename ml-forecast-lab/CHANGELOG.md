@@ -1,5 +1,48 @@
 # Changelog
 
+## 2.34.6
+
+Public-release readiness pass driven by the release-gate review.
+
+### Removed
+
+- **Auto-generated Lovelace dashboard YAML** (`dashboard.py`, the
+  `/dashboard_yaml` download route, the System-page **Download
+  Lovelace dashboard** button, and the per-experiment **Lovelace
+  YAML** button). The generated YAML referenced sensors that never
+  existed (`_point`, `_curve`), used an attribute shape that didn't
+  match the published sensors (parallel `timestamps` / `values`
+  arrays vs the actual `[{datetime, value}, …]` list), and embedded a
+  `http://homeassistant.local:5052/...` link that has been dead
+  since v2.30.0 retired direct port exposure. Fix scope outweighed
+  the feature's value; removed in full. The `[DASH]` log-phase tag
+  is gone with the module.
+- **`AUDIT_PROMPT.md`** at the repo root — internal dev artefact that
+  outlived the cleanup of four similar files in v2.33.2.
+
+### Changed
+
+- **Bundled `mlfl.yaml` example moved from author-specific entities
+  to a generic household-load template** (`sensor.power_consumption_w`,
+  one optional outside-temperature covariate, `seasonal_naive` added
+  to the starter models). Existing users are unaffected — the s6
+  init script (`rootfs/.../init-mlforecastlab/run`) only copies the
+  bundled default when `${ADDON_CONFIG}/mlfl.yaml` is absent.
+- **Documentation, code comments, UI tooltips, and tests
+  genericised.** Mixergy / iBoost / Predbat illustrative references
+  are now described by the underlying device category (solar-divert
+  dump, tank-heating automation, switchable load, etc.). No behaviour
+  change.
+- **README support section** spells out that this is the first
+  public release of a previously private project and that the
+  add-on is maintained on a best-effort basis.
+
+### Added
+
+- **`SECURITY.md`** at the repo root routes vulnerability reports
+  through GitHub's private vulnerability reporting with a best-effort
+  acknowledgement window.
+
 ## 2.34.5
 
 ### Fixed
