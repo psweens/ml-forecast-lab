@@ -30,6 +30,12 @@ If you're browsing on GitHub, the install button below is the fastest path. The 
 
 ![Dashboard with three production experiments](docs/images/dashboard.png)
 
+## Why this exists
+
+Modern time-series forecasting research rarely reaches the people who'd benefit from it day-to-day. If you're not a data scientist, predicting your home's energy use typically means weeks of glue code, a cloud bill, and a stack of papers.
+
+ML Forecast Lab is here to close that gap: the same models researchers use, packaged so a normal Home Assistant user can just click through. No PhD, no cloud, no GPU.
+
 ## Install
 
 [![Open your Home Assistant instance and show the add add-on repository dialog with this repository pre-filled.][openhainstall-shield]][openhainstall-link]
