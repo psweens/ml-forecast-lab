@@ -122,3 +122,5 @@ This is the first public release of a project that was developed in a private re
 Open an issue at https://github.com/psweens/ml-forecast-lab/issues — please include the add-on version, the relevant section of `mlfl.yaml`, and the last 50 lines of the add-on log.
 
 The add-on is maintained on a best-effort basis as a side project. For security issues, follow [`SECURITY.md`](https://github.com/psweens/ml-forecast-lab/blob/main/SECURITY.md) (private disclosure via GitHub).
+
+If the add-on has been useful to you, [buying me a coffee](https://www.buymeacoffee.com/psweens) helps keep development going. ☕
