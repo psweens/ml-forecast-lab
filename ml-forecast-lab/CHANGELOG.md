@@ -35,9 +35,17 @@
 ### Added
 
 - Inline "?" tooltips on the **Window**, **Show last**, **View as**,
-  and **Sort by** controls — concise descriptions of what each
-  selector does and when to pick each option, so users don't have
-  to hover the chart heading to find out.
+  and **Sort by** controls on the Forecast Accuracy tab — concise
+  descriptions of what each selector does and when to pick each
+  option, so users don't have to hover the chart heading to find out.
+- Hover titles on the **Run Pipeline** and **Publish** action buttons
+  spelling out what each one actually does (benchmark every enabled
+  model with walk-forward CV vs. promote winner + switch to
+  production + start publishing sensors).
+- "?" tooltips on the system **Training CPU cores**, **Process
+  priority**, and **Timezone** fields. Explains what "All available"
+  costs the Pi, what Unix nice values do, and what the timezone is
+  used for (daily-reset midnight boundary).
 
 ## 2.34.4
 

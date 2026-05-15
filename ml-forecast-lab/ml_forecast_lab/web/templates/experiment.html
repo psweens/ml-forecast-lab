@@ -40,7 +40,8 @@
     {% endif %}
 
     <div class="action-buttons">
-        <button id="btn-run" class="btn btn-primary" onclick="startPipeline()">
+        <button id="btn-run" class="btn btn-primary" onclick="startPipeline()"
+                title="Train every enabled model on this experiment with walk-forward cross-validation, then rank them by the Demšar composite (MAE + RMSE + MASE). Existing forecasts and the production model are untouched until you click Publish. Use the Settings tab to enable / disable models first.">
             <span id="btn-run-text">{% if is_running %}Running...{% else %}Run Pipeline{% endif %}</span>
         </button>
         {% if experiment.best_model %}
@@ -51,7 +52,8 @@
         </button>
             {% else %}
         <button class="btn btn-success" id="promote-btn"
-                onclick="promoteSelected('{{ experiment.name }}')">
+                onclick="promoteSelected('{{ experiment.name }}')"
+                title="Promote this model to production and start publishing forecasts to HA sensors (sensor.mlfl_*). Also switches the experiment to production mode so the add-on auto-retrains it on schedule. Reversible via Roll back once a retrain has happened.">
             Publish <span id="promote-model-name">{{ _publish_model | model_display }}</span>
         </button>
             {% endif %}
