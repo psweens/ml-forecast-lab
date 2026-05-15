@@ -113,31 +113,56 @@ pytest tests/unit/           # 124 unit tests
 
 Both suites are wired into GitHub Actions on every PR and main push (`tests.yml`). The smoke suite boots the FastAPI app against a tmp `mlfl.yaml` and walks the eight golden user flows without needing trained models — designed as a fast release gate that catches UI/API regressions before they ship.
 
+## Contributing
+
+This is a side project with one maintainer, so contribution paths are narrower than a multi-person codebase. Within that, real help is welcome.
+
+**Useful to open:**
+
+- **Bug reports.** Include the add-on version, the relevant slice of `mlfl.yaml`, and the last 50 lines of the add-on log. The phase tags (`[BENCH]`, `[MODEL]`, `[HA]`, `[PUB]`, …) make triage quick.
+- **Documentation gaps.** If something in DOCS / MODEL_GUIDE didn't prepare you for what you hit, that's a first-class issue.
+- **Tested model configurations.** Which backend won on what kind of HA sensor, with how much history, on which hardware. The current guidance in `docs/MODEL_GUIDE.md` is grounded in a narrow set of household sensors; broader data sharpens it.
+- **Better defaults for the 24 backends on Pi-scale data.** The benchmark harness in `ml_forecast_lab/benchmark/` is already built; results that beat the current defaults are welcome as PRs to `model_overrides`.
+
+**Discuss scope before opening a PR:**
+
+- Refactors to core orchestration (`ml_forecast_lab/main.py`) — a single large file driving both lab and production cycles. Changes here need agreement on shape first.
+- New backends — the registry is open, but each backend is meaningful review effort. Open an issue with a paper reference and a small comparison first.
+
+**Not a contribution path today:**
+
+- UI translations. The web UI is hard-coded English and there is no merge surface for translated strings.
+
+For security issues, follow [`SECURITY.md`](SECURITY.md) — private disclosure via GitHub's vulnerability reporting.
+
+## Status
+
+Stable codebase, first public release. The project was developed in a private repository through 175 internal versions before opening; behaviour and interfaces are settled, but the public user base is small and feedback-driven. Maintained on a best-effort basis as a side project — issues are triaged, cadence is set by available evenings.
+
+## Acknowledgements
+
+The 24 model backends are implementations of published architectures by their respective authors; `docs/MODEL_GUIDE.md` lists each one by paper. Standing on the shoulders of:
+
+- [Nixtla `statsforecast`](https://github.com/Nixtla/statsforecast) for the classical baselines (AutoARIMA / AutoETS / AutoTheta).
+- [LightGBM](https://github.com/microsoft/LightGBM), [XGBoost](https://github.com/dmlc/xgboost), and [CatBoost](https://github.com/catboost/catboost) for the tree backends.
+- [PyTorch](https://pytorch.org/) for the neural backends.
+- [Optuna](https://optuna.org/) for Bayesian hyperparameter tuning.
+- [pvlib](https://pvlib-python.readthedocs.io/) for the Ineichen clear-sky-irradiance feature.
+- [FastAPI](https://fastapi.tiangolo.com/), [Jinja2](https://palletsprojects.com/p/jinja/), [HTMX](https://htmx.org/), and [Plotly](https://plotly.com/javascript/) for the web UI.
+- Demšar (2006), *Statistical Comparisons of Classifiers over Multiple Data Sets* — methodology for the composite cross-validation rank.
+- The [`home-assistant/hassio-addons`](https://github.com/hassio-addons) Ubuntu base image and the Home Assistant add-on platform itself.
+
 ## Licence
 
 [MIT](LICENSE) © Dr Paul W. Sweeney, University of Cambridge.
 
 <!-- Badges -->
-<!-- Badge URLs.
-     The release / licence / tests badges are STATIC text while the
-     repo remains private (shields.io is unauthenticated and can't
-     read private-repo GitHub APIs — every dynamic badge rendered as
-     "repo not found"). Refresh `release-shield` on each version bump;
-     `tests-shield` only needs a manual flip if the suite ever starts
-     failing. When the repo is flipped to public, swap these back to
-     the dynamic equivalents (commented below). -->
-[release-shield]: https://img.shields.io/badge/release-v2.34.5-41bdf5?style=flat-square
-[release-link]: https://github.com/psweens/ml-forecast-lab/releases/latest
-[licence-shield]: https://img.shields.io/badge/licence-MIT-41bdf5?style=flat-square
-[licence-link]: LICENSE
-[tests-shield]: https://img.shields.io/badge/tests-passing-41bdf5?style=flat-square
-[tests-link]: https://github.com/psweens/ml-forecast-lab/actions/workflows/tests.yml
-<!-- Dynamic equivalents (re-enable once the repo is public):
 [release-shield]: https://img.shields.io/github/v/release/psweens/ml-forecast-lab?style=flat-square&color=41bdf5
+[release-link]: https://github.com/psweens/ml-forecast-lab/releases/latest
 [licence-shield]: https://img.shields.io/github/license/psweens/ml-forecast-lab?style=flat-square&color=41bdf5
+[licence-link]: LICENSE
 [tests-shield]: https://img.shields.io/github/actions/workflow/status/psweens/ml-forecast-lab/tests.yml?branch=main&style=flat-square&label=tests&color=41bdf5
--->
-
+[tests-link]: https://github.com/psweens/ml-forecast-lab/actions/workflows/tests.yml
 [ha-shield]: https://img.shields.io/badge/Home%20Assistant-add--on-41bdf5?style=flat-square&logo=home-assistant&logoColor=white
 [ha-link]: https://www.home-assistant.io/
 [arch-shield]: https://img.shields.io/badge/arch-aarch64%20%7C%20amd64%20%7C%20armv7-41bdf5?style=flat-square
