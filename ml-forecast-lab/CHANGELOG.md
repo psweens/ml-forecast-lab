@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.34.7
+
+### Fixed
+
+- **"Show RMSE & bias" toggle on the lead-time chart didn't visibly
+  update.** User report. The onchange handler called the full
+  `loadForecastAccuracy()` flow, which re-rendered every tile on the
+  Forecast Accuracy tab (model badge, retrain chips, lead-time
+  chart, revision improvement, etc.). The cached-fetch path should
+  have made this instant, but the toggle was reported as a no-op.
+
+  Refactored the lead-time chart render into a stand-alone
+  `_renderLeadTimeChart(data)` helper. The toggle now calls a new
+  `onLeadTimeDetailToggle()` wrapper that re-renders directly off
+  `_lastAccuracyData` without re-fetching or re-rendering anything
+  else — single Plotly call, no chained side-effects. Falls back to
+  a full load if the initial fetch hasn't completed yet.
+
 ## 2.34.6
 
 Public-release readiness pass driven by the release-gate review.

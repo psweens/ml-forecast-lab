@@ -1569,7 +1569,7 @@
                     <span class="info-tip">?<span class="tip-text">MAE binned by lead time (minutes between the forecast's issued_at and target_dt). As the model looks further ahead, error usually grows — a flat curve means the model gains nothing from shorter lead times; a steep curve means the near-term forecast is much better than the long-range one. When multiple retrains are in the window, each (model, version) cohort gets its own coloured line so you can see whether a specific retrain dragged the curve up or down. Toggle "Show RMSE &amp; bias" for diagnostic series — RMSE penalises large misses more, and bias (mean error) tells you whether the model systematically under- or over-predicts at each horizon.</span></span>
                 </h3>
                 <label class="leadtime-detail-toggle" style="color:var(--text-secondary);font-size:0.85rem;cursor:pointer;">
-                    <input type="checkbox" id="leadtime-detail" onchange="loadForecastAccuracy()" style="vertical-align:middle;margin-right:0.25rem;">
+                    <input type="checkbox" id="leadtime-detail" onchange="onLeadTimeDetailToggle()" style="vertical-align:middle;margin-right:0.25rem;">
                     Show RMSE &amp; bias
                 </label>
             </div>
@@ -3279,6 +3279,140 @@ window.showTab = function(el) {
         }
     }
 
+    // Lead-time chart render — extracted so the "Show RMSE & bias"
+    // toggle can re-render directly off `_lastAccuracyData` without
+    // re-fetching every other tile on the tab. The previous flow had
+    // the toggle call loadForecastAccuracy(), which works for the
+    // cached-fetch path but routes through every other tile's render
+    // and was reported as "doesn't seem to update".
+    function _renderLeadTimeChart(data) {
+        if (!data || !data.lead_time_curve || !data.lead_time_curve.lead_minutes
+            || !data.lead_time_curve.lead_minutes.length) return;
+        var ltc = data.lead_time_curve;
+        var xHours = ltc.lead_minutes.map(function(m) { return m / 60; });
+        var detail = document.getElementById('leadtime-detail');
+        var showDetail = !!(detail && detail.checked);
+        // Split low-n buckets into a separate trace so they render
+        // with a lighter marker — avoids making a single 3-sample
+        // bucket look as authoritative as a 300-sample one.
+        function maskBy(arr, pred) { return arr.map(function(v, i) { return pred(i) ? v : null; }); }
+        var strong = function(i) { return (ltc.sample_count[i] || 0) >= LEADBUCKET_MIN_N; };
+        var weak   = function(i) { return (ltc.sample_count[i] || 0) <  LEADBUCKET_MIN_N; };
+        var traces = [];
+
+        // v2.34.0: multi-cohort MAE overlay. When the response carries
+        // ≥2 (model_name, model_version) cohorts (no chip pinned + a
+        // retrain landed in the window), emit one MAE trace per cohort
+        // instead of the pooled line. Each cohort is coloured
+        // deterministically via _cohortColor so the chart, legend, and
+        // retrain-history chips all agree. RMSE / Bias stay single-
+        // cohort (pooled lead_time_curve) to avoid an N×3 clutter.
+        var _allCohorts = data.cohorts || [];
+        var _vCohorts = _filterCohortsBySelection(_allCohorts);
+        var cohorts = (_vCohorts && _vCohorts.length >= 2) ? _vCohorts : null;
+        if (cohorts) {
+            cohorts.forEach(function(c) {
+                var c_ltc = c.lead_time_curve || {};
+                var c_x = (c_ltc.lead_minutes || []).map(function(m) { return m / 60; });
+                var c_strong = function(i) { return (c_ltc.sample_count[i] || 0) >= LEADBUCKET_MIN_N; };
+                var c_weak   = function(i) { return (c_ltc.sample_count[i] || 0) <  LEADBUCKET_MIN_N; };
+                var colour = _cohortColor(c.model_name, c.model_version);
+                var label = _cohortLabel(c.model_name, c.model_version);
+                traces.push({
+                    x: c_x,
+                    y: maskBy(c_ltc.mae || [], c_strong),
+                    name: label,
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    line: { color: colour, width: 2.5 },
+                    marker: { size: 6, color: colour },
+                    hovertemplate: label + '<br>MAE %{y:.3f} (n=%{customdata})<extra></extra>',
+                    customdata: c_ltc.sample_count || [],
+                    connectgaps: true,
+                    legendgroup: label,
+                });
+                traces.push({
+                    x: c_x,
+                    y: maskBy(c_ltc.mae || [], c_weak),
+                    type: 'scatter',
+                    mode: 'markers',
+                    marker: { size: 6, color: colour, opacity: 0.35, symbol: 'circle-open' },
+                    hovertemplate: label + '<br>MAE %{y:.3f} (n=%{customdata}, low confidence)<extra></extra>',
+                    customdata: c_ltc.sample_count || [],
+                    legendgroup: label,
+                    showlegend: false,
+                });
+            });
+        } else {
+            // Single-cohort path (user pinned a cohort, or only one
+            // exists in the window). Identical to v2.33.x.
+            traces.push({
+                x: xHours, y: maskBy(ltc.mae, strong), name: 'MAE',
+                type: 'scatter', mode: 'lines+markers',
+                line: { color: '#ff6b6b', width: 2.5 },
+                marker: { size: 6, color: '#ff6b6b' },
+                hovertemplate: 'MAE %{y:.3f} (n=%{customdata})<extra></extra>',
+                customdata: ltc.sample_count,
+                connectgaps: true,
+            });
+            traces.push({
+                x: xHours, y: maskBy(ltc.mae, weak), name: 'MAE (low n)',
+                type: 'scatter', mode: 'markers',
+                marker: { size: 6, color: '#ff6b6b', opacity: 0.35, symbol: 'circle-open' },
+                hovertemplate: 'MAE %{y:.3f} (n=%{customdata}, low confidence)<extra></extra>',
+                customdata: ltc.sample_count,
+                showlegend: false,
+            });
+        }
+        if (showDetail) {
+            traces.push({
+                x: xHours, y: ltc.rmse, name: 'RMSE (all cohorts)',
+                type: 'scatter', mode: 'lines+markers',
+                line: { color: '#4d96ff', width: 2, dash: 'dot' },
+                marker: { size: 4 },
+                hovertemplate: 'RMSE %{y:.3f}<extra></extra>',
+            });
+            traces.push({
+                x: xHours, y: ltc.me, name: 'Bias (all cohorts)',
+                type: 'scatter', mode: 'lines+markers',
+                line: { color: '#facc15', width: 2, dash: 'dash' },
+                marker: { size: 4 },
+                hovertemplate: 'Bias %{y:.3f}<extra></extra>',
+            });
+        }
+        var yTitle = 'Error'
+            + (EXP_UNITS ? (accuracyMode === 'increment' ? ' (' + EXP_UNITS + ' per bin)' : ' (' + EXP_UNITS + ')') : '');
+        var layout = {
+            xaxis: { title: 'Lead time (hours)', color: '#b0b0b0', gridcolor: '#2d3561' },
+            yaxis: {
+                title: yTitle,
+                color: '#b0b0b0', gridcolor: '#2d3561',
+                zeroline: true, zerolinecolor: '#4a5178', zerolinewidth: 1,
+            },
+            plot_bgcolor: 'rgba(0,0,0,0)',
+            paper_bgcolor: 'rgba(0,0,0,0)',
+            font: { color: '#e0e0e0' },
+            legend: {
+                x: 1.02, y: 1,
+                xanchor: 'left', yanchor: 'top',
+                bgcolor: 'rgba(0,0,0,0)',
+                font: { size: 11 },
+            },
+            margin: { t: 20, r: 180 },
+        };
+        Plotly.newPlot('accuracy-lead-chart', traces, layout, { responsive: true });
+    }
+
+    // Toggle handler — re-render off the cached payload immediately.
+    // Falls back to a full reload if the data hasn't loaded yet.
+    window.onLeadTimeDetailToggle = function() {
+        if (_lastAccuracyData) {
+            _renderLeadTimeChart(_lastAccuracyData);
+        } else {
+            loadForecastAccuracy();
+        }
+    };
+
     function loadForecastAccuracy() {
         var url = BASE + '/experiment/' + EXP_NAME + '/forecast-accuracy'
             + '?mode=' + accuracyMode + '&days=' + _accuracyDays()
@@ -3358,148 +3492,7 @@ window.showTab = function(el) {
                 modelBadge.style.display = 'none';
             }
 
-            // Lead-time vs accuracy chart — MAE only by default, RMSE/bias
-            // behind the "show detail" toggle.
-            var ltc = data.lead_time_curve;
-            var xHours = ltc.lead_minutes.map(function(m) { return m / 60; });
-            var detail = document.getElementById('leadtime-detail');
-            var showDetail = !!(detail && detail.checked);
-            // Split low-n buckets into a separate trace so they render
-            // with a lighter marker — avoids making a single 3-sample
-            // bucket look as authoritative as a 300-sample one.
-            function maskBy(arr, pred) { return arr.map(function(v, i) { return pred(i) ? v : null; }); }
-            var strong = function(i) { return (ltc.sample_count[i] || 0) >= LEADBUCKET_MIN_N; };
-            var weak   = function(i) { return (ltc.sample_count[i] || 0) <  LEADBUCKET_MIN_N; };
-            var traces = [];
-
-            // v2.34.0: multi-cohort MAE overlay. When the response
-            // carries ≥2 (model_name, model_version) cohorts (i.e. the
-            // user hasn't pinned one via the chip strip and the
-            // window contains a retrain or model switch), emit one
-            // MAE trace per cohort instead of the single pooled line.
-            // Each cohort is coloured deterministically via
-            // _cohortColor so the chart, legend, and retrain-history
-            // chips all agree. Plotly's legend supports click-to-
-            // hide natively. RMSE / Bias stay single-cohort (the
-            // pooled values from lead_time_curve) so the chart
-            // doesn't get cluttered with N×3 lines.
-            // v2.34.0: apply the multi-select to the cohort list
-            // before checking the ≥2 threshold. If the user has
-            // narrowed to a single cohort via the chip strip, the
-            // chart falls back to the single-trace path (using the
-            // pooled lead_time_curve — which now reflects that
-            // single cohort because the backend was filtered, OR
-            // because the SQL partitioning + Commit 1's correctness
-            // pass ensures the dominant cohort wins).
-            var _allCohorts = data.cohorts || [];
-            var _vCohorts = _filterCohortsBySelection(_allCohorts);
-            var cohorts = (_vCohorts && _vCohorts.length >= 2) ? _vCohorts : null;
-            if (cohorts) {
-                cohorts.forEach(function(c) {
-                    var c_ltc = c.lead_time_curve || {};
-                    var c_x = (c_ltc.lead_minutes || []).map(function(m) { return m / 60; });
-                    var c_strong = function(i) { return (c_ltc.sample_count[i] || 0) >= LEADBUCKET_MIN_N; };
-                    var c_weak   = function(i) { return (c_ltc.sample_count[i] || 0) <  LEADBUCKET_MIN_N; };
-                    var colour = _cohortColor(c.model_name, c.model_version);
-                    var label = _cohortLabel(c.model_name, c.model_version);
-                    traces.push({
-                        x: c_x,
-                        y: maskBy(c_ltc.mae || [], c_strong),
-                        name: label,
-                        type: 'scatter',
-                        mode: 'lines+markers',
-                        line: { color: colour, width: 2.5 },
-                        marker: { size: 6, color: colour },
-                        hovertemplate: label + '<br>MAE %{y:.3f} (n=%{customdata})<extra></extra>',
-                        customdata: c_ltc.sample_count || [],
-                        connectgaps: true,
-                        legendgroup: label,
-                    });
-                    traces.push({
-                        x: c_x,
-                        y: maskBy(c_ltc.mae || [], c_weak),
-                        type: 'scatter',
-                        mode: 'markers',
-                        marker: { size: 6, color: colour, opacity: 0.35, symbol: 'circle-open' },
-                        hovertemplate: label + '<br>MAE %{y:.3f} (n=%{customdata}, low confidence)<extra></extra>',
-                        customdata: c_ltc.sample_count || [],
-                        legendgroup: label,
-                        showlegend: false,
-                    });
-                });
-            } else {
-                // Single-cohort path (user has pinned a cohort, or only
-                // one exists in the window). Identical to v2.33.x.
-                traces.push({
-                    x: xHours, y: maskBy(ltc.mae, strong), name: 'MAE',
-                    type: 'scatter', mode: 'lines+markers',
-                    line: { color: '#ff6b6b', width: 2.5 },
-                    marker: { size: 6, color: '#ff6b6b' },
-                    hovertemplate: 'MAE %{y:.3f} (n=%{customdata})<extra></extra>',
-                    customdata: ltc.sample_count,
-                    connectgaps: true,
-                });
-                traces.push({
-                    x: xHours, y: maskBy(ltc.mae, weak), name: 'MAE (low n)',
-                    type: 'scatter', mode: 'markers',
-                    marker: { size: 6, color: '#ff6b6b', opacity: 0.35, symbol: 'circle-open' },
-                    hovertemplate: 'MAE %{y:.3f} (n=%{customdata}, low confidence)<extra></extra>',
-                    customdata: ltc.sample_count,
-                    showlegend: false,
-                });
-            }
-            if (showDetail) {
-                // RMSE / Bias are read from the pooled lead_time_curve —
-                // adding per-cohort variants would clutter the chart
-                // with N×3 traces. Toggle them on when a deeper view is
-                // wanted; the multi-cohort MAE is the headline.
-                traces.push({
-                    x: xHours, y: ltc.rmse, name: 'RMSE (all cohorts)',
-                    type: 'scatter', mode: 'lines+markers',
-                    line: { color: '#4d96ff', width: 2, dash: 'dot' },
-                    marker: { size: 4 },
-                    hovertemplate: 'RMSE %{y:.3f}<extra></extra>',
-                });
-                traces.push({
-                    x: xHours, y: ltc.me, name: 'Bias (all cohorts)',
-                    type: 'scatter', mode: 'lines+markers',
-                    // LOW-4: neutral yellow — bias is signed, no "good"
-                    // direction; green encodes "good" elsewhere in the UI
-                    // (verdict, "Keep X" rec) so green for bias was
-                    // misleading.
-                    line: { color: '#facc15', width: 2, dash: 'dash' },
-                    marker: { size: 4 },
-                    hovertemplate: 'Bias %{y:.3f}<extra></extra>',
-                });
-            }
-            var yTitle = 'Error'
-                + (EXP_UNITS ? (accuracyMode === 'increment' ? ' (' + EXP_UNITS + ' per bin)' : ' (' + EXP_UNITS + ')') : '');
-            // LOW-2: no `colorway` — every trace pins its own colour
-            // (red MAE / blue RMSE / yellow Bias) so the colourway
-            // setting was unused. Removed to avoid confusion.
-            var layout = {
-                xaxis: { title: 'Lead time (hours)', color: '#b0b0b0', gridcolor: '#2d3561' },
-                yaxis: {
-                    title: yTitle,
-                    color: '#b0b0b0', gridcolor: '#2d3561',
-                    zeroline: true, zerolinecolor: '#4a5178', zerolinewidth: 1,
-                },
-                plot_bgcolor: 'rgba(0,0,0,0)',
-                paper_bgcolor: 'rgba(0,0,0,0)',
-                font: { color: '#e0e0e0' },
-                // Legend on the right outside the plot, matching the
-                // convergence chart. The lead-time chart often has
-                // 20+ cohort traces; the previous top-left-inside
-                // position made the legend cover the data.
-                legend: {
-                    x: 1.02, y: 1,
-                    xanchor: 'left', yanchor: 'top',
-                    bgcolor: 'rgba(0,0,0,0)',
-                    font: { size: 11 },
-                },
-                margin: { t: 20, r: 180 },
-            };
-            Plotly.newPlot('accuracy-lead-chart', traces, layout, { responsive: true });
+            _renderLeadTimeChart(data);
 
             // Revision improvement tile — re-worded so the direction of
             // "improvement" is unambiguous.
