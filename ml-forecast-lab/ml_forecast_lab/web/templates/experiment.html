@@ -1241,7 +1241,7 @@
 {% set best_label = ns_best.label %}
 <div class="tab-section" id="sec-covariate-analysis" style="display:none;">
 <section class="section">
-    <h2>Covariate Analysis <span class="info-tip">?<span class="tip-text">Tests every model with different covariate combinations to find which external features help and which ones hurt. The % change column shows how typical forecast error (MAE — Mean Absolute Error) shifts versus the "All covariates" baseline. <strong>Green = error got smaller</strong> (good), <strong>red = error got larger</strong> (bad). Rankings come from a single 80/20 train/test split — rerun the analysis to confirm borderline results.</span></span></h2>
+    <h2>Covariate Analysis <span class="info-tip">?<span class="tip-text">Tests every model with different covariate combinations to find which external features help and which ones hurt. The % change column shows how typical forecast error (MAE — Mean Absolute Error) shifts versus the "All covariates" baseline. <strong>Green = error got smaller</strong> (good), <strong>red = error got larger</strong> (bad). Rankings come from a single 80/20 train/test split — rerun the analysis to confirm borderline results. <br><br>To act on a result: each <strong>Remove</strong> button on a "Without X" row strips that one covariate from <code>mlfl.yaml</code> immediately. Tick the <strong>bulk</strong> checkboxes to queue several at once and confirm them together. After any removal, the analysis is stale (other rows were computed against the old covariate set) — re-run Covariate Analysis to refresh.</span></span></h2>
 
     <!-- Controls -->
     <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin-bottom:1.5rem;">
@@ -1304,6 +1304,38 @@
         </button>
     </div>
 
+    {# Stale-numbers banner. Appears after the first per-row Remove
+       click or after a bulk-remove completes, signalling that the
+       percentages in the table were computed against an older covariate
+       set. Re-run Covariate Analysis to refresh. JS populates the
+       text + entity list. #}
+    <div id="cov-stale-banner"
+         style="display:none;padding:0.75rem 1rem;background:rgba(241,196,15,0.08);border:1px solid rgba(241,196,15,0.3);border-radius:0.5rem;margin:0.5rem 0 0.75rem 0;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.6rem;">
+        <div id="cov-stale-banner-text" style="flex:1 1 320px;font-size:0.85rem;color:var(--text-primary);"></div>
+        <button class="btn btn-primary"
+                style="padding:0.4rem 0.9rem;font-size:0.85rem;white-space:nowrap;"
+                onclick="runCovariateAnalysis('{{ experiment.name }}', this)">
+            Re-run Covariate Analysis
+        </button>
+    </div>
+
+    {# Bulk-remove action bar. Hidden by default; appears whenever any
+       row's "bulk" checkbox is ticked. One confirm dialog covers all
+       selected removals; failures are reported individually. #}
+    <div id="cov-bulk-bar"
+         style="display:none;padding:0.6rem 1rem;background:rgba(231,76,60,0.08);border:1px solid rgba(231,76,60,0.3);border-radius:0.5rem;margin:0.5rem 0 0.75rem 0;align-items:center;justify-content:space-between;gap:0.5rem;flex-wrap:wrap;">
+        <div id="cov-bulk-bar-text" style="color:#e74c3c;font-weight:600;font-size:0.9rem;">0 covariates selected</div>
+        <div style="display:flex;gap:0.5rem;">
+            <button class="btn btn-secondary"
+                    style="padding:0.35rem 0.8rem;font-size:0.82rem;"
+                    onclick="_clearCovBulkSelection()">Clear</button>
+            <button class="btn btn-danger"
+                    style="padding:0.35rem 0.8rem;font-size:0.82rem;"
+                    id="cov-bulk-bar-remove"
+                    onclick="removeCovFromAnalysisBulk('{{ experiment.name }}', this)">Remove selected</button>
+        </div>
+    </div>
+
     {# HIGH-5 legend strip — colour key directly above the table so a
        reader doesn't need to hunt for the info-tip to decode cells. #}
     <div style="display:flex;flex-wrap:wrap;gap:0.75rem 1.5rem;align-items:center;margin:0.5rem 0 0.75rem 0;padding:0.5rem 0.75rem;background:rgba(0,0,0,0.15);border:1px solid var(--border);border-radius:6px;font-size:0.8rem;color:var(--text-secondary);">
@@ -1311,6 +1343,7 @@
         <span><span style="color:#2ecc71;font-weight:600;">−x%</span> typical error dropped (this scenario forecasts <em>better</em>)</span>
         <span><span style="color:#e74c3c;font-weight:600;">+x%</span> typical error grew (this scenario forecasts <em>worse</em>)</span>
         <span><span style="color:var(--text-secondary);">±0–2%</span> within noise</span>
+        <span style="margin-left:auto;color:var(--text-muted);font-size:0.75rem;">Tick the <strong>bulk</strong> checkboxes to remove multiple covariates at once.</span>
     </div>
 
     <div class="table-container">
@@ -1363,7 +1396,16 @@
                            colour bands, so the affordance and the rec
                            no longer disagree. #}
                         {% if is_drop and avg_change < -2 %}
-                        <button class="btn" style="padding:0.1rem 0.4rem;font-size:0.7rem;margin-left:0.5rem;background:rgba(231,76,60,0.15);color:#e74c3c;border:1px solid rgba(231,76,60,0.3);"
+                        <label class="cov-bulk-check-label"
+                               title="Tick to add to a bulk-remove batch — review and confirm them all together via the red bar above the table."
+                               style="margin-left:0.5rem;display:inline-flex;align-items:center;gap:0.25rem;font-size:0.7rem;color:var(--text-secondary);cursor:pointer;vertical-align:middle;">
+                            <input type="checkbox" class="cov-bulk-check"
+                                   data-entity="{{ label.replace('Without ', '') }}"
+                                   onchange="_toggleCovBulkSelect(this)"
+                                   style="cursor:pointer;">
+                            bulk
+                        </label>
+                        <button class="btn" style="padding:0.1rem 0.4rem;font-size:0.7rem;margin-left:0.35rem;background:rgba(231,76,60,0.15);color:#e74c3c;border:1px solid rgba(231,76,60,0.3);"
                                 onclick="removeCovFromAnalysis('{{ experiment.name }}', '{{ label.replace('Without ', '') }}', this)">
                             Remove
                         </button>
@@ -4600,6 +4642,83 @@ window.showTab = function(el) {
         .catch(function(err) { console.error('selectModel failed:', err); });
     };
 
+    // Covariate Analysis — track which entities the user has removed
+    // since the analysis was last run. The percentages in the table are
+    // a snapshot from that point, so once any row is removed the rest
+    // are computed against an out-of-date covariate set. The stale-
+    // banner reads this set to show "you've removed X, Y — re-run".
+    // _covSelectedForBulk is a parallel set holding the current bulk
+    // checkbox state.
+    var _covRemovedSinceAnalysis = new Set();
+    var _covSelectedForBulk = new Set();
+
+    function _toggleCovBulkSelect(checkbox) {
+        var entity = checkbox.dataset.entity;
+        if (!entity) return;
+        if (checkbox.checked) {
+            _covSelectedForBulk.add(entity);
+        } else {
+            _covSelectedForBulk.delete(entity);
+        }
+        _updateCovBulkBar();
+    }
+    window._toggleCovBulkSelect = _toggleCovBulkSelect;
+
+    function _updateCovBulkBar() {
+        var bar = document.getElementById('cov-bulk-bar');
+        var text = document.getElementById('cov-bulk-bar-text');
+        var btn = document.getElementById('cov-bulk-bar-remove');
+        if (!bar || !text || !btn) return;
+        var n = _covSelectedForBulk.size;
+        if (n === 0) {
+            bar.style.display = 'none';
+            return;
+        }
+        text.textContent = n + ' covariate' + (n === 1 ? '' : 's') + ' selected for removal';
+        btn.textContent = 'Remove selected (' + n + ')';
+        bar.style.display = 'flex';
+    }
+
+    function _clearCovBulkSelection() {
+        _covSelectedForBulk.clear();
+        document.querySelectorAll('.cov-bulk-check').forEach(function(cb) { cb.checked = false; });
+        _updateCovBulkBar();
+    }
+    window._clearCovBulkSelection = _clearCovBulkSelection;
+
+    function _markCovRemoved(entity) {
+        _covRemovedSinceAnalysis.add(entity);
+        _updateCovStaleBanner();
+        // Fade the row that owned that entity's checkbox.
+        var cb = document.querySelector('.cov-bulk-check[data-entity="' + entity + '"]');
+        var tr = cb && cb.closest('tr');
+        if (tr) {
+            tr.style.opacity = '0.3';
+            // Uncheck so it doesn't sit in the bulk selection as a
+            // ghost after a successful removal.
+            cb.checked = false;
+            _covSelectedForBulk.delete(entity);
+        }
+    }
+
+    function _updateCovStaleBanner() {
+        var banner = document.getElementById('cov-stale-banner');
+        var text = document.getElementById('cov-stale-banner-text');
+        if (!banner || !text) return;
+        var entities = Array.from(_covRemovedSinceAnalysis);
+        if (entities.length === 0) {
+            banner.style.display = 'none';
+            return;
+        }
+        var list = entities.map(function(e) {
+            return '<code style="background:rgba(255,255,255,0.06);padding:0.05rem 0.3rem;border-radius:3px;">' + e + '</code>';
+        }).join(', ');
+        text.innerHTML = '<strong style="color:#f1c40f;">Numbers below are stale.</strong> '
+            + 'The percentages were computed before you removed ' + list + '. '
+            + 'Re-run the analysis to see effects against the current covariate set.';
+        banner.style.display = 'flex';
+    }
+
     window.removeCovFromAnalysis = function(expName, entityId, btn) {
         mlfl.confirm('Remove covariate "' + entityId + '" from this experiment?', function() {
             btn.disabled = true; btn.textContent = '...';
@@ -4610,8 +4729,8 @@ window.showTab = function(el) {
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data.success) {
-                    mlfl.toast('Removed ' + entityId + ' — re-run pipeline to see effect', 'success');
-                    btn.closest('tr').style.opacity = '0.3';
+                    mlfl.toast('Removed ' + entityId + ' — re-run Covariate Analysis to update the table', 'success');
+                    _markCovRemoved(entityId);
                 } else {
                     mlfl.toast('Failed: ' + (data.error || ''), 'error');
                     btn.disabled = false; btn.textContent = 'Remove';
@@ -4619,6 +4738,67 @@ window.showTab = function(el) {
             })
             .catch(function(err) { mlfl.toast('Failed: ' + err, 'error'); btn.disabled = false; btn.textContent = 'Remove'; });
         });
+    };
+
+    // Bulk-remove path. Confirms once for the whole batch, fires the
+    // /remove-covariate POSTs sequentially (yaml writes serialise on
+    // the backend anyway), and reports a per-entity success/failure
+    // count if anything goes wrong mid-run. Successful entities get
+    // marked stale + faded as we go.
+    window.removeCovFromAnalysisBulk = function(expName, btn) {
+        var entities = Array.from(_covSelectedForBulk);
+        if (entities.length === 0) return;
+        var listStr = entities.map(function(e) { return '"' + e + '"'; }).join(', ');
+        var plural = entities.length === 1 ? '' : 's';
+        mlfl.confirm(
+            'Remove ' + entities.length + ' covariate' + plural + ' from this experiment?\n\n' + listStr,
+            function() {
+                btn.disabled = true;
+                var origText = btn.textContent;
+                var i = 0;
+                var failures = [];
+                function next() {
+                    if (i >= entities.length) {
+                        btn.disabled = false;
+                        btn.textContent = origText;
+                        if (failures.length === 0) {
+                            mlfl.toast(
+                                'Removed ' + entities.length + ' covariate' + plural
+                                + ' — re-run Covariate Analysis to update the table',
+                                'success'
+                            );
+                        } else {
+                            mlfl.toast(
+                                'Removed ' + (entities.length - failures.length) + '/'
+                                + entities.length + ' covariates; failed: ' + failures.join(', '),
+                                'warning'
+                            );
+                        }
+                        return;
+                    }
+                    var entity = entities[i];
+                    btn.textContent = 'Removing ' + (i + 1) + '/' + entities.length + '…';
+                    fetch(BASE + '/experiment/' + expName + '/remove-covariate', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({entity_id: entity})
+                    })
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) {
+                        if (data.success) {
+                            _markCovRemoved(entity);
+                        } else {
+                            failures.push(entity);
+                        }
+                        i++; next();
+                    })
+                    .catch(function() {
+                        failures.push(entity);
+                        i++; next();
+                    });
+                }
+                next();
+            }
+        );
     };
 
     window.promoteSelected = function(expName) {

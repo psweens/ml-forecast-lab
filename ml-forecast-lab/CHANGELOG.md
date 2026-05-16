@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.34.8
+
+### Added
+
+- **Covariate Analysis — bulk-remove and stale-result banner.** User
+  report: "if I have several covariates and I remove more than one,
+  what happens?" Three improvements:
+  - Each row with a Remove button now also has a **bulk** checkbox.
+    Tick several and confirm them together via a single red action
+    bar that appears above the table — one dialog covers the whole
+    batch, sequential POSTs with per-entity success/failure reporting.
+  - After **any** removal (per-row or bulk), an amber banner above
+    the table flags the displayed percentages as stale (they were
+    computed against the previous covariate set). The banner has a
+    one-click **Re-run Covariate Analysis** button that fires the
+    full analysis with the current model selection — no need to
+    scroll back up to the controls.
+  - The post-remove toast was reworded from "re-run pipeline to see
+    effect" → "re-run Covariate Analysis to update the table" — the
+    old wording was easy to misread as "re-run the benchmark
+    pipeline", which isn't what's needed.
+
+  Section tooltip updated to describe the new flow.
+
 ## 2.34.7
 
 ### Fixed
