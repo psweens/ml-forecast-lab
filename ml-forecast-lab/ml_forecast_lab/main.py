@@ -3398,7 +3398,9 @@ class MLForecastLabApp:
         is_neural = model.is_neural
         seq_kwargs = {}
         if is_neural:
-            from ml_forecast_lab.features import create_sliding_windows
+            from ml_forecast_lab.features import (
+                create_sliding_windows, compute_known_future_features,
+            )
             engineered = {
                 'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
                 'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
@@ -3412,10 +3414,36 @@ class MLForecastLabApp:
             future_periods = getattr(exp_cfg, 'future_periods', 48)
             horizon_steps = list(range(1, future_periods + 1))
             if window_size >= 12:
+                # Extend each training window with future-known features at
+                # horizon positions. Without this, a multi-horizon neural
+                # head has only the past window to project from, and a
+                # single linear layer (NLinear / SparseTSF) cannot
+                # disambiguate "horizon h" from "absolute hour at h" because
+                # h corresponds to different absolute hours across windows
+                # ending at different times — the weights are forced into a
+                # phase-smeared compromise. LSTM/CNN hit the same wall via
+                # their pooled-context → linear head and tend to collapse
+                # to the unconditional mean. Tree models avoid the issue
+                # because their recursive inference path already passes
+                # future temporal/solar features per horizon row; this
+                # change brings the neural path to parity.
+                loc = await self._get_site_location()
+                solar_lat_lon = loc if loc is not None else None
+                include_sun_elevation = 'sun_elevation' in raw_cov_cols
+                include_clear_sky_ghi = 'clear_sky_ghi' in raw_cov_cols
+                future_features_df = compute_known_future_features(
+                    combined.index,
+                    add_temporal=True,
+                    country=getattr(exp_cfg, 'country', None),
+                    solar_lat_lon=solar_lat_lon,
+                    include_sun_elevation=include_sun_elevation,
+                    include_clear_sky_ghi=include_clear_sky_ghi,
+                )
                 seq_X, seq_y, channel_names = create_sliding_windows(
                     combined, 'target', window_size=window_size,
                     covariate_cols=raw_cov_cols if raw_cov_cols else None,
                     add_temporal=True, horizon_steps=horizon_steps,
+                    future_features_df=future_features_df,
                 )
                 seq_kwargs['sequence_data'] = seq_X
                 # Cache the per-channel meaning so the forecast cycle can
@@ -3431,6 +3459,22 @@ class MLForecastLabApp:
                 # only consumed by _forecast_with_cached. Matches what the
                 # benchmark-holdout path has done for two minor releases.
                 seq_kwargs['channel_names'] = channel_names
+                # Mark this cache as carrying an extended (past + future)
+                # window so _forecast_with_cached knows to rebuild the
+                # inference tensor the same way. Old caches that pre-date
+                # this flag take the legacy path (past window only). The
+                # split index lets inference know where the past window
+                # ends — it's the size we asked create_sliding_windows to
+                # use, before the future-position extension.
+                seq_kwargs['extended_window'] = True
+                seq_kwargs['past_window_size'] = window_size
+                seq_kwargs['future_feature_cols'] = list(future_features_df.columns)
+                logger.info(
+                    f"  Extended training windows: "
+                    f"{window_size} past + {len(horizon_steps)} future "
+                    f"= {seq_X.shape[1]} steps × {seq_X.shape[2]} channels, "
+                    f"future cols={list(future_features_df.columns)}"
+                )
                 y_train_seq = seq_y
                 X_train_seq = X[-len(seq_y):]
 
@@ -3591,10 +3635,17 @@ class MLForecastLabApp:
             # redundant state. channel_names is persisted so the
             # forecast-cycle parity guard survives a restart (without
             # it, the first post-restart forecast would skip the guard).
+            # extended_window + past_window_size + future_feature_cols
+            # let the post-restart inference path reproduce the same
+            # past/future split and recompute future-known features
+            # without consulting the live training tensor.
             is_neural = cache.get("is_neural", False)
             seq_kwargs = cache.get("seq_kwargs", {})
             window_size = None
             channel_names = None
+            extended_window = bool(seq_kwargs.get("extended_window", False))
+            past_window_size = seq_kwargs.get("past_window_size")
+            future_feature_cols = seq_kwargs.get("future_feature_cols")
             if is_neural and "sequence_data" in seq_kwargs:
                 window_size = int(seq_kwargs["sequence_data"].shape[1])
             if is_neural and seq_kwargs.get("channel_names") is not None:
@@ -3610,6 +3661,13 @@ class MLForecastLabApp:
                 "is_neural": is_neural,
                 "window_size": window_size,
                 "channel_names": channel_names,
+                "extended_window": extended_window,
+                "past_window_size": (
+                    int(past_window_size) if past_window_size is not None else None
+                ),
+                "future_feature_cols": (
+                    list(future_feature_cols) if future_feature_cols is not None else None
+                ),
             }
             tmp = meta_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(meta, indent=2))
@@ -3673,6 +3731,13 @@ class MLForecastLabApp:
                 # channel_names from the persisted meta drives the
                 # post-restart parity guard against silent column-order
                 # drift between train and inference.
+                # extended_window / past_window_size / future_feature_cols
+                # carry the new (post-v2.35.x) split-window information
+                # forward so a freshly-restarted addon publishes the same
+                # forecasts as the live process did before the restart.
+                # Old metas missing these keys fall back to the legacy
+                # past-only path — those caches will be retrained on the
+                # next schedule tick anyway.
                 seq_kwargs: Dict = {}
                 if is_neural and window_size:
                     seq_kwargs["sequence_data"] = np.zeros(
@@ -3681,6 +3746,14 @@ class MLForecastLabApp:
                     cached_ch = meta.get("channel_names")
                     if cached_ch:
                         seq_kwargs["channel_names"] = list(cached_ch)
+                    if meta.get("extended_window"):
+                        seq_kwargs["extended_window"] = True
+                        past_ws = meta.get("past_window_size")
+                        if past_ws is not None:
+                            seq_kwargs["past_window_size"] = int(past_ws)
+                        ffc = meta.get("future_feature_cols")
+                        if ffc is not None:
+                            seq_kwargs["future_feature_cols"] = list(ffc)
 
                 self._cached_models[exp_cfg.name] = {
                     "model": model,
@@ -3787,6 +3860,17 @@ class MLForecastLabApp:
                 seq_kwargs["sequence_data"] = np.zeros(
                     (1, window_size, 1), dtype=np.float32
                 )
+                cached_ch = meta.get("channel_names")
+                if cached_ch:
+                    seq_kwargs["channel_names"] = list(cached_ch)
+                if meta.get("extended_window"):
+                    seq_kwargs["extended_window"] = True
+                    past_ws = meta.get("past_window_size")
+                    if past_ws is not None:
+                        seq_kwargs["past_window_size"] = int(past_ws)
+                    ffc = meta.get("future_feature_cols")
+                    if ffc is not None:
+                        seq_kwargs["future_feature_cols"] = list(ffc)
             self._cached_models[exp_name] = {
                 "model": model,
                 "model_name": model_name,
@@ -4537,8 +4621,23 @@ class MLForecastLabApp:
 
         # Prediction: neural uses dense multi-head output, tree uses recursive
         if is_neural and 'sequence_data' in seq_kwargs:
-            from ml_forecast_lab.features import build_inference_window
-            window_size = seq_kwargs['sequence_data'].shape[1]
+            from ml_forecast_lab.features import (
+                build_inference_window, compute_known_future_features,
+            )
+            cached_seq_len = seq_kwargs['sequence_data'].shape[1]
+            # Caches written before extended-window support set neither flag
+            # nor split index; they're past-only, so seq_len IS the past
+            # window size. New caches stamp `extended_window: True` plus an
+            # explicit `past_window_size` so we don't have to back-derive
+            # it from future_periods (which could disagree with the cached
+            # tensor if exp_cfg.future_periods has been changed since).
+            extended_window = seq_kwargs.get('extended_window', False)
+            if extended_window:
+                window_size = int(
+                    seq_kwargs.get('past_window_size', cached_seq_len - future_periods)
+                )
+            else:
+                window_size = cached_seq_len
 
             engineered = {
                 'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
@@ -4562,10 +4661,37 @@ class MLForecastLabApp:
             # channel-construction logic as create_sliding_windows so
             # ch_names_now is directly comparable to the cached
             # training channel_names below.
+            future_features_df = None
+            if extended_window:
+                # Mirror what _retrain_and_cache did: compute the
+                # deterministically-known feature values for every horizon
+                # timestamp and append them as future positions on the
+                # inference window. The channel-parity guard below catches
+                # any mismatch between the cached and current channel sets
+                # (covariate added/removed/reordered since last retrain),
+                # so the future positions are guaranteed to land on the
+                # same channel slots the model trained against.
+                future_index = pd.date_range(
+                    start=last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes),
+                    periods=future_periods,
+                    freq=f'{exp_cfg.interval_minutes}min',
+                )
+                future_feature_cols = set(seq_kwargs.get('future_feature_cols') or [])
+                loc = await self._get_site_location()
+                solar_lat_lon = loc if loc is not None else None
+                future_features_df = compute_known_future_features(
+                    future_index,
+                    add_temporal=True,
+                    country=getattr(exp_cfg, 'country', None),
+                    solar_lat_lon=solar_lat_lon,
+                    include_sun_elevation='sun_elevation' in future_feature_cols,
+                    include_clear_sky_ghi='clear_sky_ghi' in future_feature_cols,
+                )
             seq_X_prod, ch_names_now = build_inference_window(
                 combined, 'target', window_size=window_size,
                 covariate_cols=raw_cov_cols if raw_cov_cols else None,
                 add_temporal=True,
+                future_features_df=future_features_df,
             )
             # Channel-parity guard.
             #
