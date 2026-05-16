@@ -4,6 +4,29 @@
 
 ### Added
 
+- **Help icons (`?`) on every editable field in the Settings tab.**
+  User report: several controls had no inline guidance and a new user
+  had to guess what they did. Audit pass added concise tooltips to:
+  - Source / Forecast: **Cumulative source**, **Daily reset**
+  - Data & Forecast: **History (days)**, **Interval (minutes)**,
+    **Log transform**
+  - Robustness: **Gap max (minutes)**, **Outlier quantile**
+  - Training: **CV strategy**, **CV folds**, **Production metric**
+  - Covariate add form: **Entity**, **Aggregation**, **Scale**,
+    **Binary**
+  - Load Subtract add form: **Entity**
+
+  Every tooltip explains the default, when to change it, and what
+  the trade-off is.
+
+- **Data sanity report tooltip clarifies its scope.** Made the
+  current "target only, covariates skipped" behaviour explicit in
+  the info-tip so users know the report doesn't audit their
+  covariate entities. A follow-up task is tracked to extend the
+  report to cover covariates too.
+
+
+
 - **Covariate Analysis — bulk-remove and stale-result banner.** User
   report: "if I have several covariates and I remove more than one,
   what happens?" Three improvements:

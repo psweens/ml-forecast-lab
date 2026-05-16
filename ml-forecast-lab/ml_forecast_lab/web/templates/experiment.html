@@ -121,7 +121,7 @@
          path as the benchmark but skips the rest of the pipeline. -->
     <div class="settings-group">
         <h3 class="settings-group-title">Data sanity check
-            <span class="info-tip">?<span class="tip-text">Runs the same data fetch the benchmark would, then reports rows fetched vs expected, biggest gap, recorder freshness, missing-value rate, zero-run length, and (for cumulative sensors) max-increment hits. Use it before clicking Run Pipeline to avoid spending an hour benchmarking against broken data.</span></span>
+            <span class="info-tip">?<span class="tip-text">Runs the same data fetch the benchmark would, then reports rows fetched vs expected, biggest gap, recorder freshness, missing-value rate, zero-run length, and (for cumulative sensors) max-increment hits. Use it before clicking Run Pipeline to avoid spending an hour benchmarking against broken data. <em>Scope:</em> only the target entity is analysed — covariate sensors are not yet checked.</span></span>
         </h3>
         <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
             <button type="button" class="btn btn-secondary" id="btn-data-report"
@@ -147,7 +147,7 @@
                            onchange="saveSettingsToggle(this, 'source_is_cumulative')">
                     <span class="toggle-slider"></span>
                 </label>
-                <span class="field-label">Cumulative source</span>
+                <span class="field-label">Cumulative source <span class="info-tip">?<span class="tip-text">Turn on if the sensor reports a running total (e.g. <code>sensor.energy_today</code>, <code>sensor.demand_today</code>) rather than an instantaneous value. The add-on diffs consecutive readings to recover per-interval consumption before training. Leave off for instantaneous sensors like power, temperature, or humidity.</span></span></span>
             </div>
             <div class="settings-toggle-field">
                 <label class="toggle-switch">
@@ -156,7 +156,7 @@
                            onchange="saveSettingsToggle(this, 'reset_daily')">
                     <span class="toggle-slider"></span>
                 </label>
-                <span class="field-label">Daily reset</span>
+                <span class="field-label">Daily reset <span class="info-tip">?<span class="tip-text">Only relevant when <b>Cumulative source</b> is on. Turn on if the counter resets at local midnight (typical for "today" sensors like <code>sensor.energy_today</code>) so the add-on knows to handle the rollover instead of treating it as a huge negative jump.</span></span></span>
             </div>
             <div class="exp-field" style="max-width:180px;">
                 <label class="field-label">Max increment <span class="info-tip">?<span class="tip-text">Maximum allowed value change per interval. Larger jumps are treated as anomalies or resets. Leave empty for no limit.</span></span></label>
@@ -173,13 +173,13 @@
         <h3 class="settings-group-title">Data &amp; Forecast</h3>
         <div class="exp-field-grid" style="grid-template-columns:repeat(3, 1fr);">
             <div class="exp-field">
-                <label class="field-label">History (days)</label>
+                <label class="field-label">History (days) <span class="info-tip">?<span class="tip-text">How many days of HA recorder history to train on. Two weeks is the practical minimum; 30+ days is better for seasonality. Long windows on a Pi 5 cost benchmark time — 30–90 days is a sensible sweet spot. The add-on caches what it's already fetched, so you can widen the window without re-downloading every time.</span></span></label>
                 <input type="number" class="setting-input" data-field="days_history" min="1"
                        value="{{ exp_config.days_history if exp_config else 14 }}"
                        onchange="saveSettingsField(this)">
             </div>
             <div class="exp-field">
-                <label class="field-label">Interval (minutes)</label>
+                <label class="field-label">Interval (minutes) <span class="info-tip">?<span class="tip-text">Sampling grid the model trains on. History is resampled to this interval before features are built. 30 min is the default for household sensors; 5–15 min for fast-moving signals (occupancy, EV); 60 min for slowly-varying ones (temperature, daily energy). <b>Interval × Future periods = horizon</b> — e.g. 30 × 48 = 24 h.</span></span></label>
                 <input type="number" class="setting-input" data-field="interval_minutes" min="1"
                        value="{{ exp_config.interval_minutes if exp_config else 30 }}"
                        onchange="saveSettingsField(this)">
@@ -211,7 +211,7 @@
                            onchange="saveSettingsToggle(this, 'log_transform')">
                     <span class="toggle-slider"></span>
                 </label>
-                <span class="field-label">Log transform</span>
+                <span class="field-label">Log transform <span class="info-tip">?<span class="tip-text">Apply <code>log1p</code> to the target before training (and the inverse on predictions). Useful when the target is right-skewed (rainfall, occupancy counts, intermittent EV draw) — the loss then weights small and large values more evenly. Leave off for symmetric or already-Gaussian signals (temperature, baseline power).</span></span></span>
             </div>
         </div>
     </div>
@@ -229,7 +229,7 @@
                 </select>
             </div>
             <div class="exp-field">
-                <label class="field-label">Gap max (minutes)</label>
+                <label class="field-label">Gap max (minutes) <span class="info-tip">?<span class="tip-text">Longest gap (in minutes) the <b>Interpolate</b> gap-handling mode will fill. Anything longer is dropped instead of imputed, to avoid faking data through a multi-hour recorder outage. Defaults to 90 min — raise it for slowly-changing signals (temperature) where a 2 h interpolation is still credible; lower it for spiky signals (power) where imputation invents fictitious behaviour.</span></span></label>
                 <input type="number" class="setting-input" data-field="gap_max_minutes" min="1" max="1440"
                        value="{{ exp_config.gap_max_minutes if exp_config else 90 }}"
                        onchange="saveSettingsField(this)">
@@ -244,7 +244,7 @@
                 </select>
             </div>
             <div class="exp-field">
-                <label class="field-label">Outlier quantile</label>
+                <label class="field-label">Outlier quantile <span class="info-tip">?<span class="tip-text">Upper-tail cutoff for the <b>Quantile</b> outlier method (ignored in MAD / Off modes). Values above this percentile of the training data are clipped. Default <code>0.999</code> = clip the top 0.1 %. Lower it (e.g. <code>0.99</code>) if your sensor occasionally spikes to obviously-wrong values; raise it (e.g. <code>0.9999</code>) if real peaks matter for forecasting and you don't want them softened.</span></span></label>
                 <input type="number" class="setting-input" data-field="outlier_quantile" min="0.9" max="0.9999" step="0.0005"
                        value="{{ exp_config.outlier_quantile if exp_config else 0.999 }}"
                        onchange="saveSettingsField(this)">
@@ -266,14 +266,14 @@
         <h3 class="settings-group-title">Training</h3>
         <div class="exp-field-grid" style="grid-template-columns:repeat(3, 1fr);">
             <div class="exp-field">
-                <label class="field-label">CV strategy</label>
+                <label class="field-label">CV strategy <span class="info-tip">?<span class="tip-text"><b>Walk-forward</b> (default): each fold trains on everything before a cutoff and tests on the slice immediately after. Train set grows over folds — the right choice for time-series, no future-leak. <b>Sliding window</b>: train on a fixed-width window that slides forward each fold. Useful when very old history is no longer representative (sensor changed, regime shift). Walk-forward is the safer default unless you have a specific reason to discard old data.</span></span></label>
                 <select class="setting-input" data-field="cv_strategy" onchange="saveSettingsField(this)">
                     <option value="walk_forward" {% if exp_config and exp_config.cv_strategy == 'walk_forward' %}selected{% endif %}>Walk-forward</option>
                     <option value="sliding_window" {% if exp_config and exp_config.cv_strategy == 'sliding_window' %}selected{% endif %}>Sliding window</option>
                 </select>
             </div>
             <div class="exp-field">
-                <label class="field-label">CV folds</label>
+                <label class="field-label">CV folds <span class="info-tip">?<span class="tip-text">Number of cross-validation folds used to score each model in the benchmark. Default <code>5</code> is the sweet spot — enough variation to detect noise, fast enough on a Pi 5. Raise it (8–10) if rankings on adjacent models look noisy fold-to-fold; lower it (3) if benchmarks are taking too long.</span></span></label>
                 <input type="number" class="setting-input" data-field="cv_folds" min="2" max="20"
                        value="{{ exp_config.cv_folds if exp_config else 5 }}"
                        onchange="saveSettingsField(this)">
@@ -285,7 +285,7 @@
                        onchange="saveSettingsField(this)">
             </div>
             <div class="exp-field">
-                <label class="field-label">Production metric</label>
+                <label class="field-label">Production metric <span class="info-tip">?<span class="tip-text">Which error metric the Demšar composite weighs most heavily when picking the winner. <b>Seasonal MASE</b> (default): error relative to "same time yesterday" — handles diurnal patterns gracefully; usually the right pick for household sensors. <b>MAE</b>: raw absolute error, easy to read in your sensor's units. <b>RMSE</b>: penalises large misses more — pick if a few big errors hurt much more than many small ones. <b>MASE</b>: vs 1-step naive — only beats seasonal MASE on signals without daily seasonality.</span></span></label>
                 <select class="setting-input" data-field="production_metric" onchange="saveSettingsField(this)">
                     <option value="seasonal_mase" {% if not exp_config or exp_config.production_metric == 'seasonal_mase' %}selected{% endif %}>Seasonal MASE (vs same time yesterday)</option>
                     <option value="mae" {% if exp_config and exp_config.production_metric == 'mae' %}selected{% endif %}>MAE</option>
@@ -402,7 +402,7 @@
 
         <div class="add-cov-form" id="add-cov-form">
             <div class="exp-field entity-search-wrapper">
-                <label class="field-label">Entity</label>
+                <label class="field-label">Entity <span class="info-tip">?<span class="tip-text">The HA sensor / binary_sensor / input_number you want to expose to the model as a feature. Start typing to search — the picker autocompletes from your live entity list. Common picks: outdoor temperature, weather forecast attributes, solar irradiance, EV-plugged state, time-of-day-aware schedule helpers.</span></span></label>
                 <input type="text" class="setting-input" id="cov-entity-input" placeholder="Search HA entities..."
                        autocomplete="off" oninput="searchEntities(this)">
                 <div class="entity-search-results" id="entity-results" style="display:none;"></div>
@@ -416,7 +416,7 @@
                 </select>
             </div>
             <div class="exp-field">
-                <label class="field-label">Aggregation</label>
+                <label class="field-label">Aggregation <span class="info-tip">?<span class="tip-text">How to collapse the covariate's raw readings onto the experiment's interval grid. <b>Mean</b> (default): average over the interval — right for most continuous sensors (temperature, irradiance). <b>Sum</b>: total over the interval — for cumulative or per-tick counts. <b>Max / Min</b>: extreme of the interval — useful for "did peak demand exceed X" features. <b>Last</b>: end-of-interval value — for state-like covariates where the latest value matters (mode, status code).</span></span></label>
                 <select class="setting-input" id="cov-agg-input">
                     <option value="mean">Mean</option>
                     <option value="sum">Sum</option>
@@ -426,11 +426,11 @@
                 </select>
             </div>
             <div class="exp-field">
-                <label class="field-label">Scale</label>
+                <label class="field-label">Scale <span class="info-tip">?<span class="tip-text">Optional multiplier applied to the covariate's raw values before feature build — primarily for unit conversion. Leave blank to use values as-is. Examples: <code>0.001</code> to convert Wh → kWh; <code>0.01</code> to convert percent reported as 0–100 down to 0–1.</span></span></label>
                 <input type="number" class="setting-input" id="cov-scale-input" step="any" placeholder="Optional">
             </div>
             <div class="exp-field">
-                <label class="field-label">Binary</label>
+                <label class="field-label">Binary <span class="info-tip">?<span class="tip-text">Mark a covariate whose values are 0/1 (or any two states) — e.g. <code>binary_sensor.ev_plugged</code>, an <code>input_boolean</code>. The add-on skips numeric clipping / log-transform / outlier filtering on these and exposes them as a clean 0/1 feature column. Leave off for continuous sensors.</span></span></label>
                 <label class="toggle-switch" style="margin-top:0.25rem;">
                     <input type="checkbox" id="cov-binary-input">
                     <span class="toggle-slider"></span>
@@ -473,7 +473,7 @@
 
         <div class="add-cov-form" id="add-load-subtract-form">
             <div class="exp-field entity-search-wrapper">
-                <label class="field-label">Entity</label>
+                <label class="field-label">Entity <span class="info-tip">?<span class="tip-text">The HA sensor whose values you want to subtract from the target before training. Typically a contribution sensor like <code>sensor.ev_charger_power</code>, <code>sensor.solar_diverter_power</code>, or <code>sensor.heat_pump_consumption</code> — anything that's part of the target load but driven by a controllable / known schedule. The model then learns the residual ("base load") rather than a mix of unrelated signals.</span></span></label>
                 <input type="text" class="setting-input" id="sub-entity-input" placeholder="Search HA entities..."
                        autocomplete="off" oninput="searchEntities(this)">
                 <div class="entity-search-results" id="entity-results-sub" style="display:none;"></div>
