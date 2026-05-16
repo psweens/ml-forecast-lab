@@ -983,27 +983,42 @@ class MLForecastLabApp:
                 f"{gap}"
             )
 
-    async def compute_data_report(self, exp_cfg) -> dict:
-        """Pre-flight data sanity report for an experiment.
+    async def _analyse_entity_history(
+        self,
+        entity_id: str,
+        start,
+        now,
+        interval_minutes: int,
+        max_increment=None,
+        source_is_cumulative: bool = False,
+        big_gap_multiplier: int = 4,
+    ) -> dict:
+        """Per-entity history fetch + summary.
 
-        Fetches the raw target history the same way the benchmark would
-        (SQLite cache + HA delta fetch) and summarises it without
-        running the full pipeline — so the user can spot recorder
-        gaps, flatlines, max-increment hits, and missing-value rates
-        BEFORE spending an hour on a benchmark.
+        Returns the same per-entity stats the target analysis used to
+        compute inline; factored out so the data-report endpoint can
+        run identical checks against the target and each covariate
+        ("does this sensor look healthy enough to feed the model?").
+
+        Cache + delta-fetch strategy mirrors `_fetch_and_preprocess`.
+        Threshold defaults match the historical target checks:
+          - recorder stale if > 4× interval
+          - coverage warning < 70 %
+          - big gap = > big_gap_multiplier × interval
+          - NaN warning > 5 %
+
+        Returns dict — never raises; on HA failure / empty data the
+        caller decides what verdict to attach.
         """
         from ml_forecast_lab.ha_interface import normalise_history
 
-        now = datetime.now(timezone.utc)
-        start = now - timedelta(days=exp_cfg.days_history)
         table_name = (
-            self.history_db.safe_table_name(exp_cfg.target_entity)
+            self.history_db.safe_table_name(entity_id)
             if self.history_db else None
         )
 
         df = pd.DataFrame(columns=["ds", "value"])
         cache_rows = 0
-        # v2.33.1: cache read is unconditional now (database flag removed).
         if self.history_db and table_name:
             try:
                 cached = self.history_db.get_history(table_name)
@@ -1015,7 +1030,7 @@ class MLForecastLabApp:
                     if cache_rows > 0:
                         df = cached
             except Exception as e:
-                logger.debug("data-report cache read failed: %s", e)
+                logger.debug("data-report cache read failed for %s: %s", entity_id, e)
 
         fetch_start = df["ds"].max() if len(df) > 0 else start
         try:
@@ -1025,10 +1040,9 @@ class MLForecastLabApp:
             pass
 
         ha_rows = 0
+        fetch_error = None
         try:
-            raw = await self.ha_interface.get_history(
-                exp_cfg.target_entity, fetch_start, now,
-            )
+            raw = await self.ha_interface.get_history(entity_id, fetch_start, now)
             new_df = normalise_history(raw)
             if not new_df.empty:
                 if hasattr(new_df["ds"].dtype, "tz") and new_df["ds"].dt.tz is not None:
@@ -1040,19 +1054,20 @@ class MLForecastLabApp:
                 else:
                     df = new_df
         except Exception as e:
-            logger.warning("data-report HA fetch failed: %s", e)
+            fetch_error = str(e)
+            logger.warning("data-report HA fetch failed for %s: %s", entity_id, e)
 
         if df.empty:
             return {
-                "experiment": exp_cfg.name,
-                "target_entity": exp_cfg.target_entity,
+                "entity_id": entity_id,
                 "verdict": "no-data",
-                "ok": False,
                 "rows_total": 0,
                 "rows_cache": cache_rows,
                 "rows_fetched": ha_rows,
-                "warnings": ["No history rows found for this entity"],
-                "checked_at": now.isoformat(),
+                "warnings": (
+                    ["HA fetch error: " + fetch_error] if fetch_error
+                    else ["No history rows found for this entity"]
+                ),
             }
 
         df = df.sort_values("ds").reset_index(drop=True)
@@ -1064,33 +1079,29 @@ class MLForecastLabApp:
         now_naive = pd.Timestamp(now.replace(tzinfo=None))
         recorder_age_min = float((now_naive - last_ts).total_seconds()) / 60.0
 
-        # Coverage relative to a uniform grid spanning the window.
-        expected_step = pd.Timedelta(minutes=exp_cfg.interval_minutes)
+        expected_step = pd.Timedelta(minutes=interval_minutes)
         expected_rows = int(
             max(1, (now_naive - df["ds"].min()).total_seconds() / expected_step.total_seconds())
         )
         coverage_pct = round(min(100.0, 100.0 * len(df) / expected_rows), 1) if expected_rows else None
 
-        # Gap analysis on consecutive timestamps.
         gaps_min = (df["ds"].diff().dt.total_seconds() / 60.0).dropna()
         biggest_gap_min = float(gaps_min.max()) if len(gaps_min) else 0.0
-        big_gap_threshold_min = exp_cfg.interval_minutes * 4
+        big_gap_threshold_min = interval_minutes * big_gap_multiplier
         big_gap_count = int((gaps_min > big_gap_threshold_min).sum())
 
-        # Numeric stats on the value column.
         series = pd.to_numeric(df["value"], errors="coerce")
         non_null = series.dropna()
         nan_pct = round(100.0 * (1.0 - len(non_null) / max(1, len(series))), 1)
 
         if len(non_null):
-            target_min = float(non_null.min())
-            target_max = float(non_null.max())
-            target_median = float(non_null.median())
-            target_std = float(non_null.std())
+            v_min = float(non_null.min())
+            v_max = float(non_null.max())
+            v_median = float(non_null.median())
+            v_std = float(non_null.std())
         else:
-            target_min = target_max = target_median = target_std = None
+            v_min = v_max = v_median = v_std = None
 
-        # Zero-run length (longest consecutive run of zero values).
         zero_run = 0
         max_zero_run = 0
         for v in non_null.values:
@@ -1101,18 +1112,17 @@ class MLForecastLabApp:
             else:
                 zero_run = 0
 
-        # Max-increment hits (cumulative sensors only).
         max_inc_hits = None
-        if exp_cfg.source_is_cumulative and exp_cfg.max_increment:
+        if source_is_cumulative and max_increment:
             diffs = series.diff().dropna()
-            max_inc_hits = int((diffs > exp_cfg.max_increment).sum())
+            max_inc_hits = int((diffs > max_increment).sum())
 
         warnings = []
         verdict = "ok"
-        if recorder_age_min > exp_cfg.interval_minutes * 4:
+        if recorder_age_min > interval_minutes * 4:
             warnings.append(
                 f"Recorder is {recorder_age_min:.0f} min behind wall-clock "
-                f"(expected ≤ {exp_cfg.interval_minutes * 2} min)"
+                f"(expected ≤ {interval_minutes * 2} min)"
             )
             verdict = "warning"
         if coverage_pct is not None and coverage_pct < 70:
@@ -1126,23 +1136,20 @@ class MLForecastLabApp:
                 f"{big_gap_count} gap(s) of >{big_gap_threshold_min:.0f} min — "
                 f"biggest is {biggest_gap_min / 60:.1f} h"
             )
-            if biggest_gap_min > exp_cfg.interval_minutes * 24:
+            if biggest_gap_min > interval_minutes * 24:
                 verdict = "alert"
         if nan_pct > 5:
             warnings.append(f"{nan_pct:.1f}% of rows have non-numeric values")
             verdict = "warning" if verdict == "ok" else verdict
-        if max_zero_run > exp_cfg.interval_minutes / 5 and max_zero_run > 10:
-            # Long zero runs may be legitimate (PV at night), so frame as note
+        if max_zero_run > interval_minutes / 5 and max_zero_run > 10:
             warnings.append(
                 f"Longest zero-value run is {max_zero_run} consecutive samples "
                 f"(may be legitimate for solar / off-state sensors)"
             )
 
         return {
-            "experiment": exp_cfg.name,
-            "target_entity": exp_cfg.target_entity,
+            "entity_id": entity_id,
             "verdict": verdict,
-            "ok": verdict != "alert",
             "rows_total": int(len(df)),
             "rows_cache": cache_rows,
             "rows_fetched": ha_rows,
@@ -1155,15 +1162,126 @@ class MLForecastLabApp:
             "big_gap_count": big_gap_count,
             "big_gap_threshold_minutes": big_gap_threshold_min,
             "nan_pct": nan_pct,
-            "target_min": target_min,
-            "target_max": target_max,
-            "target_median": target_median,
-            "target_std": target_std,
+            "value_min": v_min,
+            "value_max": v_max,
+            "value_median": v_median,
+            "value_std": v_std,
             "max_zero_run_samples": int(max_zero_run),
             "max_increment_hits": max_inc_hits,
-            "max_increment_config": exp_cfg.max_increment,
-            "interval_minutes": exp_cfg.interval_minutes,
+            "max_increment_config": max_increment,
             "warnings": warnings,
+        }
+
+    async def compute_data_report(self, exp_cfg) -> dict:
+        """Pre-flight data sanity report for an experiment.
+
+        Fetches the raw target history the same way the benchmark would
+        (SQLite cache + HA delta fetch) and summarises it without
+        running the full pipeline — so the user can spot recorder
+        gaps, flatlines, max-increment hits, and missing-value rates
+        BEFORE spending an hour on a benchmark.
+
+        v2.35.0: also runs the same checks over every configured
+        covariate entity so a broken covariate (gaps, wrong units,
+        dead sensor) doesn't waste a benchmark either. The covariate
+        verdicts are returned in a separate ``covariates`` list and
+        rolled into the top-level verdict (a covariate alert escalates
+        the experiment's verdict to "warning" — covariate failures are
+        non-fatal because the benchmark can train without them, but
+        worth flagging).
+        """
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=exp_cfg.days_history)
+
+        # Target — same checks as before, just running through the helper.
+        target = await self._analyse_entity_history(
+            exp_cfg.target_entity, start, now,
+            interval_minutes=exp_cfg.interval_minutes,
+            max_increment=exp_cfg.max_increment,
+            source_is_cumulative=exp_cfg.source_is_cumulative,
+        )
+
+        # Covariates — same helper, no max-increment / cumulative
+        # semantics (those only apply to the target). Empty list when
+        # the experiment has no covariates configured.
+        covariate_reports = []
+        for cov in (exp_cfg.covariates or []):
+            try:
+                entity_id = cov.entity
+            except AttributeError:
+                entity_id = cov.get("entity") if isinstance(cov, dict) else None
+            if not entity_id:
+                continue
+            cov_report = await self._analyse_entity_history(
+                entity_id, start, now,
+                interval_minutes=exp_cfg.interval_minutes,
+            )
+            cov_report["role"] = getattr(cov, "role", None) or (
+                cov.get("role") if isinstance(cov, dict) else None
+            )
+            covariate_reports.append(cov_report)
+
+        # Roll covariate verdicts into the experiment-level verdict.
+        # Target verdict still drives the headline; covariate issues
+        # bump us to at least "warning" because the benchmark can
+        # technically train without them, but a sensible user wants
+        # to know.
+        target_verdict = target.get("verdict", "no-data")
+        rolled = target_verdict
+        for cov in covariate_reports:
+            cv = cov.get("verdict", "ok")
+            if cv in ("alert", "no-data") and rolled == "ok":
+                rolled = "warning"
+            elif cv == "warning" and rolled == "ok":
+                rolled = "warning"
+
+        # Preserve the v2.34.x response shape: target fields are
+        # promoted to the top level so the existing frontend renderer
+        # keeps working unchanged. Per-entity fields live under
+        # ``covariates`` and a top-level ``target`` mirror.
+        if target_verdict == "no-data":
+            return {
+                "experiment": exp_cfg.name,
+                "target_entity": exp_cfg.target_entity,
+                "verdict": rolled if rolled != "ok" else "no-data",
+                "ok": False,
+                "rows_total": 0,
+                "rows_cache": target.get("rows_cache", 0),
+                "rows_fetched": target.get("rows_fetched", 0),
+                "warnings": target.get("warnings", []),
+                "covariates": covariate_reports,
+                "target": target,
+                "checked_at": now.isoformat(),
+            }
+
+        return {
+            "experiment": exp_cfg.name,
+            "target_entity": exp_cfg.target_entity,
+            "verdict": rolled,
+            "ok": rolled != "alert",
+            "rows_total": target["rows_total"],
+            "rows_cache": target["rows_cache"],
+            "rows_fetched": target["rows_fetched"],
+            "rows_expected": target["rows_expected"],
+            "coverage_pct": target["coverage_pct"],
+            "recorder_age_minutes": target["recorder_age_minutes"],
+            "first_ts": target["first_ts"],
+            "last_ts": target["last_ts"],
+            "biggest_gap_minutes": target["biggest_gap_minutes"],
+            "big_gap_count": target["big_gap_count"],
+            "big_gap_threshold_minutes": target["big_gap_threshold_minutes"],
+            "nan_pct": target["nan_pct"],
+            "target_min": target["value_min"],
+            "target_max": target["value_max"],
+            "target_median": target["value_median"],
+            "target_std": target["value_std"],
+            "max_zero_run_samples": target["max_zero_run_samples"],
+            "max_increment_hits": target["max_increment_hits"],
+            "max_increment_config": target["max_increment_config"],
+            "interval_minutes": exp_cfg.interval_minutes,
+            "warnings": target["warnings"],
+            "covariates": covariate_reports,
+            "target": target,
             "checked_at": now.isoformat(),
         }
 

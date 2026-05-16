@@ -52,7 +52,41 @@ user never has to guess what a field does.
   current "target only, covariates skipped" behaviour explicit so
   users know the report doesn't audit their covariate entities. A
   follow-up task is tracked to extend the report to cover covariates
-  too.
+  too. *(Superseded in 2.35.1 — covariates are now checked.)*
+
+## 2.35.1
+
+Follow-ups to 2.35.0 surfaced when reviewing the same screens.
+
+### Added
+
+- **Data sanity report now covers covariates too.** Previously the
+  pre-flight sanity check only fetched and analysed the target
+  entity — covariates were silently skipped, so a broken covariate
+  (gap, dead sensor, wrong units) only surfaced an hour into a
+  benchmark. The per-entity analysis is factored into a helper that
+  runs once for the target and once per configured covariate; the
+  report now includes a `covariates` array with per-entity verdict,
+  coverage %, gap stats, recorder freshness, NaN rate, and any
+  warnings. A covariate alert escalates the experiment-level verdict
+  to "warning" (covariates are non-fatal — training still runs — but
+  worth knowing). Frontend renders each covariate as a compact card
+  with a verdict-coloured left border below the target's detail
+  rows. The data-report tooltip is updated to reflect the new scope.
+
+### Changed
+
+- **Output activation tooltip rewritten + dropdown expanded.** The
+  old tip lumped <code>zscore</code> with deprecated <code>relu</code>/<code>exp</code>
+  as "YAML-only footguns", which was wrong: <code>zscore</code> is a
+  current, valid option (the Auto choice for LSTM and the
+  per-horizon normalisation strategy honoured by every PyTorch
+  neural backend). The tip now describes <code>zscore</code> properly,
+  notes the RevIN interaction (zscore becomes a no-op when
+  <code>use_revin=True</code>, the default on most backends), and is
+  honest that <i>relu</i> and <i>exp</i> remain YAML-only footguns.
+  <code>zscore</code> is also now a regular dropdown option, so users
+  can pick it without editing YAML.
 
 ## 2.34.7
 
