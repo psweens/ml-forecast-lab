@@ -2904,17 +2904,18 @@ class MLForecastLabApp:
             # ----- Dense multi-head prediction for neural models -----
             # Model was trained with horizons [1, 2, ..., future_periods] so
             # predict_sequence returns all steps directly — no interpolation.
-            from ml_forecast_lab.features import create_sliding_windows
+            # Uses build_inference_window (not create_sliding_windows) so
+            # the window's last timestep IS combined.iloc[-1] = last_ts,
+            # not last_ts - 1 interval. See features.build_inference_window
+            # docstring for the rationale.
+            from ml_forecast_lab.features import build_inference_window
 
             window_size = seq_kwargs['sequence_data'].shape[1]
-            tail_df = combined.iloc[-(window_size + 1):].copy()
-            seq_X_prod, _, _ = create_sliding_windows(
-                tail_df, 'target', window_size=window_size,
+            last_window, _ = build_inference_window(
+                combined, 'target', window_size=window_size,
                 covariate_cols=raw_cov_cols_prod if raw_cov_cols_prod else None,
                 add_temporal=True,
-                horizon_steps=[1],  # we only need the window, not labels
             )
-            last_window = seq_X_prod[-1:] if len(seq_X_prod) > 0 else seq_X_prod
 
             def _predict_multihead():
                 return model.predict_sequence(last_window)
@@ -4536,12 +4537,9 @@ class MLForecastLabApp:
 
         # Prediction: neural uses dense multi-head output, tree uses recursive
         if is_neural and 'sequence_data' in seq_kwargs:
-            from ml_forecast_lab.features import create_sliding_windows
+            from ml_forecast_lab.features import build_inference_window
             window_size = seq_kwargs['sequence_data'].shape[1]
 
-            # Build the window from the tail of the data.
-            # horizon_steps=[1] is the minimum needed for the window builder;
-            # we only care about the window itself, not the y labels here.
             engineered = {
                 'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
                 'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
@@ -4549,11 +4547,25 @@ class MLForecastLabApp:
             engineered.update(c for c in combined.columns if c.startswith('y_lag_'))
             raw_cov_cols = [c for c in combined.columns if c not in engineered and c != 'target']
 
-            tail_df = combined.iloc[-(window_size + 1):].copy()
-            seq_X_prod, _, ch_names_now = create_sliding_windows(
-                tail_df, 'target', window_size=window_size,
+            # Build the single inference window whose last timestep IS
+            # combined.index[-1] = last_ts. The previous implementation
+            # called create_sliding_windows with horizon_steps=[1] on a
+            # (window_size + 1)-row tail, which reserves the final row
+            # as an unused y-label and so produces a window ending at
+            # combined.iloc[-2]. That half-hour misalignment shifted
+            # every published prediction one interval later than the
+            # model intended, surfacing as visible time-of-day skew in
+            # the forecast — most pronounced on dense 96-horizon
+            # backends like NLinear / SparseTSF where the user can
+            # eyeball where the peak sits relative to the labelled
+            # timestamps. build_inference_window has the same
+            # channel-construction logic as create_sliding_windows so
+            # ch_names_now is directly comparable to the cached
+            # training channel_names below.
+            seq_X_prod, ch_names_now = build_inference_window(
+                combined, 'target', window_size=window_size,
                 covariate_cols=raw_cov_cols if raw_cov_cols else None,
-                add_temporal=True, horizon_steps=[1],
+                add_temporal=True,
             )
             # Channel-parity guard.
             #
@@ -4586,7 +4598,8 @@ class MLForecastLabApp:
                     f"cycle to rebuild the cached channel order."
                 )
                 return
-            last_window = seq_X_prod[-1:] if len(seq_X_prod) > 0 else seq_X_prod
+            # build_inference_window already returns shape (1, window, ch).
+            last_window = seq_X_prod
 
             loop = asyncio.get_running_loop()
             multi_pred = await loop.run_in_executor(None, lambda: model.predict_sequence(last_window))
