@@ -1,5 +1,76 @@
 # Changelog
 
+## 2.35.2
+
+A correctness fix triggered by user-reported "odd predictions" from
+NLinear: forecasts with a peak at the wrong hour of day even though
+NLinear ranked best in the benchmark.
+
+### Fixed
+
+- **Channel-parity guard between training and inference for neural
+  models.** The production retrain path
+  (`_retrain_and_cache`) stored the trained `sequence_data` tensor in
+  the in-memory cache but did **not** store the per-channel meaning
+  (`channel_names` returned by `create_sliding_windows`). At forecast
+  time, `_forecast_with_cached` re-derived the channel ordering from
+  a freshly-fetched dataframe with no verification that it matched
+  what the model was trained on. The benchmark-holdout path stored
+  `channel_names` correctly — only the production cache was missing
+  it.
+
+  Consequence: if anything ever shifted the column order between
+  train and inference — a transient empty covariate fetch leaving
+  a hole at one tick, a covariate added or removed in Settings
+  since the last retrain, a future change to `build_features`
+  output order — the model would silently consume mis-labelled
+  channels (e.g. `sun_elevation` arriving in the slot the network
+  learned for `clear_sky_ghi`) and the published forecast would
+  look wrong in oddly time-specific ways. There was no error
+  raised because every channel still had the right *shape*, just
+  the wrong *meaning*. NLinear is the most exposed backend to this
+  because a single linear layer has no capacity to compensate for
+  swapped channels, but every neural backend was affected.
+
+  Fix: store `channel_names` in `seq_kwargs` at production retrain
+  (matching what the benchmark-holdout already did), persist it in
+  `cache_meta.json` so the guard survives restarts, restore it into
+  the in-memory cache on startup, and verify in
+  `_forecast_with_cached` that the inference-time ordering matches
+  the cached training-time ordering. On mismatch the forecast cycle
+  logs a clear `ERROR` and skips publishing for one tick rather
+  than emit a confidently-wrong sensor value — the next retrain
+  rebuilds the cache with the current ordering.
+
+  Existing on-disk caches without `channel_names` keep working
+  (the guard treats absent metadata as "no check" rather than
+  failing) and are upgraded transparently on the next retrain.
+
+### Changed
+
+- **Output-activation tooltip clarified for log-transformed
+  targets.** The Experiment Settings tooltip for *Output activation
+  (neural)* now explicitly suggests picking **Softplus** when Log
+  transform is on and you want the activation to own the
+  non-negativity contract instead of relying on the post-hoc
+  `max(0, expm1(.))` clamp. The `auto` default remains unchanged
+  — `softplus` for cumulative sources, `linear` otherwise — but
+  the trade-off is documented so users debugging spurious
+  predictions on log-transformed PV / energy targets have a
+  documented next thing to try.
+
+### Added
+
+- **Unit tests pinning the output-activation resolution rules and
+  the channel-ordering filter.** `TestResolveOutputActivation`
+  fixes the auto-rule contract (LSTM→zscore, cumulative→softplus,
+  log_transform-alone stays linear, explicit choice wins) so the
+  default can't drift undetected. `TestNLinear` adds a
+  softplus-floor sanity check. `TestChannelParityFilter` exercises
+  the production filter directly: same-df-columns → same channel
+  order, and re-ordered covariates → divergent channel order
+  (which is exactly the scenario the new runtime guard catches).
+
 ## 2.35.0
 
 A UX-focused minor release. Two themes: making the Covariate

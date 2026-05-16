@@ -3411,12 +3411,25 @@ class MLForecastLabApp:
             future_periods = getattr(exp_cfg, 'future_periods', 48)
             horizon_steps = list(range(1, future_periods + 1))
             if window_size >= 12:
-                seq_X, seq_y, _ = create_sliding_windows(
+                seq_X, seq_y, channel_names = create_sliding_windows(
                     combined, 'target', window_size=window_size,
                     covariate_cols=raw_cov_cols if raw_cov_cols else None,
                     add_temporal=True, horizon_steps=horizon_steps,
                 )
                 seq_kwargs['sequence_data'] = seq_X
+                # Cache the per-channel meaning so the forecast cycle can
+                # verify it's feeding the model channels in the SAME order
+                # they were trained on. Without this, a covariate fetch
+                # that silently re-orders (e.g. a transient empty cov_series
+                # at one tick, or a future build_features rearrangement)
+                # would make NLinear/DLinear/etc. predict from mis-labelled
+                # channels and produce nonsense (e.g. spurious early-morning
+                # peaks) with no error raised. Backend fit() methods accept
+                # **kwargs and silently ignore unknown keys, so passing
+                # channel_names through is harmless during training; it's
+                # only consumed by _forecast_with_cached. Matches what the
+                # benchmark-holdout path has done for two minor releases.
+                seq_kwargs['channel_names'] = channel_names
                 y_train_seq = seq_y
                 X_train_seq = X[-len(seq_y):]
 
@@ -3574,12 +3587,17 @@ class MLForecastLabApp:
             # window_size is only meaningful for neural backends that
             # trained through the sliding-window path — derive it from
             # the live seq_kwargs.sequence_data shape so we don't store
-            # redundant state.
+            # redundant state. channel_names is persisted so the
+            # forecast-cycle parity guard survives a restart (without
+            # it, the first post-restart forecast would skip the guard).
             is_neural = cache.get("is_neural", False)
             seq_kwargs = cache.get("seq_kwargs", {})
             window_size = None
+            channel_names = None
             if is_neural and "sequence_data" in seq_kwargs:
                 window_size = int(seq_kwargs["sequence_data"].shape[1])
+            if is_neural and seq_kwargs.get("channel_names") is not None:
+                channel_names = list(seq_kwargs["channel_names"])
 
             meta = {
                 "schema_version": 1,
@@ -3590,6 +3608,7 @@ class MLForecastLabApp:
                 "model_version": cache["model_version"],
                 "is_neural": is_neural,
                 "window_size": window_size,
+                "channel_names": channel_names,
             }
             tmp = meta_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(meta, indent=2))
@@ -3650,11 +3669,17 @@ class MLForecastLabApp:
                 # Rebuild a minimal seq_kwargs so _forecast_with_cached
                 # can still read window_size from sequence_data.shape[1]
                 # without us having to persist the full training array.
+                # channel_names from the persisted meta drives the
+                # post-restart parity guard against silent column-order
+                # drift between train and inference.
                 seq_kwargs: Dict = {}
                 if is_neural and window_size:
                     seq_kwargs["sequence_data"] = np.zeros(
                         (1, window_size, 1), dtype=np.float32
                     )
+                    cached_ch = meta.get("channel_names")
+                    if cached_ch:
+                        seq_kwargs["channel_names"] = list(cached_ch)
 
                 self._cached_models[exp_cfg.name] = {
                     "model": model,
@@ -4525,11 +4550,42 @@ class MLForecastLabApp:
             raw_cov_cols = [c for c in combined.columns if c not in engineered and c != 'target']
 
             tail_df = combined.iloc[-(window_size + 1):].copy()
-            seq_X_prod, _, _ = create_sliding_windows(
+            seq_X_prod, _, ch_names_now = create_sliding_windows(
                 tail_df, 'target', window_size=window_size,
                 covariate_cols=raw_cov_cols if raw_cov_cols else None,
                 add_temporal=True, horizon_steps=[1],
             )
+            # Channel-parity guard.
+            #
+            # The model was trained with a specific (target + covariates +
+            # temporal) channel ordering. At inference we rebuild the
+            # window from a freshly-fetched dataframe; if anything has
+            # shifted the column order — a transient empty covariate fetch
+            # leaving a hole that subsequent ticks filled, a covariate
+            # added/removed in Settings since the last retrain, a
+            # build_features change in a future version — the model would
+            # silently predict from mis-labelled channels and the
+            # published forecast would look wrong in oddly time-specific
+            # ways (a spike at the wrong hour, a constant offset, peaks
+            # at midnight) with NO error logged.
+            #
+            # The cached channel_names from the retrain that produced this
+            # model is the ground truth. If they disagree, log a clear
+            # warning and skip publishing — better a stale sensor for one
+            # tick than a confidently-published wrong forecast. The retrain
+            # cycle will rebuild the cache.
+            cached_ch_names = seq_kwargs.get('channel_names')
+            if cached_ch_names is not None and list(ch_names_now) != list(cached_ch_names):
+                logger.error(
+                    f"  Channel-name mismatch for {exp_cfg.name}: cached "
+                    f"({len(cached_ch_names)} channels) vs current "
+                    f"({len(ch_names_now)} channels). "
+                    f"Cached={list(cached_ch_names)}, "
+                    f"Current={list(ch_names_now)}. "
+                    f"Skipping forecast publish — wait for next retrain "
+                    f"cycle to rebuild the cached channel order."
+                )
+                return
             last_window = seq_X_prod[-1:] if len(seq_X_prod) > 0 else seq_X_prod
 
             loop = asyncio.get_running_loop()
