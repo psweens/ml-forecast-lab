@@ -1,5 +1,99 @@
 # Changelog
 
+## 2.36.0
+
+A user-reported PV forecast on NLinear produced a spurious peak at
+~3 AM — i.e. in the middle of the night, when the sun is physically
+below the horizon. Confirmed across multiple neural backends and
+across solar-features-on / solar-features-off retrains: NLinear and
+SparseTSF produced smeared shapes with night-time peaks, LSTM and
+CNN collapsed to a flat constant ≈ training mean. Same root cause:
+a multi-horizon neural head with a single linear projection from a
+pooled / flattened past-window encoder cannot disambiguate "horizon
+h" from "absolute hour at h", because h corresponds to different
+absolute hours across windows that end at different times. The
+weights for h are forced into a phase-smeared compromise (linear
+models) or the model gives up and predicts the unconditional mean
+(LSTM/CNN). The tree-model production path doesn't have this
+problem — its recursive inference loop already feeds each future
+horizon row with its own pvlib-computed `sun_elevation` /
+`clear_sky_ghi` and `hour_sin/cos`. This release closes the
+neural-path asymmetry.
+
+### Added
+
+- **`features.compute_known_future_features`** — helper that returns
+  a DataFrame of features that are deterministically known for any
+  future timestamp: temporal (hour_sin/cos, dow_sin/cos, is_weekend),
+  holiday indicator (when a country is configured), and solar
+  physics (`sun_elevation`, `clear_sky_ghi` via pvlib) when site
+  lat/lon is available and the experiment opted into the solar
+  covariate channels. Forecast-style covariates whose future
+  values are knowable (Solcast etc.) can be threaded through too.
+
+- **Extended-window mode for `create_sliding_windows` and
+  `build_inference_window`.** Both accept an optional
+  `future_features_df`. When provided, each window is appended
+  with `n_horizons` future positions; channels matching
+  `future_features_df` columns are populated at those future
+  positions (target is left as zero — no leakage), all other
+  channels at future positions are zero. The resulting per-sample
+  tensor has shape `(window_size + n_horizons, n_channels)`. The
+  model's multi-horizon head can now read each horizon's own
+  time-anchored signal directly from its corresponding future
+  position, instead of having to phase-disambiguate from the
+  past window alone.
+
+- **`extended_window` flag + `past_window_size` + `future_feature_cols`
+  in the cached `seq_kwargs` and persisted `cache_meta.json`.** Lets
+  the inference path (and the post-restart restore path) reproduce
+  the same past/future split the trainer used. Caches written before
+  this release lack the flag and take the legacy past-only path —
+  they keep working unchanged until they're retrained on the normal
+  schedule.
+
+### Changed
+
+- **`_retrain_and_cache` neural path** now computes future-known
+  features for `combined.index` (temporal always; `sun_elevation` /
+  `clear_sky_ghi` only when the experiment has the matching solar
+  covariates enabled and lat/lon is configured) and passes them
+  through to `create_sliding_windows`. Per-channel parity with the
+  inference path is preserved because both sides go through
+  `compute_known_future_features` with the same arguments and
+  consume the same channel-name list.
+
+- **`_forecast_with_cached` neural path** now detects the
+  `extended_window` flag on the cached `seq_kwargs`, computes
+  future-known features for the inference horizon timestamps
+  (`ds_future`), and passes them to `build_inference_window` to
+  produce the same extended-shape tensor the model was trained on.
+  Old caches without the flag take the original past-only path,
+  so the upgrade is non-breaking.
+
+### Trade-offs and known effects
+
+- **NLinear's last-value anchor trick degrades when the cache is
+  retrained on extended windows.** The trick subtracts
+  `x[:, -1:, target_channel]` from every step and adds it back to
+  the output, anchoring the prediction on the most recent
+  observation. With future-position target slots set to zero (no
+  leakage), `last_val` is zero and the anchor becomes a no-op —
+  effectively NLinear collapses to a plain linear head over the
+  larger input. This is the deliberate trade. The
+  per-horizon-time-anchored signal that future positions now carry
+  is a much stronger inductive bias than the level-anchor for
+  strongly-periodic targets, but if your previous NLinear ranking
+  came specifically from the anchor trick it may no longer be the
+  bench winner under the new scheme. Re-benchmark to confirm.
+
+- **Holdout / benchmark training paths are not touched in this
+  release** — they remain on the past-only window scheme. So the
+  bench-winner ranking that picks the production model is computed
+  under the old scheme, while production training and inference run
+  under the new scheme. A follow-up will plumb extended windows
+  through holdout for ranking consistency.
+
 ## 2.35.3
 
 The user-reported "odd predictions" turned out to be a real bug in the

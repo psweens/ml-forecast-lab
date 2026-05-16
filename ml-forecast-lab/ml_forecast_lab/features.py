@@ -6,7 +6,7 @@ temporal features, lag features, rolling statistics, and holiday indicators.
 """
 
 import logging
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -251,6 +251,103 @@ def build_features(
     return features
 
 
+def compute_known_future_features(
+    future_index: pd.DatetimeIndex,
+    add_temporal: bool = True,
+    country: Optional[str] = None,
+    solar_lat_lon: Optional[Tuple[float, float]] = None,
+    include_sun_elevation: bool = False,
+    include_clear_sky_ghi: bool = False,
+    future_covariate_values: Optional[Dict[str, pd.Series]] = None,
+) -> pd.DataFrame:
+    """
+    Compute features that are deterministically known for future timestamps.
+
+    A single linear projection from a past-window encoder onto multiple
+    horizons cannot disambiguate "horizon h" from "absolute hour at h" —
+    the same h-slot in training spans every absolute hour depending on the
+    window's end time, so a fixed weight per h is forced into a phase-
+    smeared compromise. The model can do better when each horizon position
+    in its input carries its own time-anchored features. Tree models get
+    this naturally (one row per horizon during recursive inference);
+    neural sliding-window models do not, unless the window is extended
+    with future positions populated by *this* function.
+
+    Parameters
+    ----------
+    future_index : pd.DatetimeIndex
+        Timestamps for which to compute features. May be tz-aware or
+        tz-naive (naive is treated as UTC by the solar helper).
+    add_temporal : bool, default True
+        Include hour_sin, hour_cos, dow_sin, dow_cos, is_weekend.
+    country : str, optional
+        Country code for is_holiday. Omitted if None.
+    solar_lat_lon : (lat, lon), optional
+        Required for sun_elevation / clear_sky_ghi.
+    include_sun_elevation : bool, default False
+        Include 'sun_elevation' column (requires solar_lat_lon).
+    include_clear_sky_ghi : bool, default False
+        Include 'clear_sky_ghi' column (requires solar_lat_lon).
+    future_covariate_values : dict[str, pd.Series], optional
+        Forecast-style covariates whose future values are known (e.g.
+        Solcast PV-forecast, weather forecasts). Series are reindexed to
+        future_index and ffill/bfill-aligned.
+
+    Returns
+    -------
+    pd.DataFrame
+        Indexed by future_index. Columns are a subset of the channel
+        names that ``create_sliding_windows`` / ``build_inference_window``
+        produce, so that callers can populate future-position rows in an
+        extended window by channel-name match.
+    """
+    out = pd.DataFrame(index=future_index)
+    if len(future_index) == 0:
+        return out
+
+    if add_temporal:
+        hour_rad = 2 * np.pi * future_index.hour / 24
+        dow_rad = 2 * np.pi * future_index.dayofweek / 7
+        out['hour_sin'] = np.sin(hour_rad).astype(np.float32)
+        out['hour_cos'] = np.cos(hour_rad).astype(np.float32)
+        out['dow_sin'] = np.sin(dow_rad).astype(np.float32)
+        out['dow_cos'] = np.cos(dow_rad).astype(np.float32)
+        out['is_weekend'] = (future_index.dayofweek >= 5).astype(np.float32)
+
+    if country is not None and _HOLIDAYS_AVAILABLE:
+        out['is_holiday'] = np.array(
+            [int(is_holiday(d, country)) for d in future_index],
+            dtype=np.float32,
+        )
+
+    if solar_lat_lon is not None and (include_sun_elevation or include_clear_sky_ghi):
+        try:
+            from ml_forecast_lab.solar_physics import compute_solar_features
+            solar_df = compute_solar_features(
+                future_index,
+                latitude=solar_lat_lon[0],
+                longitude=solar_lat_lon[1],
+                include_elevation=include_sun_elevation,
+                include_clear_sky=include_clear_sky_ghi,
+            )
+            for col in solar_df.columns:
+                out[col] = solar_df[col].values.astype(np.float32)
+        except Exception as e:
+            logger.warning(
+                f"Failed to compute future solar features for "
+                f"{len(future_index)} timestamps: {e}"
+            )
+
+    if future_covariate_values:
+        for name, series in future_covariate_values.items():
+            if series is None or len(series) == 0:
+                continue
+            aligned = series.reindex(future_index).ffill().bfill()
+            out[name] = aligned.values.astype(np.float32)
+
+    return out
+
+
 def prepare_train_test(
     df: pd.DataFrame,
     features_df: pd.DataFrame,
@@ -462,6 +559,7 @@ def create_sliding_windows(
     covariate_cols: Optional[List[str]] = None,
     add_temporal: bool = True,
     horizon_steps: Optional[List[int]] = None,
+    future_features_df: Optional[pd.DataFrame] = None,
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """
     Create sliding window sequences from raw time series for LSTM/CNN.
@@ -487,11 +585,30 @@ def create_sliding_windows(
         2h/8h/12h/24h at 30-min intervals. When provided, y becomes 2D
         with shape (n_samples, len(horizon_steps)). horizon_steps=[1] is
         equivalent to the default single-step-ahead behaviour.
+    future_features_df : pd.DataFrame, optional
+        Indexed by ``df.index`` (or a superset thereof) and containing
+        deterministically-known feature values for the future positions
+        of each window. When provided, each output window is EXTENDED
+        with ``max(horizon_steps)`` future positions appended in time
+        order; columns of ``future_features_df`` whose names match
+        channels in the window are populated at the future positions,
+        all other channels at future positions are zero. The resulting
+        per-sample shape becomes
+        ``(window_size + max(horizon_steps), n_channels)``.
+
+        This gives the model per-horizon, time-anchored signal directly
+        in its input — closing the asymmetry where tree models get
+        future temporal/solar features per recursive step but neural
+        multi-head models historically only saw the past window and
+        had to phase-disambiguate horizons from a single linear
+        projection.
 
     Returns
     -------
     X : np.ndarray
-        Shape (n_samples, window_size, n_channels).
+        Shape (n_samples, window_size, n_channels) — or, when
+        ``future_features_df`` is provided,
+        (n_samples, window_size + max(horizon_steps), n_channels).
     y : np.ndarray
         Shape (n_samples,) when horizon_steps is None, or
         (n_samples, n_horizons) when horizon_steps is provided.
@@ -539,7 +656,35 @@ def create_sliding_windows(
         n_samples = n_total - window_size
         n_horizons = 0
 
-    X = np.zeros((n_samples, window_size, n_channels), dtype=np.float32)
+    # Window-extension mode: append max_horizon future positions whose
+    # channels are populated from future_features_df by name match.
+    # Channel order is preserved; channels not present in future_features_df
+    # are left as zero in the future positions.
+    if future_features_df is not None:
+        if horizon_steps is None:
+            raise ValueError(
+                "future_features_df requires horizon_steps to be set so the "
+                "number of appended future positions is well-defined"
+            )
+        extend_by = max_horizon
+        # Pre-compute the future-channel slice aligned with df.index. This
+        # lets us index by row position rather than re-aligning per sample.
+        future_aligned = future_features_df.reindex(df.index)
+        future_data = np.zeros((n_total, n_channels), dtype=np.float32)
+        for ch_idx, ch_name in enumerate(channel_names):
+            if ch_name in future_aligned.columns:
+                vals = future_aligned[ch_name].values
+                # NaN at rows outside future_features_df's original index
+                # → leave as zero (no future-known signal there).
+                mask = ~np.isnan(vals.astype(np.float64))
+                future_data[mask, ch_idx] = vals[mask].astype(np.float32)
+        effective_window = window_size + extend_by
+    else:
+        extend_by = 0
+        future_data = None
+        effective_window = window_size
+
+    X = np.zeros((n_samples, effective_window, n_channels), dtype=np.float32)
     if n_horizons > 0:
         y = np.zeros((n_samples, n_horizons), dtype=np.float32)
     else:
@@ -547,7 +692,9 @@ def create_sliding_windows(
 
     target_idx = 0  # target_col is always first
     for i in range(n_samples):
-        X[i] = data[i:i + window_size]
+        X[i, :window_size] = data[i:i + window_size]
+        if future_data is not None:
+            X[i, window_size:] = future_data[i + window_size : i + window_size + extend_by]
         if n_horizons > 0:
             for h_idx, h in enumerate(horizon_steps):
                 y[i, h_idx] = data[i + window_size + h - 1, target_idx]
@@ -555,9 +702,11 @@ def create_sliding_windows(
             y[i] = data[i + window_size, target_idx]
 
     horizon_info = f", horizons={horizon_steps}" if horizon_steps else ""
+    extend_info = f" +{extend_by} future positions" if extend_by else ""
     logger.debug(
         f"Created {n_samples} sliding windows: "
-        f"({window_size} steps × {n_channels} channels: {channel_names}{horizon_info})"
+        f"({effective_window} steps{extend_info} × {n_channels} channels: "
+        f"{channel_names}{horizon_info})"
     )
 
     return X, y, channel_names
@@ -569,6 +718,7 @@ def build_inference_window(
     window_size: int,
     covariate_cols: Optional[List[str]] = None,
     add_temporal: bool = True,
+    future_features_df: Optional[pd.DataFrame] = None,
 ) -> Tuple[np.ndarray, List[str]]:
     """
     Build a single inference window from the tail of a DataFrame.
@@ -605,11 +755,29 @@ def build_inference_window(
     add_temporal : bool, default True
         Append temporal features (hour_sin, hour_cos, dow_sin, dow_cos,
         is_weekend) as the final channels.
+    future_features_df : pd.DataFrame, optional
+        Indexed by the future timestamps following ``df.index[-1]`` (i.e.
+        the rows for which the model will predict). When provided, the
+        returned tensor is EXTENDED with ``len(future_features_df)``
+        future positions appended after the past window; columns of
+        ``future_features_df`` whose names match channels in the window
+        are populated at those future positions, all other channels at
+        future positions are zero. The resulting shape is
+        ``(1, window_size + n_horizons, n_channels)``.
+
+        Must be channel-compatible with the matching ``create_sliding_windows``
+        call that produced the cached training tensor — that is, the same
+        ``future_features_df`` columns must be available at inference
+        time as were available at training time, otherwise the future
+        positions of the inference window will silently disagree with
+        what the model learned to read.
 
     Returns
     -------
     X : np.ndarray
-        Shape ``(1, window_size, n_channels)``, dtype float32.
+        Shape ``(1, window_size, n_channels)``, or
+        ``(1, window_size + n_horizons, n_channels)`` when
+        ``future_features_df`` is provided. dtype float32.
     channel_names : list of str
         Per-channel labels in the same order as the third dimension of X.
     """
@@ -642,8 +810,22 @@ def build_inference_window(
             ['hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_weekend']
         )
 
-    data = work_df.values.astype(np.float32)
-    X = data.reshape(1, window_size, len(channel_names))
+    n_channels = len(channel_names)
+    past_data = work_df.values.astype(np.float32)
+
+    if future_features_df is not None and len(future_features_df) > 0:
+        n_horizons = len(future_features_df)
+        future_block = np.zeros((n_horizons, n_channels), dtype=np.float32)
+        for ch_idx, ch_name in enumerate(channel_names):
+            if ch_name in future_features_df.columns:
+                vals = future_features_df[ch_name].values
+                # NaN-safe copy; leave NaN slots as zero (no known signal).
+                mask = ~np.isnan(vals.astype(np.float64))
+                future_block[mask, ch_idx] = vals[mask].astype(np.float32)
+        combined_block = np.concatenate([past_data, future_block], axis=0)
+        X = combined_block.reshape(1, window_size + n_horizons, n_channels)
+    else:
+        X = past_data.reshape(1, window_size, n_channels)
     return X, channel_names
 
 

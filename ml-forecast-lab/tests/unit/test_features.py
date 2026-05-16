@@ -112,6 +112,107 @@ class TestCreateSlidingWindows:
             np.testing.assert_almost_equal(y[i], target_vals[i + 12])
 
 
+class TestExtendedWindow:
+    """Cover the future-features extension that closes the
+    train-vs-inference asymmetry for neural multi-horizon backends."""
+
+    def _make_df(self, n=200):
+        idx = pd.date_range("2025-01-01", periods=n, freq="30min")
+        return pd.DataFrame({
+            "target": np.sin(np.arange(n) * 0.3) + 1.0,
+        }, index=idx)
+
+    def test_compute_known_future_features_temporal_only(self):
+        from ml_forecast_lab.features import compute_known_future_features
+        idx = pd.date_range("2025-06-01 00:00", periods=48, freq="30min")
+        fkf = compute_known_future_features(idx, add_temporal=True)
+        assert set(fkf.columns) == {
+            "hour_sin", "hour_cos", "dow_sin", "dow_cos", "is_weekend",
+        }
+        # hour_sin at 06:00 = sin(2π * 6 / 24) = sin(π/2) = 1
+        ts_06 = pd.Timestamp("2025-06-01 06:00")
+        assert ts_06 in fkf.index
+        np.testing.assert_allclose(fkf.loc[ts_06, "hour_sin"], 1.0, atol=1e-6)
+
+    def test_create_sliding_windows_extends_with_future(self):
+        from ml_forecast_lab.features import (
+            create_sliding_windows, compute_known_future_features,
+        )
+        df = self._make_df(n=200)
+        fkf = compute_known_future_features(df.index, add_temporal=True)
+        horizons = list(range(1, 49))
+        X, y, channels = create_sliding_windows(
+            df, "target", window_size=48,
+            covariate_cols=None, add_temporal=True,
+            horizon_steps=horizons,
+            future_features_df=fkf,
+        )
+        # Extended window: 48 past + 48 future positions
+        assert X.shape[1] == 48 + 48
+        # y unchanged (still per-horizon target)
+        assert y.shape == (X.shape[0], len(horizons))
+        # Channel names match the past-window channel set; no new channels
+        assert channels == ["target", "hour_sin", "hour_cos", "dow_sin", "dow_cos", "is_weekend"]
+
+    def test_future_positions_carry_known_values(self):
+        from ml_forecast_lab.features import (
+            create_sliding_windows, compute_known_future_features,
+        )
+        df = self._make_df(n=200)
+        fkf = compute_known_future_features(df.index, add_temporal=True)
+        X, _, channels = create_sliding_windows(
+            df, "target", window_size=48,
+            covariate_cols=None, add_temporal=True,
+            horizon_steps=list(range(1, 49)),
+            future_features_df=fkf,
+        )
+        target_idx = channels.index("target")
+        hour_sin_idx = channels.index("hour_sin")
+        # Future-position target must be zero (no leakage).
+        np.testing.assert_array_equal(X[:, 48:, target_idx], 0)
+        # Future-position hour_sin must match the deterministic values for
+        # the corresponding combined.index rows — for sample 0, future
+        # positions are df.index[48..95], so hour_sin should equal
+        # sin(2π * hour / 24) at those rows.
+        expected = fkf["hour_sin"].iloc[48:96].values.astype(np.float32)
+        np.testing.assert_allclose(X[0, 48:, hour_sin_idx], expected, rtol=1e-6)
+
+    def test_build_inference_window_extends_with_future(self):
+        from ml_forecast_lab.features import (
+            build_inference_window, compute_known_future_features,
+        )
+        df = self._make_df(n=200)
+        future_index = pd.date_range(
+            start=df.index[-1] + pd.Timedelta(minutes=30),
+            periods=48, freq="30min",
+        )
+        fkf = compute_known_future_features(future_index, add_temporal=True)
+        X, channels = build_inference_window(
+            df, "target", window_size=48,
+            add_temporal=True,
+            future_features_df=fkf,
+        )
+        assert X.shape == (1, 48 + 48, len(channels))
+        # Future-position values for hour_sin must equal what compute_*
+        # returned for the requested future_index (closing the loop end-to-end).
+        hour_sin_idx = channels.index("hour_sin")
+        np.testing.assert_allclose(
+            X[0, 48:, hour_sin_idx],
+            fkf["hour_sin"].values.astype(np.float32),
+            rtol=1e-6,
+        )
+
+    def test_build_inference_window_legacy_path_unchanged(self):
+        """Existing callers that pass no future_features_df keep the
+        past-only behaviour — old cached models must continue to work."""
+        from ml_forecast_lab.features import build_inference_window
+        df = self._make_df(n=100)
+        X, channels = build_inference_window(
+            df, "target", window_size=24, add_temporal=True,
+        )
+        assert X.shape == (1, 24, len(channels))
+
+
 class TestIsHoliday:
     def test_christmas_gb(self):
         dt = pd.Timestamp("2024-12-25")
