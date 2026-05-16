@@ -121,7 +121,7 @@
          path as the benchmark but skips the rest of the pipeline. -->
     <div class="settings-group">
         <h3 class="settings-group-title">Data sanity check
-            <span class="info-tip">?<span class="tip-text">Runs the same data fetch the benchmark would, then reports rows fetched vs expected, biggest gap, recorder freshness, missing-value rate, zero-run length, and (for cumulative sensors) max-increment hits. Use it before clicking Run Pipeline to avoid spending an hour benchmarking against broken data. <em>Scope:</em> only the target entity is analysed — covariate sensors are not yet checked.</span></span>
+            <span class="info-tip">?<span class="tip-text">Runs the same data fetch the benchmark would, then reports rows fetched vs expected, biggest gap, recorder freshness, missing-value rate, zero-run length, and (for cumulative sensors) max-increment hits. Use it before clicking Run Pipeline to avoid spending an hour benchmarking against broken data. The target is analysed in detail and every configured covariate gets its own compact verdict card below — a broken covariate (gap, dead sensor, wrong units) won't sneak into a benchmark.</span></span>
         </h3>
         <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
             <button type="button" class="btn btn-secondary" id="btn-data-report"
@@ -310,13 +310,14 @@
                 </select>
             </div>
             <div class="exp-field">
-                <label class="field-label">Output activation (neural) <span class="info-tip">?<span class="tip-text">Activation applied to the final linear head of neural models. <b>Auto</b> (recommended): the backend picks the right activation given the target type (zscore for LSTM, softplus for cumulative targets, linear otherwise). <b>Linear</b>: unbounded, signed (temperature, deltas). <b>Softplus</b>: smooth non-negative (0, ∞) for energy / power / counts. <b>Sigmoid</b>: bounded (0, s) for quantities with a physical ceiling (SoC, humidity). The historical <i>relu</i>, <i>exp</i>, and <i>zscore</i> options are footguns on near-zero targets and are settable via YAML only.</span></span></label>
+                <label class="field-label">Output activation (neural) <span class="info-tip">?<span class="tip-text">Activation on the final head of PyTorch neural models. Tree backends (LightGBM / XGBoost / CatBoost) ignore this. <b>Auto</b> (recommended): backend picks per target shape — LSTM uses <i>zscore</i>, other neural backends use <i>softplus</i> for cumulative sources and <i>linear</i> otherwise. <b>Linear</b>: unbounded, signed (temperature, deltas, signed power). <b>Softplus</b>: smooth non-negative in (0, ∞) — energy / power / counts. <b>Sigmoid</b>: bounded in (0, s) with <code>s</code> learned from training-data max — for physical-ceiling quantities (battery SoC, humidity %). <b>zscore</b>: per-horizon z-score normalisation with a linear head, denormalised at inference and floored at zero. <b>Note:</b> when <code>use_revin=True</code> on the backend (the default for every PyTorch model except N-BEATS / N-HiTS) the zscore path becomes a no-op — RevIN owns the scale. The <i>relu</i> and <i>exp</i> values are YAML-only footguns: relu produces dead units on near-zero targets, exp saturates fast.</span></span></label>
                 <select class="setting-input" data-field="output_activation" onchange="saveSettingsField(this)">
                     <option value="auto" {% if not exp_config or exp_config.output_activation == 'auto' %}selected{% endif %}>Auto (recommended)</option>
                     <option value="linear" {% if exp_config and exp_config.output_activation == 'linear' %}selected{% endif %}>Linear</option>
                     <option value="softplus" {% if exp_config and exp_config.output_activation == 'softplus' %}selected{% endif %}>Softplus (≥ 0, smooth)</option>
                     <option value="sigmoid" {% if exp_config and exp_config.output_activation == 'sigmoid' %}selected{% endif %}>Sigmoid (bounded)</option>
-                    {% if exp_config and exp_config.output_activation in ('relu', 'exp', 'zscore') %}
+                    <option value="zscore" {% if exp_config and exp_config.output_activation == 'zscore' %}selected{% endif %}>Z-score normalisation</option>
+                    {% if exp_config and exp_config.output_activation in ('relu', 'exp') %}
                     <option value="{{ exp_config.output_activation }}" selected>{{ exp_config.output_activation }} (advanced, set via YAML)</option>
                     {% endif %}
                 </select>
@@ -4869,7 +4870,53 @@ window.showTab = function(el) {
                     + '</ul></div>';
             }
 
-            detail.innerHTML = rows.join('') + warn;
+            // v2.35.0: per-covariate sanity block. One compact card per
+            // covariate with verdict colour + key metrics. Hidden when
+            // the experiment has no covariates configured.
+            var covBlock = '';
+            if (rep.covariates && rep.covariates.length) {
+                covBlock = '<div style="margin-top:1rem;">'
+                    + '<div style="color:var(--text-secondary);font-size:0.78rem;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.4rem;">Covariates</div>';
+                covBlock += rep.covariates.map(function(c) {
+                    var verdictCol, verdictLabel;
+                    if (c.verdict === 'ok') { verdictCol = 'var(--success)'; verdictLabel = 'OK'; }
+                    else if (c.verdict === 'warning') { verdictCol = 'var(--warning)'; verdictLabel = 'Warning'; }
+                    else if (c.verdict === 'alert') { verdictCol = 'var(--error)'; verdictLabel = 'Alert'; }
+                    else { verdictCol = 'var(--text-muted)'; verdictLabel = 'No data'; }
+                    var metricsHtml = '';
+                    if (c.verdict !== 'no-data') {
+                        var bits = [
+                            c.rows_total + ' rows',
+                            'coverage ' + (c.coverage_pct != null ? c.coverage_pct.toFixed(0) + '%' : '—'),
+                            'gap ' + (c.biggest_gap_minutes != null ? c.biggest_gap_minutes.toFixed(0) + ' min' : '—'),
+                            'NaN ' + (c.nan_pct != null ? c.nan_pct.toFixed(1) + '%' : '—'),
+                            'age ' + (c.recorder_age_minutes != null ? c.recorder_age_minutes.toFixed(0) + ' min' : '—'),
+                        ];
+                        metricsHtml = '<div style="font-size:0.75rem;color:var(--text-muted);font-family:ui-monospace,monospace;margin-top:0.15rem;">'
+                            + bits.join(' · ') + '</div>';
+                    }
+                    var warnHtml = '';
+                    if (c.warnings && c.warnings.length) {
+                        warnHtml = '<ul style="margin:0.3rem 0 0 1.2rem;color:var(--text-secondary);font-size:0.78rem;">'
+                            + c.warnings.map(function(w) { return '<li>' + w + '</li>'; }).join('')
+                            + '</ul>';
+                    }
+                    var roleBadge = c.role
+                        ? '<span style="margin-left:0.4rem;padding:0.05rem 0.35rem;font-size:0.65rem;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);border-radius:999px;">' + c.role + '</span>'
+                        : '';
+                    return '<div style="padding:0.5rem 0.75rem;margin-bottom:0.4rem;border-radius:0.4rem;background:rgba(0,0,0,0.15);border:1px solid var(--border);border-left:3px solid ' + verdictCol + ';">'
+                        + '<div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;">'
+                        + '<span style="font-family:ui-monospace,monospace;font-size:0.85rem;color:var(--text-primary);">' + c.entity_id + roleBadge + '</span>'
+                        + '<span style="font-size:0.75rem;font-weight:600;color:' + verdictCol + ';">' + verdictLabel + '</span>'
+                        + '</div>'
+                        + metricsHtml
+                        + warnHtml
+                        + '</div>';
+                }).join('');
+                covBlock += '</div>';
+            }
+
+            detail.innerHTML = rows.join('') + warn + covBlock;
             detail.style.display = '';
         })
         .catch(function(e) {
