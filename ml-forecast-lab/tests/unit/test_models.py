@@ -166,6 +166,89 @@ class TestNLinear:
         assert (preds >= 0).all(), f"softplus must floor at 0, got min={preds.min()}"
 
 
+class TestInferenceWindowAlignment:
+    """The inference window builder must produce a window whose LAST
+    timestep is df.index[-1] (the most recent observation), and whose
+    channels match the training-time ordering exactly.
+
+    Pre-fix, the production forecast path called create_sliding_windows
+    with horizon_steps=[1] on the last (window_size + 1) rows. That
+    reserved the final row as an unused y-label and produced a window
+    ending at df.iloc[-2] — a one-interval misalignment that shifted
+    every published forecast prediction one interval later than the
+    model intended. This test pins the corrected contract."""
+
+    @staticmethod
+    def _make_df(n=200, interval_min=30):
+        import pandas as pd
+        idx = pd.date_range('2026-05-15 00:00', periods=n, freq=f'{interval_min}min')
+        return pd.DataFrame({
+            'target': (idx.hour + idx.minute / 60.0).astype(np.float32),
+            'cov_a': np.linspace(0, 1, n, dtype=np.float32),
+            'cov_b': np.linspace(10, 20, n, dtype=np.float32),
+        }, index=idx)
+
+    def test_window_ends_at_last_index(self):
+        from ml_forecast_lab.features import build_inference_window
+        df = self._make_df()
+        X, _ = build_inference_window(
+            df, 'target', window_size=48,
+            covariate_cols=['cov_a', 'cov_b'], add_temporal=True,
+        )
+        assert X.shape == (1, 48, 8)  # target + 2 cov + 5 temporal
+        # The last timestep of the window's target channel MUST equal
+        # df['target'].iloc[-1]. Pre-fix this assertion held on
+        # df['target'].iloc[-2] instead, leaking the off-by-one into
+        # production.
+        assert X[0, -1, 0] == df['target'].iloc[-1]
+        assert X[0, 0, 0] == df['target'].iloc[-48]
+
+    def test_channel_order_matches_create_sliding_windows(self):
+        """Inference channel ordering must match what was cached at
+        training time. If these two helpers ever drift, the parity
+        guard in _forecast_with_cached fires and forecasts stop
+        publishing until retrain — so they MUST stay in lockstep."""
+        from ml_forecast_lab.features import (
+            build_inference_window, create_sliding_windows,
+        )
+        df = self._make_df()
+        _, ch_inf = build_inference_window(
+            df, 'target', window_size=48,
+            covariate_cols=['cov_a', 'cov_b'], add_temporal=True,
+        )
+        _, _, ch_train = create_sliding_windows(
+            df, 'target', window_size=48,
+            covariate_cols=['cov_a', 'cov_b'], add_temporal=True,
+            horizon_steps=[1],
+        )
+        assert ch_inf == ch_train
+
+    def test_temporal_channels_reflect_actual_last_timestamp(self):
+        """The window's last temporal-feature row must encode the hour
+        at df.index[-1] (the model's anchor), not df.index[-2]. A
+        one-step misalignment here would make the model interpret
+        the inference as if 'now' were 30 minutes earlier — exactly
+        the failure mode the original bug produced."""
+        import pandas as pd
+        from ml_forecast_lab.features import build_inference_window
+        df = self._make_df()
+        X, ch = build_inference_window(
+            df, 'target', window_size=48,
+            covariate_cols=None, add_temporal=True,
+        )
+        hour_sin_idx = ch.index('hour_sin')
+        expected_hour_sin = float(np.sin(
+            2 * np.pi * df.index[-1].hour / 24
+        ))
+        assert abs(float(X[0, -1, hour_sin_idx]) - expected_hour_sin) < 1e-6
+
+    def test_too_few_rows_raises(self):
+        from ml_forecast_lab.features import build_inference_window
+        df = self._make_df(n=20)
+        with __import__('pytest').raises(ValueError, match='at least 48 rows'):
+            build_inference_window(df, 'target', window_size=48)
+
+
 class TestChannelParityFilter:
     """The neural sliding-window builder must produce the SAME channel
     ordering at training and at inference, otherwise the model predicts

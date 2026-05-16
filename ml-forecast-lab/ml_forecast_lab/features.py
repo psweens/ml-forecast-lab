@@ -563,3 +563,87 @@ def create_sliding_windows(
     return X, y, channel_names
 
 
+def build_inference_window(
+    df: pd.DataFrame,
+    target_col: str,
+    window_size: int,
+    covariate_cols: Optional[List[str]] = None,
+    add_temporal: bool = True,
+) -> Tuple[np.ndarray, List[str]]:
+    """
+    Build a single inference window from the tail of a DataFrame.
+
+    Counterpart to ``create_sliding_windows`` for the production forecast
+    path. Returns a ``(1, window_size, n_channels)`` tensor whose window
+    ends at ``df.index[-1]`` (i.e. the most recent timestamp).
+
+    ``create_sliding_windows`` cannot be used for inference window
+    construction because it reserves the row after the window for the
+    ``h=1`` y-label, even when ``horizon_steps=[1]`` is requested only
+    to make the call valid. The consequence is that its last possible
+    window ends at ``df.index[-2]`` — a half-hour misalignment at 30-min
+    sampling that publishes every prediction one interval later than the
+    model intended, surfacing as visible time-of-day shifts in the
+    forecast.
+
+    Channel ordering matches ``create_sliding_windows`` exactly so the
+    cached training ``channel_names`` are directly comparable by the
+    parity guard in ``_forecast_with_cached``.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with DatetimeIndex containing target and optional
+        covariates. Must have at least ``window_size`` rows.
+    target_col : str
+        Name of target column. Becomes channel 0.
+    window_size : int
+        Number of timesteps in the window.
+    covariate_cols : list of str, optional
+        Additional columns to include as channels (channels 1..N+0,
+        in iteration order — same as ``create_sliding_windows``).
+    add_temporal : bool, default True
+        Append temporal features (hour_sin, hour_cos, dow_sin, dow_cos,
+        is_weekend) as the final channels.
+
+    Returns
+    -------
+    X : np.ndarray
+        Shape ``(1, window_size, n_channels)``, dtype float32.
+    channel_names : list of str
+        Per-channel labels in the same order as the third dimension of X.
+    """
+    if len(df) < window_size:
+        raise ValueError(
+            f"Need at least {window_size} rows for an inference window, "
+            f"got {len(df)}"
+        )
+
+    tail = df.iloc[-window_size:]
+
+    channel_names = [target_col]
+    work_df = tail[[target_col]].copy()
+
+    if covariate_cols:
+        for c in covariate_cols:
+            if c in tail.columns:
+                channel_names.append(c)
+                work_df[c] = tail[c]
+
+    if add_temporal and isinstance(tail.index, pd.DatetimeIndex):
+        hour_rad = 2 * np.pi * tail.index.hour / 24
+        dow_rad = 2 * np.pi * tail.index.dayofweek / 7
+        work_df['hour_sin'] = np.sin(hour_rad)
+        work_df['hour_cos'] = np.cos(hour_rad)
+        work_df['dow_sin'] = np.sin(dow_rad)
+        work_df['dow_cos'] = np.cos(dow_rad)
+        work_df['is_weekend'] = (tail.index.dayofweek >= 5).astype(np.float32)
+        channel_names.extend(
+            ['hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_weekend']
+        )
+
+    data = work_df.values.astype(np.float32)
+    X = data.reshape(1, window_size, len(channel_names))
+    return X, channel_names
+
+

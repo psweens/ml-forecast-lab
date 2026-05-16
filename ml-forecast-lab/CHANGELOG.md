@@ -1,5 +1,55 @@
 # Changelog
 
+## 2.35.3
+
+The user-reported "odd predictions" turned out to be a real bug in the
+shared neural inference plumbing — not a model-side issue. Confirmed
+when switching from NLinear to SparseTSF produced the same misaligned
+shape: two architectures, same symptom, so the cause lives in the
+code both paths share.
+
+### Fixed
+
+- **Off-by-one in the neural inference window construction.** The
+  production forecast path (`_forecast_with_cached`) and the legacy
+  inference path (`_run_production_inference`) both built the
+  inference window by calling
+  `create_sliding_windows(tail_df, ..., horizon_steps=[1])` on the
+  last `window_size + 1` rows of the combined dataframe. The intent
+  was "give me the most recent window"; the actual behaviour was
+  "give me a window ending at `combined.iloc[-2]`, because the final
+  row is reserved as the (unused-at-inference) h=1 y-label". The
+  model was therefore fed a window whose last timestep was one
+  interval *before* `last_ts`, while `_publish_forecast_sensors`
+  timestamped its predictions starting at `last_ts + 1 interval`.
+  Net effect: every published forecast value was the model's
+  prediction for the slot one interval *earlier* than the
+  timestamp it was published under. Visible as a time-of-day skew
+  in the dashboard — most pronounced on dense 96-horizon backends
+  (NLinear, SparseTSF, DLinear) where a user can eyeball where the
+  peak sits relative to the labelled axis.
+
+  Fix: new helper `features.build_inference_window` constructs a
+  single `(1, window_size, n_channels)` tensor directly from
+  `df.iloc[-window_size:]`, so the window's last timestep IS
+  `last_ts`. Channel ordering matches `create_sliding_windows`
+  exactly, so the v2.35.2 channel-parity guard still compares
+  apples to apples between the cached training names and the
+  inference-rebuilt names. Both inference paths are switched over.
+
+### Added
+
+- **Unit tests pinning the inference-window contract.**
+  `TestInferenceWindowAlignment` covers four invariants:
+  - the window ends at `df.index[-1]` (catches the original bug),
+  - channel ordering matches `create_sliding_windows` exactly
+    (keeps the parity guard's cached names directly comparable),
+  - the window's last temporal-feature row encodes the hour at
+    `df.index[-1]` (the model's anchor must be the actual
+    most-recent timestamp, not one step earlier — the failure
+    mode of the original bug),
+  - too-few-rows raises a clear `ValueError`.
+
 ## 2.35.2
 
 A correctness fix triggered by user-reported "odd predictions" from
