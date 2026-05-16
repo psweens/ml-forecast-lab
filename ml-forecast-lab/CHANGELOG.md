@@ -1,12 +1,38 @@
 # Changelog
 
-## 2.34.8
+## 2.35.0
+
+A UX-focused minor release. Two themes: making the Covariate
+Analysis tab safer to act on when removing more than one covariate,
+and making the Experiment Settings fully self-documenting so a new
+user never has to guess what a field does.
 
 ### Added
 
+- **Covariate Analysis — bulk-remove and stale-result banner.**
+  User report: *"if I have several covariates and I remove more than
+  one, what happens when I click remove on those?"* Three changes:
+  - Each row with a Remove button now also has a **bulk** checkbox.
+    Tick several and confirm them together via a single red action
+    bar that appears above the table — one dialog covers the whole
+    batch, sequential POSTs with per-entity success/failure
+    reporting.
+  - After **any** removal (per-row or bulk), an amber banner above
+    the table flags the displayed percentages as stale (they were
+    computed against the previous covariate set). The banner has a
+    one-click **Re-run Covariate Analysis** button that fires the
+    full analysis with the current model selection — no need to
+    scroll back up to the controls.
+  - The post-remove toast was reworded from "re-run pipeline to see
+    effect" → "re-run Covariate Analysis to update the table". The
+    old wording was easy to misread as "re-run the benchmark
+    pipeline" (a different button entirely).
+
+  Section tooltip rewritten to describe the new flow.
+
 - **Help icons (`?`) on every editable field in the Settings tab.**
-  User report: several controls had no inline guidance and a new user
-  had to guess what they did. Audit pass added concise tooltips to:
+  Audit pass added concise tooltips to 14 previously-undocumented
+  controls:
   - Source / Forecast: **Cumulative source**, **Daily reset**
   - Data & Forecast: **History (days)**, **Interval (minutes)**,
     **Log transform**
@@ -16,36 +42,17 @@
     **Binary**
   - Load Subtract add form: **Entity**
 
-  Every tooltip explains the default, when to change it, and what
-  the trade-off is.
+  Every tooltip names the default, when to change it, and the
+  trade-off — so a new user never has to guess from the field name
+  alone.
+
+### Changed
 
 - **Data sanity report tooltip clarifies its scope.** Made the
-  current "target only, covariates skipped" behaviour explicit in
-  the info-tip so users know the report doesn't audit their
-  covariate entities. A follow-up task is tracked to extend the
-  report to cover covariates too.
-
-
-
-- **Covariate Analysis — bulk-remove and stale-result banner.** User
-  report: "if I have several covariates and I remove more than one,
-  what happens?" Three improvements:
-  - Each row with a Remove button now also has a **bulk** checkbox.
-    Tick several and confirm them together via a single red action
-    bar that appears above the table — one dialog covers the whole
-    batch, sequential POSTs with per-entity success/failure reporting.
-  - After **any** removal (per-row or bulk), an amber banner above
-    the table flags the displayed percentages as stale (they were
-    computed against the previous covariate set). The banner has a
-    one-click **Re-run Covariate Analysis** button that fires the
-    full analysis with the current model selection — no need to
-    scroll back up to the controls.
-  - The post-remove toast was reworded from "re-run pipeline to see
-    effect" → "re-run Covariate Analysis to update the table" — the
-    old wording was easy to misread as "re-run the benchmark
-    pipeline", which isn't what's needed.
-
-  Section tooltip updated to describe the new flow.
+  current "target only, covariates skipped" behaviour explicit so
+  users know the report doesn't audit their covariate entities. A
+  follow-up task is tracked to extend the report to cover covariates
+  too.
 
 ## 2.34.7
 
