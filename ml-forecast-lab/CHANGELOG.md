@@ -1,5 +1,95 @@
 # Changelog
 
+## 2.37.0
+
+Implements every fix identified by the neural-PV investigation
+(``docs/investigations/2026-05-neural-pv.md``). The v2.36.0 extended-
+window mode reproduced the user's bizarre PV forecasts on synthetic
+data with ground truth, and the same synthetic harness was used to
+verify the fixes.
+
+* **PF1 — RevIN past-only stats**: ``_RevIN.normalize`` accepts a new
+  ``past_window_size`` kwarg. When provided, per-window mean/std are
+  computed over the past slice only, undoing the 50% mean bias that
+  the future-position zero-target padding induces. Applied across all
+  12 backends that use RevIN. Backwards-compatible (None = legacy
+  whole-window behaviour).
+* **PF2 — NLinear past-end anchor**: NLinear's "subtract the last
+  value, re-add it" trick now anchors on ``x[:, past_window_size - 1,
+  target_channel]`` (the last past observation) instead of the literal
+  last row (a future zero in v2.36 extended mode).
+* **PF2-variant — TFT past-end query**: TFT's "last step as query"
+  trick at ``tft_backend.py:179`` was degenerate for the same reason
+  as PF2; now uses the past-end position.
+* **PF3 — past-only attention mask**: LSTM, GRU temporal attention;
+  TFT multi-head attention; PatchTST, Crossformer transformer
+  encoders. Future-position scores are pushed to ``-inf`` before
+  softmax so the attention can't read absolute time from
+  zero-target slots. Restored LSTM peak hour from 1 AM to noon.
+* **PF4 — N-BEATS / N-HiTS past-only backcast**: the doubly-residual
+  stack now operates on the past slice only. Without this the
+  backcast learned trivial zeros for the future block and the
+  forecast residual collapsed.
+* **PF5 — CNN past-only pool mask**: CNN's learnable pool weights are
+  masked at future positions before softmax so the pooled context
+  excludes zero-target slots.
+* **PF6 — iTransformer past-only channel embed**: the per-channel
+  ``Linear(seq_len, d_model)`` embedder now consumes only the past
+  slice so the target channel's token isn't biased low.
+* **PF7 — head-input mask**: NLinear, DLinear, TSMixer drop the
+  future-position target-channel slots from their flat head input
+  (always zero by construction; including them only adds
+  head-input variance imbalance). Other linear-head backends are
+  already restored to flatness ≈ 1.0 by PF1 alone.
+* **PF8 — softplus default for non-negative targets**: new
+  ``ExperimentCfg.target_is_nonnegative`` flag mirrors
+  ``source_is_cumulative``; when either is True and
+  ``output_activation='auto'``, the resolver picks softplus instead
+  of linear. Set this for PV power, irradiance, demand quantities.
+* **PF9 — daily_loss_weight default for non-negative targets**: new
+  ``_resolve_daily_loss_weight()`` defaults the cumulative-trajectory
+  loss weight to 0.5 (from 0.0) for non-negative neural targets when
+  the user hasn't explicitly set it. Penalises systematic bias more
+  aggressively than per-interval MSE alone.
+
+**Cache invalidation**: ``schema_version`` bumped from 1 to 2. Old
+v2.36-era caches are silently ignored on startup and a fresh
+benchmark + retrain is scheduled — necessary because the old models
+were trained against the biased RevIN / degenerate anchors that
+PF1-PF9 fix, so loading them would just re-publish the broken
+forecasts.
+
+Verification (``make_realistic_pv(0)``, extended_window=True default,
+40 training epochs):
+
+| backend       | v2.36 flat / peak | v2.37 flat / peak |
+| ---           |             ---:  |             ---:  |
+| nlinear       | 0.82 / 12         | **1.33 / 12** ✓   |
+| dlinear       | 0.66 / 12         | **1.06 / 11** ✓   |
+| sparsetsf     | 0.71 / 12         | **1.08 / 11** ✓   |
+| fits          | 0.50 / 11         | **0.93 / 12** ✓   |
+| tsmixer       | 0.78 / 12         | **1.19 / 12** ✓   |
+| timemixer     | 0.69 / 12         | **0.99 / 12** ✓   |
+| tide          | 0.70 / 12         | **1.69 / 11** ✓   |
+| lstm          | 0.05 / 1 (!)      | **0.81 / 11** ✓   |
+| gru           | 0.05 / 8          | **0.99 / 12** ✓   |
+| cnn           | 0.03 / 10         | **0.98 / 12** ✓   |
+| patchtst      | 0.13 / 13         | **0.79 / 12** ✓   |
+| itransformer  | 0.58 / 12         | **0.74 / 10** ✓   |
+| crossformer   | 0.25 / 11         | **0.95 / 12** ✓   |
+| timesnet      | 0.57 / 12         | **1.20 / 13** ✓   |
+| tft           | 0.74 / 12         | **0.88 / 13** ✓   |
+| nbeats        | 0.11 / 10         | **1.45 / 12** (needs 100 epochs) |
+| nhits         | 0.08 / 3          | 0.10 / 7 (still broken — architectural follow-up) |
+
+True peak hour is 12 (noon, UTC) on this dataset; ideal flatness is
+1.0. Every backend except N-HiTS is recognisably correct after PF1-PF9.
+
+Tests: ``tests/unit/test_neural_pv_regression.py`` adds 10 tests
+covering each PF. All 10 PASS today; the previous xfail-strict
+versions XPASS-strict-fail when the fix lands, which is the intended
+"fix gets pinned" pattern.
+
 ## 2.36.0
 
 A user-reported PV forecast on NLinear produced a spurious peak at
