@@ -98,6 +98,7 @@ def _train_extended_window_nlinear(
     exp_cfg: _FakeExpCfg,
     epochs: int = 30,
     seed: int = 0,
+    learning_rate: float = 5e-4,
 ):
     """Run the exact _retrain_and_cache neural training path.
 
@@ -142,10 +143,14 @@ def _train_extended_window_nlinear(
         'future_feature_cols': list(future_features_df.columns),
     }
 
-    model = NLinearModel(epochs=epochs, batch_size=64)
+    model = NLinearModel(
+        epochs=epochs, batch_size=64, learning_rate=learning_rate,
+    )
     _apply_output_activation(model, exp_cfg)
     if hasattr(model, 'daily_loss_weight'):
         model.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
+    if hasattr(model, 'optimiser'):
+        model.set_params(optimiser=exp_cfg.optimiser)
 
     X_flat = np.zeros((seq_X.shape[0], 1), dtype=np.float32)
     model.fit(
@@ -493,3 +498,189 @@ def test_pv_forecast_past_only_path_still_works(pv_data_no_covariates):
 
     pv_peak = float(np.max(np.expm1(combined['target'].values)))
     _assert_forecast_not_collapsed(y_pred, pv_peak, label="pv_past_only")
+
+
+# ------------------------------------------------------------------
+# Save → load → predict roundtrip: the production cache writes the
+# model to disk, the addon may restart, then a forecast cycle loads
+# the model back from disk and calls predict_sequence. If save/load
+# loses ANY state (past_window_size, channel_mean, y_mean, etc.) the
+# reloaded model produces a wrong forecast — the in-memory tests
+# above would not catch it because they predict directly from the
+# freshly-trained model object.
+# ------------------------------------------------------------------
+def test_pv_forecast_save_load_predict_roundtrip(
+    pv_data_no_covariates, tmp_path,
+):
+    """Train → save → reload → predict. Reloaded model must produce
+    a forecast that is numerically identical (within float tolerance)
+    to the in-memory model's forecast on the same input.
+
+    A divergence here means model.save / model.load loses state —
+    the user's flat-zero forecast could be caused by this if the
+    cache loaded after addon restart is missing past_window_size,
+    a y_mean offset, or similar.
+    """
+    exp_cfg = _FakeExpCfg(
+        target_is_nonnegative=True,
+        log_transform=True,
+    )
+    df = pv_data_no_covariates.copy()
+    df['y'] = np.log1p(np.maximum(df['y'].values, 0.0))
+    features_df = build_features(
+        df, target_col='y', interval_minutes=exp_cfg.interval_minutes,
+        country=exp_cfg.country,
+    )
+    combined = features_df.copy()
+    combined['target'] = df['y']
+    combined = combined.dropna()
+
+    model, seq_kwargs, window_size, _ = _train_extended_window_nlinear(
+        combined, exp_cfg, epochs=15,
+    )
+    y_pred_in_memory = _live_forecast(
+        combined, model, seq_kwargs, window_size, exp_cfg,
+    )
+
+    # Save → reload (mirrors _retrain_and_cache's cache["model"].save(...)
+    # plus the post-restart _forecast_with_cached model.load(...)).
+    model_bin = tmp_path / "model.bin"
+    model.save(str(model_bin))
+
+    reloaded = NLinearModel()
+    reloaded.load(str(model_bin))
+    y_pred_reloaded = _live_forecast(
+        combined, reloaded, seq_kwargs, window_size, exp_cfg,
+    )
+
+    # Numerical equivalence within float tolerance. If the reloaded
+    # model output diverges from the in-memory model's output, save/load
+    # has lost state.
+    assert y_pred_reloaded.shape == y_pred_in_memory.shape
+    max_diff = float(np.max(np.abs(y_pred_reloaded - y_pred_in_memory)))
+    assert max_diff < 1e-3, (
+        f"save/load roundtrip changes the forecast: "
+        f"max abs diff = {max_diff:.6f}\n"
+        f"  in-memory peak={np.max(y_pred_in_memory):.2f}, "
+        f"min={np.min(y_pred_in_memory):.2f}\n"
+        f"  reloaded peak ={np.max(y_pred_reloaded):.2f}, "
+        f"min={np.min(y_pred_reloaded):.2f}\n"
+        f"This pattern matches the user's flat-zero forecast if some "
+        f"state (past_window_size, y_mean, channel_mean) is dropped "
+        f"during load."
+    )
+
+    # And the reloaded model must still pass the collapse-signature
+    # checks — it's the production-relevant assertion.
+    pv_peak = float(np.max(np.expm1(combined['target'].values)))
+    _assert_forecast_not_collapsed(
+        y_pred_reloaded, pv_peak, label="pv_reloaded_from_disk"
+    )
+
+
+# ------------------------------------------------------------------
+# Time-of-day inference robustness: the user's screenshot was taken
+# mid-morning with current PV ~0.9W. The PF2 anchor mechanism uses
+# the last past observation, so different inference times produce
+# different anchors. Test that the forecast does not collapse
+# regardless of which time-of-day we infer at.
+# ------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "inference_hour",
+    [3, 8, 11, 14, 17, 22],
+    ids=["pre-dawn", "morning-ramp", "mid-morning", "afternoon", "evening", "post-dusk"],
+)
+def test_pv_forecast_anchor_robust_across_time_of_day(
+    pv_data_no_covariates, inference_hour,
+):
+    """The user's flat-zero screenshot was taken at mid-morning with
+    anchor ≈ 0.9 W (near zero). The PF2 anchor mechanism makes the
+    model's output sensitive to the anchor value: when anchor is
+    small, the linear head needs strictly positive output to predict
+    daytime values. Test that the forecast survives across a sweep
+    of inference times-of-day.
+
+    If a specific time-of-day produces a collapsed forecast, the
+    failure localises to the anchor / RevIN interaction.
+    """
+    exp_cfg = _FakeExpCfg(
+        target_is_nonnegative=True,
+        log_transform=True,
+    )
+    df = pv_data_no_covariates.copy()
+    df['y'] = np.log1p(np.maximum(df['y'].values, 0.0))
+    features_df = build_features(
+        df, target_col='y', interval_minutes=exp_cfg.interval_minutes,
+        country=exp_cfg.country,
+    )
+    combined = features_df.copy()
+    combined['target'] = df['y']
+    combined = combined.dropna()
+
+    # Train once on the full series, then slice the dataframe to end
+    # at the requested hour-of-day so build_inference_window picks up
+    # an anchor at that hour.
+    model, seq_kwargs, window_size, _ = _train_extended_window_nlinear(
+        combined, exp_cfg, epochs=15,
+    )
+
+    # Slice combined so its last row is at the chosen UTC hour.
+    matching = combined.index.hour == inference_hour
+    candidate_idx = np.where(matching)[0]
+    # Use a candidate far enough from the start to have a full past
+    # window available.
+    candidate_idx = candidate_idx[candidate_idx >= window_size + 96]
+    assert candidate_idx.size > 0, (
+        f"No timestamp at hour={inference_hour} with full window. "
+        f"Synthetic data shorter than expected?"
+    )
+    last_idx = int(candidate_idx[-1])
+    combined_sliced = combined.iloc[: last_idx + 1].copy()
+    y_pred = _live_forecast(
+        combined_sliced, model, seq_kwargs, window_size, exp_cfg,
+    )
+
+    pv_peak = float(np.max(np.expm1(combined['target'].values)))
+    _assert_forecast_not_collapsed(
+        y_pred, pv_peak, label=f"pv_anchor_at_hour_{inference_hour:02d}"
+    )
+
+
+# ------------------------------------------------------------------
+# User-tuned learning rate: the user's YAML has
+# ``model_params.nlinear.learning_rate: 0.009480`` — 20× the v2.37
+# default of 5e-4. Tuning was done against the pre-v2.37 NLinear,
+# so the value may diverge or destabilise the new normalised /
+# anchored architecture. This test reproduces the user's tuned-LR
+# path and asserts the model still produces a non-collapsed forecast.
+# ------------------------------------------------------------------
+def test_pv_forecast_user_tuned_high_learning_rate(pv_data_no_covariates):
+    """User's tuned ``learning_rate: 0.009480`` reproduces. If this
+    test collapses while the same config with the default LR (5e-4)
+    passes, the user's tuned hyperparameters are the culprit and
+    they should reset ``model_params.nlinear``.
+    """
+    exp_cfg = _FakeExpCfg(
+        target_is_nonnegative=True,
+        log_transform=True,
+        model_params={'nlinear': {'learning_rate': 0.009480163569127946}},
+    )
+    df = pv_data_no_covariates.copy()
+    df['y'] = np.log1p(np.maximum(df['y'].values, 0.0))
+    features_df = build_features(
+        df, target_col='y', interval_minutes=exp_cfg.interval_minutes,
+        country=exp_cfg.country,
+    )
+    combined = features_df.copy()
+    combined['target'] = df['y']
+    combined = combined.dropna()
+
+    user_lr = exp_cfg.model_params['nlinear']['learning_rate']
+    model, seq_kwargs, window_size, _ = _train_extended_window_nlinear(
+        combined, exp_cfg, epochs=20, learning_rate=user_lr,
+    )
+    y_pred = _live_forecast(
+        combined, model, seq_kwargs, window_size, exp_cfg,
+    )
+    pv_peak = float(np.max(np.expm1(combined['target'].values)))
+    _assert_forecast_not_collapsed(y_pred, pv_peak, label="pv_tuned_lr")
