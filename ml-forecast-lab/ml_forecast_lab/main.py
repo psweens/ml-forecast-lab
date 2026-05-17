@@ -65,7 +65,28 @@ def _resolve_output_activation(exp_cfg, model_name: str = '') -> str:
             getattr(exp_cfg, 'source_is_cumulative', False)
             or getattr(exp_cfg, 'target_is_nonnegative', False)
         )
-        return 'relu' if is_nonneg else 'linear'
+        if is_nonneg:
+            # PF10: when ``log_transform=True`` the target lives in
+            # ``log(1+y)`` space, so softplus's +log(2)≈0.69 floor maps to
+            # exp(0.69)-1 ≈ 1 physical unit — negligible for any target
+            # whose physical peak is >> 1 (PV power in W, irradiance in
+            # W/m²). Softplus has a non-zero gradient everywhere, which
+            # immunises us against the "dying ReLU" collapse where a high
+            # LR or aggressive anchor delta drives the linear head into
+            # all-negative pre-activations and freezes the model at a
+            # literal-zero forecast for the entire horizon.
+            #
+            # Without log_transform, the floor problem returns and
+            # dominates small-magnitude cumulative kWh intervals (the
+            # Mixergy demand case where softplus produced 900% daily-total
+            # error in synthetic validation). For that path we keep ReLU
+            # — but the user can opt out by setting
+            # ``output_activation: softplus`` explicitly in the YAML if
+            # they hit dying-ReLU on a non-log-transformed target.
+            if getattr(exp_cfg, 'log_transform', False):
+                return 'softplus'
+            return 'relu'
+        return 'linear'
     return act
 
 
@@ -3526,12 +3547,15 @@ class MLForecastLabApp:
                 # output_activation / daily_loss_weight values are what
                 # the PF1-PF9 fixes expect.
                 logger.info(
-                    f"  PF1-PF9 diagnostics for {prod_model_name}: "
+                    f"  PF1-PF10 diagnostics for {prod_model_name}: "
                     f"past_window_size={seq_kwargs.get('past_window_size')}, "
                     f"extended_window={seq_kwargs.get('extended_window')}, "
                     f"output_activation={getattr(model, 'output_activation', '<n/a>')}, "
                     f"daily_loss_weight={getattr(model, 'daily_loss_weight', '<n/a>')}, "
                     f"use_revin={getattr(model, 'use_revin', '<n/a>')}, "
+                    f"learning_rate={getattr(model, 'learning_rate', getattr(model, 'lr', '<n/a>'))}, "
+                    f"optimiser={getattr(exp_cfg, 'optimiser', '<n/a>')}, "
+                    f"log_transform={getattr(exp_cfg, 'log_transform', False)}, "
                     f"source_is_cumulative={getattr(exp_cfg, 'source_is_cumulative', False)}, "
                     f"target_is_nonnegative={getattr(exp_cfg, 'target_is_nonnegative', False)}"
                 )

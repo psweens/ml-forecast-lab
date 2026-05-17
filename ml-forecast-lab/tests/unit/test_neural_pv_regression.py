@@ -475,3 +475,132 @@ def test_pf8_pf9_resolve_together_for_source_is_cumulative():
     assert _resolve_output_activation(_Cfg(), "lstm") == "zscore"
     # PF9: cumulative → daily_loss_weight = 0.5
     assert _resolve_daily_loss_weight(_Cfg()) == 0.5
+
+
+def test_pf10_log_transform_nonneg_resolves_to_softplus():
+    """PF10: when target is non-negative AND log_transform=True, auto
+    resolves to 'softplus' (not 'relu') to avoid dying-ReLU collapse.
+
+    Reproduces the user-reported case: PV power target with
+    target_is_nonnegative=True + log_transform=True + a tuned
+    learning_rate produced a model that predicted literal 0 for every
+    forecast step. Softplus has non-zero gradient everywhere, so the
+    head can recover from negative pre-activations during training.
+
+    The +log(2)≈0.69 floor of softplus is negligible in log-target
+    space: exp(0.69)-1 ≈ 1 physical unit, which is dwarfed by any
+    PV/irradiance target whose physical peak is in the hundreds.
+    """
+    from dataclasses import dataclass
+    from ml_forecast_lab.main import _resolve_output_activation
+
+    @dataclass
+    class _Fake:
+        output_activation: str = "auto"
+        source_is_cumulative: bool = False
+        target_is_nonnegative: bool = False
+        log_transform: bool = False
+
+    # Without log_transform → relu (current PF8 behaviour preserved)
+    assert _resolve_output_activation(
+        _Fake(target_is_nonnegative=True), "nlinear"
+    ) == "relu"
+
+    # log_transform=True + target_is_nonnegative → softplus (PF10)
+    assert _resolve_output_activation(
+        _Fake(target_is_nonnegative=True, log_transform=True), "nlinear"
+    ) == "softplus"
+
+    # log_transform=True + source_is_cumulative → softplus (PF10)
+    assert _resolve_output_activation(
+        _Fake(source_is_cumulative=True, log_transform=True), "nlinear"
+    ) == "softplus"
+
+    # log_transform alone (signed target) → still linear
+    assert _resolve_output_activation(
+        _Fake(log_transform=True), "nlinear"
+    ) == "linear"
+
+    # Explicit override always wins over auto-resolution
+    assert _resolve_output_activation(
+        _Fake(
+            output_activation="relu",
+            target_is_nonnegative=True,
+            log_transform=True,
+        ),
+        "nlinear",
+    ) == "relu"
+
+
+def test_pf10_nlinear_non_zero_forecast_with_softplus_log_transform():
+    """End-to-end smoke test: NLinear with output_activation=softplus on
+    a log-transformed non-negative target produces a forecast that is
+    NOT identically zero. Catches the dying-ReLU regression where the
+    head got stuck at all-negative pre-activations and ReLU clamped
+    every horizon to 0.0.
+    """
+    import math
+    import numpy as np
+    import torch
+    from ml_forecast_lab.models.nlinear_backend import NLinearModel
+
+    rng = np.random.default_rng(0)
+    n = 1200
+    window = 48
+    horizon = 96  # match user's future_periods=96
+    t = np.arange(n)
+    hours = (t * 0.5) % 24
+    # Synthetic PV in physical W: bell during day, zero at night.
+    pv_w = np.maximum(0.0, 1500.0 * np.sin(np.pi * (hours - 6) / 12.0))
+    pv_w = pv_w + rng.normal(0, 30.0, size=n).clip(-50, 50)
+    pv_w = np.maximum(0.0, pv_w)
+    # log_transform=True → train on log(1+y)
+    y_log = np.log1p(pv_w).astype(np.float32)
+    # 3-channel input: log target + hour_sin + hour_cos
+    hr_sin = np.sin(2 * math.pi * hours / 24.0).astype(np.float32)
+    hr_cos = np.cos(2 * math.pi * hours / 24.0).astype(np.float32)
+    X = np.stack([y_log, hr_sin, hr_cos], axis=-1)
+
+    # Build sliding windows for extended training
+    seq_X = []
+    seq_y = []
+    for i in range(window, n - horizon):
+        past = X[i - window:i, :]
+        # Future channels: only known-future (hour_sin/cos), target zero-filled
+        fut_known = X[i:i + horizon, 1:]
+        fut_target_zero = np.zeros((horizon, 1), dtype=np.float32)
+        fut = np.concatenate([fut_target_zero, fut_known], axis=-1)
+        seq_X.append(np.concatenate([past, fut], axis=0))
+        seq_y.append(y_log[i:i + horizon])
+    seq_X = np.array(seq_X)
+    seq_y = np.array(seq_y)
+
+    model = NLinearModel(
+        epochs=30,
+        batch_size=64,
+        output_activation="softplus",
+        use_revin=True,
+    )
+    X_flat = np.zeros((seq_X.shape[0], 1), dtype=np.float32)
+    model.fit(
+        X_flat,
+        seq_y,
+        sequence_data=seq_X,
+        past_window_size=window,
+    )
+    pred = model.predict_sequence(seq_X[-1:]).reshape(-1)
+
+    # In log-space, prediction must NOT be identically zero everywhere
+    # (the dying-ReLU collapse signature). At least one horizon should
+    # have a non-trivial log-target prediction.
+    assert pred.shape == (horizon,)
+    assert np.max(pred) > 0.5, (
+        f"Softplus NLinear collapsed to zero (max log-pred={np.max(pred):.4f}); "
+        f"dying-ReLU regression returned"
+    )
+    # Also assert the forecast varies across the horizon — flat output
+    # at any constant value (zero or non-zero) is also a collapse signal.
+    assert pred.std() > 0.1, (
+        f"Softplus NLinear collapsed to flat output (std={pred.std():.4f}); "
+        f"forecast shape lost"
+    )
