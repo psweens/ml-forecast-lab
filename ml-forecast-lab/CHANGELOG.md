@@ -1,5 +1,50 @@
 # Changelog
 
+## 2.37.2
+
+Diagnostic surface for retrain regressions. Synthetic integration tests
+can pin a code path's correctness but cannot reproduce a regression
+that only shows up against a specific user's data — the 50% dropna
+loss, the time-of-day peak drift, the magnitude over-prediction. This
+release adds an opt-in per-experiment toggle that dumps the exact
+production training inputs and outputs to disk so a maintainer can
+inspect them offline.
+
+* **New per-experiment setting — ``debug_save_training_dumps``**: when
+  enabled, every retrain writes a bundle to
+  ``<config_dir>/debug/<experiment>/<UTC-timestamp>/`` containing:
+    - ``meta.json`` — hyperparameters, target stats, channel order,
+      data range, ``seq_kwargs`` (PF1–PF10 flags), addon version,
+      forecast range after the paired inference call;
+    - ``training.parquet`` — full ``combined`` dataframe (target +
+      features) that fed ``create_sliding_windows`` / ``model.fit``;
+    - ``sliding_window.npz`` — neural-path ``seq_X`` / ``seq_y`` /
+      ``channel_names`` (omitted for tree-only experiments);
+    - ``forecast.parquet`` — the immediate post-retrain forecast with
+      raw model output AND post-log-inverse physical values.
+* **Bounded disk usage**: rotation keeps the 5 most recent bundles
+  per experiment; older timestamp directories are auto-deleted at the
+  start of each new dump. ~0.5–2 MB per bundle on a 30-min PV target.
+* **Bundle location ``<config_dir>/debug/``**: sits next to
+  ``mlfl.yaml`` so HA's File Editor / Samba / SSH add-ons can browse
+  the dumps without an extra path mapping. To share a bundle with a
+  maintainer: zip the timestamp directory and attach.
+* **Default OFF**: no overhead for ordinary users. Toggle lives in
+  Settings → Diagnostics → "Save training dumps". Turn on, trigger
+  one retrain, share the bundle, turn off.
+* **7 regression tests** (``tests/unit/test_debug_dump.py``) pin the
+  bundle contract: file set, meta-JSON keys, forecast→training dir
+  pairing, no-op when no training dump pending, rotation, parquet
+  engine fallback to CSV.
+* **Logged-line discoverability**: each successful dump logs
+  ``Debug dump: training → <path>`` and ``Debug dump: forecast →
+  <path>`` so the addon log surfaces where the bundles landed.
+
+No production code path changes — the dumper is a pure observer that
+runs after ``model.fit`` succeeds and after the cached forecast
+finalises ``y_pred``. Errors are swallowed and logged so a failing
+dump can never break the retrain.
+
 ## 2.37.1
 
 Hotfix for the v2.37.0 PF8 regression that caused the auto-resolver

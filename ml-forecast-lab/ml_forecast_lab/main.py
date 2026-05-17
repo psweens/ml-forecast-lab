@@ -218,6 +218,11 @@ class MLForecastLabApp:
         # loop reloads config every 30s; we don't want a log line each time).
         self._last_config_path: Optional[Path] = None
         self._last_config_mtime: Optional[float] = None
+        # Debug bundle dumper (created lazily on first retrain that has
+        # debug_save_training_dumps=True). Rooted at <config_dir>/debug/
+        # so the bundles sit next to mlfl.yaml and are visible via HA's
+        # Samba / File Editor add-ons without an extra path mapping.
+        self._debug_dumper = None
         # Cached site location (lat, lon) from HA's /api/config — used for
         # deterministic solar physics covariates. Fetched lazily on first use.
         self._site_location: Optional[tuple[float, float]] = None
@@ -3564,6 +3569,49 @@ class MLForecastLabApp:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, model.fit, X, y)
 
+        # Debug bundle: capture training inputs for offline analysis. Gated
+        # per-experiment so disk usage stays bounded and ordinary users
+        # don't accumulate noise. The matched dump_forecast call is in
+        # _forecast_with_cached.
+        if getattr(exp_cfg, "debug_save_training_dumps", False):
+            try:
+                from ml_forecast_lab.debug_dump import DebugDumper
+                if self._debug_dumper is None and self._last_config_path is not None:
+                    self._debug_dumper = DebugDumper.from_config_path(self._last_config_path)
+                if self._debug_dumper is not None:
+                    target_stats = {
+                        "mean": float(np.mean(y)) if len(y) else None,
+                        "std": float(np.std(y)) if len(y) else None,
+                        "min": float(np.min(y)) if len(y) else None,
+                        "max": float(np.max(y)) if len(y) else None,
+                        "zeros": int(np.sum(y == 0)) if len(y) else 0,
+                        "n_samples": int(len(y)),
+                    }
+                    model_params = {
+                        k: getattr(model, k, None) for k in (
+                            "learning_rate", "lr", "output_activation",
+                            "daily_loss_weight", "use_revin", "loss_fn",
+                            "optimiser", "epochs", "batch_size", "hidden_size",
+                            "num_layers", "dropout",
+                        )
+                        if hasattr(model, k)
+                    }
+                    self._debug_dumper.dump_training(
+                        exp_name=exp_cfg.name,
+                        model_name=prod_model_name,
+                        exp_cfg=exp_cfg,
+                        combined=combined,
+                        feature_cols=feature_cols,
+                        target_stats=target_stats,
+                        seq_X=seq_kwargs.get("sequence_data") if is_neural else None,
+                        seq_y=y_train_seq if is_neural else None,
+                        channel_names=seq_kwargs.get("channel_names") if is_neural else None,
+                        seq_kwargs=seq_kwargs if is_neural else None,
+                        model_params=model_params,
+                    )
+            except Exception as e:
+                logger.debug(f"debug_dump training hook failed: {e}")
+
         logger.info(f"  {prod_model_name} trained on {len(X)} samples")
         # Surface the feature set the model was actually trained with, so a
         # user who enabled a covariate or solar toggle and then retrained can
@@ -5070,6 +5118,17 @@ class MLForecastLabApp:
         if y_pred.ndim > 1:
             y_pred = y_pred.ravel()
 
+        # Snapshot raw model output before any unit conversion so the
+        # debug bundle can show what the head actually emitted (in
+        # log space when log_transform is on, in physical space when
+        # it's off). Cheap copy of ≤96 float32s; only the next branch
+        # mutates y_pred in place.
+        y_pred_raw_snapshot = (
+            np.asarray(y_pred, dtype=np.float32).copy()
+            if getattr(exp_cfg, "debug_save_training_dumps", False)
+            else None
+        )
+
         # Invert log-transform if active (see _run_production_inference).
         if exp_cfg.log_transform:
             y_pred = np.expm1(y_pred).astype(np.float32)
@@ -5088,6 +5147,27 @@ class MLForecastLabApp:
         last_trained = cache.get("trained_at", datetime.now(timezone.utc))
         if not isinstance(last_trained, datetime):
             last_trained = datetime.now(timezone.utc)
+
+        # Debug bundle: pair this forecast with the most recent training
+        # dump for the same experiment. Only fires when dump_training
+        # left a pending dir behind (i.e. this is the immediate
+        # post-retrain forecast). Later 30-min cycles no-op so the
+        # bundle stays small.
+        if (
+            getattr(exp_cfg, "debug_save_training_dumps", False)
+            and self._debug_dumper is not None
+        ):
+            try:
+                self._debug_dumper.dump_forecast(
+                    exp_name=exp_cfg.name,
+                    y_pred_raw=y_pred_raw_snapshot,
+                    y_pred_physical=y_pred,
+                    ds_future=ds_future,
+                    model_version=cache.get("model_version"),
+                    log_transform_applied=bool(exp_cfg.log_transform),
+                )
+            except Exception as e:
+                logger.debug(f"debug_dump forecast hook failed: {e}")
 
         await self._publish_forecast_sensors(
             exp_cfg=exp_cfg,
