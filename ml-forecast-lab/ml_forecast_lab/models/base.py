@@ -193,13 +193,28 @@ try:
             self._mean: Optional["torch.Tensor"] = None
             self._stdev: Optional["torch.Tensor"] = None
 
-        def normalize(self, x: "torch.Tensor") -> "torch.Tensor":
+        def normalize(self, x: "torch.Tensor",
+                       past_window_size: Optional[int] = None) -> "torch.Tensor":
             """
             Normalise a per-window input tensor.
 
             Parameters
             ----------
             x : torch.Tensor, shape (batch, seq_len, n_channels)
+            past_window_size : int, optional
+                When provided AND strictly less than ``x.size(1)``, compute
+                per-window stats over the PAST slice
+                ``x[:, :past_window_size, :]`` only. This is the v2.37 fix
+                for the "RC1: RevIN bias from future-position zeros"
+                degeneration: in extended-window mode the future positions
+                leave the target channel at zero, which pulls the
+                whole-window mean ~50% low and shifts the denormalised
+                prediction by the same factor. Past-only stats avoid that
+                bias while leaving the legacy single-window path
+                completely unchanged.
+
+                When omitted or equal to ``x.size(1)`` (the past-only
+                training path), behaves exactly as the original RevIN.
 
             Returns
             -------
@@ -207,11 +222,15 @@ try:
                 Input with per-sample per-channel zero-mean unit-variance
                 (plus learnable affine if enabled).
             """
+            if past_window_size is not None and past_window_size < x.size(1):
+                src = x[:, :past_window_size, :]
+            else:
+                src = x
             # Detach so per-sample stats are constants w.r.t. autograd — the
             # network sees the normalised values but cannot pull gradient
             # through the normalisation itself.
-            mean = x.mean(dim=1, keepdim=True).detach()
-            var = x.var(dim=1, keepdim=True, unbiased=False).detach()
+            mean = src.mean(dim=1, keepdim=True).detach()
+            var = src.var(dim=1, keepdim=True, unbiased=False).detach()
             stdev = _torch.sqrt(var + self.eps)
             self._mean = mean
             self._stdev = stdev
@@ -258,11 +277,37 @@ try:
             # correctly.
             return y * stdev_t.view(-1, 1, 1) + mean_t.view(-1, 1, 1)
 
+    def _past_only_score_mask(seq_len: int, past_window_size: Optional[int],
+                                device: "torch.device") -> Optional["torch.Tensor"]:
+        """Boolean key-padding mask masking out future positions.
+
+        Returns shape ``(seq_len,)`` with True at positions to MASK OUT
+        (i.e. the future positions ``[past_window_size:]``). Returns
+        None when ``past_window_size`` is None or covers the whole
+        window — matches what ``nn.MultiheadAttention`` and
+        ``nn.TransformerEncoder`` expect as ``src_key_padding_mask``.
+
+        Used by attention-bearing backends (LSTM/GRU temporal
+        attention, CNN learnable pool, PatchTST/Crossformer transformer
+        encoders, TFT multi-head attention) to ensure that the
+        attention scores assigned to future positions — where the
+        target channel is zero in extended-window mode — are pushed to
+        ``-inf`` before softmax. Without this mask the LSTM in
+        particular puts ~48% of its weight mass on future-position
+        zero-target slots and learns to read absolute time from there,
+        causing the v2.36 phase-inversion symptom.
+        """
+        if past_window_size is None or past_window_size >= seq_len:
+            return None
+        mask = _torch.zeros(seq_len, dtype=_torch.bool, device=device)
+        mask[past_window_size:] = True
+        return mask
 except ImportError:
     # Torch not installed — activation factory will raise at call time.
     _ExpActivation = None  # type: ignore[assignment]
     _ScaledSigmoid = None  # type: ignore[assignment]
     _RevIN = None  # type: ignore[assignment]
+    _past_only_score_mask = None  # type: ignore[assignment]
 
 
 def _resolve_sigmoid_scale(y: np.ndarray, buffer: float = 1.1) -> float:

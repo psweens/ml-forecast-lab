@@ -170,7 +170,8 @@ class _TimesNetNet(nn.Module):
                  n_layers: int = 2, top_k: int = 3, dropout: float = 0.2,
                  n_horizons: int = 1, output_activation: str = 'linear',
                  sigmoid_scale: float = 1.0,
-                 use_revin: bool = True, target_channel: int = 0):
+                 use_revin: bool = True, target_channel: int = 0,
+                 past_window_size: Optional[int] = None):
         super().__init__()
         self.use_revin = use_revin
         self.revin = _RevIN(n_channels, target_channel=target_channel, affine=True) if use_revin else None
@@ -178,6 +179,7 @@ class _TimesNetNet(nn.Module):
         self.seq_len = seq_len
         self.n_channels = n_channels
         self.d_model = d_model
+        self.past_window_size = past_window_size
 
         # Input projection: (batch, seq_len, n_channels) -> (batch, seq_len, d_model)
         self.input_proj = nn.Linear(n_channels, d_model)
@@ -207,7 +209,7 @@ class _TimesNetNet(nn.Module):
     def forward(self, x):
         # x: (batch, seq_len, n_channels)
         if self.revin is not None:
-            x = self.revin.normalize(x)
+            x = self.revin.normalize(x, past_window_size=self.past_window_size)
 
         # Input projection
         x = self.input_proj(x)  # (batch, seq_len, d_model)
@@ -290,6 +292,10 @@ class TimesNetModel(ForecastModel):
         # Identity defaults so non-zscore paths are a safe no-op.
         self._y_mean: Any = 0.0
         self._y_std: Any = 1.0
+        # past_window_size enables PF1 (RevIN past-only stats); set per-fit
+        # from kwargs, round-tripped in save/load. None means legacy
+        # single-window path.
+        self._past_window_size: Optional[int] = None
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -332,6 +338,7 @@ class TimesNetModel(ForecastModel):
         _, seq_len, input_size = X_seq.shape
         self._input_size = input_size
         self._seq_len = seq_len
+        self._past_window_size = kwargs.get("past_window_size")
 
         if not self.use_revin:
             # Per-channel z-score standardisation (fitted on training data)
@@ -405,6 +412,7 @@ class TimesNetModel(ForecastModel):
             sigmoid_scale=self._sigmoid_scale,
             use_revin=self.use_revin,
             target_channel=self.target_channel,
+            past_window_size=self._past_window_size,
         )
         optimiser = self._build_optimiser(
             self._model.parameters(), self.optimiser, self.learning_rate,
@@ -599,6 +607,7 @@ class TimesNetModel(ForecastModel):
             "sigmoid_scale": self._sigmoid_scale,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "past_window_size": self._past_window_size,
         }, path)
         logger.info(f"Saved TimesNet model to {path}")
 
@@ -613,6 +622,7 @@ class TimesNetModel(ForecastModel):
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
         self._y_mean = data.get("y_mean", 0.0)
         self._y_std = data.get("y_std", 1.0)
+        self._past_window_size = data.get("past_window_size")
 
         # Reconstruct the nn.Module and load weights
         self._input_size = data.get("input_size")
@@ -635,6 +645,7 @@ class TimesNetModel(ForecastModel):
                 sigmoid_scale=self._sigmoid_scale,
                 use_revin=self.use_revin,
                 target_channel=self.target_channel,
+                past_window_size=self._past_window_size,
             )
             self._model.load_state_dict(state_dict)
             self._model.eval()

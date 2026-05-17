@@ -43,7 +43,8 @@ class _iTransformerNet(nn.Module):
                  dim_feedforward: int = 64, dropout: float = 0.2,
                  n_horizons: int = 1,
                  output_activation: str = 'linear', sigmoid_scale: float = 1.0,
-                 use_revin: bool = True, target_channel: int = 0):
+                 use_revin: bool = True, target_channel: int = 0,
+                 past_window_size: Optional[int] = None):
         super().__init__()
         self.use_revin = use_revin
         self.revin = _RevIN(n_channels, target_channel=target_channel, affine=True) if use_revin else None
@@ -51,9 +52,18 @@ class _iTransformerNet(nn.Module):
         self.seq_len = seq_len
         self.n_channels = n_channels
         self.d_model = d_model
+        self.past_window_size = past_window_size
+        # PF6 (v2.37): the per-channel embedder consumes the PAST slice
+        # only when past_window_size < seq_len. Otherwise it consumes the
+        # whole sequence (legacy past-only training). Without this, the
+        # target channel's embedding is biased low because half the
+        # input is zero-target placeholders in extended-window mode.
+        embed_len = (past_window_size
+                     if past_window_size is not None and past_window_size < seq_len
+                     else seq_len)
 
-        # Embed each channel's seq_len values to d_model
-        self.channel_embed = nn.Linear(seq_len, d_model)
+        # Embed each channel's slice values to d_model
+        self.channel_embed = nn.Linear(embed_len, d_model)
 
         # Learnable positional embedding per channel
         self.pos_embed = nn.Parameter(torch.randn(1, n_channels, d_model) * 0.02)
@@ -83,11 +93,19 @@ class _iTransformerNet(nn.Module):
     def forward(self, x):
         # x: (batch, seq_len, n_channels)
         if self.revin is not None:
-            x = self.revin.normalize(x)
-        # Transpose to (batch, n_channels, seq_len) so each channel is a token
-        x = x.permute(0, 2, 1)  # (batch, n_channels, seq_len)
+            x = self.revin.normalize(x, past_window_size=self.past_window_size)
+        # PF6: slice to past block before transposing, so the channel
+        # embedder consumes only past values for every channel — the
+        # target channel's "future" is always zero (no useful signal)
+        # and the covariate channels' future is redundant with their
+        # past + the cross-channel attention that follows.
+        if (self.past_window_size is not None
+                and self.past_window_size < x.size(1)):
+            x = x[:, : self.past_window_size, :]
+        # Transpose to (batch, n_channels, slice_len) so each channel is a token
+        x = x.permute(0, 2, 1)
 
-        # Embed each channel's full time-series to d_model
+        # Embed each channel's slice to d_model
         x = self.channel_embed(x)  # (batch, n_channels, d_model)
 
         # Add positional embedding
@@ -170,6 +188,10 @@ class iTransformerModel(ForecastModel):
         # Identity defaults so non-zscore paths are a safe no-op.
         self._y_mean: Any = 0.0
         self._y_std: Any = 1.0
+        # past_window_size enables PF1 (RevIN past-only stats); set per-fit
+        # from kwargs, round-tripped in save/load. None means legacy
+        # single-window path.
+        self._past_window_size: Optional[int] = None
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -212,6 +234,7 @@ class iTransformerModel(ForecastModel):
         _, seq_len, input_size = X_seq.shape
         self._input_size = input_size
         self._seq_len = seq_len
+        self._past_window_size = kwargs.get("past_window_size")
 
         if not self.use_revin:
             # Per-channel z-score standardisation (fitted on training data)
@@ -285,6 +308,7 @@ class iTransformerModel(ForecastModel):
             sigmoid_scale=self._sigmoid_scale,
             use_revin=self.use_revin,
             target_channel=self.target_channel,
+            past_window_size=self._past_window_size,
         )
         optimiser = self._build_optimiser(
             self._model.parameters(), self.optimiser, self.learning_rate,
@@ -481,6 +505,7 @@ class iTransformerModel(ForecastModel):
             "sigmoid_scale": self._sigmoid_scale,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "past_window_size": self._past_window_size,
         }, path)
         logger.info(f"Saved iTransformer model to {path}")
 
@@ -494,6 +519,7 @@ class iTransformerModel(ForecastModel):
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
         self._y_mean = data.get("y_mean", 0.0)
         self._y_std = data.get("y_std", 1.0)
+        self._past_window_size = data.get("past_window_size")
 
         # Reconstruct the nn.Module and load weights
         self._input_size = data.get("input_size")
@@ -517,6 +543,7 @@ class iTransformerModel(ForecastModel):
                 sigmoid_scale=self._sigmoid_scale,
                 use_revin=self.use_revin,
                 target_channel=self.target_channel,
+                past_window_size=self._past_window_size,
             )
             self._model.load_state_dict(state_dict)
             self._model.eval()

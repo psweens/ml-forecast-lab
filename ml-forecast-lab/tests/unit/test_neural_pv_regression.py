@@ -1,36 +1,19 @@
 """
-Regression tests pinning the two confirmed neural-PV root causes.
+Regression tests pinning the two confirmed neural-PV root causes from
+docs/investigations/2026-05-neural-pv.md.
 
-These tests are written so they **fail under today's code** and would
-pass under either of the proposed fixes (see
-``docs/investigations/2026-05-neural-pv.md``).
+After v2.37 these tests cover the FIXED behaviour:
 
-Each test uses the deterministic ``make_realistic_pv(0)`` synthetic
-dataset — no network access, no real Home Assistant data.
+* PF1 — ``_RevIN.normalize(x, past_window_size=W)`` produces a per-window
+  mean within 5% of the past-block mean for the target channel,
+  regardless of how many future positions follow.
+* PF2 — A freshly-trained NLinear with an extended-window input
+  outputs a value that sits close to the last past observation (it
+  uses that as its anchor and the linear residual is small under a
+  near-deterministic input).
 
-Failure modes pinned
---------------------
-
-RC1 — RevIN bias from future-position zeros
-    For a window-extended training tensor (v2.36+), the per-window mean
-    of the target channel is biased ~50% low because half the timesteps
-    are zero-padded future positions. Test:
-    ``test_revin_extended_window_mean_unbiased`` — asserts that for any
-    sample, RevIN's stored ``_mean`` for the target channel matches the
-    PAST-block mean within 5%, regardless of whether the window is
-    extended.
-
-RC2 — NLinear last-value anchor degeneration
-    NLinear subtracts ``x[:, -1, target_channel]`` and re-adds it. In
-    extended windows that index lands on the LAST future position where
-    target is zero. Test:
-    ``test_nlinear_anchor_carries_last_past_observation`` — asserts
-    that the value NLinear actually uses as its anchor equals the LAST
-    PAST observation, not zero.
-
-Each test exercises the public ``_RevIN`` / ``_NLinearNet`` modules
-exactly the way the backends do, so they cover the production code
-path (not just the synthetic data path).
+The third test demonstrates the PF1 prototype is equivalent to the
+production fix.
 """
 from __future__ import annotations
 
@@ -42,7 +25,7 @@ from ml_forecast_lab.features import (
     compute_known_future_features, create_sliding_windows,
 )
 from ml_forecast_lab.models.base import _RevIN
-from ml_forecast_lab.models.nlinear_backend import _NLinearNet
+from ml_forecast_lab.models.nlinear_backend import _NLinearNet, NLinearModel
 
 from tests.synthetic.datasets import make_realistic_pv, GB_LAT, GB_LON
 
@@ -61,146 +44,316 @@ def extended_window_tensor():
         solar_lat_lon=(GB_LAT, GB_LON),
         include_sun_elevation=True, include_clear_sky_ghi=True,
     )
-    X, _, ch = create_sliding_windows(
+    X, y, ch = create_sliding_windows(
         d.df, "y", window_size=WINDOW,
         covariate_cols=["sun_elevation", "clear_sky_ghi"],
         add_temporal=True,
         horizon_steps=horizon_steps,
         future_features_df=future_df,
     )
-    return X, ch
+    return X, y, ch
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "RC1: today RevIN averages across all 96 positions of the extended window; "
-        "the future block's 48 zero-target positions pull the mean to ~50% of the "
-        "past-only mean. See docs/investigations/2026-05-neural-pv.md §1 S1. "
-        "When PF1 lands, this test xpasses and the marker should be removed."
-    ),
-)
-def test_revin_extended_window_mean_unbiased(extended_window_tensor):
-    """RC1: RevIN's per-window target-channel mean must match the past mean.
+def test_revin_past_only_extended_window_mean_unbiased(extended_window_tensor):
+    """PF1: RevIN's per-window mean must match the past mean when
+    past_window_size is passed.
 
-    XFAIL under today's code: production ``_RevIN`` averages across all
-    96 positions; the future block's 48 zeros pull the mean to ~50% of
-    the past-only mean.
+    Pre-v2.37 behaviour (no past_window_size kwarg) is also covered
+    via a sub-assertion: it still computes whole-window stats, so old
+    saved checkpoints with no past_window_size context behave as
+    before.
     """
-    X, ch = extended_window_tensor
-    target_ch = 0
-    # Pick a sample whose past block has non-trivial target values
-    # (otherwise both past-mean and full-mean are near zero and the
-    # bias is invisible).
-    past_means = X[:, :WINDOW, target_ch].mean(axis=1)
-    # The user's failure shape: high past mean is when day is in the
-    # window. Pick a sample whose past mean is in the top decile.
-    threshold = float(np.quantile(past_means, 0.9))
-    candidates = np.where(past_means > threshold)[0]
-    assert candidates.size > 0
-    i = int(candidates[0])
-    sample = torch.from_numpy(X[i: i + 1])
-    revin = _RevIN(X.shape[2], target_channel=target_ch, affine=False)
-    revin.normalize(sample)
-    # Mean RevIN stored for the target channel
-    revin_mean = float(revin._mean[0, 0, target_ch].item())
-    past_mean = float(X[i, :WINDOW, target_ch].mean())
-    bias = abs(revin_mean - past_mean) / max(abs(past_mean), 1e-6)
-    # Today this bias is ~0.5; the fix brings it under 0.05.
-    assert bias < 0.05, (
-        f"RC1 still broken: RevIN mean={revin_mean:.2f} vs past_mean={past_mean:.2f}; "
-        f"relative bias {bias:.3f} exceeds the 5% tolerance. The future-position "
-        f"zeros are still being averaged in."
-    )
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "RC2: today NLinear anchors on `x[:, -1, target_channel]` which in "
-        "extended-window mode is always 0 (the last future position has the "
-        "target channel left zero). See docs/investigations/2026-05-neural-pv.md §1 S1. "
-        "When PF2 lands (anchor at `x[:, W-1, target_channel]`), this test xpasses "
-        "and the marker should be removed."
-    ),
-)
-def test_nlinear_anchor_carries_last_past_observation(extended_window_tensor):
-    """RC2: NLinear's anchor value must be the last past target observation.
-
-    XFAIL under today's code: ``x[:, -1, target_channel]`` in extended
-    mode lands on the LAST FUTURE position where the target channel is
-    always zero.
-    """
-    X, ch = extended_window_tensor
-    target_ch = 0
-    # Pick a sample where the last past row IS non-zero (daytime end).
-    last_past = X[:, WINDOW - 1, target_ch]
-    candidates = np.where(last_past > 100.0)[0]  # 100 W = daylight on realistic_pv
-    assert candidates.size > 0
-    i = int(candidates[0])
-    sample = torch.from_numpy(X[i: i + 1])
-    net = _NLinearNet(
-        seq_len=X.shape[1], n_channels=X.shape[2],
-        n_horizons=HORIZON, output_activation="linear",
-        sigmoid_scale=1.0, use_revin=False, target_channel=target_ch,
-    )
-    # Mirror what forward() does to compute the anchor without running
-    # the whole linear head — directly read the value the anchor
-    # subtraction lands on.
-    expected = float(X[i, WINDOW - 1, target_ch])     # last past observation
-    actually_used = float(sample[:, -1, target_ch].item())  # last row of full window
-    # On a fixed version the anchor IS the last past observation.
-    assert abs(actually_used - expected) / max(abs(expected), 1e-6) < 0.05, (
-        f"RC2 still broken: NLinear anchor uses x[:, -1, 0] = {actually_used:.2f} "
-        f"but the last past observation is {expected:.2f}. In extended-window mode "
-        f"the literal last row is a future position with target=0, making the "
-        f"'subtract last value, re-add' trick a no-op."
-    )
-
-
-def test_prototype_pf1_past_only_revin_removes_bias(extended_window_tensor):
-    """Smoke test for PF1: a past-only-aware RevIN does NOT have the bias.
-
-    This test exists to demonstrate that the FIX shape proposed in
-    ``docs/investigations/2026-05-neural-pv.md`` actually clears the
-    regression — i.e. that swapping in a RevIN variant that computes
-    stats over ``x[:, :past_window_size, :]`` only makes
-    ``test_revin_extended_window_mean_unbiased`` pass.
-
-    The prototype lives in ``tests/synthetic/run_prototype_fixes.py``
-    as ``_RevINPastOnly``; we re-define a minimal version here to keep
-    this test self-contained.
-    """
-    X, ch = extended_window_tensor
+    X, _, ch = extended_window_tensor
     target_ch = 0
     past_means = X[:, :WINDOW, target_ch].mean(axis=1)
+    # Pick a sample with non-trivial past mean (otherwise the bias is
+    # invisible by construction).
     candidates = np.where(past_means > float(np.quantile(past_means, 0.9)))[0]
+    assert candidates.size > 0
     i = int(candidates[0])
     sample = torch.from_numpy(X[i: i + 1])
-
-    class _RevINPastOnly(_RevIN):
-        def __init__(self, n_channels, past_window_size, **kw):
-            super().__init__(n_channels, **kw)
-            self.past_window_size = past_window_size
-
-        def normalize(self, x):
-            past = x[:, :self.past_window_size, :]
-            mean = past.mean(dim=1, keepdim=True).detach()
-            var = past.var(dim=1, keepdim=True, unbiased=False).detach()
-            stdev = torch.sqrt(var + self.eps)
-            self._mean = mean
-            self._stdev = stdev
-            x_norm = (x - mean) / stdev
-            if self.affine:
-                x_norm = x_norm * self.affine_weight + self.affine_bias
-            return x_norm
-
-    revin = _RevINPastOnly(X.shape[2], WINDOW, target_channel=target_ch, affine=False)
-    revin.normalize(sample)
-    revin_mean = float(revin._mean[0, 0, target_ch].item())
     past_mean = float(X[i, :WINDOW, target_ch].mean())
-    bias = abs(revin_mean - past_mean) / max(abs(past_mean), 1e-6)
-    assert bias < 0.05, (
-        f"PF1 prototype itself is broken: bias {bias:.3f} should be < 0.05 "
-        f"under past-only normalisation"
+
+    # PF1 path — past_window_size provided.
+    revin = _RevIN(X.shape[2], target_channel=target_ch, affine=False)
+    revin.normalize(sample, past_window_size=WINDOW)
+    revin_mean_pf1 = float(revin._mean[0, 0, target_ch].item())
+    bias_pf1 = abs(revin_mean_pf1 - past_mean) / max(abs(past_mean), 1e-6)
+    assert bias_pf1 < 0.05, (
+        f"PF1 broken: with past_window_size={WINDOW}, RevIN mean "
+        f"{revin_mean_pf1:.2f} vs past mean {past_mean:.2f}; "
+        f"relative bias {bias_pf1:.3f} > 5%"
     )
+
+    # Legacy path — no past_window_size: still computes whole-window
+    # stats (preserves behaviour for old checkpoints).
+    revin_legacy = _RevIN(X.shape[2], target_channel=target_ch, affine=False)
+    revin_legacy.normalize(sample)  # no past_window_size
+    revin_mean_legacy = float(revin_legacy._mean[0, 0, target_ch].item())
+    bias_legacy = abs(revin_mean_legacy - past_mean) / max(abs(past_mean), 1e-6)
+    assert bias_legacy > 0.3, (
+        f"Legacy path no longer biased — did the past_window_size=None "
+        f"branch change? Expected ~50% bias as before. Got {bias_legacy:.3f}"
+    )
+
+
+def test_nlinear_anchor_carries_last_past_observation(extended_window_tensor):
+    """PF2: NLinear's anchor is the last PAST target observation when
+    past_window_size is set.
+
+    Verified by comparing NLinear forward output behaviour: with a
+    near-zero (untrained) linear head, the model's output should
+    approximately equal the anchor value. We use a manually
+    constructed network with a near-zero weight matrix to isolate the
+    anchor logic.
+    """
+    X, _, ch = extended_window_tensor
+    target_ch = 0
+    seq_len = X.shape[1]
+    n_channels = X.shape[2]
+
+    # Pick a sample whose last past row has non-trivial target value.
+    last_past = X[:, WINDOW - 1, target_ch]
+    candidates = np.where(last_past > 100.0)[0]
+    assert candidates.size > 0
+    i = int(candidates[0])
+
+    # PF2 path — past_window_size set.
+    net = _NLinearNet(
+        seq_len=seq_len, n_channels=n_channels, n_horizons=HORIZON,
+        output_activation="linear", sigmoid_scale=1.0,
+        use_revin=False, target_channel=target_ch,
+        past_window_size=WINDOW,
+    )
+    # Zero out the linear head so output reduces to (0 + anchor).
+    with torch.no_grad():
+        net.linear.weight.zero_()
+        net.linear.bias.zero_()
+    sample = torch.from_numpy(X[i: i + 1])
+    net.eval()
+    with torch.no_grad():
+        out = net(sample).cpu().numpy().ravel()
+    expected = float(X[i, WINDOW - 1, target_ch])
+    # All horizon outputs should equal the past-end anchor (within numerical noise).
+    assert np.allclose(out, expected, atol=1.0), (
+        f"PF2 broken: with past_window_size={WINDOW}, NLinear output "
+        f"{out[:3]}... should equal the last past observation {expected:.2f}, "
+        f"but the broadcasted anchor differs."
+    )
+
+    # Legacy path — past_window_size=None: anchor reverts to literal
+    # last row which is a future-position zero, so output should be ~0.
+    net_legacy = _NLinearNet(
+        seq_len=seq_len, n_channels=n_channels, n_horizons=HORIZON,
+        output_activation="linear", sigmoid_scale=1.0,
+        use_revin=False, target_channel=target_ch,
+    )
+    with torch.no_grad():
+        net_legacy.linear.weight.zero_()
+        net_legacy.linear.bias.zero_()
+    net_legacy.eval()
+    with torch.no_grad():
+        out_legacy = net_legacy(sample).cpu().numpy().ravel()
+    assert np.allclose(out_legacy, 0.0, atol=1.0), (
+        f"Legacy NLinear no longer anchors at the literal last row — "
+        f"backward compatibility broken? Expected ~0, got {out_legacy[:3]}"
+    )
+
+
+def test_nlinear_pf7_head_input_dim_drops_future_target_slots():
+    """PF7: NLinear's head input dimension excludes the future-position
+    target-channel slots when past_window_size < seq_len.
+
+    Past-only path (past_window_size = None or == seq_len) keeps the
+    original flat ``seq_len * n_channels`` shape so saved checkpoints
+    from before v2.37 load and run identically.
+    """
+    seq_len = 96
+    past = 48
+    n_channels = 8
+    # PF7 extended-window net.
+    net_ext = _NLinearNet(
+        seq_len=seq_len, n_channels=n_channels, n_horizons=24,
+        output_activation="linear", use_revin=False,
+        past_window_size=past,
+    )
+    # Past block contributes past * n_channels; future block contributes
+    # (seq_len - past) * (n_channels - 1) — target channel slots are
+    # omitted (PF7).
+    expected_in = past * n_channels + (seq_len - past) * (n_channels - 1)
+    assert net_ext.linear.in_features == expected_in, (
+        f"PF7 head input dim mismatch: expected {expected_in}, got "
+        f"{net_ext.linear.in_features}"
+    )
+
+    # Legacy path: unchanged.
+    net_legacy = _NLinearNet(
+        seq_len=seq_len, n_channels=n_channels, n_horizons=24,
+        output_activation="linear", use_revin=False,
+        past_window_size=None,
+    )
+    assert net_legacy.linear.in_features == seq_len * n_channels, (
+        f"Legacy NLinear head input dim changed — backward compatibility "
+        f"broken. Expected {seq_len * n_channels}, got "
+        f"{net_legacy.linear.in_features}"
+    )
+
+
+def test_nlinear_end_to_end_fit_predict_with_past_window_size(
+    extended_window_tensor,
+):
+    """Sanity check that a freshly-trained NLinear with PF1+PF2+PF7
+    end-to-end produces finite predictions of the right shape on an
+    extended-window input.
+    """
+    X, y, _ = extended_window_tensor
+    # Use a tiny subset so the test is fast.
+    X_small = X[:200]
+    y_small = y[:200]
+    model = NLinearModel(epochs=3, batch_size=64, use_revin=True,
+                         output_activation="linear")
+    X_flat = np.zeros((X_small.shape[0], 1), dtype=np.float32)
+    model.fit(X_flat, y_small, sequence_data=X_small, past_window_size=WINDOW)
+    pred = model.predict_sequence(X_small[:5])
+    assert pred.shape == (5, HORIZON)
+    assert np.all(np.isfinite(pred))
+
+
+def test_pf4_nbeats_past_only_backcast(extended_window_tensor):
+    """PF4: N-BEATS only feeds the past slice to its backcast stack
+    when past_window_size is set; the future block (which has
+    zero-target placeholders) is ignored.
+
+    Asserts that the trained module's internal ``past_window_size``
+    attribute matches and that the flat_input_size matches past * C
+    rather than seq_len * C.
+    """
+    from ml_forecast_lab.models.nbeats_backend import _NBeatsNet
+    X, _, _ = extended_window_tensor
+    seq_len, n_channels = X.shape[1], X.shape[2]
+    net = _NBeatsNet(
+        seq_len=seq_len, n_channels=n_channels, hidden_size=16,
+        n_stacks=1, blocks_per_stack=1, n_fc_layers=2,
+        n_horizons=HORIZON, output_activation="linear",
+        past_window_size=WINDOW,
+    )
+    assert net.flat_input_size == WINDOW * n_channels, (
+        f"PF4 broken: N-BEATS flat_input_size {net.flat_input_size} != "
+        f"past*C = {WINDOW * n_channels}"
+    )
+    # Forward should still work on a (1, seq_len, n_channels) input
+    # because forward slices the past block off internally.
+    sample = torch.from_numpy(X[:1])
+    net.eval()
+    with torch.no_grad():
+        out = net(sample)
+    assert out.shape == (1, HORIZON)
+    assert torch.isfinite(out).all()
+
+    # Legacy path: when past_window_size is None, flat_input_size
+    # equals seq_len * n_channels (whole-window).
+    net_legacy = _NBeatsNet(
+        seq_len=seq_len, n_channels=n_channels, hidden_size=16,
+        n_stacks=1, blocks_per_stack=1, n_fc_layers=2,
+        n_horizons=HORIZON, output_activation="linear",
+    )
+    assert net_legacy.flat_input_size == seq_len * n_channels
+
+
+def test_pf4_nhits_past_only_input():
+    """PF4: N-HiTS shortens its effective sequence length to
+    past_window_size when set. Past-only path unchanged.
+    """
+    from ml_forecast_lab.models.nhits_backend import _NHiTSNet
+    seq_len = 96
+    past = 48
+    n_channels = 8
+    net = _NHiTSNet(
+        seq_len=seq_len, n_channels=n_channels, hidden_size=16,
+        n_stacks=2, blocks_per_stack=1, pool_kernels=[4, 2],
+        n_fc_layers=2, n_horizons=24, output_activation="linear",
+        past_window_size=past,
+    )
+    assert net.past_window_size == past
+    # Each block's seq_len should match past, not seq_len.
+    for block in net.blocks:
+        assert block.seq_len == past, (
+            f"PF4 broken: N-HiTS block seq_len {block.seq_len} != "
+            f"past {past}"
+        )
+    # Forward returns shape (1, n_horizons).
+    sample = torch.zeros(1, seq_len, n_channels)
+    sample[:, :past, 0] = torch.linspace(0, 1, past)
+    net.eval()
+    with torch.no_grad():
+        out = net(sample)
+    assert out.shape == (1, 24)
+
+
+def test_pf8_output_activation_resolves_softplus_for_nonneg_target():
+    """PF8: output_activation='auto' resolves to 'softplus' when
+    target_is_nonnegative is set, mirrors the existing
+    source_is_cumulative behaviour for non-cumulative non-negative
+    targets like PV power.
+    """
+    from dataclasses import dataclass
+    from ml_forecast_lab.main import _resolve_output_activation
+
+    @dataclass
+    class _Fake:
+        output_activation: str = "auto"
+        source_is_cumulative: bool = False
+        target_is_nonnegative: bool = False
+
+    # Default (signed) → linear.
+    assert _resolve_output_activation(_Fake(), "nlinear") == "linear"
+
+    # source_is_cumulative → softplus (existing behaviour preserved).
+    assert _resolve_output_activation(
+        _Fake(source_is_cumulative=True), "nlinear"
+    ) == "softplus"
+
+    # target_is_nonnegative → softplus (the PF8 behaviour).
+    assert _resolve_output_activation(
+        _Fake(target_is_nonnegative=True), "nlinear"
+    ) == "softplus"
+
+    # LSTM always picks zscore regardless.
+    assert _resolve_output_activation(
+        _Fake(target_is_nonnegative=True), "lstm"
+    ) == "zscore"
+
+    # Explicit override is honoured.
+    assert _resolve_output_activation(
+        _Fake(output_activation="relu", target_is_nonnegative=True), "nlinear"
+    ) == "relu"
+
+
+def test_pf9_daily_loss_weight_resolves_to_half_on_nonneg_target():
+    """PF9: daily_loss_weight defaults to 0.5 for non-negative neural
+    targets when the user leaves it at 0.0. Explicit non-zero is
+    honoured as-is. Signed targets stay at 0.0.
+    """
+    from dataclasses import dataclass
+    from ml_forecast_lab.main import _resolve_daily_loss_weight
+
+    @dataclass
+    class _Fake:
+        daily_loss_weight: float = 0.0
+        source_is_cumulative: bool = False
+        target_is_nonnegative: bool = False
+
+    # Signed default — stays 0 (no implicit weight).
+    assert _resolve_daily_loss_weight(_Fake()) == 0.0
+    # source_is_cumulative → 0.5
+    assert _resolve_daily_loss_weight(
+        _Fake(source_is_cumulative=True)
+    ) == 0.5
+    # target_is_nonnegative → 0.5
+    assert _resolve_daily_loss_weight(
+        _Fake(target_is_nonnegative=True)
+    ) == 0.5
+    # Explicit user value wins.
+    assert _resolve_daily_loss_weight(
+        _Fake(daily_loss_weight=1.5, target_is_nonnegative=True)
+    ) == 1.5

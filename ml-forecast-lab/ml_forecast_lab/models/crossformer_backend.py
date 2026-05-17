@@ -41,7 +41,8 @@ class _CrossformerNet(nn.Module):
                  d_model: int = 32, n_heads: int = 4, n_layers: int = 2,
                  dropout: float = 0.2, n_horizons: int = 1,
                  output_activation: str = 'linear', sigmoid_scale: float = 1.0,
-                 use_revin: bool = True, target_channel: int = 0):
+                 use_revin: bool = True, target_channel: int = 0,
+                 past_window_size: Optional[int] = None):
         super().__init__()
         self.use_revin = use_revin
         self.revin = _RevIN(n_channels, target_channel=target_channel, affine=True) if use_revin else None
@@ -50,6 +51,7 @@ class _CrossformerNet(nn.Module):
         self.n_channels = n_channels
         self.seg_len = seg_len
         self.d_model = d_model
+        self.past_window_size = past_window_size
 
         # Pad seq_len to multiple of seg_len
         self.n_segs = math.ceil(seq_len / seg_len)
@@ -98,7 +100,7 @@ class _CrossformerNet(nn.Module):
         batch_size = x.size(0)
 
         if self.revin is not None:
-            x = self.revin.normalize(x)
+            x = self.revin.normalize(x, past_window_size=self.past_window_size)
 
         # Pad sequence to multiple of seg_len
         if self.padded_len > self.seq_len:
@@ -120,10 +122,30 @@ class _CrossformerNet(nn.Module):
         # Temporal attention per channel
         # Reshape to (batch*n_channels, n_segs, d_model)
         x = x.reshape(batch_size * self.n_channels, self.n_segs, self.d_model)
-        x = self.temporal_encoder(x)
+        # PF3 (v2.37): mask segments fully in the future (where the
+        # target channel is zero) so the temporal encoder can't read
+        # absolute time from them. Each segment covers seg_len timesteps
+        # starting at seg_idx * seg_len; a segment is "fully past" when
+        # (seg_idx + 1) * seg_len <= past_window_size. Past-only training
+        # leaves the mask None and behaviour unchanged.
+        src_mask = None
+        n_past_segs = self.n_segs
+        if (self.past_window_size is not None
+                and self.past_window_size < self.padded_len):
+            n_past_segs = max(1, self.past_window_size // self.seg_len)
+            n_past_segs = min(n_past_segs, self.n_segs)
+            if n_past_segs < self.n_segs:
+                src_mask = torch.zeros(
+                    x.size(0), self.n_segs, dtype=torch.bool, device=x.device,
+                )
+                src_mask[:, n_past_segs:] = True
+        x = self.temporal_encoder(x, src_key_padding_mask=src_mask)
 
-        # Mean pool over segments -> (batch*n_channels, d_model)
-        x = x.mean(dim=1)
+        # Mean pool over segments — past-only when PF3 is active.
+        if n_past_segs < self.n_segs:
+            x = x[:, :n_past_segs, :].mean(dim=1)
+        else:
+            x = x.mean(dim=1)
 
         # Reshape to (batch, n_channels, d_model)
         x = x.reshape(batch_size, self.n_channels, self.d_model)
@@ -205,6 +227,10 @@ class CrossformerModel(ForecastModel):
         # Identity defaults so non-zscore paths are a safe no-op.
         self._y_mean: Any = 0.0
         self._y_std: Any = 1.0
+        # past_window_size enables PF1 (RevIN past-only stats); set per-fit
+        # from kwargs, round-tripped in save/load. None means legacy
+        # single-window path.
+        self._past_window_size: Optional[int] = None
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -247,6 +273,7 @@ class CrossformerModel(ForecastModel):
         _, seq_len, input_size = X_seq.shape
         self._input_size = input_size
         self._seq_len = seq_len
+        self._past_window_size = kwargs.get("past_window_size")
 
         if not self.use_revin:
             # Per-channel z-score standardisation (fitted on training data)
@@ -320,6 +347,7 @@ class CrossformerModel(ForecastModel):
             sigmoid_scale=self._sigmoid_scale,
             use_revin=self.use_revin,
             target_channel=self.target_channel,
+            past_window_size=self._past_window_size,
         )
         optimiser = self._build_optimiser(
             self._model.parameters(), self.optimiser, self.learning_rate,
@@ -516,6 +544,7 @@ class CrossformerModel(ForecastModel):
             "sigmoid_scale": self._sigmoid_scale,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "past_window_size": self._past_window_size,
         }, path)
         logger.info(f"Saved Crossformer model to {path}")
 
@@ -529,6 +558,7 @@ class CrossformerModel(ForecastModel):
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
         self._y_mean = data.get("y_mean", 0.0)
         self._y_std = data.get("y_std", 1.0)
+        self._past_window_size = data.get("past_window_size")
 
         # Reconstruct the nn.Module and load weights
         self._input_size = data.get("input_size")
@@ -552,6 +582,7 @@ class CrossformerModel(ForecastModel):
                 sigmoid_scale=self._sigmoid_scale,
                 use_revin=self.use_revin,
                 target_channel=self.target_channel,
+                past_window_size=self._past_window_size,
             )
             self._model.load_state_dict(state_dict)
             self._model.eval()

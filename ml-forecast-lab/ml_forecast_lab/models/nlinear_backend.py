@@ -36,11 +36,30 @@ except ImportError:
 
 
 class _NLinearNet(nn.Module):
-    """NLinear: subtract last value, single Linear, add back."""
+    """NLinear: subtract last value, single Linear, add back.
+
+    v2.37 changes (driven by docs/investigations/2026-05-neural-pv.md):
+
+    * **PF1**: when ``past_window_size`` is set, RevIN computes per-window
+      mean/std over the past slice only — undoes the 50% mean bias that
+      the future-position zero-target padding introduces in extended-
+      window mode.
+    * **PF2**: the "subtract the last value, re-add at the end" anchor
+      uses ``x[:, past_window_size - 1, target_channel]`` instead of
+      the literal last row. In extended mode the literal last row is a
+      future position where the target channel is always zero, which
+      makes the anchor trick a no-op.
+    * **PF7**: the head's input omits the future-position target-channel
+      slots (always zero, no signal). The flat input shape is therefore
+      ``W*C + H*(C-1)`` rather than ``(W+H)*C``. Past-only training
+      windows fall back to the original ``W*C`` shape — fully
+      backwards-compatible with checkpoints that pre-date this change.
+    """
 
     def __init__(self, seq_len: int, n_channels: int, n_horizons: int = 1,
                  output_activation: str = 'linear', sigmoid_scale: float = 1.0,
-                 use_revin: bool = True, target_channel: int = 0):
+                 use_revin: bool = True, target_channel: int = 0,
+                 past_window_size: Optional[int] = None):
         super().__init__()
         self.use_revin = use_revin
         # RevIN composes with NLinear's last-value subtraction without
@@ -54,24 +73,58 @@ class _NLinearNet(nn.Module):
         self.n_channels = n_channels
         self.n_horizons = n_horizons
         self.target_channel = target_channel
-        flat = seq_len * n_channels
+        # past_window_size is the length of the past slice within seq_len.
+        # None or == seq_len means "no future positions" (legacy path).
+        if past_window_size is None or past_window_size >= seq_len:
+            self.past_window_size = seq_len
+            self._has_future = False
+            flat = seq_len * n_channels
+        else:
+            self.past_window_size = int(past_window_size)
+            self._has_future = True
+            future_len = seq_len - self.past_window_size
+            # Past block: every channel; future block: every channel except
+            # the target (PF7) — those slots are always zero so they only
+            # add input-imbalance noise to the linear head.
+            flat = (self.past_window_size * n_channels
+                    + future_len * (n_channels - 1))
         self.linear = nn.Linear(flat, n_horizons)
         self.activation = _build_activation(output_activation, scale=sigmoid_scale)
+
+    def _head_input(self, x: "torch.Tensor") -> "torch.Tensor":
+        """Reshape ``x`` into the flat tensor the head expects.
+
+        Past block: take all channels. Future block: drop the target
+        channel (PF7 — always zero anyway, removes head-input variance
+        imbalance). For the legacy past-only path returns the same
+        flatten as before.
+        """
+        if not self._has_future:
+            return x.reshape(x.size(0), -1)
+        past = x[:, : self.past_window_size, :]
+        future = x[:, self.past_window_size :, :]
+        # Drop the target channel from the future block.
+        keep = [c for c in range(self.n_channels) if c != self.target_channel]
+        future_kept = future[:, :, keep]
+        flat_past = past.reshape(past.size(0), -1)
+        flat_future = future_kept.reshape(future_kept.size(0), -1)
+        return torch.cat([flat_past, flat_future], dim=1)
 
     def forward(self, x: "torch.Tensor") -> "torch.Tensor":
         # x: (batch, seq_len, n_channels)
         if self.revin is not None:
-            x = self.revin.normalize(x)
-        # Last-step value of the target channel — shape (batch, 1).
-        last_val = x[:, -1:, self.target_channel]
-        # Subtract from every channel (broadcasts across channels and time).
-        # NLinear's original formulation subtracts the last value across all
-        # channels which keeps the linear head focused on the residual.
-        x_shifted = x - x[:, -1:, :]
-        flat = x_shifted.reshape(x_shifted.size(0), -1)
+            x = self.revin.normalize(x, past_window_size=self.past_window_size)
+        # PF2: anchor on the last PAST step, not the literal last row of
+        # the (possibly extended) window. ``self.past_window_size - 1``
+        # equals ``seq_len - 1`` on the legacy path, so this is fully
+        # backwards-compatible.
+        anchor_idx = self.past_window_size - 1
+        last_val = x[:, anchor_idx : anchor_idx + 1, self.target_channel]   # (B, 1)
+        # Subtract from every channel at every position (broadcasts).
+        x_shifted = x - x[:, anchor_idx : anchor_idx + 1, :]
+        flat = self._head_input(x_shifted)
         out = self.linear(flat)  # (batch, n_horizons)
-        # Re-add the target's last value so the prediction sits around the
-        # current level — last_val broadcasts across the horizon dim.
+        # Re-add the target's anchor value.
         out = out + last_val
         if self.revin is not None:
             out = self.revin.denormalize(out)
@@ -128,6 +181,10 @@ class NLinearModel(ForecastModel):
         self._sigmoid_scale: float = 1.0
         self._y_mean: Any = 0.0
         self._y_std: Any = 1.0
+        # past_window_size enables PF1/PF2/PF7 (see _NLinearNet docstring).
+        # Set per-fit from kwargs; round-tripped in save/load. None means
+        # legacy single-window path.
+        self._past_window_size: Optional[int] = None
 
     @property
     def name(self) -> str:
@@ -158,6 +215,7 @@ class NLinearModel(ForecastModel):
             sigmoid_scale=self._sigmoid_scale,
             use_revin=self.use_revin,
             target_channel=self.target_channel,
+            past_window_size=self._past_window_size,
         )
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray,
@@ -180,6 +238,11 @@ class NLinearModel(ForecastModel):
         _, seq_len, n_channels = X_seq.shape
         self._seq_len = seq_len
         self._n_channels = n_channels
+        # PF1/PF2/PF7 plumbing: training pipeline passes past_window_size
+        # in seq_kwargs when extended_window is True. None means the
+        # legacy single-window path; the _Net falls back to its v2.36
+        # behaviour in that case.
+        self._past_window_size = kwargs.get("past_window_size")
 
         if not self.use_revin:
             self._channel_mean = X_seq.mean(axis=(0, 1))
@@ -364,6 +427,7 @@ class NLinearModel(ForecastModel):
             "sigmoid_scale": self._sigmoid_scale,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "past_window_size": self._past_window_size,
         }, path)
         logger.info(f"Saved NLinear model to {path}")
 
@@ -378,6 +442,10 @@ class NLinearModel(ForecastModel):
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
         self._y_mean = data.get("y_mean", 0.0)
         self._y_std = data.get("y_std", 1.0)
+        # past_window_size absent on pre-v2.37 checkpoints — None means
+        # legacy single-window path, which is the right behaviour for
+        # those.
+        self._past_window_size = data.get("past_window_size")
         if self._seq_len is not None and self._n_channels is not None:
             self._model = self._build_model(self._seq_len, self._n_channels,
                                             n_horizons=self._n_horizons)

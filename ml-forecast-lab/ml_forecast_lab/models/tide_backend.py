@@ -97,6 +97,7 @@ class _TiDENet(nn.Module):
         temporal_hidden: int = 32,
         use_revin: bool = True,
         target_channel: int = 0,
+        past_window_size: Optional[int] = None,
     ):
         super().__init__()
         self.n_horizons = n_horizons
@@ -106,6 +107,7 @@ class _TiDENet(nn.Module):
         self.decoder_output_size = decoder_output_size
         self.feature_proj_size = feature_proj_size
         self.use_revin = use_revin
+        self.past_window_size = past_window_size
 
         # RevIN handles per-window instance normalisation. Applied around
         # the whole network so the encoder / decoder / residual all see
@@ -160,7 +162,7 @@ class _TiDENet(nn.Module):
         # x: (batch, seq_len, n_channels)
         # future_covariates: (batch, n_horizons, n_future_covariates) or None
         if self.revin is not None:
-            x = self.revin.normalize(x)
+            x = self.revin.normalize(x, past_window_size=self.past_window_size)
 
         batch_size = x.size(0)
         past_flat = x.reshape(batch_size, -1)  # (batch, seq_len * n_channels)
@@ -300,6 +302,10 @@ class TiDEModel(ForecastModel):
         # AND use_revin is False — otherwise RevIN handles scale per-window).
         self._y_mean: Any = 0.0
         self._y_std: Any = 1.0
+        # past_window_size enables PF1 (RevIN past-only stats); set per-fit
+        # from kwargs, round-tripped in save/load. None means legacy
+        # single-window path.
+        self._past_window_size: Optional[int] = None
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -386,6 +392,7 @@ class TiDEModel(ForecastModel):
         _, seq_len, input_size = X_seq.shape
         self._input_size = input_size
         self._seq_len = seq_len
+        self._past_window_size = kwargs.get("past_window_size")
 
         # Future covariates (opt-in).
         future_covariates = self._validate_future_covariates(
@@ -489,6 +496,7 @@ class TiDEModel(ForecastModel):
             temporal_hidden=self.temporal_hidden,
             use_revin=self.use_revin,
             target_channel=self.target_channel,
+            past_window_size=self._past_window_size,
         )
         optimiser = self._build_optimiser(
             self._model.parameters(), self.optimiser, self.learning_rate,
@@ -694,6 +702,7 @@ class TiDEModel(ForecastModel):
             "sigmoid_scale": self._sigmoid_scale,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "past_window_size": self._past_window_size,
         }, path)
         logger.info(f"Saved TiDE model to {path}")
 
@@ -709,6 +718,7 @@ class TiDEModel(ForecastModel):
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
         self._y_mean = data.get("y_mean", 0.0)
         self._y_std = data.get("y_std", 1.0)
+        self._past_window_size = data.get("past_window_size")
 
         # Reconstruct the nn.Module and load weights
         self._input_size = data.get("input_size")
@@ -731,6 +741,7 @@ class TiDEModel(ForecastModel):
                 temporal_hidden=self.temporal_hidden,
                 use_revin=self.use_revin,
                 target_channel=self.target_channel,
+                past_window_size=self._past_window_size,
             )
             self._model.load_state_dict(state_dict)
             self._model.eval()

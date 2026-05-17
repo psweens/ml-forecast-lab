@@ -93,14 +93,29 @@ class _NHiTSBlock(nn.Module):
 
 
 class _NHiTSNet(nn.Module):
-    """N-HiTS with hierarchical pooling and doubly-residual stacking."""
+    """N-HiTS with hierarchical pooling and doubly-residual stacking.
+
+    v2.37 change (PF4): when ``past_window_size`` is set and is less
+    than ``seq_len``, only the PAST slice is fed to the stack. Without
+    this, N-HiTS's hierarchical pooling averages the past values with
+    the future zero-target placeholders, depressing the pooled signal
+    at every scale and collapsing the forecast residual. Past-only
+    training windows behave exactly as before because the default
+    keeps the whole-window path.
+    """
 
     def __init__(self, seq_len: int, n_channels: int, hidden_size: int,
                  n_stacks: int, blocks_per_stack: int, pool_kernels: List[int],
                  n_fc_layers: int, n_horizons: int = 1,
-                 output_activation: str = 'linear', sigmoid_scale: float = 1.0):
+                 output_activation: str = 'linear', sigmoid_scale: float = 1.0,
+                 past_window_size: Optional[int] = None):
         super().__init__()
         self.n_horizons = n_horizons
+        if past_window_size is not None and past_window_size < seq_len:
+            self.past_window_size = int(past_window_size)
+        else:
+            self.past_window_size = seq_len
+        effective_seq_len = self.past_window_size
 
         # Ensure pool_kernels list matches n_stacks (repeat last if too short).
         # Copy the input list first — callers may reuse the same list across
@@ -111,17 +126,19 @@ class _NHiTSNet(nn.Module):
 
         self.blocks = nn.ModuleList()
         for stack_idx in range(n_stacks):
-            pk = min(pool_kernels[stack_idx], seq_len)  # clamp to seq_len
+            pk = min(pool_kernels[stack_idx], effective_seq_len)  # clamp to past size
             for _ in range(blocks_per_stack):
                 self.blocks.append(
-                    _NHiTSBlock(seq_len, n_channels, hidden_size, n_horizons, pk, n_fc_layers)
+                    _NHiTSBlock(effective_seq_len, n_channels, hidden_size,
+                                n_horizons, pk, n_fc_layers)
                 )
         self.activation = _build_activation(output_activation, scale=sigmoid_scale)
 
     def forward(self, x):
         # x: (batch, seq_len, n_channels)
         batch_size = x.size(0)
-        residual = x
+        # PF4: slice off the future block before feeding the stack.
+        residual = x[:, : self.past_window_size, :]
         forecast_sum = torch.zeros(batch_size, self.n_horizons, device=x.device)
 
         for block in self.blocks:
@@ -193,6 +210,9 @@ class NHiTSModel(ForecastModel):
         self._y_mean: Any = 0.0
         self._y_std: Any = 1.0
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
+        # PF4: past_window_size shortens the input seen by the stack.
+        # None = legacy whole-window path.
+        self._past_window_size: Optional[int] = None
 
     @property
     def name(self) -> str:
@@ -234,6 +254,8 @@ class NHiTSModel(ForecastModel):
         _, seq_len, input_size = X_seq.shape
         self._input_size = input_size
         self._seq_len = seq_len
+        # PF4 plumbing.
+        self._past_window_size = kwargs.get("past_window_size")
 
         # Per-channel z-score standardisation (fitted on training data)
         self._channel_mean = X_seq.mean(axis=(0, 1))  # shape (n_channels,)
@@ -295,6 +317,7 @@ class NHiTSModel(ForecastModel):
             self.n_fc_layers, n_horizons=self._n_horizons,
             output_activation=self.output_activation,
             sigmoid_scale=self._sigmoid_scale,
+            past_window_size=self._past_window_size,
         )
         optimiser = self._build_optimiser(
             self._model.parameters(), self.optimiser, self.learning_rate,
@@ -487,6 +510,7 @@ class NHiTSModel(ForecastModel):
             "sigmoid_scale": self._sigmoid_scale,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "past_window_size": self._past_window_size,
         }, path)
         logger.info(f"Saved N-HiTS model to {path}")
 
@@ -500,6 +524,8 @@ class NHiTSModel(ForecastModel):
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
         self._y_mean = data.get("y_mean", 0.0)
         self._y_std = data.get("y_std", 1.0)
+        # past_window_size absent on pre-v2.37 checkpoints (None = legacy).
+        self._past_window_size = data.get("past_window_size")
 
         # Reconstruct the nn.Module and load weights
         self._input_size = data.get("input_size")
@@ -512,6 +538,7 @@ class NHiTSModel(ForecastModel):
                 self.n_fc_layers, n_horizons=self._n_horizons,
                 output_activation=self.output_activation,
                 sigmoid_scale=self._sigmoid_scale,
+                past_window_size=self._past_window_size,
             )
             self._model.load_state_dict(state_dict)
             self._model.eval()

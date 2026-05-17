@@ -41,7 +41,8 @@ class _PatchTSTNet(nn.Module):
                  stride: int, d_model: int, n_heads: int,
                  n_encoder_layers: int, dropout: float, n_horizons: int = 1,
                  output_activation: str = 'linear', sigmoid_scale: float = 1.0,
-                 use_revin: bool = True, target_channel: int = 0):
+                 use_revin: bool = True, target_channel: int = 0,
+                 past_window_size: Optional[int] = None):
         super().__init__()
         self.use_revin = use_revin
         self.revin = _RevIN(n_channels, target_channel=target_channel, affine=True) if use_revin else None
@@ -51,6 +52,7 @@ class _PatchTSTNet(nn.Module):
         self.patch_len = patch_len
         self.stride = stride
         self.d_model = d_model
+        self.past_window_size = past_window_size
 
         # Number of patches
         self.n_patches = (seq_len - patch_len) // stride + 1
@@ -84,7 +86,7 @@ class _PatchTSTNet(nn.Module):
         batch_size = x.size(0)
 
         if self.revin is not None:
-            x = self.revin.normalize(x)
+            x = self.revin.normalize(x, past_window_size=self.past_window_size)
 
         # Transpose to channel-first: (batch, n_channels, seq_len)
         x = x.transpose(1, 2)
@@ -105,12 +107,41 @@ class _PatchTSTNet(nn.Module):
 
         x = self.dropout(x)
 
+        # PF3 (v2.37): patches whose start position is at or after
+        # past_window_size are entirely in the zero-target future block.
+        # Mask them out of the transformer's self-attention so the
+        # encoder can't attend to them. Past-only training windows leave
+        # the mask as None — behaviour unchanged. The mean pool below is
+        # also restricted to unmasked patches.
+        src_key_padding_mask = None
+        n_past_patches = self.n_patches
+        if (self.past_window_size is not None
+                and self.past_window_size < x.size(1) * self.stride):
+            # A patch starting at position s covers [s, s + patch_len).
+            # We consider a patch "past" if its center is still in the
+            # past, i.e. s + patch_len/2 <= past_window_size. Future
+            # patches are masked.
+            n_past_patches = max(
+                1, (self.past_window_size - self.patch_len // 2) // self.stride + 1,
+            )
+            n_past_patches = min(n_past_patches, self.n_patches)
+            if n_past_patches < self.n_patches:
+                src_key_padding_mask = torch.zeros(
+                    x.size(0), self.n_patches, dtype=torch.bool, device=x.device,
+                )
+                src_key_padding_mask[:, n_past_patches:] = True
+
         # Transformer encoder: (batch * n_channels, n_patches, d_model)
-        x = self.transformer(x)
+        x = self.transformer(x, src_key_padding_mask=src_key_padding_mask)
         x = self.layer_norm(x)
 
-        # Mean pool over patches: (batch * n_channels, d_model)
-        x = x.mean(dim=1)
+        # Mean pool over patches — when PF3 is active, only over past
+        # patches so the pooled vector is not diluted by zero-output
+        # transformer states from masked positions.
+        if n_past_patches < self.n_patches:
+            x = x[:, :n_past_patches, :].mean(dim=1)
+        else:
+            x = x.mean(dim=1)
 
         # Reshape back: (batch, n_channels * d_model)
         x = x.reshape(batch_size, self.n_channels * self.d_model)
@@ -188,6 +219,10 @@ class PatchTSTModel(ForecastModel):
         # Identity defaults so non-zscore paths are a safe no-op.
         self._y_mean: Any = 0.0
         self._y_std: Any = 1.0
+        # past_window_size enables PF1 (RevIN past-only stats); set per-fit
+        # from kwargs, round-tripped in save/load. None means legacy
+        # single-window path.
+        self._past_window_size: Optional[int] = None
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -230,6 +265,7 @@ class PatchTSTModel(ForecastModel):
         _, seq_len, input_size = X_seq.shape
         self._input_size = input_size
         self._seq_len = seq_len
+        self._past_window_size = kwargs.get("past_window_size")
 
         if not self.use_revin:
             # Per-channel z-score standardisation (fitted on training data)
@@ -298,6 +334,7 @@ class PatchTSTModel(ForecastModel):
             sigmoid_scale=self._sigmoid_scale,
             use_revin=self.use_revin,
             target_channel=self.target_channel,
+            past_window_size=self._past_window_size,
         )
         optimiser = self._build_optimiser(
             self._model.parameters(), self.optimiser, self.learning_rate,
@@ -495,6 +532,7 @@ class PatchTSTModel(ForecastModel):
             "sigmoid_scale": self._sigmoid_scale,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "past_window_size": self._past_window_size,
         }, path)
         logger.info(f"Saved PatchTST model to {path}")
 
@@ -508,6 +546,7 @@ class PatchTSTModel(ForecastModel):
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
         self._y_mean = data.get("y_mean", 0.0)
         self._y_std = data.get("y_std", 1.0)
+        self._past_window_size = data.get("past_window_size")
 
         # Reconstruct the nn.Module and load weights
         self._input_size = data.get("input_size")
@@ -526,6 +565,7 @@ class PatchTSTModel(ForecastModel):
                 sigmoid_scale=self._sigmoid_scale,
                 use_revin=self.use_revin,
                 target_channel=self.target_channel,
+                past_window_size=self._past_window_size,
             )
             self._model.load_state_dict(state_dict)
             self._model.eval()

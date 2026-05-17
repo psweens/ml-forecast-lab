@@ -128,8 +128,14 @@ def _train_neural_backend(
     # We pass sequence_data so the backend's flat-feature reshape is bypassed.
     # X_flat is a stub of correct n_samples but irrelevant content — fit()
     # only uses it for shape inference when sequence_data is absent.
+    # past_window_size mirrors the production training path's seq_kwargs
+    # (main.py:_retrain_and_cache) so backends can apply the v2.37 PF1+
+    # fixes during training.
     X_flat = np.zeros((X.shape[0], 1), dtype=np.float32)
-    model.fit(X_flat, y, sequence_data=X)
+    fit_kwargs: Dict[str, Any] = {"sequence_data": X}
+    if cfg.extended_window:
+        fit_kwargs["past_window_size"] = cfg.window_size
+    model.fit(X_flat, y, **fit_kwargs)
     return model, channel_names, cfg.window_size
 
 
