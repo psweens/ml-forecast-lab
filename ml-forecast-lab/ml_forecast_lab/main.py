@@ -100,6 +100,60 @@ def _apply_output_activation(model, exp_cfg) -> None:
         pass
 
 
+def _apply_solar_night_fill(result: 'pd.DataFrame', exp_cfg) -> int:
+    """
+    Fill NaN slots in ``result['y']`` with 0.0 where solar physics says the
+    sun is below the horizon. Returns the number of rows filled.
+
+    For physically non-negative solar-driven targets (PV power, GHI,
+    irradiance) HA's recorder is delta-storage based: when the sensor
+    sits at 0 W from sunset to sunrise it typically records one
+    transition and then nothing — or reports ``unavailable`` while the
+    inverter is asleep, which gets parsed as NaN. The default
+    ``gap_handling='interpolate'`` only fills gaps up to
+    ``gap_max_minutes`` (90), so the 10-14h night gap stays as NaN and
+    the downstream ``result.dropna()`` deletes every night-time row.
+    The model then trains on a daytime-only window and has no signal
+    for "PV = 0 when sun is below the horizon" — at inference time it
+    predicts 0.3-0.7 kW at 23:00 and the daily peak phase-shifts to
+    18:00 because the bell curve was only ever half-visible during
+    training.
+
+    Solar physics is deterministic — when the addon already computes
+    ``clear_sky_ghi`` (or ``sun_elevation``) for the same index, we can
+    cheaply identify night-time slots and fill them with 0 before the
+    dropna step. Gated on ``target_is_nonnegative=True`` so only
+    solar / irradiance-style experiments are touched — signed targets
+    like net grid flow keep the original drop-on-NaN behaviour.
+
+    ``log_transform=True`` maps physical 0 → log(1+0) = 0, so writing
+    0.0 is correct whether the target series is in raw or log-
+    transformed space — no inverse needed.
+    """
+    if not getattr(exp_cfg, "target_is_nonnegative", False):
+        return 0
+    if "y" not in result.columns:
+        return 0
+    if "clear_sky_ghi" not in result.columns and "sun_elevation" not in result.columns:
+        return 0
+
+    if result["y"].isna().sum() == 0:
+        return 0
+
+    if "clear_sky_ghi" in result.columns:
+        night_mask = result["clear_sky_ghi"].fillna(0) <= 0
+    else:
+        # -0.833° is the standard astronomical horizon (accounts for
+        # atmospheric refraction). Anything below is night.
+        night_mask = result["sun_elevation"].fillna(-90) < -0.833
+
+    fill_mask = result["y"].isna() & night_mask
+    n_filled = int(fill_mask.sum())
+    if n_filled > 0:
+        result.loc[fill_mask, "y"] = 0.0
+    return n_filled
+
+
 def _resolve_daily_loss_weight(exp_cfg) -> float:
     """
     Resolve the effective ``daily_loss_weight`` for a neural model.
@@ -1699,6 +1753,23 @@ class MLForecastLabApp:
                 logger.warning(
                     "  Solar physics requested but site location unavailable"
                 )
+
+        # --- Solar night-time zero-fill ----------------------------------
+        # See _apply_solar_night_fill docstring for the full rationale.
+        # Short version: HA's delta-storage recorder + the default
+        # 90-min ``gap_handling='interpolate'`` cap drops every
+        # night-time row from PV-style training data, so the model
+        # never learns "y = 0 when sun is below the horizon". Filling
+        # before dropna restores the full daily bell curve.
+        y_nan_before = int(result["y"].isna().sum()) if "y" in result.columns else 0
+        n_filled = _apply_solar_night_fill(result, exp_cfg)
+        if n_filled > 0:
+            remaining_nan = y_nan_before - n_filled
+            logger.info(
+                f"  Solar night-time fill: {n_filled} NaN rows "
+                f"(sun below horizon) → 0 for {exp_cfg.name} "
+                f"[{remaining_nan} daytime NaN remain for dropna]"
+            )
 
         # --- Covariate manifest -------------------------------------------
         # Summarise every covariate's contribution BEFORE dropna so the
