@@ -37,21 +37,32 @@ def _resolve_output_activation(exp_cfg, model_name: str = '') -> str:
       conditions gradients across widely-varying target scales and is the
       best general default for recurrent backends)
     - Other neural, ``source_is_cumulative=True`` OR
-      ``target_is_nonnegative=True``                  → ``'relu'``
-      (hard non-negative clamp at 0, no positive bias — works for
-      arbitrary target magnitudes including small kWh-scale demand
-      intervals where softplus's +log(2)≈0.69 floor in physical space
-      would dominate small targets and push predictions 10-15× too high)
+      ``target_is_nonnegative=True``                  → ``'softplus'``
+      (non-negative, smooth gradient near zero — ideal for energy /
+      rainfall / counts that reset to zero overnight, or instantaneous
+      non-negative targets like PV power. Softplus has a non-zero
+      gradient everywhere, which immunises against the "dying ReLU"
+      collapse where a high LR or aggressive anchor delta drives the
+      linear head into all-negative pre-activations and freezes the
+      model at a literal-zero forecast for the entire horizon.)
     - Other neural, default                           → ``'linear'`` (unbounded
       signed output suitable for temperature, net grid flow, deltas)
 
-    The ``target_is_nonnegative`` branch is the v2.37 PF8 fix. Note that
-    pre-v2.37 the same auto path picked ``softplus`` when
-    ``source_is_cumulative=True``; this was reverted in favour of ReLU
-    because softplus's positive floor in physical space catastrophically
-    biased low-magnitude cumulative interval targets (verified on
-    synthetic cumulative-with-daily-reset data — softplus produced 900%
-    daily-total error vs ReLU's 30%).
+    The ``target_is_nonnegative`` branch is the v2.37 PF8 addition for
+    users with non-cumulative non-negative targets (PV power in W,
+    irradiance, instantaneous demand). It resolves to softplus on the
+    same rationale as cumulative — a non-negative-by-construction
+    activation with non-zero gradient everywhere is robust to the
+    anchor/RevIN/log_transform interactions that the v2.37 PF1-PF7
+    extended-window path introduces.
+
+    History: the initial v2.37 PF8 picked ``'relu'`` here on the theory
+    that softplus's +log(2)≈0.69 floor would bias small-magnitude
+    cumulative kWh intervals high. In production this caused the
+    user-reported flat-zero forecast (dying-ReLU on the extended-window
+    NLinear with the PF2 anchor add-back), and the test
+    ``test_cumulative_source_picks_softplus`` had been pinning the
+    correct (softplus) behaviour all along.
     """
     act = getattr(exp_cfg, 'output_activation', 'auto')
     if act == 'auto':
@@ -65,7 +76,7 @@ def _resolve_output_activation(exp_cfg, model_name: str = '') -> str:
             getattr(exp_cfg, 'source_is_cumulative', False)
             or getattr(exp_cfg, 'target_is_nonnegative', False)
         )
-        return 'relu' if is_nonneg else 'linear'
+        return 'softplus' if is_nonneg else 'linear'
     return act
 
 
@@ -3526,12 +3537,15 @@ class MLForecastLabApp:
                 # output_activation / daily_loss_weight values are what
                 # the PF1-PF9 fixes expect.
                 logger.info(
-                    f"  PF1-PF9 diagnostics for {prod_model_name}: "
+                    f"  PF1-PF10 diagnostics for {prod_model_name}: "
                     f"past_window_size={seq_kwargs.get('past_window_size')}, "
                     f"extended_window={seq_kwargs.get('extended_window')}, "
                     f"output_activation={getattr(model, 'output_activation', '<n/a>')}, "
                     f"daily_loss_weight={getattr(model, 'daily_loss_weight', '<n/a>')}, "
                     f"use_revin={getattr(model, 'use_revin', '<n/a>')}, "
+                    f"learning_rate={getattr(model, 'learning_rate', getattr(model, 'lr', '<n/a>'))}, "
+                    f"optimiser={getattr(exp_cfg, 'optimiser', '<n/a>')}, "
+                    f"log_transform={getattr(exp_cfg, 'log_transform', False)}, "
                     f"source_is_cumulative={getattr(exp_cfg, 'source_is_cumulative', False)}, "
                     f"target_is_nonnegative={getattr(exp_cfg, 'target_is_nonnegative', False)}"
                 )

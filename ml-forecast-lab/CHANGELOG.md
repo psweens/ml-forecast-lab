@@ -1,5 +1,55 @@
 # Changelog
 
+## 2.37.1
+
+Hotfix for the v2.37.0 PF8 regression that caused the auto-resolver
+to pick ``relu`` for non-negative targets, producing a flat-zero
+NLinear forecast in production via the classic "dying ReLU"
+collapse on the PF2 anchor add-back. Reverts that one branch to
+``softplus`` (the pre-v2.37 default) for all auto non-negative
+cases — both ``source_is_cumulative=True`` and the new v2.37
+``target_is_nonnegative=True`` flag.
+
+* **PF8 revert — auto resolves to softplus for non-negative
+  targets**: ``_resolve_output_activation`` returns ``'softplus'``
+  whenever ``source_is_cumulative=True`` OR
+  ``target_is_nonnegative=True``, restoring the pre-v2.37 default
+  for cumulative and extending it to the new instantaneous
+  non-negative flag. The original PF8 ReLU pick was synthetic-
+  validated against small-magnitude cumulative kWh intervals on
+  the theory that softplus's +log(2)≈0.69 physical-space floor
+  would dominate predictions; in production, the dying-ReLU
+  collapse on extended-window NLinear's anchor add-back proved a
+  far larger regression. Softplus has non-zero gradient everywhere
+  and its physical floor (~1 unit) is negligible for any non-trivial
+  target. The existing
+  ``test_cumulative_source_picks_softplus`` (added 2026-05-16, the
+  day before v2.37) had been pinning the correct behaviour all
+  along — PF8 silently broke it and the next PR's CI surfaced it.
+* **Settings UI — Non-negative target toggle**: new toggle next to
+  "Daily reset" exposes the ``target_is_nonnegative`` flag, so
+  users with non-cumulative non-negative targets (PV power,
+  irradiance, instantaneous demand) can opt into PF8/PF9 without
+  hand-editing YAML.
+* **PF1-PF10 retrain diagnostic log line**: ``_retrain_and_cache``
+  now logs every neural retrain's resolved ``past_window_size``,
+  ``extended_window``, ``output_activation``, ``daily_loss_weight``,
+  ``use_revin``, ``learning_rate``, ``optimiser``, ``log_transform``,
+  ``source_is_cumulative``, ``target_is_nonnegative``. First place
+  to look when investigating a post-v2.37 forecast that still
+  misbehaves — confirms exactly which PF1-PF10 path was entered.
+* **Persistent log archive — bumped retention**: rotating
+  ``mlfl.log`` is now 10 MB × 5 backups (was 5 × 5), plus a new
+  ``mlfl-daily.log`` with UTC daily rotation kept for 14 days.
+  Total disk footprint bounded. Suppress the daily archive with
+  ``MLFL_DAILY_LOG_KEEP=0``.
+
+No retrain is forced by this hotfix; users who already toggled
+``Non-negative target`` ON in v2.37.0 should retrain after
+upgrading to pick up the softplus activation. Users on the legacy
+``output_activation: linear`` path (the v2.36.x default for
+non-cumulative targets) are unaffected.
+
 ## 2.37.0
 
 Implements every fix identified by the neural-PV investigation
