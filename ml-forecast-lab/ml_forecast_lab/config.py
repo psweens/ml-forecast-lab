@@ -233,6 +233,15 @@ class ExperimentCfg:
     ``source_is_cumulative``; set this directly for non-cumulative non-negative
     targets like ``predbat.pv_power`` (v2.37+ PF8)."""
 
+    debug_save_training_dumps: bool = False
+    """If True, every retrain dumps the training inputs (features, channels,
+    hyperparameters) and the immediate post-retrain forecast (raw + physical
+    values) to ``<config_dir>/debug/<experiment>/<timestamp>/``. Last 5 dumps
+    per experiment are kept; older ones are rotated out. Default OFF — enable
+    only when diagnosing a regression so a maintainer can inspect the exact
+    production training surface offline. ~0.5–2 MB per dump on a 30-min PV
+    target with 22 channels and 48-step past window."""
+
     models_enabled: List[str] = field(
         default_factory=lambda: ['lightgbm', 'xgboost', 'lstm', 'cnn']
     )

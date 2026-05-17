@@ -3335,6 +3335,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "source_is_cumulative": lambda v: bool(v),
             "reset_daily": lambda v: bool(v),
             "target_is_nonnegative": lambda v: bool(v),
+            "debug_save_training_dumps": lambda v: bool(v),
             "log_transform": lambda v: bool(v),
             "forecast_every_minutes": lambda v: int(v) if int(v) >= 1 else None,
             "retrain_every_hours": lambda v: float(v) if float(v) >= 0.1 else None,

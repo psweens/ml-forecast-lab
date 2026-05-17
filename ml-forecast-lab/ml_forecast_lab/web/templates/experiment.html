@@ -527,6 +527,22 @@
         </div>
     </div>
 
+    <!-- Diagnostics -->
+    <div class="settings-group">
+        <h3 class="settings-group-title">Diagnostics</h3>
+        <div class="exp-field-grid" style="grid-template-columns:repeat(2, 1fr);">
+            <div class="settings-toggle-field">
+                <label class="toggle-switch">
+                    <input type="checkbox" data-field="debug_save_training_dumps"
+                           {% if exp_config and exp_config.debug_save_training_dumps %}checked{% endif %}
+                           onchange="saveSettingsToggle(this, 'debug_save_training_dumps')">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span class="field-label">Save training dumps <span class="info-tip">?<span class="tip-text">When on, every retrain writes a debug bundle to <code>&lt;config&gt;/debug/&lt;experiment&gt;/&lt;timestamp&gt;/</code> capturing the exact training inputs (<code>training.parquet</code>, <code>sliding_window.npz</code>), hyperparameters and target stats (<code>meta.json</code>), and the immediate post-retrain forecast (<code>forecast.parquet</code>). Last 5 bundles per experiment kept; older ones auto-rotated. ~1 MB per bundle. Turn on only when diagnosing a regression and zip the folder to share with a maintainer; turn off when done.</span></span></span>
+            </div>
+        </div>
+    </div>
+
 </section>
 </div>
 
