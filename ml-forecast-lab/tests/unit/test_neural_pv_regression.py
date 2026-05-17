@@ -290,11 +290,13 @@ def test_pf4_nhits_past_only_input():
     assert out.shape == (1, 24)
 
 
-def test_pf8_output_activation_resolves_softplus_for_nonneg_target():
-    """PF8: output_activation='auto' resolves to 'softplus' when
-    target_is_nonnegative is set, mirrors the existing
-    source_is_cumulative behaviour for non-cumulative non-negative
-    targets like PV power.
+def test_pf8_output_activation_resolves_relu_for_nonneg_target():
+    """PF8: output_activation='auto' resolves to 'relu' (not softplus)
+    when target_is_nonnegative or source_is_cumulative is set.
+
+    Softplus's +log(2)≈0.69 floor in physical space catastrophically
+    biases low-magnitude targets like kWh-scale demand intervals.
+    ReLU clamps at 0 with no bias — works at any target magnitude.
     """
     from dataclasses import dataclass
     from ml_forecast_lab.main import _resolve_output_activation
@@ -308,15 +310,15 @@ def test_pf8_output_activation_resolves_softplus_for_nonneg_target():
     # Default (signed) → linear.
     assert _resolve_output_activation(_Fake(), "nlinear") == "linear"
 
-    # source_is_cumulative → softplus (existing behaviour preserved).
+    # source_is_cumulative → relu.
     assert _resolve_output_activation(
         _Fake(source_is_cumulative=True), "nlinear"
-    ) == "softplus"
+    ) == "relu"
 
-    # target_is_nonnegative → softplus (the PF8 behaviour).
+    # target_is_nonnegative → relu (the PF8 behaviour).
     assert _resolve_output_activation(
         _Fake(target_is_nonnegative=True), "nlinear"
-    ) == "softplus"
+    ) == "relu"
 
     # LSTM always picks zscore regardless.
     assert _resolve_output_activation(
@@ -325,8 +327,8 @@ def test_pf8_output_activation_resolves_softplus_for_nonneg_target():
 
     # Explicit override is honoured.
     assert _resolve_output_activation(
-        _Fake(output_activation="relu", target_is_nonnegative=True), "nlinear"
-    ) == "relu"
+        _Fake(output_activation="softplus", target_is_nonnegative=True), "nlinear"
+    ) == "softplus"
 
 
 def test_pf7_dlinear_head_input_dim_drops_future_target_slots():
@@ -403,3 +405,73 @@ def test_pf9_daily_loss_weight_resolves_to_half_on_nonneg_target():
     assert _resolve_daily_loss_weight(
         _Fake(daily_loss_weight=1.5, target_is_nonnegative=True)
     ) == 1.5
+
+
+def test_cumulative_daily_reset_dataset_invariants():
+    """Sanity check that the cumulative-with-daily-reset synthetic data
+    has the structure we test against (used by run_cumulative_check.py).
+    """
+    from tests.synthetic.datasets import make_cumulative_daily_reset
+    d = make_cumulative_daily_reset(0)
+    assert "y" in d.df.columns
+    assert "y_interval" in d.df.columns
+    # The cumulative column must reset at midnight: every value at
+    # 00:00 should be smaller than the previous day's 23:30 value.
+    cum_at_midnight = d.df.loc[
+        (d.df.index.hour == 0) & (d.df.index.minute == 0), "y"
+    ]
+    cum_at_eod = d.df.loc[
+        (d.df.index.hour == 23) & (d.df.index.minute == 30), "y"
+    ]
+    assert len(cum_at_midnight) == 365
+    assert len(cum_at_eod) == 365
+    # The first row of each day (midnight) must be the smallest within
+    # that day. Easier check: the average midnight value is much smaller
+    # than the average end-of-day value.
+    assert float(cum_at_midnight.mean()) < 0.1 * float(cum_at_eod.mean()), (
+        f"Cumulative reset broken: midnight avg "
+        f"{cum_at_midnight.mean():.3f}, EOD avg {cum_at_eod.mean():.3f}"
+    )
+    # Interval column must be non-negative everywhere.
+    assert (d.df["y_interval"] >= 0).all()
+    # The cumsum of the interval column within each day should equal
+    # the cumulative column (up to float precision).
+    day_starts = np.where(d.df.index.hour == 0)[0]
+    day_starts = day_starts[d.df.index.minute[day_starts] == 0]
+    for i_start, i_next in zip(day_starts[:-1], day_starts[1:]):
+        intervals = d.df["y_interval"].values[i_start: i_next]
+        reconstructed_cum = np.cumsum(intervals)
+        actual_cum = d.df["y"].values[i_start: i_next]
+        assert np.allclose(reconstructed_cum, actual_cum, atol=1e-4), (
+            f"Cumulative/interval mismatch at day starting {d.df.index[i_start]}"
+        )
+        break  # one day is enough
+
+
+def test_pf8_pf9_resolve_together_for_source_is_cumulative():
+    """Cumulative-with-daily-reset is the canonical PF8/PF9 case.
+
+    ExperimentCfg.source_is_cumulative=True should trigger both PF8
+    (softplus) and PF9 (daily_loss_weight=0.5) defaults via the auto
+    resolvers.
+    """
+    from dataclasses import dataclass
+    from ml_forecast_lab.main import (
+        _resolve_output_activation, _resolve_daily_loss_weight,
+    )
+
+    @dataclass
+    class _Cfg:
+        output_activation: str = "auto"
+        daily_loss_weight: float = 0.0
+        source_is_cumulative: bool = True
+        target_is_nonnegative: bool = False
+
+    # PF8: cumulative → relu (non-LSTM neural backends)
+    assert _resolve_output_activation(_Cfg(), "nlinear") == "relu"
+    assert _resolve_output_activation(_Cfg(), "dlinear") == "relu"
+    assert _resolve_output_activation(_Cfg(), "nbeats") == "relu"
+    # LSTM still picks zscore (its specialised default)
+    assert _resolve_output_activation(_Cfg(), "lstm") == "zscore"
+    # PF9: cumulative → daily_loss_weight = 0.5
+    assert _resolve_daily_loss_weight(_Cfg()) == 0.5

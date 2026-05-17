@@ -190,5 +190,70 @@ def make_realistic_pv(seed: int = 0) -> SyntheticData:
     )
 
 
-def all_datasets() -> Tuple[SyntheticData, SyntheticData, SyntheticData, SyntheticData]:
-    return (make_pure_pv(0), make_cloudy_pv(0), make_realistic_pv(0), make_ev_mixergy(0))
+def make_cumulative_daily_reset(seed: int = 0) -> SyntheticData:
+    """Cumulative target that resets at midnight — sensor.energy_today shape.
+
+    Interval form: a typical household electricity-usage day-shape
+    (morning ramp, midday plateau, evening peak, overnight floor) with
+    a weekend modifier. Cumulative form: cumsum within each day,
+    snaps to zero at midnight every 24 h.
+
+    The dataframe carries the CUMULATIVE column ``y`` because that's what
+    production sensors report; the harness's preprocessing reaches for
+    this exact shape via ``ExperimentCfg.source_is_cumulative=True``.
+    The interval reference is kept as ``y_interval`` so tests can verify
+    that the round-trip cumsum → cumulative_to_interval → re-cumsum
+    matches.
+    """
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2024-01-01", periods=365 * 48, freq="30min", tz="UTC")
+    h = idx.hour + idx.minute / 60.0
+    # Interval (per 30-min) — kWh-like magnitude.
+    base = (
+        0.08 * np.exp(-((h - 7.5) ** 2) / 2.0) +    # morning peak ~07:30
+        0.04 * np.exp(-((h - 13.0) ** 2) / 8.0) +   # midday plateau
+        0.12 * np.exp(-((h - 19.0) ** 2) / 3.0) +   # evening peak ~19:00
+        0.008                                         # overnight floor
+    )
+    # Weekend modifier — slightly higher daytime usage.
+    weekend = (idx.dayofweek >= 5).astype(float)
+    intervals = base * (1.0 + 0.25 * weekend)
+    # Small multiplicative day-to-day noise so the shape isn't trivially
+    # learnable; correlated within a day (random walk on log scale).
+    raw = np.zeros(len(idx))
+    for t in range(1, len(idx)):
+        raw[t] = 0.97 * raw[t - 1] + rng.normal(0, 0.05)
+    intervals = intervals * np.exp(raw)
+    # Floor at zero so the cumulative form stays monotonic within a day.
+    intervals = np.maximum(intervals, 0.0)
+    # Cumulative: cumsum within each calendar day; resets at 00:00.
+    day_idx = (idx.hour == 0) & (idx.minute == 0)
+    cum = np.zeros(len(idx))
+    running = 0.0
+    for t in range(len(idx)):
+        if day_idx[t]:
+            running = 0.0
+        running += intervals[t]
+        cum[t] = running
+    df = pd.DataFrame({
+        "y": cum.astype(np.float32),
+        "y_interval": intervals.astype(np.float32),
+    }, index=idx)
+    return SyntheticData(
+        name="cumulative_daily_reset",
+        df=df,
+        meta={
+            "description": ("Daily-reset cumulative demand (energy_today-like). "
+                            "y is cumulative kWh-per-day; y_interval is the per-30min "
+                            "interval reference."),
+            "n_rows": str(len(df)),
+            "freq": "30min",
+            "n_days": "365",
+            "source_is_cumulative": "True",
+        },
+    )
+
+
+def all_datasets() -> Tuple[SyntheticData, SyntheticData, SyntheticData, SyntheticData, SyntheticData]:
+    return (make_pure_pv(0), make_cloudy_pv(0), make_realistic_pv(0),
+            make_ev_mixergy(0), make_cumulative_daily_reset(0))

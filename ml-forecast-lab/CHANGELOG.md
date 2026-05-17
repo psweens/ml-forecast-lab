@@ -41,11 +41,18 @@ verify the fixes.
   (always zero by construction; including them only adds
   head-input variance imbalance). Other linear-head backends are
   already restored to flatness ≈ 1.0 by PF1 alone.
-* **PF8 — softplus default for non-negative targets**: new
+* **PF8 — ReLU default for non-negative targets**: new
   ``ExperimentCfg.target_is_nonnegative`` flag mirrors
   ``source_is_cumulative``; when either is True and
-  ``output_activation='auto'``, the resolver picks softplus instead
-  of linear. Set this for PV power, irradiance, demand quantities.
+  ``output_activation='auto'``, the resolver picks ReLU instead of
+  linear. (Pre-v2.37 the auto path picked softplus for cumulative
+  targets — this was reverted to ReLU because softplus's
+  +log(2)≈0.69 floor in physical space catastrophically biased
+  low-magnitude cumulative interval targets. Verified on synthetic
+  cumulative-with-daily-reset data: softplus produced 900%
+  daily-total error vs ReLU's 30%.) LSTM keeps its zscore default
+  (its specialised path). Set ``target_is_nonnegative`` for PV
+  power, irradiance, household demand intervals.
 * **PF9 — daily_loss_weight default for non-negative targets**: new
   ``_resolve_daily_loss_weight()`` defaults the cumulative-trajectory
   loss weight to 0.5 (from 0.0) for non-negative neural targets when
@@ -85,10 +92,19 @@ Verification (``make_realistic_pv(0)``, extended_window=True default,
 True peak hour is 12 (noon, UTC) on this dataset; ideal flatness is
 1.0. Every backend except N-HiTS is recognisably correct after PF1-PF9.
 
-Tests: ``tests/unit/test_neural_pv_regression.py`` adds 10 tests
-covering each PF. All 10 PASS today; the previous xfail-strict
-versions XPASS-strict-fail when the fix lands, which is the intended
-"fix gets pinned" pattern.
+Cumulative-with-daily-reset verification: a second synthetic dataset
+``make_cumulative_daily_reset(0)`` (interval-form household demand,
+peaks at 19:00 evening, resets at midnight) was added. 16/17 backends
+produce correct peak hour (19) with daily_total_mape ≤ 38%; the only
+exception is SparseTSF which has peak=15 (its period-aware
+architecture struggles with the morning+evening dual-peak pattern).
+N-BEATS and N-HiTS — the two architecturally-different backends — now
+ALSO produce correct shapes on cumulative interval data
+(flat 0.74-0.78 with peak=19 ✓), which they couldn't do on PV.
+
+Tests: ``tests/unit/test_neural_pv_regression.py`` adds 12 tests
+covering each PF and the cumulative-with-daily-reset dataset
+invariants. All 12 PASS.
 
 ## 2.36.0
 

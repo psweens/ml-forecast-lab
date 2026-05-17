@@ -37,18 +37,21 @@ def _resolve_output_activation(exp_cfg, model_name: str = '') -> str:
       conditions gradients across widely-varying target scales and is the
       best general default for recurrent backends)
     - Other neural, ``source_is_cumulative=True`` OR
-      ``target_is_nonnegative=True``                  → ``'softplus'``
-      (non-negative, smooth gradient near zero — ideal for energy / rainfall
-      / counts / PV / irradiance / demand quantities)
+      ``target_is_nonnegative=True``                  → ``'relu'``
+      (hard non-negative clamp at 0, no positive bias — works for
+      arbitrary target magnitudes including small kWh-scale demand
+      intervals where softplus's +log(2)≈0.69 floor in physical space
+      would dominate small targets and push predictions 10-15× too high)
     - Other neural, default                           → ``'linear'`` (unbounded
       signed output suitable for temperature, net grid flow, deltas)
 
-    The ``target_is_nonnegative`` branch is the v2.37 PF8 fix: under MSE
-    training the linear-head backends were converging to slightly
-    under-amplitude predictions because the optimiser could balance
-    daytime under-shoot with slightly-negative night-time predictions.
-    Switching to softplus removes that escape valve and forces the head
-    to spend its capacity getting daytime amplitude right.
+    The ``target_is_nonnegative`` branch is the v2.37 PF8 fix. Note that
+    pre-v2.37 the same auto path picked ``softplus`` when
+    ``source_is_cumulative=True``; this was reverted in favour of ReLU
+    because softplus's positive floor in physical space catastrophically
+    biased low-magnitude cumulative interval targets (verified on
+    synthetic cumulative-with-daily-reset data — softplus produced 900%
+    daily-total error vs ReLU's 30%).
     """
     act = getattr(exp_cfg, 'output_activation', 'auto')
     if act == 'auto':
@@ -62,7 +65,7 @@ def _resolve_output_activation(exp_cfg, model_name: str = '') -> str:
             getattr(exp_cfg, 'source_is_cumulative', False)
             or getattr(exp_cfg, 'target_is_nonnegative', False)
         )
-        return 'softplus' if is_nonneg else 'linear'
+        return 'relu' if is_nonneg else 'linear'
     return act
 
 

@@ -59,6 +59,11 @@ class HarnessCfg:
     country: Optional[str] = "GB"
     # holdout: how many *days* at the tail to reserve for evaluation
     holdout_days: int = 14
+    # When True, the harness applies PF8 (softplus default) and PF9
+    # (daily_loss_weight = 0.5) — mirrors what main.py's
+    # _apply_output_activation / _resolve_daily_loss_weight do in
+    # production for non-negative targets.
+    target_is_nonnegative: bool = False
 
 
 @dataclass
@@ -112,13 +117,28 @@ def _train_neural_backend(
         horizon_steps=horizon_steps,
         future_features_df=future_df,
     )
-    # Build the backend with the experiment's knobs.
+    # Build the backend with the experiment's knobs. PF8/PF9: when
+    # target_is_nonnegative is set and the user hasn't overridden, swap
+    # in relu (or zscore for LSTM) and a default daily_loss_weight —
+    # mirrors main.py's _resolve_output_activation / _resolve_daily_loss_weight.
+    model_name = getattr(cls, "__name__", "").lower().replace("model", "")
+    if cfg.target_is_nonnegative:
+        if cfg.output_activation == "linear":
+            # LSTM gets zscore (its own normalisation path); other
+            # backends get relu (clamp at 0, no positive bias).
+            out_act = "zscore" if model_name == "lstm" else "relu"
+        else:
+            out_act = cfg.output_activation
+        dlw = cfg.daily_loss_weight if cfg.daily_loss_weight > 0 else 0.5
+    else:
+        out_act = cfg.output_activation
+        dlw = cfg.daily_loss_weight
     kwargs: Dict[str, Any] = dict(
         epochs=cfg.epochs,
         batch_size=cfg.batch_size,
         use_revin=cfg.use_revin,
-        output_activation=cfg.output_activation,
-        daily_loss_weight=cfg.daily_loss_weight,
+        output_activation=out_act,
+        daily_loss_weight=dlw,
         optimiser=cfg.optimiser,
         patience=max(8, cfg.epochs // 4),
     )
