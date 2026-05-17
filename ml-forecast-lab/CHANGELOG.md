@@ -1,5 +1,60 @@
 # Changelog
 
+## 2.37.3
+
+Fixes the v2.37 neural-PV "daytime-only training set" regression
+diagnosed via the v2.37.2 debug bundle. User's ``optimised_solar``
+forecast was predicting 0.3-0.7 kW at 23:00 with the daily peak
+phase-shifted to 18:00 — symptoms of a model that had never seen
+night-time data during training.
+
+* **Root cause**: HA's recorder is delta-storage based. When a PV
+  sensor sits at 0 W from sunset to sunrise it records one
+  transition and then nothing, or reports ``unavailable`` (parsed as
+  NaN) while the inverter sleeps. The default
+  ``gap_handling='interpolate'`` only fills gaps up to
+  ``gap_max_minutes`` (90), so the 10-14h night gap stays NaN and
+  the downstream ``result.dropna()`` deletes every night-time row.
+  The user's debug bundle confirmed: 2085 of 2088 training rows had
+  ``sun_elevation >= 0`` — hours 21-03 were completely absent from
+  the training index. The model never learned "PV = 0 when sun is
+  below the horizon", so at inference it predicted non-zero across
+  the night and a phase-shifted bell curve.
+* **Fix — solar night-time zero-fill**: new
+  ``_apply_solar_night_fill`` helper runs after solar physics
+  features are computed and before the dropna step. For experiments
+  with ``target_is_nonnegative=True`` AND ``clear_sky_ghi`` (or
+  ``sun_elevation``) in the result columns, fills NaN ``y`` slots
+  with 0 wherever the physics says the sun is below the horizon.
+  Where ``clear_sky_ghi`` is present it's used as the gate (matches
+  the existing physics-gate in ``features.py`` line 192); otherwise
+  falls back to ``sun_elevation < -0.833°`` (standard astronomical
+  horizon, accounts for atmospheric refraction).
+* **log_transform=True works without inverse**: log(1+0) = 0, so
+  writing 0.0 is correct whether the target series is in raw or
+  log-transformed space — no inverse needed.
+* **Daytime NaN is preserved**: a sensor outage during daylight
+  (clear_sky_ghi > 0 but y is NaN) is NOT filled — it stays NaN and
+  drops out at the dropna step. Silent fill of genuine sensor
+  failures would mask real data quality problems.
+* **Gated on ``target_is_nonnegative=True``**: signed targets (net
+  grid flow, temperature delta) keep the original drop-on-NaN
+  behaviour. Only solar / irradiance-style experiments are touched.
+* **Log line surfaces the fill**: each retrain now logs ``Solar
+  night-time fill: N NaN rows (sun below horizon) → 0`` so users
+  can confirm the fix took effect — typical doubling of training
+  rows from ~2088 to ~4272 on a 30-min PV experiment.
+* **8 regression tests** (``tests/unit/test_solar_night_fill.py``)
+  pin the contract: gate short-circuits, ghi/sun_elev fallback,
+  daytime NaN preserved, idempotence, full 24-hour coverage after
+  fill+dropna, log_transform compatibility.
+
+Known scope limit: the wider issue — that ANY sensor going
+"unavailable" for >90 min gets dropped from training (EV charger
+when idle, battery flow when sleeping, etc.) — is separate and
+will be addressed in a follow-up. Solar is the only case where the
+correct fill value is deterministically known.
+
 ## 2.37.2
 
 Diagnostic surface for retrain regressions. Synthetic integration tests
