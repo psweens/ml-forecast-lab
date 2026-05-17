@@ -3518,6 +3518,23 @@ class MLForecastLabApp:
                     f"= {seq_X.shape[1]} steps × {seq_X.shape[2]} channels, "
                     f"future cols={list(future_features_df.columns)}"
                 )
+                # v2.37 PF1-PF9 diagnostic — surfaces the exact knobs the
+                # neural backend will receive in fit(). When a user reports
+                # "the LSTM forecast is still flat after the v2.37 upgrade"
+                # this log line is the first place to look: it confirms
+                # whether the past_window_size / extended_window /
+                # output_activation / daily_loss_weight values are what
+                # the PF1-PF9 fixes expect.
+                logger.info(
+                    f"  PF1-PF9 diagnostics for {prod_model_name}: "
+                    f"past_window_size={seq_kwargs.get('past_window_size')}, "
+                    f"extended_window={seq_kwargs.get('extended_window')}, "
+                    f"output_activation={getattr(model, 'output_activation', '<n/a>')}, "
+                    f"daily_loss_weight={getattr(model, 'daily_loss_weight', '<n/a>')}, "
+                    f"use_revin={getattr(model, 'use_revin', '<n/a>')}, "
+                    f"source_is_cumulative={getattr(exp_cfg, 'source_is_cumulative', False)}, "
+                    f"target_is_nonnegative={getattr(exp_cfg, 'target_is_nonnegative', False)}"
+                )
                 y_train_seq = seq_y
                 X_train_seq = X[-len(seq_y):]
 

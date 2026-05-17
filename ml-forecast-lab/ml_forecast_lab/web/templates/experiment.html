@@ -158,6 +158,15 @@
                 </label>
                 <span class="field-label">Daily reset <span class="info-tip">?<span class="tip-text">Only relevant when <b>Cumulative source</b> is on. Turn on if the counter resets at local midnight (typical for "today" sensors like <code>sensor.energy_today</code>) so the add-on knows to handle the rollover instead of treating it as a huge negative jump.</span></span></span>
             </div>
+            <div class="settings-toggle-field">
+                <label class="toggle-switch">
+                    <input type="checkbox" data-field="target_is_nonnegative"
+                           {% if exp_config and exp_config.target_is_nonnegative %}checked{% endif %}
+                           onchange="saveSettingsToggle(this, 'target_is_nonnegative')">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span class="field-label">Non-negative target <span class="info-tip">?<span class="tip-text">Turn on when the target is physically non-negative (PV power, solar irradiance, household demand, weather rainfall) but isn't a cumulative sensor. Neural models then default to a ReLU output activation (clamps predictions at 0 with no bias) and a small daily-loss-weight (penalises systematic under/over-shoot of the day's total). Without this flag, models with a flat-collapsed forecast on PV-style targets see noticeable shape improvement after retrain. Leave off for signed targets like net grid flow or temperature deltas.</span></span></span>
+            </div>
             <div class="exp-field" style="max-width:180px;">
                 <label class="field-label">Max increment <span class="info-tip">?<span class="tip-text">Maximum allowed value change per interval. Larger jumps are treated as anomalies or resets. Leave empty for no limit.</span></span></label>
                 <input type="number" class="setting-input" data-field="max_increment" step="any" min="0"

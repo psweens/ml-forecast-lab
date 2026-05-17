@@ -132,17 +132,52 @@ console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(_PhaseFormatter(LOG_FORMAT, datefmt="%H:%M:%S"))
 root_logger.addHandler(console_handler)
 
-# Rotating file handler — detailed format with module name for debugging
+# File logging — TWO handlers so users get both:
+#   1. Size-rotating ``mlfl.log`` — newest entries always there, never larger
+#      than ~10 MB per file × 5 files (~50 MB total). Convenient for tailing
+#      with `tail -F /data/ml_forecast_lab/logs/mlfl.log` in real time.
+#   2. Time-rotating ``mlfl-YYYY-MM-DD.log`` — one file per UTC day, kept for
+#      14 days. Easier to grep historical issues against a known timeframe
+#      (e.g. "what did the v2.37 retrain look like on 17 May?").
+# Total disk footprint is bounded: 50 MB live + ~14 × N MB historical where
+# N is the typical daily log volume (usually 1-3 MB for INFO-level traffic,
+# more on DEBUG). On an SD-card system the user can drop the time-rotating
+# handler by setting MLFL_DAILY_LOG_KEEP=0 in the addon config.
 file_handler = logging.handlers.RotatingFileHandler(
     str(LOG_FILE),
-    maxBytes=5 * 1024 * 1024,
+    maxBytes=10 * 1024 * 1024,
     backupCount=5,
     encoding="utf-8",
 )
 file_handler.setFormatter(_PhaseFormatter(LOG_FORMAT_FILE, datefmt="%Y-%m-%d %H:%M:%S"))
 root_logger.addHandler(file_handler)
 
+# Daily rotating archive — one file per UTC day, 14-day retention. The
+# RotatingFileHandler above is for the "current" tail; this gives the
+# user a per-day historical record for ad-hoc forensics. Suppress
+# with MLFL_DAILY_LOG_KEEP=0.
+_daily_keep = int(os.getenv("MLFL_DAILY_LOG_KEEP", "14"))
+if _daily_keep > 0:
+    daily_handler = logging.handlers.TimedRotatingFileHandler(
+        str(LOG_DIR / "mlfl-daily.log"),
+        when="midnight",
+        interval=1,
+        backupCount=_daily_keep,
+        encoding="utf-8",
+        utc=True,
+    )
+    # Filename suffix so rotated files become ``mlfl-daily.log.2026-05-17``.
+    daily_handler.suffix = "%Y-%m-%d"
+    daily_handler.setFormatter(
+        _PhaseFormatter(LOG_FORMAT_FILE, datefmt="%Y-%m-%d %H:%M:%S")
+    )
+    root_logger.addHandler(daily_handler)
+
 logger = logging.getLogger(__name__)
+logger.info(
+    f"Log files at {LOG_DIR}: mlfl.log (10 MB × 5 size-rotated) + "
+    f"mlfl-daily.log (UTC daily × {_daily_keep} kept)"
+)
 
 
 
