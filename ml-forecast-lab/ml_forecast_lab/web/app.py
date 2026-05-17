@@ -1891,7 +1891,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"success": False, "error": "name and target_entity are required"})
 
         exp_dict = {"name": name, "target_entity": target_entity}
-        for opt in ("source_is_cumulative", "reset_daily"):
+        for opt in ("source_is_cumulative", "reset_daily", "target_is_nonnegative"):
             if opt in body:
                 exp_dict[opt] = bool(body[opt])
 
@@ -3334,6 +3334,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "future_periods": lambda v: int(v) if int(v) >= 1 else None,
             "source_is_cumulative": lambda v: bool(v),
             "reset_daily": lambda v: bool(v),
+            "target_is_nonnegative": lambda v: bool(v),
             "log_transform": lambda v: bool(v),
             "forecast_every_minutes": lambda v: int(v) if int(v) >= 1 else None,
             "retrain_every_hours": lambda v: float(v) if float(v) >= 0.1 else None,

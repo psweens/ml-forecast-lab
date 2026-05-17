@@ -244,7 +244,13 @@ The add-on log is visible from the HA add-on page or via the Web UI's **Logs** t
 | `[PUB]` | Sensor publication back to HA. |
 | `[WEB]` | FastAPI request handling. |
 
-A rotating file copy is written to `/data/ml_forecast_lab/logs/mlfl.log` inside the container (5 MB × 5 backups).
+**Persistent log files** (v2.37+) live in `/data/ml_forecast_lab/logs/` inside the container:
+
+* `mlfl.log` — size-rotated, 10 MB × 5 backups (≈50 MB total). Always tails the most recent activity. Open it with the **File editor** add-on or via Samba.
+* `mlfl-daily.log` + `mlfl-daily.log.YYYY-MM-DD` — one file per UTC day, kept for 14 days. Easier to grep against a specific date when investigating an issue.
+* Both files use the same `[PHASE] level [module] message` format as the console log, so they're directly greppable.
+* Suppress the daily archive by setting `MLFL_DAILY_LOG_KEEP=0` in the add-on environment (the size-rotated log keeps working).
+* Disk footprint is bounded — ~50 MB live + (typical INFO-level daily volume × 14 days).
 
 ### Backing up trained models
 
