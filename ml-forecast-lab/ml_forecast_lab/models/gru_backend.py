@@ -39,16 +39,23 @@ except ImportError:
 
 
 class _TemporalAttention(nn.Module):
-    """Learnable attention over RNN timesteps (matches the LSTM backend)."""
+    """Learnable attention over RNN timesteps (matches the LSTM backend).
+
+    v2.37 PF3: see ``lstm_backend._TemporalAttention`` — GRU's attention
+    is a verbatim copy of LSTM's, so the same past-only mask applies.
+    """
 
     def __init__(self, hidden_size: int):
         super().__init__()
         self.attn_proj = nn.Linear(hidden_size, hidden_size)
         self.attn_vector = nn.Parameter(torch.randn(hidden_size))
 
-    def forward(self, rnn_out):
+    def forward(self, rnn_out, past_window_size: Optional[int] = None):
         scores = torch.tanh(self.attn_proj(rnn_out))
         scores = (scores * self.attn_vector).sum(dim=-1)
+        if past_window_size is not None and past_window_size < scores.size(1):
+            scores = scores.clone()
+            scores[:, past_window_size:] = float("-inf")
         weights = F.softmax(scores, dim=-1)
         context = (rnn_out * weights.unsqueeze(-1)).sum(dim=1)
         return context
@@ -60,7 +67,8 @@ class _GRUNet(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, num_layers: int,
                  dropout: float, n_horizons: int = 1,
                  output_activation: str = 'linear', sigmoid_scale: float = 1.0,
-                 use_revin: bool = True, target_channel: int = 0):
+                 use_revin: bool = True, target_channel: int = 0,
+                 past_window_size: Optional[int] = None):
         super().__init__()
         self.n_horizons = n_horizons
         self.use_revin = use_revin
@@ -68,6 +76,7 @@ class _GRUNet(nn.Module):
             _RevIN(input_size, target_channel=target_channel, affine=True)
             if use_revin else None
         )
+        self.past_window_size = past_window_size
         self.layer_norm = nn.LayerNorm(input_size)
         self.gru = nn.GRU(
             input_size=input_size,
@@ -88,10 +97,12 @@ class _GRUNet(nn.Module):
 
     def forward(self, x):
         if self.revin is not None:
-            x = self.revin.normalize(x)
+            x = self.revin.normalize(x, past_window_size=self.past_window_size)
         x = self.layer_norm(x)
         rnn_out, _ = self.gru(x)
-        context = self.attention(rnn_out)
+        context = self.attention(
+            rnn_out, past_window_size=self.past_window_size,
+        )
         out = self.head(context)
         if self.revin is not None:
             out = self.revin.denormalize(out)
@@ -153,6 +164,10 @@ class GRUModel(ForecastModel):
         self._sigmoid_scale: float = 1.0
         self._y_mean: Any = 0.0
         self._y_std: Any = 1.0
+        # past_window_size enables PF1 (RevIN past-only stats); set per-fit
+        # from kwargs, round-tripped in save/load. None means legacy
+        # single-window path.
+        self._past_window_size: Optional[int] = None
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -189,6 +204,7 @@ class GRUModel(ForecastModel):
         X_seq = sequence_data if sequence_data is not None else self._reshape_to_sequences(X_train)
         _, seq_len, input_size = X_seq.shape
         self._input_size = input_size
+        self._past_window_size = kwargs.get("past_window_size")
 
         if not self.use_revin:
             self._channel_mean = X_seq.mean(axis=(0, 1))
@@ -237,6 +253,7 @@ class GRUModel(ForecastModel):
             n_horizons=self._n_horizons, output_activation=_eff,
             sigmoid_scale=self._sigmoid_scale,
             use_revin=self.use_revin, target_channel=self.target_channel,
+            past_window_size=self._past_window_size,
         )
         optimiser = self._build_optimiser(
             self._model.parameters(), self.optimiser, self.learning_rate,
@@ -379,6 +396,7 @@ class GRUModel(ForecastModel):
             "sigmoid_scale": self._sigmoid_scale,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "past_window_size": self._past_window_size,
         }, path)
         logger.info(f"Saved GRU model to {path}")
 
@@ -391,6 +409,7 @@ class GRUModel(ForecastModel):
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
         self._y_mean = data.get("y_mean", 0.0)
         self._y_std = data.get("y_std", 1.0)
+        self._past_window_size = data.get("past_window_size")
         self._input_size = data.get("input_size")
         state_dict = data.get("state_dict")
         if state_dict is not None and self._input_size is not None:
@@ -401,6 +420,7 @@ class GRUModel(ForecastModel):
                 n_horizons=self._n_horizons, output_activation=_eff,
                 sigmoid_scale=self._sigmoid_scale,
                 use_revin=self.use_revin, target_channel=self.target_channel,
+                past_window_size=self._past_window_size,
             )
             self._model.load_state_dict(state_dict)
             self._model.eval()

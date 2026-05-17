@@ -71,7 +71,8 @@ class _FITSNet(nn.Module):
     def __init__(self, seq_len: int, n_channels: int, n_horizons: int,
                  cutoff_ratio: float = 0.25,
                  output_activation: str = 'linear', sigmoid_scale: float = 1.0,
-                 use_revin: bool = True, target_channel: int = 0):
+                 use_revin: bool = True, target_channel: int = 0,
+                 past_window_size: Optional[int] = None):
         super().__init__()
         self.use_revin = use_revin
         self.revin = (
@@ -82,6 +83,7 @@ class _FITSNet(nn.Module):
         self.n_channels = n_channels
         self.n_horizons = n_horizons
         self.target_channel = target_channel
+        self.past_window_size = past_window_size
         self.total_len = seq_len + n_horizons
 
         # Number of frequency bins in the rfft output of length seq_len /
@@ -100,7 +102,7 @@ class _FITSNet(nn.Module):
     def forward(self, x: "torch.Tensor") -> "torch.Tensor":
         # x: (batch, seq_len, n_channels)
         if self.revin is not None:
-            x = self.revin.normalize(x)
+            x = self.revin.normalize(x, past_window_size=self.past_window_size)
         # Per-window per-channel mean removal — FITS's standard preprocessing,
         # gives the linear layer a stationary input regardless of level.
         # When RevIN is on, this adds a small extra mean removal which is
@@ -193,6 +195,10 @@ class FITSModel(ForecastModel):
         self._sigmoid_scale: float = 1.0
         self._y_mean: Any = 0.0
         self._y_std: Any = 1.0
+        # past_window_size enables PF1 (RevIN past-only stats); set per-fit
+        # from kwargs, round-tripped in save/load. None means legacy
+        # single-window path.
+        self._past_window_size: Optional[int] = None
 
     @property
     def name(self) -> str:
@@ -222,6 +228,7 @@ class FITSModel(ForecastModel):
             sigmoid_scale=self._sigmoid_scale,
             use_revin=self.use_revin,
             target_channel=self.target_channel,
+            past_window_size=self._past_window_size,
         )
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray,
@@ -240,6 +247,7 @@ class FITSModel(ForecastModel):
         _, seq_len, n_channels = X_seq.shape
         self._seq_len = seq_len
         self._n_channels = n_channels
+        self._past_window_size = kwargs.get("past_window_size")
 
         if not self.use_revin:
             self._channel_mean = X_seq.mean(axis=(0, 1))
@@ -420,6 +428,7 @@ class FITSModel(ForecastModel):
             "sigmoid_scale": self._sigmoid_scale,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "past_window_size": self._past_window_size,
         }, path)
         logger.info(f"Saved FITS model to {path}")
 
@@ -434,6 +443,7 @@ class FITSModel(ForecastModel):
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
         self._y_mean = data.get("y_mean", 0.0)
         self._y_std = data.get("y_std", 1.0)
+        self._past_window_size = data.get("past_window_size")
         if self._seq_len is not None and self._n_channels is not None:
             self._model = self._build_model(self._seq_len, self._n_channels,
                                             self._n_horizons)

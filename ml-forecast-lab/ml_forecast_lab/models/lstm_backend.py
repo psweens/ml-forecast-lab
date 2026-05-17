@@ -34,17 +34,32 @@ except ImportError:
 
 
 class _TemporalAttention(nn.Module):
-    """Learnable attention over LSTM timesteps."""
+    """Learnable attention over LSTM timesteps.
+
+    v2.37 PF3: when called with ``past_window_size`` set on the
+    enclosing module, future positions (indices ``[past_window_size:]``)
+    have their scores pushed to ``-inf`` before softmax so the attention
+    cannot read absolute-time covariates from the zero-target future
+    block. Without this mask the LSTM puts ~48% of its weight mass on
+    future positions and learns to invert phase (Phase 3 §3.3 in
+    docs/investigations/2026-05-neural-pv.md).
+    """
 
     def __init__(self, hidden_size: int):
         super().__init__()
         self.attn_proj = nn.Linear(hidden_size, hidden_size)
         self.attn_vector = nn.Parameter(torch.randn(hidden_size))
 
-    def forward(self, lstm_out):
+    def forward(self, lstm_out, past_window_size: Optional[int] = None):
         # lstm_out: (batch, seq_len, hidden_size)
         scores = torch.tanh(self.attn_proj(lstm_out))  # (batch, seq_len, hidden)
         scores = (scores * self.attn_vector).sum(dim=-1)  # (batch, seq_len)
+        if past_window_size is not None and past_window_size < scores.size(1):
+            # Push future-position scores to -inf so softmax assigns them
+            # zero probability. Past-only path is unchanged because the
+            # condition is false.
+            scores = scores.clone()
+            scores[:, past_window_size:] = float("-inf")
         weights = F.softmax(scores, dim=-1)  # (batch, seq_len)
         context = (lstm_out * weights.unsqueeze(-1)).sum(dim=1)  # (batch, hidden)
         return context
@@ -56,7 +71,8 @@ class _LSTMNet(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, num_layers: int,
                  dropout: float, n_horizons: int = 1,
                  output_activation: str = 'linear', sigmoid_scale: float = 1.0,
-                 use_revin: bool = True, target_channel: int = 0):
+                 use_revin: bool = True, target_channel: int = 0,
+                 past_window_size: Optional[int] = None):
         super().__init__()
         self.n_horizons = n_horizons
         self.use_revin = use_revin
@@ -64,6 +80,7 @@ class _LSTMNet(nn.Module):
         # shift per-window — replaces the need for dataset-level target
         # z-scoring on non-stationary series.
         self.revin = _RevIN(input_size, target_channel=target_channel, affine=True) if use_revin else None
+        self.past_window_size = past_window_size
         self.layer_norm = nn.LayerNorm(input_size)
         self.lstm = nn.LSTM(
             input_size=input_size,
@@ -85,10 +102,14 @@ class _LSTMNet(nn.Module):
     def forward(self, x):
         # x: (batch, seq_len, input_size)
         if self.revin is not None:
-            x = self.revin.normalize(x)
+            x = self.revin.normalize(x, past_window_size=self.past_window_size)
         x = self.layer_norm(x)
         lstm_out, _ = self.lstm(x)  # (batch, seq_len, hidden_size)
-        context = self.attention(lstm_out)  # (batch, hidden_size)
+        # PF3: attention masks future positions so it can't read absolute
+        # time from the zero-target block.
+        context = self.attention(
+            lstm_out, past_window_size=self.past_window_size,
+        )  # (batch, hidden_size)
         out = self.head(context)  # (batch, n_horizons)
         if self.revin is not None:
             # Denormalise in z-space before the output activation so the
@@ -165,6 +186,10 @@ class LSTMModel(ForecastModel):
         # Defaults (0.0, 1.0) are identity — safe no-op for non-zscore paths.
         self._y_mean: Any = 0.0
         self._y_std: Any = 1.0
+        # past_window_size enables PF1 (RevIN past-only stats); set per-fit
+        # from kwargs, round-tripped in save/load. None means legacy
+        # single-window path.
+        self._past_window_size: Optional[int] = None
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -206,6 +231,7 @@ class LSTMModel(ForecastModel):
             X_seq = self._reshape_to_sequences(X_train)
         _, seq_len, input_size = X_seq.shape
         self._input_size = input_size
+        self._past_window_size = kwargs.get("past_window_size")
 
         # Dataset-level channel normalisation is mutually exclusive with
         # RevIN: RevIN handles per-window instance-level normalisation inside
@@ -298,6 +324,7 @@ class LSTMModel(ForecastModel):
             sigmoid_scale=self._sigmoid_scale,
             use_revin=self.use_revin,
             target_channel=self.target_channel,
+            past_window_size=self._past_window_size,
         )
         optimiser = self._build_optimiser(
             self._model.parameters(), self.optimiser, self.learning_rate,
@@ -502,6 +529,7 @@ class LSTMModel(ForecastModel):
             # checkpoints re-saved from a zscore run round-trip cleanly.
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "past_window_size": self._past_window_size,
         }, path)
         logger.info(f"Saved LSTM model to {path}")
 
@@ -517,6 +545,7 @@ class LSTMModel(ForecastModel):
         # checkpoints saved before this field existed.
         self._y_mean = data.get("y_mean", 0.0)
         self._y_std = data.get("y_std", 1.0)
+        self._past_window_size = data.get("past_window_size")
 
         # Reconstruct the nn.Module and load weights
         self._input_size = data.get("input_size")
@@ -533,6 +562,7 @@ class LSTMModel(ForecastModel):
                 sigmoid_scale=self._sigmoid_scale,
                 use_revin=self.use_revin,
                 target_channel=self.target_channel,
+                past_window_size=self._past_window_size,
             )
             self._model.load_state_dict(state_dict)
             self._model.eval()

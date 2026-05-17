@@ -57,15 +57,33 @@ class _NBeatsBlock(nn.Module):
 
 
 class _NBeatsNet(nn.Module):
-    """Generic N-BEATS with doubly-residual stacking."""
+    """Generic N-BEATS with doubly-residual stacking.
+
+    v2.37 change (PF4): when ``past_window_size`` is set and is less
+    than ``seq_len``, only the PAST slice ``x[:, :past_window_size, :]``
+    is flattened and fed to the backcast/forecast stack. This avoids
+    the "RC4: backcast on zero-future" degeneration where N-BEATS sees
+    half its input as zero-target-channel placeholders, the backcast
+    learns to trivially reconstruct those zeros, and the forecast
+    residual collapses. Past-only training windows (the legacy path)
+    behave exactly as before because ``past_window_size`` defaults to
+    None / seq_len.
+    """
 
     def __init__(self, seq_len: int, n_channels: int, hidden_size: int,
                  n_stacks: int, blocks_per_stack: int, n_fc_layers: int,
                  n_horizons: int = 1,
-                 output_activation: str = 'linear', sigmoid_scale: float = 1.0):
+                 output_activation: str = 'linear', sigmoid_scale: float = 1.0,
+                 past_window_size: Optional[int] = None):
         super().__init__()
         self.n_horizons = n_horizons
-        self.flat_input_size = seq_len * n_channels
+        # When past_window_size is set, the stack only consumes the past
+        # slice; otherwise it consumes the whole window (legacy).
+        if past_window_size is not None and past_window_size < seq_len:
+            self.past_window_size = int(past_window_size)
+        else:
+            self.past_window_size = seq_len
+        self.flat_input_size = self.past_window_size * n_channels
 
         self.blocks = nn.ModuleList()
         for _ in range(n_stacks):
@@ -78,7 +96,12 @@ class _NBeatsNet(nn.Module):
     def forward(self, x):
         # x: (batch, seq_len, n_channels)
         batch_size = x.size(0)
-        residual = x.reshape(batch_size, -1)  # (batch, seq_len * n_channels)
+        # PF4: backcast/forecast operate on the past slice only when
+        # ``past_window_size`` is set. The future block is ignored — N-BEATS
+        # has no covariate-aware mechanism and the future block's only
+        # useful signal would be the target (which is zero by construction).
+        past = x[:, : self.past_window_size, :]
+        residual = past.reshape(batch_size, -1)  # (batch, past * n_channels)
         forecast_sum = torch.zeros(batch_size, self.n_horizons, device=x.device)
 
         for block in self.blocks:
@@ -147,6 +170,9 @@ class NBeatsModel(ForecastModel):
         self._y_mean: Any = 0.0
         self._y_std: Any = 1.0
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
+        # PF4: when set, the backcast/forecast stack only sees the past
+        # slice. None = legacy whole-window path (backwards compatible).
+        self._past_window_size: Optional[int] = None
 
     @property
     def name(self) -> str:
@@ -188,6 +214,10 @@ class NBeatsModel(ForecastModel):
         _, seq_len, input_size = X_seq.shape
         self._input_size = input_size
         self._seq_len = seq_len
+        # PF4 plumbing: kwargs supplies past_window_size when the
+        # training pipeline ran create_sliding_windows with an extended
+        # window. None means the legacy single-window path.
+        self._past_window_size = kwargs.get("past_window_size")
 
         # Per-channel z-score standardisation (fitted on training data)
         self._channel_mean = X_seq.mean(axis=(0, 1))  # shape (n_channels,)
@@ -249,6 +279,7 @@ class NBeatsModel(ForecastModel):
             n_horizons=self._n_horizons,
             output_activation=self.output_activation,
             sigmoid_scale=self._sigmoid_scale,
+            past_window_size=self._past_window_size,
         )
         optimiser = self._build_optimiser(
             self._model.parameters(), self.optimiser, self.learning_rate,
@@ -441,6 +472,7 @@ class NBeatsModel(ForecastModel):
             "sigmoid_scale": self._sigmoid_scale,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "past_window_size": self._past_window_size,
         }, path)
         logger.info(f"Saved N-BEATS model to {path}")
 
@@ -454,6 +486,8 @@ class NBeatsModel(ForecastModel):
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
         self._y_mean = data.get("y_mean", 0.0)
         self._y_std = data.get("y_std", 1.0)
+        # past_window_size absent on pre-v2.37 checkpoints (None = legacy).
+        self._past_window_size = data.get("past_window_size")
 
         # Reconstruct the nn.Module and load weights
         self._input_size = data.get("input_size")
@@ -466,6 +500,7 @@ class NBeatsModel(ForecastModel):
                 n_horizons=self._n_horizons,
                 output_activation=self.output_activation,
                 sigmoid_scale=self._sigmoid_scale,
+                past_window_size=self._past_window_size,
             )
             self._model.load_state_dict(state_dict)
             self._model.eval()

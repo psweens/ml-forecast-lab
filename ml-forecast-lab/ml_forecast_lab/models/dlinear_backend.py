@@ -49,7 +49,8 @@ class _DLinearNet(nn.Module):
                  n_horizons: int = 1, output_activation: str = 'linear',
                  sigmoid_scale: float = 1.0,
                  use_revin: bool = True, target_channel: int = 0,
-                 n_quantiles: int = 1):
+                 n_quantiles: int = 1,
+                 past_window_size: Optional[int] = None):
         super().__init__()
         self.use_revin = use_revin
         # Reversible instance norm (Kim et al. 2022). Handles distribution
@@ -61,23 +62,52 @@ class _DLinearNet(nn.Module):
         self.n_horizons = n_horizons
         self.n_quantiles = max(1, int(n_quantiles))
         self.output_activation = output_activation
+        self.target_channel = target_channel
+        self.n_channels = n_channels
+        # PF7 (v2.37): when past_window_size < seq_len the future block's
+        # target-channel slot is always zero. Excluding it from the head
+        # input cuts head-input variance imbalance and lets the linear
+        # head spend capacity on signal-bearing positions.
+        if past_window_size is not None and past_window_size < seq_len:
+            self.past_window_size = int(past_window_size)
+            self._has_future = True
+            future_len = seq_len - self.past_window_size
+            flat = (self.past_window_size * n_channels
+                    + future_len * (n_channels - 1))
+        else:
+            self.past_window_size = seq_len
+            self._has_future = False
+            flat = seq_len * n_channels
         pad = kernel_size // 2
         self.avg_pool = nn.AvgPool1d(kernel_size, stride=1, padding=pad, count_include_pad=False)
-        flat = seq_len * n_channels
         out_dim = n_horizons * self.n_quantiles
         self.trend_linear = nn.Linear(flat, out_dim)
         self.seasonal_linear = nn.Linear(flat, out_dim)
         self.activation = _build_activation(output_activation, scale=sigmoid_scale)
 
+    def _head_flatten(self, x_ch_first: "torch.Tensor") -> "torch.Tensor":
+        """Flatten (B, n_channels, seq_len) → (B, flat) honouring PF7."""
+        if not self._has_future:
+            return x_ch_first.reshape(x_ch_first.shape[0], -1)
+        past = x_ch_first[:, :, : self.past_window_size]
+        future = x_ch_first[:, :, self.past_window_size :]
+        keep = [c for c in range(self.n_channels) if c != self.target_channel]
+        future_kept = future[:, keep, :]
+        return torch.cat(
+            [past.reshape(past.shape[0], -1),
+             future_kept.reshape(future_kept.shape[0], -1)],
+            dim=1,
+        )
+
     def forward(self, x: "torch.Tensor") -> "torch.Tensor":
         # x: (batch, seq_len, n_channels)
         if self.revin is not None:
-            x = self.revin.normalize(x)
+            x = self.revin.normalize(x, past_window_size=self.past_window_size if self._has_future else None)
         x_t = x.permute(0, 2, 1)
         trend = self.avg_pool(x_t)[:, :, :self.seq_len]
         seasonal = x_t - trend
-        trend_flat = trend.reshape(trend.shape[0], -1)
-        seasonal_flat = seasonal.reshape(seasonal.shape[0], -1)
+        trend_flat = self._head_flatten(trend)
+        seasonal_flat = self._head_flatten(seasonal)
         out = self.trend_linear(trend_flat) + self.seasonal_linear(seasonal_flat)
         if self.n_quantiles > 1:
             out = out.view(-1, self.n_horizons, self.n_quantiles)
@@ -155,6 +185,10 @@ class DLinearModel(ForecastModel):
         # Identity defaults so non-zscore paths are a safe no-op.
         self._y_mean: Any = 0.0
         self._y_std: Any = 1.0
+        # past_window_size enables PF1 (RevIN past-only stats); set per-fit
+        # from kwargs, round-tripped in save/load. None means legacy
+        # single-window path.
+        self._past_window_size: Optional[int] = None
 
     @property
     def name(self) -> str:
@@ -187,6 +221,7 @@ class DLinearModel(ForecastModel):
             use_revin=self.use_revin,
             target_channel=self.target_channel,
             n_quantiles=max(1, len(self.quantiles)),
+            past_window_size=self._past_window_size,
         )
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray, **kwargs: Any) -> Dict[str, Any]:
@@ -211,6 +246,7 @@ class DLinearModel(ForecastModel):
         _, seq_len, n_channels = X_seq.shape
         self._seq_len = seq_len
         self._n_channels = n_channels
+        self._past_window_size = kwargs.get("past_window_size")
 
         # Dataset-level channel normalisation is mutually exclusive with
         # RevIN: RevIN handles per-window instance-level normalisation inside
@@ -507,6 +543,7 @@ class DLinearModel(ForecastModel):
             "sigmoid_scale": self._sigmoid_scale,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "past_window_size": self._past_window_size,
         }, path)
         logger.info(f"Saved DLinear model to {path}")
 
@@ -521,6 +558,7 @@ class DLinearModel(ForecastModel):
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
         self._y_mean = data.get("y_mean", 0.0)
         self._y_std = data.get("y_std", 1.0)
+        self._past_window_size = data.get("past_window_size")
 
         if self._seq_len is not None and self._n_channels is not None:
             self._model = self._build_model(self._seq_len, self._n_channels,

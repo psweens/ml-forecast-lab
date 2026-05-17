@@ -72,13 +72,15 @@ class _CNNNet(nn.Module):
     def __init__(self, input_size: int, seq_len: int, n_filters: int, kernel_size: int,
                  n_layers: int, dilation_base: int, dropout: float, n_horizons: int = 1,
                  output_activation: str = 'linear', sigmoid_scale: float = 1.0,
-                 use_revin: bool = True, target_channel: int = 0):
+                 use_revin: bool = True, target_channel: int = 0,
+                 past_window_size: Optional[int] = None):
         super().__init__()
         self.n_horizons = n_horizons
         self.use_revin = use_revin
         # RevIN (Kim et al. 2022): per-window instance normalisation. Handles
         # distribution shift on non-stationary series — on by default.
         self.revin = _RevIN(input_size, target_channel=target_channel, affine=True) if use_revin else None
+        self.past_window_size = past_window_size
         self.layer_norm = nn.LayerNorm(input_size)
         layers = []
         for i in range(n_layers):
@@ -109,13 +111,23 @@ class _CNNNet(nn.Module):
     def forward(self, x):
         # x: (batch, seq_len, input_size)
         if self.revin is not None:
-            x = self.revin.normalize(x)
+            x = self.revin.normalize(x, past_window_size=self.past_window_size)
         x = self.layer_norm(x)
         x = x.permute(0, 2, 1)  # → (batch, channels, seq_len)
         out = self.blocks(x)  # (batch, n_filters, seq_len)
 
-        # Learnable weighted average pooling
-        weights = F.softmax(self.pool_weights, dim=0)  # (seq_len,)
+        # Learnable weighted average pooling.
+        # PF5 (v2.37): mask future-position pool weights to -inf before
+        # softmax so the pooled context can't include zero-target future
+        # slots. Past-only training windows (past_window_size==seq_len
+        # or None) leave the original behaviour untouched.
+        pool_scores = self.pool_weights
+        if (self.past_window_size is not None
+                and self.past_window_size < pool_scores.size(0)):
+            mask = torch.zeros_like(pool_scores)
+            mask[self.past_window_size:] = float("-inf")
+            pool_scores = pool_scores + mask
+        weights = F.softmax(pool_scores, dim=0)  # (seq_len,)
         pooled = (out * weights.unsqueeze(0).unsqueeze(0)).sum(dim=2)  # (batch, n_filters)
 
         out = self.head(pooled)  # (batch, n_horizons)
@@ -190,6 +202,10 @@ class CNNModel(ForecastModel):
         # Identity defaults so non-zscore paths are a safe no-op.
         self._y_mean: Any = 0.0
         self._y_std: Any = 1.0
+        # past_window_size enables PF1 (RevIN past-only stats); set per-fit
+        # from kwargs, round-tripped in save/load. None means legacy
+        # single-window path.
+        self._past_window_size: Optional[int] = None
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -232,6 +248,7 @@ class CNNModel(ForecastModel):
         _, seq_len, input_size = X_seq.shape
         self._input_size = input_size
         self._sequence_length = seq_len
+        self._past_window_size = kwargs.get("past_window_size")
 
         # Dataset-level channel normalisation is skipped when RevIN is on —
         # RevIN performs per-window instance normalisation inside forward()
@@ -304,6 +321,7 @@ class CNNModel(ForecastModel):
             sigmoid_scale=self._sigmoid_scale,
             use_revin=self.use_revin,
             target_channel=self.target_channel,
+            past_window_size=self._past_window_size,
         )
         optimiser = self._build_optimiser(
             self._model.parameters(), self.optimiser, self.learning_rate,
@@ -501,6 +519,7 @@ class CNNModel(ForecastModel):
             "sigmoid_scale": self._sigmoid_scale,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "past_window_size": self._past_window_size,
         }, path)
         logger.info(f"Saved CNN model to {path}")
 
@@ -516,6 +535,7 @@ class CNNModel(ForecastModel):
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
         self._y_mean = data.get("y_mean", 0.0)
         self._y_std = data.get("y_std", 1.0)
+        self._past_window_size = data.get("past_window_size")
 
         # Reconstruct the nn.Module and load weights
         if self._input_size is not None and self._sequence_length is not None:
@@ -531,6 +551,7 @@ class CNNModel(ForecastModel):
                 sigmoid_scale=self._sigmoid_scale,
                 use_revin=self.use_revin,
                 target_channel=self.target_channel,
+                past_window_size=self._past_window_size,
             )
             self._model.load_state_dict(data["state_dict"])
             self._model.eval()

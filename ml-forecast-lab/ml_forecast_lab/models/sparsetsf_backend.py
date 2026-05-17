@@ -39,7 +39,8 @@ class _SparseTSFNet(nn.Module):
     def __init__(self, seq_len: int, n_channels: int, period_len: int,
                  dropout: float, n_horizons: int = 1,
                  output_activation: str = 'linear', sigmoid_scale: float = 1.0,
-                 use_revin: bool = True, target_channel: int = 0):
+                 use_revin: bool = True, target_channel: int = 0,
+                 past_window_size: Optional[int] = None):
         super().__init__()
         self.use_revin = use_revin
         # Reversible instance norm (Kim et al. 2022). Handles distribution
@@ -50,6 +51,7 @@ class _SparseTSFNet(nn.Module):
         self.seq_len = seq_len
         self.n_channels = n_channels
         self.period_len = period_len
+        self.past_window_size = past_window_size
 
         # Clamp period_len so at least one complete period fits
         if period_len > seq_len:
@@ -73,7 +75,7 @@ class _SparseTSFNet(nn.Module):
         # Apply RevIN on the (batch, seq_len, n_channels) shape BEFORE any
         # slice/permute — RevIN expects this layout for its per-window stats.
         if self.revin is not None:
-            x = self.revin.normalize(x)
+            x = self.revin.normalize(x, past_window_size=self.past_window_size)
 
         # Use last (sub_len * period_len) timesteps to ensure complete periods
         effective_len = self.sub_len * self.period_len
@@ -168,6 +170,10 @@ class SparseTSFModel(ForecastModel):
         # Identity defaults so non-zscore paths are a safe no-op.
         self._y_mean: Any = 0.0
         self._y_std: Any = 1.0
+        # past_window_size enables PF1 (RevIN past-only stats); set per-fit
+        # from kwargs, round-tripped in save/load. None means legacy
+        # single-window path.
+        self._past_window_size: Optional[int] = None
         self._training_history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
     @property
@@ -210,6 +216,7 @@ class SparseTSFModel(ForecastModel):
         _, seq_len, input_size = X_seq.shape
         self._input_size = input_size
         self._seq_len = seq_len
+        self._past_window_size = kwargs.get("past_window_size")
 
         # Dataset-level channel normalisation is mutually exclusive with
         # RevIN: RevIN handles per-window instance-level normalisation inside
@@ -286,6 +293,7 @@ class SparseTSFModel(ForecastModel):
             sigmoid_scale=self._sigmoid_scale,
             use_revin=self.use_revin,
             target_channel=self.target_channel,
+            past_window_size=self._past_window_size,
         )
         optimiser = self._build_optimiser(
             self._model.parameters(), self.optimiser, self.learning_rate,
@@ -483,6 +491,7 @@ class SparseTSFModel(ForecastModel):
             "sigmoid_scale": self._sigmoid_scale,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "past_window_size": self._past_window_size,
         }, path)
         logger.info(f"Saved SparseTSF model to {path}")
 
@@ -497,6 +506,7 @@ class SparseTSFModel(ForecastModel):
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
         self._y_mean = data.get("y_mean", 0.0)
         self._y_std = data.get("y_std", 1.0)
+        self._past_window_size = data.get("past_window_size")
 
         # Reconstruct the nn.Module and load weights
         self._input_size = data.get("input_size")
@@ -514,6 +524,7 @@ class SparseTSFModel(ForecastModel):
                 sigmoid_scale=self._sigmoid_scale,
                 use_revin=self.use_revin,
                 target_channel=self.target_channel,
+                past_window_size=self._past_window_size,
             )
             self._model.load_state_dict(state_dict)
             self._model.eval()

@@ -1,0 +1,298 @@
+{
+  "pure_pv": {
+    "nlinear": {
+      "mae": 0.030051449313759804,
+      "peak_hour_truth": 12.0,
+      "peak_hour_pred": 12.0,
+      "phase_offset_h": 0.0,
+      "pred_std_over_horizon": 0.4302515983581543,
+      "truth_std_over_horizon": 0.4244558811187744,
+      "flatness_ratio": 1.0136544632721394,
+      "night_mae": 0.024860693141818047,
+      "day_mae": 0.031873416155576706,
+      "note": ""
+    },
+    "dlinear": {
+      "mae": 0.02097291685640812,
+      "peak_hour_truth": 12.0,
+      "peak_hour_pred": 12.0,
+      "phase_offset_h": 0.0,
+      "pred_std_over_horizon": 0.4216434359550476,
+      "truth_std_over_horizon": 0.4244558811187744,
+      "flatness_ratio": 0.993373998832779,
+      "night_mae": 0.016861604526638985,
+      "day_mae": 0.027656305581331253,
+      "note": ""
+    },
+    "sparsetsf": {
+      "mae": 0.03195710852742195,
+      "peak_hour_truth": 12.0,
+      "peak_hour_pred": 12.0,
+      "phase_offset_h": 0.0,
+      "pred_std_over_horizon": 0.4188106060028076,
+      "truth_std_over_horizon": 0.4244558811187744,
+      "flatness_ratio": 0.9866999719709689,
+      "night_mae": 0.02450503222644329,
+      "day_mae": 0.035315293818712234,
+      "note": ""
+    },
+    "lstm": {
+      "mae": 0.35895267128944397,
+      "peak_hour_truth": 12.0,
+      "peak_hour_pred": 11.0,
+      "phase_offset_h": 23.0,
+      "pred_std_over_horizon": 0.021303221583366394,
+      "truth_std_over_horizon": 0.4244558811187744,
+      "flatness_ratio": 0.05018948383331545,
+      "night_mae": 0.28967562317848206,
+      "day_mae": 0.742051362991333,
+      "note": ""
+    },
+    "cnn": {
+      "mae": 0.35176610946655273,
+      "peak_hour_truth": 12.0,
+      "peak_hour_pred": 8.0,
+      "phase_offset_h": 20.0,
+      "pred_std_over_horizon": 0.02353443205356598,
+      "truth_std_over_horizon": 0.4244558811187744,
+      "flatness_ratio": 0.055446120787711266,
+      "night_mae": 0.26418209075927734,
+      "day_mae": 0.7479918599128723,
+      "note": ""
+    },
+    "lightgbm": {
+      "mae": 0.00692144175991416,
+      "peak_hour_truth": 12.0,
+      "peak_hour_pred": 12.0,
+      "phase_offset_h": 0.0,
+      "pred_std_over_horizon": 0.4222836494445801,
+      "truth_std_over_horizon": 0.4244558811187744,
+      "flatness_ratio": 0.9948823145800954,
+      "night_mae": 0.0009562781197018921,
+      "day_mae": 0.005704545881599188,
+      "note": ""
+    }
+  },
+  "cloudy_pv": {
+    "nlinear": {
+      "mae": 0.11187145859003067,
+      "peak_hour_truth": 11.0,
+      "peak_hour_pred": 12.0,
+      "phase_offset_h": 1.0,
+      "pred_std_over_horizon": 0.3430962860584259,
+      "truth_std_over_horizon": 0.45819520950317383,
+      "flatness_ratio": 0.7487993740276094,
+      "night_mae": 0.027128329500555992,
+      "day_mae": 0.31385287642478943,
+      "note": ""
+    },
+    "dlinear": {
+      "mae": 0.1332889348268509,
+      "peak_hour_truth": 11.0,
+      "peak_hour_pred": 12.0,
+      "phase_offset_h": 1.0,
+      "pred_std_over_horizon": 0.3313544988632202,
+      "truth_std_over_horizon": 0.45819520950317383,
+      "flatness_ratio": 0.7231732065084477,
+      "night_mae": 0.04202231392264366,
+      "day_mae": 0.3579147458076477,
+      "note": ""
+    },
+    "sparsetsf": {
+      "mae": 0.10277549177408218,
+      "peak_hour_truth": 11.0,
+      "peak_hour_pred": 12.0,
+      "phase_offset_h": 1.0,
+      "pred_std_over_horizon": 0.3343788981437683,
+      "truth_std_over_horizon": 0.45819520950317383,
+      "flatness_ratio": 0.7297738850354614,
+      "night_mae": 0.019633594900369644,
+      "day_mae": 0.3151337504386902,
+      "note": ""
+    },
+    "lstm": {
+      "mae": 0.3653360903263092,
+      "peak_hour_truth": 11.0,
+      "peak_hour_pred": 9.0,
+      "phase_offset_h": 22.0,
+      "pred_std_over_horizon": 0.020961889997124672,
+      "truth_std_over_horizon": 0.45819520950317383,
+      "flatness_ratio": 0.045748819634875454,
+      "night_mae": 0.2446964830160141,
+      "day_mae": 0.8452510833740234,
+      "note": ""
+    },
+    "cnn": {
+      "mae": 0.3592505156993866,
+      "peak_hour_truth": 11.0,
+      "peak_hour_pred": 13.0,
+      "phase_offset_h": 2.0,
+      "pred_std_over_horizon": 0.02180008590221405,
+      "truth_std_over_horizon": 0.45819520950317383,
+      "flatness_ratio": 0.047578161993121065,
+      "night_mae": 0.2152145653963089,
+      "day_mae": 0.8836818933486938,
+      "note": ""
+    },
+    "lightgbm": {
+      "mae": 0.1642192155122757,
+      "peak_hour_truth": 11.0,
+      "peak_hour_pred": 12.0,
+      "phase_offset_h": 1.0,
+      "pred_std_over_horizon": 0.22070059180259705,
+      "truth_std_over_horizon": 0.45819520950317383,
+      "flatness_ratio": 0.4816737216478216,
+      "night_mae": 0.0013040498597547412,
+      "day_mae": 0.5788431167602539,
+      "note": ""
+    }
+  },
+  "realistic_pv": {
+    "nlinear": {
+      "mae": 171.8759307861328,
+      "peak_hour_truth": 11.0,
+      "peak_hour_pred": 12.0,
+      "phase_offset_h": 1.0,
+      "pred_std_over_horizon": 490.3543701171875,
+      "truth_std_over_horizon": 650.8167724609375,
+      "flatness_ratio": 0.7534445805122807,
+      "night_mae": 77.71331024169922,
+      "day_mae": 461.4095153808594,
+      "note": ""
+    },
+    "dlinear": {
+      "mae": 160.7200164794922,
+      "peak_hour_truth": 11.0,
+      "peak_hour_pred": 12.0,
+      "phase_offset_h": 1.0,
+      "pred_std_over_horizon": 440.2768859863281,
+      "truth_std_over_horizon": 650.8167724609375,
+      "flatness_ratio": 0.6764989849931285,
+      "night_mae": 25.093156814575195,
+      "day_mae": 490.77032470703125,
+      "note": ""
+    },
+    "sparsetsf": {
+      "mae": 249.5012664794922,
+      "peak_hour_truth": 11.0,
+      "peak_hour_pred": 12.0,
+      "phase_offset_h": 1.0,
+      "pred_std_over_horizon": 456.4685974121094,
+      "truth_std_over_horizon": 650.8167724609375,
+      "flatness_ratio": 0.7013780479044229,
+      "night_mae": 129.4111328125,
+      "day_mae": 616.1253662109375,
+      "note": ""
+    },
+    "lstm": {
+      "mae": 512.38818359375,
+      "peak_hour_truth": 11.0,
+      "peak_hour_pred": 12.0,
+      "phase_offset_h": 1.0,
+      "pred_std_over_horizon": 37.443138122558594,
+      "truth_std_over_horizon": 650.8167724609375,
+      "flatness_ratio": 0.057532534050981236,
+      "night_mae": 340.2574157714844,
+      "day_mae": 1172.226318359375,
+      "note": ""
+    },
+    "cnn": {
+      "mae": 525.8983764648438,
+      "peak_hour_truth": 11.0,
+      "peak_hour_pred": 8.0,
+      "phase_offset_h": 21.0,
+      "pred_std_over_horizon": 20.403575897216797,
+      "truth_std_over_horizon": 650.8167724609375,
+      "flatness_ratio": 0.03135072229325718,
+      "night_mae": 345.8937683105469,
+      "day_mae": 1215.7252197265625,
+      "note": ""
+    },
+    "lightgbm": {
+      "mae": 597.7252197265625,
+      "peak_hour_truth": 11.0,
+      "peak_hour_pred": 11.0,
+      "phase_offset_h": 0.0,
+      "pred_std_over_horizon": 5.703463554382324,
+      "truth_std_over_horizon": 650.8167724609375,
+      "flatness_ratio": 0.008763547277393884,
+      "night_mae": 566.6334838867188,
+      "day_mae": 996.7314453125,
+      "note": ""
+    }
+  },
+  "ev_mixergy": {
+    "nlinear": {
+      "mae": 0.2049424797296524,
+      "peak_hour_truth": 1.0,
+      "peak_hour_pred": 1.0,
+      "phase_offset_h": 0.0,
+      "pred_std_over_horizon": 0.5707878470420837,
+      "truth_std_over_horizon": 0.6778767704963684,
+      "flatness_ratio": 0.8420230223026084,
+      "night_mae": 0.3242087960243225,
+      "day_mae": 0.15114350616931915,
+      "note": ""
+    },
+    "dlinear": {
+      "mae": 0.12010831385850906,
+      "peak_hour_truth": 1.0,
+      "peak_hour_pred": 1.0,
+      "phase_offset_h": 0.0,
+      "pred_std_over_horizon": 0.6248250007629395,
+      "truth_std_over_horizon": 0.6778767704963684,
+      "flatness_ratio": 0.9217383276099248,
+      "night_mae": 0.2080196589231491,
+      "day_mae": 0.05800919607281685,
+      "note": ""
+    },
+    "sparsetsf": {
+      "mae": 0.3467271327972412,
+      "peak_hour_truth": 1.0,
+      "peak_hour_pred": 1.0,
+      "phase_offset_h": 0.0,
+      "pred_std_over_horizon": 0.4321175217628479,
+      "truth_std_over_horizon": 0.6778767704963684,
+      "flatness_ratio": 0.6374573382215682,
+      "night_mae": 0.6529369950294495,
+      "day_mae": 0.1859695464372635,
+      "note": ""
+    },
+    "lstm": {
+      "mae": 0.5117612481117249,
+      "peak_hour_truth": 1.0,
+      "peak_hour_pred": 4.0,
+      "phase_offset_h": 3.0,
+      "pred_std_over_horizon": 0.02246929332613945,
+      "truth_std_over_horizon": 0.6778767704963684,
+      "flatness_ratio": 0.03314657516540438,
+      "night_mae": 0.8750914931297302,
+      "day_mae": 0.3872126638889313,
+      "note": ""
+    },
+    "cnn": {
+      "mae": 0.498676061630249,
+      "peak_hour_truth": 1.0,
+      "peak_hour_pred": 12.0,
+      "phase_offset_h": 11.0,
+      "pred_std_over_horizon": 0.03642996400594711,
+      "truth_std_over_horizon": 0.6778767704963684,
+      "flatness_ratio": 0.05374127804862179,
+      "night_mae": 0.8831783533096313,
+      "day_mae": 0.3723298907279968,
+      "note": ""
+    },
+    "lightgbm": {
+      "mae": 0.04878707230091095,
+      "peak_hour_truth": 1.0,
+      "peak_hour_pred": 1.0,
+      "phase_offset_h": 0.0,
+      "pred_std_over_horizon": 0.6769072413444519,
+      "truth_std_over_horizon": 0.6778767704963684,
+      "flatness_ratio": 0.9985697560469485,
+      "night_mae": 0.049119073897600174,
+      "day_mae": 0.05035214498639107,
+      "note": ""
+    }
+  }
+}

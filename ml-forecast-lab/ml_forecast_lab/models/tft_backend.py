@@ -128,7 +128,8 @@ class _TFTNet(nn.Module):
                  hidden_size: int = 32, n_heads: int = 4,
                  dropout: float = 0.1, n_lstm_layers: int = 1,
                  output_activation: str = 'linear', sigmoid_scale: float = 1.0,
-                 use_revin: bool = True, target_channel: int = 0):
+                 use_revin: bool = True, target_channel: int = 0,
+                 past_window_size: Optional[int] = None):
         super().__init__()
         self.use_revin = use_revin
         self.revin = (
@@ -136,6 +137,7 @@ class _TFTNet(nn.Module):
             if use_revin else None
         )
         self.n_horizons = n_horizons
+        self.past_window_size = past_window_size
 
         self.vsn = _VariableSelectionNetwork(n_channels, seq_len,
                                              hidden_size, dropout)
@@ -165,7 +167,7 @@ class _TFTNet(nn.Module):
     def forward(self, x: "torch.Tensor") -> "torch.Tensor":
         # x: (batch, seq_len, n_channels)
         if self.revin is not None:
-            x = self.revin.normalize(x)
+            x = self.revin.normalize(x, past_window_size=self.past_window_size)
 
         # Variable Selection — collapses channels to a single hidden stream.
         h = self.vsn(x)  # (batch, seq_len, hidden)
@@ -174,10 +176,27 @@ class _TFTNet(nn.Module):
         h_lstm, _ = self.lstm(h)  # (batch, seq_len, hidden)
         h_enc = self.post_lstm_grn(h_lstm + h)  # residual + GRN
 
-        # Self-attention with the last step as query — pulls relevant history
-        # forward into a single context vector.
-        query = h_enc[:, -1:, :]  # (batch, 1, hidden)
-        attn_out, _ = self.attention(query, h_enc, h_enc)
+        # Self-attention with the LAST PAST step as query — pulls relevant
+        # history forward into a single context vector. PF2-variant (v2.37):
+        # in extended-window mode the literal last row is a future
+        # position with target=0, so query-from-literal-last gives a
+        # covariate-only vector with no past-target anchor. We pin the
+        # query to ``past_window_size - 1`` instead. Past-only training
+        # behaves exactly as before (past_window_size is None or == seq_len).
+        # PF3: also key_padding_mask the future positions so the
+        # attention can't read absolute time from them.
+        if self.past_window_size is not None and self.past_window_size < h_enc.size(1):
+            query = h_enc[:, self.past_window_size - 1: self.past_window_size, :]
+            kpm = torch.zeros(
+                h_enc.size(0), h_enc.size(1), dtype=torch.bool, device=x.device,
+            )
+            kpm[:, self.past_window_size:] = True
+        else:
+            query = h_enc[:, -1:, :]  # legacy: literal last row
+            kpm = None
+        attn_out, _ = self.attention(
+            query, h_enc, h_enc, key_padding_mask=kpm,
+        )
         attn_out = self.attn_norm(attn_out + query)
         ctx = self.position_grn(attn_out).squeeze(1)  # (batch, hidden)
 
@@ -247,6 +266,10 @@ class TFTModel(ForecastModel):
         self._sigmoid_scale: float = 1.0
         self._y_mean: Any = 0.0
         self._y_std: Any = 1.0
+        # past_window_size enables PF1 (RevIN past-only stats); set per-fit
+        # from kwargs, round-tripped in save/load. None means legacy
+        # single-window path.
+        self._past_window_size: Optional[int] = None
 
     @property
     def name(self) -> str:
@@ -285,6 +308,7 @@ class TFTModel(ForecastModel):
             sigmoid_scale=self._sigmoid_scale,
             use_revin=self.use_revin,
             target_channel=self.target_channel,
+            past_window_size=self._past_window_size,
         )
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray,
@@ -303,6 +327,7 @@ class TFTModel(ForecastModel):
         _, seq_len, n_channels = X_seq.shape
         self._seq_len = seq_len
         self._n_channels = n_channels
+        self._past_window_size = kwargs.get("past_window_size")
 
         if not self.use_revin:
             self._channel_mean = X_seq.mean(axis=(0, 1))
@@ -484,6 +509,7 @@ class TFTModel(ForecastModel):
             "sigmoid_scale": self._sigmoid_scale,
             "y_mean": self._y_mean,
             "y_std": self._y_std,
+            "past_window_size": self._past_window_size,
         }, path)
         logger.info(f"Saved TFT model to {path}")
 
@@ -498,6 +524,7 @@ class TFTModel(ForecastModel):
         self._sigmoid_scale = float(data.get("sigmoid_scale", 1.0))
         self._y_mean = data.get("y_mean", 0.0)
         self._y_std = data.get("y_std", 1.0)
+        self._past_window_size = data.get("past_window_size")
         if self._seq_len is not None and self._n_channels is not None:
             self._model = self._build_model(self._seq_len, self._n_channels,
                                             self._n_horizons)

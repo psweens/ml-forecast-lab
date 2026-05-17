@@ -224,6 +224,15 @@ class ExperimentCfg:
     max_increment: Optional[float] = None
     """Maximum allowed increment for cumulative conversion; exceeds indicate anomaly or reset."""
 
+    target_is_nonnegative: bool = False
+    """Whether the target is physically non-negative (PV power, irradiance, demand
+    quantities). When True, the ``output_activation='auto'`` resolution defaults
+    to ``'softplus'`` instead of ``'linear'`` — keeping predictions on the
+    correct side of zero is worth more than the (small) loss of unbounded
+    range. Cumulative targets always enable this implicitly via
+    ``source_is_cumulative``; set this directly for non-cumulative non-negative
+    targets like ``predbat.pv_power`` (v2.37+ PF8)."""
+
     models_enabled: List[str] = field(
         default_factory=lambda: ['lightgbm', 'xgboost', 'lstm', 'cnn']
     )

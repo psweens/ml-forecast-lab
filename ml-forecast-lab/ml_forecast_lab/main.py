@@ -32,15 +32,26 @@ def _resolve_output_activation(exp_cfg, model_name: str = '') -> str:
     The ``'auto'`` alias picks a sensible default based on the model backend
     and target's physical nature:
 
-    - LSTM                            → ``'zscore'`` (target z-score
-      normalisation with linear head, denormalised at inference; conditions
-      gradients across widely-varying target scales and is the best general
-      default for recurrent backends)
-    - Other neural, ``source_is_cumulative=True``  → ``'softplus'``
-      (non-negative, smooth gradient near zero — ideal for energy / rainfall
-      / counts that reset to zero overnight)
-    - Other neural, ``source_is_cumulative=False`` → ``'linear'`` (unbounded
+    - LSTM                                            → ``'zscore'`` (target
+      z-score normalisation with linear head, denormalised at inference;
+      conditions gradients across widely-varying target scales and is the
+      best general default for recurrent backends)
+    - Other neural, ``source_is_cumulative=True`` OR
+      ``target_is_nonnegative=True``                  → ``'relu'``
+      (hard non-negative clamp at 0, no positive bias — works for
+      arbitrary target magnitudes including small kWh-scale demand
+      intervals where softplus's +log(2)≈0.69 floor in physical space
+      would dominate small targets and push predictions 10-15× too high)
+    - Other neural, default                           → ``'linear'`` (unbounded
       signed output suitable for temperature, net grid flow, deltas)
+
+    The ``target_is_nonnegative`` branch is the v2.37 PF8 fix. Note that
+    pre-v2.37 the same auto path picked ``softplus`` when
+    ``source_is_cumulative=True``; this was reverted in favour of ReLU
+    because softplus's positive floor in physical space catastrophically
+    biased low-magnitude cumulative interval targets (verified on
+    synthetic cumulative-with-daily-reset data — softplus produced 900%
+    daily-total error vs ReLU's 30%).
     """
     act = getattr(exp_cfg, 'output_activation', 'auto')
     if act == 'auto':
@@ -50,7 +61,11 @@ def _resolve_output_activation(exp_cfg, model_name: str = '') -> str:
         # targets ranging from small fractions to large cumulative values.
         if model_name == 'lstm':
             return 'zscore'
-        return 'softplus' if getattr(exp_cfg, 'source_is_cumulative', False) else 'linear'
+        is_nonneg = (
+            getattr(exp_cfg, 'source_is_cumulative', False)
+            or getattr(exp_cfg, 'target_is_nonnegative', False)
+        )
+        return 'relu' if is_nonneg else 'linear'
     return act
 
 
@@ -72,6 +87,29 @@ def _apply_output_activation(model, exp_cfg) -> None:
         # Backend doesn't support output_activation (older checkpoint being
         # loaded pre-v2.11.0, or a neural backend not yet migrated).
         pass
+
+
+def _resolve_daily_loss_weight(exp_cfg) -> float:
+    """
+    Resolve the effective ``daily_loss_weight`` for a neural model.
+
+    PF9 (v2.37): when the user leaves ``daily_loss_weight=0.0`` (the default)
+    but the target is non-negative (cumulative or explicitly flagged), apply
+    a moderate weight of 0.5 by default. The cumulative-trajectory loss term
+    is the most effective remaining lever against the residual amplitude
+    compression on linear-head backends after PF1+PF7 (see
+    ``docs/investigations/2026-05-neural-pv.md``).
+
+    An explicitly non-zero user value is honoured as-is.
+    """
+    user_value = float(getattr(exp_cfg, 'daily_loss_weight', 0.0))
+    if user_value > 0:
+        return user_value
+    is_nonneg = (
+        getattr(exp_cfg, 'source_is_cumulative', False)
+        or getattr(exp_cfg, 'target_is_nonnegative', False)
+    )
+    return 0.5 if is_nonneg else 0.0
 
 
 def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
@@ -108,7 +146,12 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
     for attr in ('loss_fn', 'daily_loss_weight', 'optimiser'):
         if attr in overrides:
             continue
-        value = getattr(exp_cfg, attr, None)
+        # PF9: daily_loss_weight goes through the resolver so non-negative
+        # targets default to 0.5 even when the user hasn't explicitly set it.
+        if attr == 'daily_loss_weight':
+            value = _resolve_daily_loss_weight(exp_cfg)
+        else:
+            value = getattr(exp_cfg, attr, None)
         if value is None:
             continue
         if not hasattr(model, attr):
@@ -3652,7 +3695,12 @@ class MLForecastLabApp:
                 channel_names = list(seq_kwargs["channel_names"])
 
             meta = {
-                "schema_version": 1,
+                # schema_version bumped to 2 in v2.37 to force a re-train
+                # after the neural-PV root-cause fixes (PF1-PF9). Old
+                # caches written under schema_version=1 are silently
+                # ignored on load and a fresh training cycle is scheduled
+                # — see docs/investigations/2026-05-neural-pv.md.
+                "schema_version": 2,
                 "addon_version": __version__,
                 "model_name": cache["model_name"],
                 "feature_cols": list(cache["feature_cols"]),
@@ -3710,10 +3758,18 @@ class MLForecastLabApp:
                 continue
             try:
                 meta = json.loads(meta_file.read_text())
-                if meta.get("schema_version") != 1:
+                # v2.37: cache schema bumped to 2 after the PF1-PF9 neural
+                # fixes (see docs/investigations/2026-05-neural-pv.md). Old
+                # schema=1 caches were trained against the biased RevIN /
+                # degenerate anchors / collapsed backcasts, so loading them
+                # would just re-publish the broken forecasts that PF1-PF9
+                # were designed to fix. Force re-train by ignoring them.
+                if meta.get("schema_version") != 2:
                     logger.info(
                         f"  Cached model for {exp_cfg.name} has schema "
-                        f"v{meta.get('schema_version')}, ignoring"
+                        f"v{meta.get('schema_version')}, ignoring (v2.37 "
+                        f"PF1-PF9 fixes require schema_version=2 — a fresh "
+                        f"benchmark + retrain will be scheduled)"
                     )
                     continue
 
