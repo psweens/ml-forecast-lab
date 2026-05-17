@@ -329,6 +329,52 @@ def test_pf8_output_activation_resolves_softplus_for_nonneg_target():
     ) == "relu"
 
 
+def test_pf7_dlinear_head_input_dim_drops_future_target_slots():
+    """PF7 for DLinear: head input dim shrinks when past_window_size <
+    seq_len; legacy past-only mode keeps the full seq_len * n_channels.
+    """
+    from ml_forecast_lab.models.dlinear_backend import _DLinearNet
+    seq_len = 96
+    past = 48
+    n_channels = 8
+    # PF7 extended path.
+    net_ext = _DLinearNet(
+        seq_len=seq_len, n_channels=n_channels, kernel_size=13,
+        n_horizons=24, use_revin=False, past_window_size=past,
+    )
+    expected_in = past * n_channels + (seq_len - past) * (n_channels - 1)
+    assert net_ext.trend_linear.in_features == expected_in
+    assert net_ext.seasonal_linear.in_features == expected_in
+    # Legacy path.
+    net_legacy = _DLinearNet(
+        seq_len=seq_len, n_channels=n_channels, kernel_size=13,
+        n_horizons=24, use_revin=False, past_window_size=None,
+    )
+    assert net_legacy.trend_linear.in_features == seq_len * n_channels
+    assert net_legacy.seasonal_linear.in_features == seq_len * n_channels
+
+
+def test_pf7_tsmixer_head_input_dim_drops_future_target_slots():
+    """PF7 for TSMixer."""
+    from ml_forecast_lab.models.tsmixer_backend import _TSMixerNet
+    seq_len = 96
+    past = 48
+    n_channels = 8
+    net_ext = _TSMixerNet(
+        seq_len=seq_len, n_channels=n_channels, n_mixer_layers=2,
+        hidden=16, dropout=0.0, n_horizons=24, use_revin=False,
+        past_window_size=past,
+    )
+    expected_in = past * n_channels + (seq_len - past) * (n_channels - 1)
+    assert net_ext.head.in_features == expected_in
+    net_legacy = _TSMixerNet(
+        seq_len=seq_len, n_channels=n_channels, n_mixer_layers=2,
+        hidden=16, dropout=0.0, n_horizons=24, use_revin=False,
+        past_window_size=None,
+    )
+    assert net_legacy.head.in_features == seq_len * n_channels
+
+
 def test_pf9_daily_loss_weight_resolves_to_half_on_nonneg_target():
     """PF9: daily_loss_weight defaults to 0.5 for non-negative neural
     targets when the user leaves it at 0.0. Explicit non-zero is

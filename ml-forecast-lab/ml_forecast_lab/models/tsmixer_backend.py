@@ -93,24 +93,51 @@ class _TSMixerNet(nn.Module):
         self.n_horizons = n_horizons
         self.seq_len = seq_len
         self.n_channels = n_channels
-        self.past_window_size = past_window_size
+        self.target_channel = target_channel
+        # PF7 (v2.37): drop the future-position target-channel slot
+        # from the head input — those slots are always zero by
+        # construction and only contribute head-input variance imbalance.
+        if past_window_size is not None and past_window_size < seq_len:
+            self.past_window_size = int(past_window_size)
+            self._has_future = True
+            future_len = seq_len - self.past_window_size
+            head_in = (self.past_window_size * n_channels
+                       + future_len * (n_channels - 1))
+        else:
+            self.past_window_size = seq_len
+            self._has_future = False
+            head_in = seq_len * n_channels
 
         self.mixer_layers = nn.ModuleList([
             _MixerLayer(seq_len, n_channels, hidden, dropout)
             for _ in range(n_mixer_layers)
         ])
         self.final_norm = nn.LayerNorm(n_channels)
-        self.head = nn.Linear(seq_len * n_channels, n_horizons)
+        self.head = nn.Linear(head_in, n_horizons)
         self.activation = _build_activation(output_activation, scale=sigmoid_scale)
+
+    def _head_flatten(self, x: "torch.Tensor") -> "torch.Tensor":
+        """Flatten (B, seq_len, n_channels) → (B, head_in) honouring PF7."""
+        if not self._has_future:
+            return x.reshape(x.size(0), -1)
+        past = x[:, : self.past_window_size, :]
+        future = x[:, self.past_window_size :, :]
+        keep = [c for c in range(self.n_channels) if c != self.target_channel]
+        future_kept = future[:, :, keep]
+        return torch.cat(
+            [past.reshape(past.size(0), -1),
+             future_kept.reshape(future_kept.size(0), -1)],
+            dim=1,
+        )
 
     def forward(self, x):
         # x: (batch, seq_len, n_channels)
         if self.revin is not None:
-            x = self.revin.normalize(x, past_window_size=self.past_window_size)
+            x = self.revin.normalize(x, past_window_size=self.past_window_size if self._has_future else None)
         for layer in self.mixer_layers:
             x = layer(x)
         x = self.final_norm(x)
-        x = x.reshape(x.size(0), -1)  # (batch, seq_len * n_channels)
+        x = self._head_flatten(x)
         out = self.head(x)  # (batch, n_horizons)
         if self.revin is not None:
             # Denormalise in z-space before the output activation so the

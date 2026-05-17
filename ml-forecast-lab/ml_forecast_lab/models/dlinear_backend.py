@@ -62,24 +62,52 @@ class _DLinearNet(nn.Module):
         self.n_horizons = n_horizons
         self.n_quantiles = max(1, int(n_quantiles))
         self.output_activation = output_activation
-        self.past_window_size = past_window_size
+        self.target_channel = target_channel
+        self.n_channels = n_channels
+        # PF7 (v2.37): when past_window_size < seq_len the future block's
+        # target-channel slot is always zero. Excluding it from the head
+        # input cuts head-input variance imbalance and lets the linear
+        # head spend capacity on signal-bearing positions.
+        if past_window_size is not None and past_window_size < seq_len:
+            self.past_window_size = int(past_window_size)
+            self._has_future = True
+            future_len = seq_len - self.past_window_size
+            flat = (self.past_window_size * n_channels
+                    + future_len * (n_channels - 1))
+        else:
+            self.past_window_size = seq_len
+            self._has_future = False
+            flat = seq_len * n_channels
         pad = kernel_size // 2
         self.avg_pool = nn.AvgPool1d(kernel_size, stride=1, padding=pad, count_include_pad=False)
-        flat = seq_len * n_channels
         out_dim = n_horizons * self.n_quantiles
         self.trend_linear = nn.Linear(flat, out_dim)
         self.seasonal_linear = nn.Linear(flat, out_dim)
         self.activation = _build_activation(output_activation, scale=sigmoid_scale)
 
+    def _head_flatten(self, x_ch_first: "torch.Tensor") -> "torch.Tensor":
+        """Flatten (B, n_channels, seq_len) → (B, flat) honouring PF7."""
+        if not self._has_future:
+            return x_ch_first.reshape(x_ch_first.shape[0], -1)
+        past = x_ch_first[:, :, : self.past_window_size]
+        future = x_ch_first[:, :, self.past_window_size :]
+        keep = [c for c in range(self.n_channels) if c != self.target_channel]
+        future_kept = future[:, keep, :]
+        return torch.cat(
+            [past.reshape(past.shape[0], -1),
+             future_kept.reshape(future_kept.shape[0], -1)],
+            dim=1,
+        )
+
     def forward(self, x: "torch.Tensor") -> "torch.Tensor":
         # x: (batch, seq_len, n_channels)
         if self.revin is not None:
-            x = self.revin.normalize(x, past_window_size=self.past_window_size)
+            x = self.revin.normalize(x, past_window_size=self.past_window_size if self._has_future else None)
         x_t = x.permute(0, 2, 1)
         trend = self.avg_pool(x_t)[:, :, :self.seq_len]
         seasonal = x_t - trend
-        trend_flat = trend.reshape(trend.shape[0], -1)
-        seasonal_flat = seasonal.reshape(seasonal.shape[0], -1)
+        trend_flat = self._head_flatten(trend)
+        seasonal_flat = self._head_flatten(seasonal)
         out = self.trend_linear(trend_flat) + self.seasonal_linear(seasonal_flat)
         if self.n_quantiles > 1:
             out = out.view(-1, self.n_horizons, self.n_quantiles)
