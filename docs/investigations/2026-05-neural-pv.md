@@ -23,6 +23,11 @@ Companion artifacts in this directory:
   (extended_window=False) does NOT reproduce the 3 AM symptom on
   synthetic data
 * `figures_phase1/v2_35_3_check.png` — the resulting curve
+* **`all_neural_code_audit.md`** — RC1/RC2/RC3/RC4 exposure across
+  ALL 17 registered neural backends (code-level + empirical)
+* **`all_neural_summary.md`**, `all_neural_summary.json`,
+  `figures_phase1/all_neural_realistic_pv.png` — empirical
+  per-backend verdicts on `realistic_pv` (v2.36.0 path)
 
 Reproduce locally:
 
@@ -51,6 +56,45 @@ The smallest surgical change is **PF1 + PF2**: ~40 LOC total. PF1
 restores LSTM and CNN to the correct peak hour and lifts flatness from
 ≈0.05 to ≈1.9 on `realistic_pv`. PF1 also corrects NLinear's
 late-by-one-hour peak on the same data.
+
+### Generalisation across all 17 neural backends
+
+`all_neural_code_audit.md` extends the analysis to every registered
+multi-horizon neural backend. Empirical verdicts on `realistic_pv`
+(default settings, extended_window=True):
+
+| Verdict | Backends |
+| --- | --- |
+| OK with mild compression (flat 0.5-0.78, peak ±1 h) | NLinear, DLinear, SparseTSF, FITS, TSMixer, TimeMixer, TiDE, iTransformer, TimesNet, TFT |
+| **COLLAPSED** (flat < 0.3) | CNN, Crossformer, **N-BEATS** |
+| **HEAVILY_BROKEN** (flat < 0.3 AND peak off by >1 h) | LSTM (peak=1, truth=11), GRU (peak=8), PatchTST (peak=13), **N-HiTS** (peak=3) |
+
+Two new findings come out of this wider sweep:
+
+1. **GRU shares LSTM's bug exactly.** The `_TemporalAttention` class
+   in `gru_backend.py:41-54` is a verbatim copy of LSTM's. Any RC3
+   fix must be applied to BOTH backends at the same time.
+
+2. **N-BEATS and N-HiTS are broken too — and they don't even use RevIN.**
+   The doubly-residual backcast trick sees `[real_past; zero_future]`
+   for the target channel; the forecast residual heads collapse
+   because half the input has no useful signal. **This is a fourth
+   root cause not on the original list:**
+   * **RC4 — backcast-on-zero-future degeneration**, applies to
+     N-BEATS, N-HiTS. The fix shape: apply the backcast subtraction
+     only on past positions of the target channel (~10 LOC per backend).
+
+3. **TFT has a third anchor-style degeneration.** `tft_backend.py:179`:
+   `query = h_enc[:, -1:, :]` is the encoded representation of the
+   LAST FUTURE POSITION (target=0). Surprisingly TFT ends up the
+   LEAST broken of the attention-using backends — its VSN+LSTM+GRN
+   pipeline provides redundant pathways — but the query is still
+   degenerate and should be moved to `past_window_size - 1`.
+
+The full per-backend audit (including code citations for each
+pattern) is in `all_neural_code_audit.md`. The empirical numbers
+above are pulled from `all_neural_summary.md` /
+`figures_phase1/all_neural_realistic_pv.png`.
 
 ---
 
@@ -193,7 +237,11 @@ that fails today.
 | --- | --- | --- | --- |
 | **RC1 — RevIN bias from future-position zeros** | **Recommended.** Add an optional `past_window_size` kwarg to `_RevIN.normalize()`. When provided, compute `mean`/`var` over `x[:, :past_window_size, :]` only. Plumb `past_window_size` from each backend's `forward()` — every backend already knows it (`extended_window` + `past_window_size` already live in `seq_kwargs`). Backward-compatible: when omitted, behave exactly as today. | A masking-aware RevIN: introduce a per-channel `validity_mask` that propagates from `create_sliding_windows`. Channels NOT present in `future_features_df` get a mask of 0 at future positions, and RevIN computes mean/std over the unmasked entries per channel. More general — also handles partial-future-known covariates. | If we can't ship PF1 quickly, document that `extended_window=True` requires `use_revin=False` (which removes the bias path entirely at the cost of losing per-window scale normalisation). |
 | **RC2 — NLinear anchor degeneration** | **Recommended.** Pass `past_window_size` into `_NLinearNet.forward()` and anchor on `x[:, past_window_size - 1, target_channel]`. The broadcast subtraction `x_shifted = x - x[:, past_window_size - 1: past_window_size, :]` is shape-compatible. When `past_window_size == seq_len` (the past-only path), this is identical to today's behaviour. | Replace the hand-rolled residual trick with a tiny learned anchor head: a small `nn.Linear(C, 1)` over the last past row that produces the per-sample anchor. Marginal accuracy improvement; more compute. | Disable NLinear when `extended_window=True` and recommend SparseTSF or DLinear instead. (DLinear's trend-seasonality decomposition doesn't rely on a last-value anchor in the same way.) |
-| **RC3 — LSTM/CNN attention reads future-position zeros** | **None practical.** Even adding a past-only attention mask is ~10 LOC but architectural in nature because it requires the attention module to know `past_window_size`. | Two options: (i) past-only attention mask — set future scores to `-inf` before softmax. (ii) replace temporal attention with a cross-attention: past = K/V, future = Q (so each future position queries the past for context). | Document that `extended_window=True` works best for linear-head backends (NLinear, DLinear, SparseTSF, FITS, TSMixer). For LSTM/CNN, prefer `extended_window=False` until the attention is updated. The Phase 1 numbers above show LSTM/CNN are unreliable in extended-window mode regardless of RevIN. |
+| **RC3 — Temporal attention reads future-position zeros** | **~10 LOC per backend** but architectural in nature because it requires the attention module to know `past_window_size`. Applies to LSTM, GRU (verbatim copy of LSTM's attention), CNN's learnable pool, PatchTST and Crossformer's `TransformerEncoder` paths. | (i) Past-only attention mask — set future scores to `-inf` before softmax. (ii) Replace temporal attention with cross-attention: past = K/V, future = Q (so each future position queries the past for context). | Document that `extended_window=True` works best for linear-head backends. For attention-based RNN/CNN/transformer backends, prefer `extended_window=False` until the attention is updated. |
+| **RC2-variant — TFT query at last position** | **~3 LOC**: change `query = h_enc[:, -1:, :]` at `tft_backend.py:179` to `query = h_enc[:, past_window_size - 1: past_window_size, :]`. Trivially preserves past-only behaviour. | — | None — the surgical fix is so small it dominates. |
+| **RC4 — N-BEATS / N-HiTS backcast-on-zero-future** | **~10 LOC per backend**: split flat input into past + future slices; only subtract backcast from past positions of the target channel; only feed the forecast residual head from past-block content. Past-only path unchanged. | Replace the doubly-residual scheme with a windowed scheme that's aware of the past/future boundary — a meaningful rewrite. | Disable N-BEATS and N-HiTS in extended-window mode and route to a different backend (any linear-head one is safer). |
+| **iTransformer channel-embed bias** | **~5 LOC**: replace `channel_embed = Linear(seq_len, d_model)` with applying it on `x[:, :past_window_size, :]` only — the target channel's full sequence has half its content in zero-future positions today. | Per-channel switchable embedders based on whether the channel exists in `future_features_df`. | — |
+| **CNN learnable pool reads future positions** | **1 LOC**: `pool_weights[past_window_size:] = -1e9` before softmax. The pool weights are not query-conditioned so this is fully equivalent to setting them past-only. | — | Use any other backend in extended mode. |
 
 ---
 
