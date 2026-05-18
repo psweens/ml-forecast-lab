@@ -3606,6 +3606,35 @@ class MLForecastLabApp:
                 solar_lat_lon = loc if loc is not None else None
                 include_sun_elevation = 'sun_elevation' in raw_cov_cols
                 include_clear_sky_ghi = 'clear_sky_ghi' in raw_cov_cols
+
+                # User-configured future-role covariates (e.g. Solcast PV
+                # forecast, met.no weather). The tree (recursive) inference
+                # path always saw these at horizon positions via
+                # ``future_cov_values``; the neural extended-window path
+                # historically did not, so neural backends were
+                # information-starved relative to tree backends in
+                # benchmarks. At training time the "future" positions are
+                # actually past timestamps we have ground-truth observations
+                # for — use the in-sample historical values from ``combined``.
+                # The matching inference-side call in _forecast_with_cached
+                # fetches the HA forecast attribute for real-future
+                # timestamps.
+                future_cov_for_neural = {}
+                neural_future_cov_names: list[str] = []
+                if getattr(exp_cfg, 'covariates', None):
+                    for cov_cfg in exp_cfg.covariates:
+                        if cov_cfg.role not in ('future', 'both'):
+                            continue
+                        cov_name = cov_cfg.entity.split('.')[-1]
+                        if cov_name in combined.columns:
+                            future_cov_for_neural[cov_name] = combined[cov_name]
+                            neural_future_cov_names.append(cov_name)
+                if neural_future_cov_names:
+                    logger.info(
+                        f"  Neural future covariates (horizon-aware): "
+                        f"{neural_future_cov_names}"
+                    )
+
                 future_features_df = compute_known_future_features(
                     combined.index,
                     add_temporal=True,
@@ -3613,6 +3642,7 @@ class MLForecastLabApp:
                     solar_lat_lon=solar_lat_lon,
                     include_sun_elevation=include_sun_elevation,
                     include_clear_sky_ghi=include_clear_sky_ghi,
+                    future_covariate_values=future_cov_for_neural or None,
                 )
                 seq_X, seq_y, channel_names = create_sliding_windows(
                     combined, 'target', window_size=window_size,
@@ -3644,6 +3674,15 @@ class MLForecastLabApp:
                 seq_kwargs['extended_window'] = True
                 seq_kwargs['past_window_size'] = window_size
                 seq_kwargs['future_feature_cols'] = list(future_features_df.columns)
+                # Sub-list — just the columns that came from user
+                # covariates with role in (future, both). The
+                # deterministic columns (temporal, solar physics) can
+                # be recomputed at inference from the future_index
+                # alone; these need a HA history / forecast fetch.
+                if neural_future_cov_names:
+                    seq_kwargs['future_covariate_names'] = list(
+                        neural_future_cov_names
+                    )
                 logger.info(
                     f"  Extended training windows: "
                     f"{window_size} past + {len(horizon_steps)} future "
@@ -3911,6 +3950,13 @@ class MLForecastLabApp:
                 "future_feature_cols": (
                     list(future_feature_cols) if future_feature_cols is not None else None
                 ),
+                # Subset of future_feature_cols that came from user
+                # covariates and require a HA history / forecast fetch
+                # at inference. Deterministic columns (temporal /
+                # solar physics) are recomputed from the future_index.
+                "future_covariate_names": (
+                    list(seq_kwargs.get("future_covariate_names") or [])
+                ),
             }
             tmp = meta_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(meta, indent=2))
@@ -4005,6 +4051,9 @@ class MLForecastLabApp:
                         ffc = meta.get("future_feature_cols")
                         if ffc is not None:
                             seq_kwargs["future_feature_cols"] = list(ffc)
+                        fcn = meta.get("future_covariate_names")
+                        if fcn:
+                            seq_kwargs["future_covariate_names"] = list(fcn)
 
                 self._cached_models[exp_cfg.name] = {
                     "model": model,
@@ -4122,6 +4171,9 @@ class MLForecastLabApp:
                     ffc = meta.get("future_feature_cols")
                     if ffc is not None:
                         seq_kwargs["future_feature_cols"] = list(ffc)
+                    fcn = meta.get("future_covariate_names")
+                    if fcn:
+                        seq_kwargs["future_covariate_names"] = list(fcn)
             self._cached_models[exp_name] = {
                 "model": model,
                 "model_name": model_name,
@@ -4930,6 +4982,69 @@ class MLForecastLabApp:
                 future_feature_cols = set(seq_kwargs.get('future_feature_cols') or [])
                 loc = await self._get_site_location()
                 solar_lat_lon = loc if loc is not None else None
+
+                # Fetch user-configured future covariates (Solcast,
+                # met.no, etc.) from HA's forecast attribute and align
+                # them to the inference horizon. Closes the asymmetry
+                # where tree backends saw these at each recursive step
+                # via ``future_cov_values`` but the neural extended-
+                # window path historically only saw past-window lags.
+                # See _retrain_and_cache for the matching training-side
+                # call that uses in-sample observed values for the
+                # same channels.
+                neural_future_cov_names = list(
+                    seq_kwargs.get('future_covariate_names') or []
+                )
+                future_cov_for_inference: dict[str, pd.Series] = {}
+                if neural_future_cov_names and exp_cfg.covariates and self.covariate_resolver:
+                    cov_by_name = {
+                        c.entity.split('.')[-1]: c for c in exp_cfg.covariates
+                    }
+                    for cov_name in neural_future_cov_names:
+                        cov_cfg = cov_by_name.get(cov_name)
+                        if cov_cfg is None:
+                            # Configured at train time, removed in YAML
+                            # since — drop with a debug log; channel
+                            # parity guard further down will surface
+                            # the mismatch as a warning.
+                            logger.debug(
+                                f"  Future cov {cov_name} cached at "
+                                f"train but not in current YAML — "
+                                f"channel will be zero at inference"
+                            )
+                            continue
+                        try:
+                            cov_dict = {
+                                "entity_id": cov_cfg.entity,
+                                "name": cov_name,
+                                "future_attribute": getattr(cov_cfg, "future_attribute", "forecast"),
+                                "future_value_key": getattr(cov_cfg, "future_value_key", None),
+                            }
+                            future_series = await self.covariate_resolver.fetch_future(
+                                cov_dict, future_index,
+                            )
+                            if future_series is None or future_series.empty:
+                                continue
+                            if cov_cfg.scale is not None:
+                                future_series = future_series * cov_cfg.scale
+                            aligned = future_series.reindex(future_index).ffill().bfill()
+                            # All-NaN aligned series → leave the
+                            # channel at zero (build_inference_window's
+                            # NaN-safe path handles this) rather than
+                            # injecting a sentinel.
+                            if aligned.notna().any():
+                                future_cov_for_inference[cov_name] = aligned
+                        except Exception as e:
+                            logger.debug(
+                                f"  Future cov fetch failed for "
+                                f"{cov_name}: {e}"
+                            )
+                if future_cov_for_inference:
+                    logger.info(
+                        f"  Future covariates wired to neural horizon "
+                        f"positions: {list(future_cov_for_inference)}"
+                    )
+
                 future_features_df = compute_known_future_features(
                     future_index,
                     add_temporal=True,
@@ -4937,6 +5052,7 @@ class MLForecastLabApp:
                     solar_lat_lon=solar_lat_lon,
                     include_sun_elevation='sun_elevation' in future_feature_cols,
                     include_clear_sky_ghi='clear_sky_ghi' in future_feature_cols,
+                    future_covariate_values=future_cov_for_inference or None,
                 )
             seq_X_prod, ch_names_now = build_inference_window(
                 combined, 'target', window_size=window_size,
