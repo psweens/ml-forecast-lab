@@ -1,5 +1,60 @@
 # Changelog
 
+## 2.37.4
+
+Generalises the v2.37.3 solar night-fill to a per-experiment opt-in
+field that covers the wider class of intermittent sensors. HA's
+delta-storage recorder drops every row from training when ANY sensor
+sits at a constant value (or goes ``unavailable``) for >90 min —
+that's solar at night (fixed in v2.37.3) but also EV chargers
+between sessions, solar pumps in winter, idle batteries, holiday
+absences. v2.37.4 lets users declare the idle value once per
+experiment so the addon can fill those gaps with the physically
+correct value instead of dropping them.
+
+* **New per-experiment field — ``idle_value: float | None``**
+  (default ``None``). When set and ``target_is_nonnegative=True``:
+    - For solar / irradiance targets (``clear_sky_ghi`` or
+      ``sun_elevation`` present in result): fills NaN slots where
+      the sun is below the horizon with ``idle_value`` instead of
+      the default 0.0. Lets users with a measurable inverter
+      standby override the night-fill default.
+    - For non-solar non-negative targets (no physics features):
+      fills ALL remaining NaN slots with ``idle_value``. Covers
+      EV chargers, solar pumps, idle batteries.
+* **Default behaviour unchanged**: ``idle_value=None`` preserves
+  the v2.37.3 solar night-fill exactly (NaN → 0 where physics says
+  night). Users on v2.37.3 see no change without opting in.
+* **Gate is intentional**: signed targets (net grid flow,
+  temperature delta) still drop NaN regardless of ``idle_value``,
+  because "what should -5 W mean when the sensor is offline" has
+  no universal answer.
+* **Settings UI field** — Target group → "Idle value", number
+  input next to Max increment. Empty string clears the override
+  back to default. Info-tip explains the trade-off (silently
+  masks real outages on non-solar paths) so users opt in
+  knowingly.
+* **Renamed helper ``_apply_solar_night_fill`` →
+  ``_apply_idle_value_fill``** to reflect the broader scope. The
+  old name remains as a module-level alias so v2.37.3-pinned
+  imports / tests / docs still resolve.
+* **6 new regression tests** (``tests/unit/test_solar_night_fill.py``
+  ``test_idle_value_*``) pin the contract: EV-style fill-all-NaN
+  path, default-None preserves drop behaviour for non-solar,
+  solar override of the 0.0 default, signed-target gate, negative
+  idle values allowed, alias back-compat. 14 tests total (8 from
+  v2.37.3 + 6 new).
+* **Logged line generalised**: replaces the v2.37.3
+  ``Solar night-time fill: N → 0`` line with
+  ``Idle fill: N (sun below horizon → 0 / all idle NaN → X)``
+  so the source of the fill is visible.
+
+Known scope limit: this addresses the **target series** gap-fill.
+Covariates with the same intermittent pattern (e.g. an EV charge
+state used as a `role: lagged` covariate) still get the original
+drop-on-NaN behaviour at their fetch stage. Covariate-side fill
+is a separate concern tracked separately.
+
 ## 2.37.3
 
 Fixes the v2.37 neural-PV "daytime-only training set" regression

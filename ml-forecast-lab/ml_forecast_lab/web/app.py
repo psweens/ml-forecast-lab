@@ -3336,6 +3336,13 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "reset_daily": lambda v: bool(v),
             "target_is_nonnegative": lambda v: bool(v),
             "debug_save_training_dumps": lambda v: bool(v),
+            # idle_value: numeric (any sign, idle could conceivably be a
+            # negative offset for e.g. heat-pump COP-style sensors), or
+            # None to disable the fill. An empty string from the UI
+            # input maps to None so the user can clear the override.
+            "idle_value": lambda v: (
+                None if v is None or v == "" else float(v)
+            ),
             "log_transform": lambda v: bool(v),
             "forecast_every_minutes": lambda v: int(v) if int(v) >= 1 else None,
             "retrain_every_hours": lambda v: float(v) if float(v) >= 0.1 else None,

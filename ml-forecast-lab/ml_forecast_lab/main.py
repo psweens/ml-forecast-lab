@@ -100,58 +100,91 @@ def _apply_output_activation(model, exp_cfg) -> None:
         pass
 
 
-def _apply_solar_night_fill(result: 'pd.DataFrame', exp_cfg) -> int:
+def _apply_idle_value_fill(result: 'pd.DataFrame', exp_cfg) -> int:
     """
-    Fill NaN slots in ``result['y']`` with 0.0 where solar physics says the
-    sun is below the horizon. Returns the number of rows filled.
+    Fill NaN slots in ``result['y']`` with an idle value before the
+    final ``dropna``. Returns the number of rows filled.
 
-    For physically non-negative solar-driven targets (PV power, GHI,
-    irradiance) HA's recorder is delta-storage based: when the sensor
-    sits at 0 W from sunset to sunrise it typically records one
-    transition and then nothing — or reports ``unavailable`` while the
-    inverter is asleep, which gets parsed as NaN. The default
+    Two paths, both gated on ``target_is_nonnegative=True``:
+
+    1. **Solar / irradiance** (``clear_sky_ghi`` or ``sun_elevation``
+       in result columns): use solar physics to identify night-time
+       slots and fill ONLY those with ``exp_cfg.idle_value`` (default
+       0.0). Daytime NaN is preserved — a clear_sky_ghi > 0 row with
+       a NaN target is a real sensor outage worth surfacing via the
+       dropna step rather than silently masking.
+
+    2. **Non-solar non-negative** (no physics features present, but
+       ``idle_value`` explicitly set): fill ALL remaining NaN slots
+       with ``idle_value``. Covers EV chargers / batteries / pumps
+       that report ``unavailable`` when idle. The user asserts
+       "this sensor is at <idle_value> when it's not reporting"; if
+       a daytime outage shows up it'll be masked the same way. This
+       path is opt-in only — when ``idle_value`` is None (default)
+       the original drop-on-NaN behaviour is preserved.
+
+    Background: HA's recorder is delta-storage based — when a sensor
+    sits at a constant value (or goes ``unavailable``) for hours, it
+    records one transition and then nothing. The default
     ``gap_handling='interpolate'`` only fills gaps up to
-    ``gap_max_minutes`` (90), so the 10-14h night gap stays as NaN and
-    the downstream ``result.dropna()`` deletes every night-time row.
-    The model then trains on a daytime-only window and has no signal
-    for "PV = 0 when sun is below the horizon" — at inference time it
-    predicts 0.3-0.7 kW at 23:00 and the daily peak phase-shifts to
-    18:00 because the bell curve was only ever half-visible during
-    training.
+    ``gap_max_minutes`` (90), so 10-14h overnight gaps stay NaN and
+    ``result.dropna()`` deletes every idle row. The model then trains
+    on an active-only window and has no signal for the idle state —
+    at inference it produces non-zero predictions during the idle
+    period and the daily shape is distorted.
 
-    Solar physics is deterministic — when the addon already computes
-    ``clear_sky_ghi`` (or ``sun_elevation``) for the same index, we can
-    cheaply identify night-time slots and fill them with 0 before the
-    dropna step. Gated on ``target_is_nonnegative=True`` so only
-    solar / irradiance-style experiments are touched — signed targets
-    like net grid flow keep the original drop-on-NaN behaviour.
-
-    ``log_transform=True`` maps physical 0 → log(1+0) = 0, so writing
-    0.0 is correct whether the target series is in raw or log-
-    transformed space — no inverse needed.
+    ``log_transform=True`` is fine for ``idle_value=0`` (log(1+0)=0).
+    For non-zero ``idle_value`` with log_transform, the caller is
+    expected to have already log-transformed the target series; the
+    written value is taken as-is (no auto log-transform here — the
+    user knows their data better than we do).
     """
     if not getattr(exp_cfg, "target_is_nonnegative", False):
         return 0
     if "y" not in result.columns:
         return 0
-    if "clear_sky_ghi" not in result.columns and "sun_elevation" not in result.columns:
-        return 0
-
     if result["y"].isna().sum() == 0:
         return 0
 
-    if "clear_sky_ghi" in result.columns:
-        night_mask = result["clear_sky_ghi"].fillna(0) <= 0
-    else:
-        # -0.833° is the standard astronomical horizon (accounts for
-        # atmospheric refraction). Anything below is night.
-        night_mask = result["sun_elevation"].fillna(-90) < -0.833
+    idle_value = getattr(exp_cfg, "idle_value", None)
+    has_physics = (
+        "clear_sky_ghi" in result.columns
+        or "sun_elevation" in result.columns
+    )
 
-    fill_mask = result["y"].isna() & night_mask
+    if has_physics:
+        # Solar path: use physics to gate the fill so daytime outages
+        # remain visible to dropna. idle_value overrides the default 0.0
+        # for users with a measurable inverter standby.
+        fill_value = idle_value if idle_value is not None else 0.0
+        if "clear_sky_ghi" in result.columns:
+            night_mask = result["clear_sky_ghi"].fillna(0) <= 0
+        else:
+            # -0.833° is the standard astronomical horizon (accounts
+            # for atmospheric refraction). Anything below is night.
+            night_mask = result["sun_elevation"].fillna(-90) < -0.833
+        fill_mask = result["y"].isna() & night_mask
+    else:
+        # Non-solar path: ALL NaN → idle_value, but only when the
+        # user has explicitly declared what idle means. No physics
+        # to distinguish "natural idle" from "real outage" — that's
+        # the trade-off the idle_value field surfaces.
+        if idle_value is None:
+            return 0
+        fill_value = idle_value
+        fill_mask = result["y"].isna()
+
     n_filled = int(fill_mask.sum())
     if n_filled > 0:
-        result.loc[fill_mask, "y"] = 0.0
+        result.loc[fill_mask, "y"] = fill_value
     return n_filled
+
+
+# Backwards-compatibility shim — v2.37.3 introduced
+# _apply_solar_night_fill as the public helper; v2.37.4 generalised
+# it. Keep the old name as an alias so external imports / pinned
+# tests don't break.
+_apply_solar_night_fill = _apply_idle_value_fill
 
 
 def _resolve_daily_loss_weight(exp_cfg) -> float:
@@ -1754,21 +1787,33 @@ class MLForecastLabApp:
                     "  Solar physics requested but site location unavailable"
                 )
 
-        # --- Solar night-time zero-fill ----------------------------------
-        # See _apply_solar_night_fill docstring for the full rationale.
+        # --- Idle-value fill (solar night / declared idle) --------------
+        # See _apply_idle_value_fill docstring for the full rationale.
         # Short version: HA's delta-storage recorder + the default
         # 90-min ``gap_handling='interpolate'`` cap drops every
-        # night-time row from PV-style training data, so the model
-        # never learns "y = 0 when sun is below the horizon". Filling
-        # before dropna restores the full daily bell curve.
+        # idle / overnight row from training data for any sensor that
+        # goes constant-or-unavailable for >90 min. The fill restores
+        # those rows with the physically correct value (0 for solar
+        # night by default; user-declared idle_value for non-solar
+        # non-negative targets like EV chargers).
         y_nan_before = int(result["y"].isna().sum()) if "y" in result.columns else 0
-        n_filled = _apply_solar_night_fill(result, exp_cfg)
+        n_filled = _apply_idle_value_fill(result, exp_cfg)
         if n_filled > 0:
             remaining_nan = y_nan_before - n_filled
+            idle_value = getattr(exp_cfg, "idle_value", None)
+            has_physics = (
+                "clear_sky_ghi" in result.columns
+                or "sun_elevation" in result.columns
+            )
+            if has_physics:
+                fv = idle_value if idle_value is not None else 0.0
+                label = f"sun below horizon → {fv}"
+            else:
+                label = f"all idle NaN → {idle_value}"
             logger.info(
-                f"  Solar night-time fill: {n_filled} NaN rows "
-                f"(sun below horizon) → 0 for {exp_cfg.name} "
-                f"[{remaining_nan} daytime NaN remain for dropna]"
+                f"  Idle fill: {n_filled} NaN rows "
+                f"({label}) for {exp_cfg.name} "
+                f"[{remaining_nan} non-idle NaN remain for dropna]"
             )
 
         # --- Covariate manifest -------------------------------------------

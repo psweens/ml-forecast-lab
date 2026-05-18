@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from ml_forecast_lab.config import ExperimentCfg
-from ml_forecast_lab.main import _apply_solar_night_fill
+from ml_forecast_lab.main import _apply_idle_value_fill, _apply_solar_night_fill
 
 
 def _make_solar_result(
@@ -74,7 +74,7 @@ def test_fill_skipped_when_target_is_not_nonnegative():
     result = _make_solar_result()
     exp = ExperimentCfg(name="grid", target_entity="x", target_is_nonnegative=False)
     n_before = result["y"].isna().sum()
-    n_filled = _apply_solar_night_fill(result, exp)
+    n_filled = _apply_idle_value_fill(result, exp)
     assert n_filled == 0
     assert result["y"].isna().sum() == n_before
 
@@ -85,7 +85,7 @@ def test_fill_skipped_when_no_solar_features():
     result = _make_solar_result()
     result = result.drop(columns=["clear_sky_ghi", "sun_elevation"])
     exp = ExperimentCfg(name="pv", target_entity="x", target_is_nonnegative=True)
-    n_filled = _apply_solar_night_fill(result, exp)
+    n_filled = _apply_idle_value_fill(result, exp)
     assert n_filled == 0
 
 
@@ -95,7 +95,7 @@ def test_fill_uses_clear_sky_ghi_preferentially():
     physics gate)."""
     result = _make_solar_result()
     exp = ExperimentCfg(name="pv", target_entity="x", target_is_nonnegative=True)
-    n_filled = _apply_solar_night_fill(result, exp)
+    n_filled = _apply_idle_value_fill(result, exp)
     assert n_filled > 0
     night_idx = result["clear_sky_ghi"] <= 0
     # Every night row that was NaN should now be 0
@@ -111,7 +111,7 @@ def test_fill_falls_back_to_sun_elevation():
     result = _make_solar_result()
     result = result.drop(columns=["clear_sky_ghi"])
     exp = ExperimentCfg(name="pv", target_entity="x", target_is_nonnegative=True)
-    n_filled = _apply_solar_night_fill(result, exp)
+    n_filled = _apply_idle_value_fill(result, exp)
     assert n_filled > 0
     night_idx = result["sun_elevation"] < -0.833
     assert (result.loc[night_idx, "y"] == 0.0).all()
@@ -127,7 +127,7 @@ def test_fill_preserves_daytime_nan():
     midday = (result.index.hour == 12) & (result.index.day == 3)
     result.loc[midday, "y"] = np.nan
     exp = ExperimentCfg(name="pv", target_entity="x", target_is_nonnegative=True)
-    _apply_solar_night_fill(result, exp)
+    _apply_idle_value_fill(result, exp)
     # Midday NaN remains NaN (will be dropped by the dropna step)
     assert result.loc[midday, "y"].isna().all()
 
@@ -136,8 +136,8 @@ def test_fill_is_idempotent():
     """Running twice produces the same result; no double-fill."""
     result = _make_solar_result()
     exp = ExperimentCfg(name="pv", target_entity="x", target_is_nonnegative=True)
-    n1 = _apply_solar_night_fill(result, exp)
-    n2 = _apply_solar_night_fill(result, exp)
+    n1 = _apply_idle_value_fill(result, exp)
+    n2 = _apply_idle_value_fill(result, exp)
     assert n1 > 0
     assert n2 == 0  # nothing left to fill
 
@@ -148,7 +148,7 @@ def test_fill_restores_full_daily_coverage():
     21-03 are completely absent."""
     result = _make_solar_result(n_days=10)
     exp = ExperimentCfg(name="pv", target_entity="x", target_is_nonnegative=True)
-    _apply_solar_night_fill(result, exp)
+    _apply_idle_value_fill(result, exp)
     surviving = result.dropna()
     hours_present = set(surviving.index.hour.unique())
     assert hours_present == set(range(24)), (
@@ -168,8 +168,113 @@ def test_fill_log_transformed_y_is_still_zero():
         name="pv", target_entity="x",
         target_is_nonnegative=True, log_transform=True,
     )
-    _apply_solar_night_fill(result, exp)
+    _apply_idle_value_fill(result, exp)
     night_idx = result["clear_sky_ghi"] <= 0
     assert (result.loc[night_idx, "y"] == 0.0).all()
     # Spot check expm1 inverse still gives physical 0
     assert np.expm1(0.0) == 0.0
+
+
+# ----------------------------------------------------------------------
+# v2.37.4 — generalised idle_value path (non-solar non-negative targets)
+# ----------------------------------------------------------------------
+
+def _make_ev_charger_result(n_days: int = 5) -> pd.DataFrame:
+    """Synthesise an EV charger power series: 0 most of the time, with
+    a few daily sessions. No solar physics features. Simulates HA's
+    delta-storage drop by setting all 'idle' rows to NaN."""
+    idx = pd.date_range(
+        "2026-05-01 00:00",
+        periods=n_days * 48,
+        freq="30min",
+        tz=None,
+    )
+    rng = np.random.default_rng(0)
+    # Active charging in a random 4-hr block per day, ~7 kW
+    active = np.zeros(len(idx), dtype=bool)
+    for d in range(n_days):
+        start = d * 48 + rng.integers(20, 36)
+        active[start:start + 8] = True
+    y = np.where(active, 7.0 + rng.normal(0, 0.3, len(idx)), np.nan)
+    return pd.DataFrame({"y": pd.Series(y, index=idx)}, index=idx)
+
+
+def test_idle_value_zero_fills_all_ev_idle_gaps():
+    """EV charger with idle_value=0: every NaN slot (idle) becomes 0,
+    so the model sees the full 24-hour duty cycle instead of training
+    on the active-only ~17% of intervals."""
+    result = _make_ev_charger_result()
+    nan_before = result["y"].isna().sum()
+    assert nan_before > 0, "fixture should have idle NaN gaps"
+
+    exp = ExperimentCfg(
+        name="ev_power", target_entity="sensor.ev_charger_power",
+        target_is_nonnegative=True, idle_value=0.0,
+    )
+    n_filled = _apply_idle_value_fill(result, exp)
+    assert n_filled == nan_before
+    assert result["y"].isna().sum() == 0
+    # All idle slots are exactly 0; active slots still ~7 kW
+    assert (result["y"].between(0.0, 8.0)).all()
+
+
+def test_idle_value_none_keeps_drop_behaviour_for_non_solar():
+    """Default idle_value=None on a non-solar target: no fill applied,
+    NaN rows still get dropped downstream (preserves the v2.37.3
+    behaviour for users who haven't opted in)."""
+    result = _make_ev_charger_result()
+    nan_before = result["y"].isna().sum()
+
+    exp = ExperimentCfg(
+        name="ev_power", target_entity="sensor.ev_charger_power",
+        target_is_nonnegative=True,  # idle_value omitted → None
+    )
+    n_filled = _apply_idle_value_fill(result, exp)
+    assert n_filled == 0
+    assert result["y"].isna().sum() == nan_before
+
+
+def test_idle_value_overrides_solar_default_zero():
+    """Solar target with idle_value=0.005 (measurable inverter
+    standby): night-time slots get 0.005 instead of the default 0."""
+    result = _make_solar_result()
+    exp = ExperimentCfg(
+        name="pv", target_entity="x",
+        target_is_nonnegative=True, idle_value=0.005,
+    )
+    _apply_idle_value_fill(result, exp)
+    night_idx = result["clear_sky_ghi"] <= 0
+    assert (result.loc[night_idx, "y"] == 0.005).all()
+
+
+def test_idle_value_does_not_fill_when_target_not_nonneg():
+    """Even with idle_value set, target_is_nonnegative=False still
+    blocks the fill — signed targets keep drop-on-NaN."""
+    result = _make_ev_charger_result()
+    exp = ExperimentCfg(
+        name="grid_flow", target_entity="x",
+        target_is_nonnegative=False, idle_value=0.0,
+    )
+    n_filled = _apply_idle_value_fill(result, exp)
+    assert n_filled == 0
+
+
+def test_idle_value_negative_allowed():
+    """A negative idle_value is valid (e.g. a sensor that reads -5
+    when idle but should still be treated as below-active). Field
+    validator must not reject it."""
+    result = _make_ev_charger_result()
+    exp = ExperimentCfg(
+        name="weird", target_entity="x",
+        target_is_nonnegative=True, idle_value=-5.0,
+    )
+    _apply_idle_value_fill(result, exp)
+    # Every idle slot becomes -5; check at least one row was filled.
+    assert (result["y"] == -5.0).any()
+
+
+def test_solar_night_fill_alias_still_callable():
+    """Back-compat: _apply_solar_night_fill is an alias for the
+    renamed helper. Pin so future cleanups don't break pinned imports
+    or v2.37.3 docs/tests."""
+    assert _apply_solar_night_fill is _apply_idle_value_fill

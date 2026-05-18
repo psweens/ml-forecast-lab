@@ -174,6 +174,13 @@
                        placeholder="No limit"
                        onchange="saveSettingsField(this)">
             </div>
+            <div class="exp-field" style="max-width:200px;">
+                <label class="field-label">Idle value <span class="info-tip">?<span class="tip-text">Value to fill NaN gaps with when the sensor is idle / unavailable for &gt;90 min. Only applied when <b>Non-negative target</b> is on. Leave empty (default) to keep the v2.37.3 behaviour: solar targets auto-fill night-time gaps with 0; other non-negative targets drop NaN rows. Set a number (typically <code>0</code>) for EV chargers, solar pumps, or any sensor that reports <code>unavailable</code> when idle — the addon will fill ALL gap rows with this value before dropna so the model learns the idle state instead of training on an active-only window. Use with care on solar targets only if your inverter has a measurable standby (e.g. 0.005 kW) and you want the night-fill to use that instead of 0.</span></span></label>
+                <input type="number" class="setting-input" data-field="idle_value" step="any"
+                       value="{{ exp_config.idle_value if exp_config and exp_config.idle_value is not none else '' }}"
+                       placeholder="None (default)"
+                       onchange="saveSettingsField(this)">
+            </div>
         </div>
     </div>
 

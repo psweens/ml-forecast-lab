@@ -242,6 +242,27 @@ class ExperimentCfg:
     production training surface offline. ~0.5–2 MB per dump on a 30-min PV
     target with 22 channels and 48-step past window."""
 
+    idle_value: Optional[float] = None
+    """Value to fill NaN gaps with when the sensor is idle / unavailable
+    (e.g. an EV charger between sessions, a solar pump in winter, an idle
+    battery). Only applied when ``target_is_nonnegative=True``.
+
+    - When ``None`` (default): current behaviour — solar targets with
+      physics features get the v2.37.3 night-fill (NaN → 0 where sun is
+      below horizon); other non-negative targets keep the original
+      drop-on-NaN behaviour.
+    - When set to a numeric value: the v2.37.3 solar night-fill uses this
+      value instead of 0 (lets users with an inverter standby > 0
+      override the default), AND non-solar non-negative targets fill
+      ALL remaining NaN gaps with this value before dropna. The user
+      asserts "this sensor is at <value> when it's not reporting" — use
+      with care, a daytime EV-charger sensor failure would also be
+      filled with the idle value rather than dropped.
+
+    Typical usage:
+      idle_value: 0     # EV charger / solar pump / non-solar PV
+      idle_value: 0.005 # solar with measurable inverter standby"""
+
     models_enabled: List[str] = field(
         default_factory=lambda: ['lightgbm', 'xgboost', 'lstm', 'cnn']
     )
