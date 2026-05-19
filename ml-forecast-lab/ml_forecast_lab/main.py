@@ -1764,10 +1764,19 @@ class MLForecastLabApp:
                         cov_cfg, all_covs=exp_cfg.covariates,
                     )
                     # Build dict for CovariateResolver (expects entity_id, not entity)
+                    # ``future_value_key`` plumbed through so the
+                    # attribute-history path (v2.38.4) can fire for
+                    # weather.* entities: their .state is categorical
+                    # but the per-metric numeric values live in
+                    # .attributes, and value_key tells the resolver
+                    # which attribute to extract.
                     cov_dict = {
                         "entity_id": cov_cfg.entity,
                         "name": canonical_name,
                         "binary": cov_cfg.is_binary,
+                        "future_value_key": getattr(
+                            cov_cfg, "future_value_key", None,
+                        ),
                     }
 
                     cov_series = await self.covariate_resolver.fetch_history(

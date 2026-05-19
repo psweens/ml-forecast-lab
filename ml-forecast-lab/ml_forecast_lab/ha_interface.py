@@ -151,13 +151,27 @@ def state_to_float(x: Any) -> Optional[float]:
         return None
 
 
-def normalise_history(raw_records: list[dict]) -> pd.DataFrame:
+def normalise_history(
+    raw_records: list[dict],
+    attribute_key: Optional[str] = None,
+) -> pd.DataFrame:
     """
     Convert Home Assistant history response to clean DataFrame.
 
     Args:
         raw_records: List of dicts from HA history API with keys:
                      'state', 'last_changed', 'attributes', etc.
+        attribute_key: When set, read ``attributes[attribute_key]``
+                       instead of ``state``. Required for entities
+                       whose state is a categorical string but whose
+                       useful numeric data lives in attributes
+                       (``weather.*`` entities expose
+                       ``temperature``/``cloud_coverage``/etc. this
+                       way). The caller is responsible for fetching
+                       with ``include_attributes=True`` so the
+                       payload actually contains the attribute dict
+                       — by default HA's ``minimal_response`` mode
+                       strips them.
 
     Returns:
         DataFrame with columns ['ds', 'value']:
@@ -172,7 +186,17 @@ def normalise_history(raw_records: list[dict]) -> pd.DataFrame:
         try:
             ts = parse_timestamp(record["last_changed"])
             ts_utc = ensure_utc(ts)
-            val = state_to_float(record["state"])
+            if attribute_key is None:
+                val = state_to_float(record["state"])
+            else:
+                # Attribute path (v2.38.4+): pull from the entity's
+                # attribute dict. Missing key → NaN (the resolver will
+                # ffill/interpolate downstream). Some records may
+                # legitimately omit the attribute during transient
+                # states ("unavailable" with empty attribute dict).
+                attrs = record.get("attributes") or {}
+                raw_val = attrs.get(attribute_key)
+                val = state_to_float(raw_val) if raw_val is not None else float("nan")
 
             rows.append({"ds": ts_utc, "value": val})
         except (KeyError, ValueError) as e:
@@ -311,6 +335,7 @@ class HAInterface:
         entity_id: str,
         start: datetime,
         end: datetime,
+        include_attributes: bool = False,
     ) -> list[dict]:
         """
         Fetch raw history records for an entity.
@@ -319,6 +344,15 @@ class HAInterface:
             entity_id: Entity ID (e.g. 'sensor.temperature')
             start: Start datetime (converted to ISO8601)
             end: End datetime (converted to ISO8601)
+            include_attributes: When True, drop HA's
+                ``minimal_response`` flag so the response carries
+                each state-change's full attribute dict. Required to
+                read historical numeric values from
+                ``weather.*``-style entities whose ``.state`` is
+                categorical (``partlycloudy``) and whose useful
+                metrics live in ``.attributes``. Default False —
+                preserves the v2.37 minimal-response payload size
+                optimization for the common numeric-sensor case.
 
         Returns:
             List of history dicts with 'state', 'last_changed', etc.
@@ -330,8 +364,11 @@ class HAInterface:
         params = {
             "end_time": end_iso,
             "filter_entity_id": entity_id,
-            "minimal_response": "",
         }
+        if not include_attributes:
+            # minimal_response strips attributes from the payload —
+            # cuts ~80% of the response size for numeric sensors.
+            params["minimal_response"] = ""
 
         result = await self.api_call(
             "GET", endpoint, params=params, read_timeout=HISTORY_READ_TIMEOUT

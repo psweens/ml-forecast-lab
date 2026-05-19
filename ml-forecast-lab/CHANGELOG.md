@@ -1,5 +1,68 @@
 # Changelog
 
+## 2.38.4
+
+Closes the v2.38.3 workaround properly: ``weather.*`` entities used
+as future covariates now produce **real historical numeric data**
+from HA's recorder, not zero-filled padding. The model can finally
+learn the past relationship between Met Office's reported
+cloud_coverage / temperature / etc. and the target.
+
+HA's recorder stores each state-change's *full state object*,
+including the ``.attributes`` dict. For a weather entity, every
+historical record carries ``temperature``, ``cloud_coverage``,
+``humidity`` etc. in attributes alongside the categorical ``.state``
+field. v2.38.3 only knew how to read ``.state``, so weather entities
+produced 0% coverage and the past block was zero-filled. v2.38.4
+adds an **attribute-history path** that reads from
+``record["attributes"][value_key]`` instead.
+
+* **``HAInterface.get_history``** gains ``include_attributes`` flag.
+  Default ``False`` (preserves the v2.37 ``minimal_response`` payload
+  optimization). ``True`` drops the flag from the HA query so the
+  response carries the full attribute dicts.
+* **``normalise_history``** gains ``attribute_key`` argument. When
+  set, extracts ``record["attributes"][attribute_key]`` instead of
+  ``record["state"]``. Missing attribute keys → NaN (handled by
+  the existing resample / ffill / interpolate downstream).
+* **``CovariateResolver.fetch_history``** auto-detects the attribute
+  path: when the entity is in the ``weather.*`` domain AND
+  ``future_value_key`` is set on the cov_cfg, it routes through the
+  attribute-history path. Logs ``Fetching covariate history:
+  weather.met_office_balsham (attribute=cloud_coverage)`` so it's
+  visible.
+* **Plumbed through ``_fetch_and_preprocess``**: cov_dict now
+  forwards ``future_value_key`` to the resolver. No change to YAML
+  schema or UI — the existing value-key picker already populates
+  this field.
+
+The v2.38.3 empty-column guard remains as a safety net for any
+other zero-coverage cause (a sensor offline, a freshly-added
+covariate with no history yet).
+
+Tests: 7 new tests in
+``tests/unit/test_attribute_history.py`` pin the contract:
+- normalise_history state-path unchanged when no attribute_key
+- normalise_history reads from attributes when set
+- normalise_history handles missing attribute (NaN, not crash)
+- get_history include_attributes flag controls minimal_response
+- fetch_history routes weather entity + value_key through
+  attribute path
+- fetch_history keeps state path for regular numeric sensors
+- fetch_history keeps state path for weather without value_key
+  (the v2.38.3 empty-column guard still handles that case)
+
+73 tests pass total.
+
+Practical user impact: re-add
+``weather.met_office_balsham`` as ``role: future`` with
+``future_value_key: cloud_coverage``. The log line should now read
+``met_office_balsham__cloud_coverage: 4344 raw → 4344 aligned``
+(matching the openweathermap line) instead of the v2.38.3
+``→ 0 aligned`` zero-fill case. The model sees real past
+cloud_coverage AND real future forecasts — the full TFT/TiDE
+pattern.
+
 ## 2.38.3
 
 Fixes a v2.38.2 regression that killed experiments when a user
