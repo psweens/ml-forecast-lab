@@ -1,5 +1,74 @@
 # Changelog
 
+## 2.37.5
+
+Closes the **future-covariate asymmetry** between tree and neural
+backends. Tree models (LightGBM / XGBoost / CatBoost) routed user-
+configured ``role: future`` covariates into every recursive forecast
+step via ``future_cov_values`` — so a Solcast forecast value at
+horizon h directly informed the prediction at h. Neural extended-
+window backends (NLinear, DLinear, TSMixer, TiDE, etc.) had the
+same plumbing point (``compute_known_future_features`` accepts a
+``future_covariate_values`` parameter) but **the caller never
+passed it in**, so user future covariates only reached the model
+as past-window lags. This systematically biased benchmarks: any
+head-to-head comparison with a strong future-known covariate
+(Solcast, met.no weather, anything from a forecast service)
+favoured tree models on information grounds, not architecture.
+
+* **Training side** (``_retrain_and_cache``): builds a
+  ``future_cov_for_neural`` dict from ``exp_cfg.covariates`` with
+  ``role`` in ``{future, both}``, mapping each to its in-sample
+  historical observations from ``combined``. Passes through
+  ``compute_known_future_features.future_covariate_values``. The
+  "future" positions of each training window now carry the actual
+  past observations of those covariates at those timestamps —
+  giving the neural head per-horizon ground-truth signal during
+  training.
+* **Inference side** (``_forecast_with_cached``): mirrors the
+  tree-path pattern — for each cached
+  ``seq_kwargs.future_covariate_names`` entry, calls
+  ``covariate_resolver.fetch_future`` against HA's forecast
+  attribute, reindexes to the inference ``future_index``, and
+  passes the dict through to ``compute_known_future_features``.
+  The 96 horizon positions of the inference window now read the
+  forecast values directly. Falls back to channel-zero if the
+  forecast attribute is missing / all-NaN; channel-parity guard
+  surfaces a warning if a future covariate was cached but removed
+  from YAML since.
+* **Cache persistence**: ``cache_meta.json`` gains a
+  ``future_covariate_names`` field listing just the user-future
+  channels (subset of ``future_feature_cols``). Deterministic
+  columns (temporal, solar physics) are recomputed at inference
+  from the future_index alone; this list tells the inference path
+  which channels need a HA fetch. Survives addon restart.
+* **Channel parity preserved**: nothing changes about channel
+  ordering — user future covariates appear in the same channel
+  slots they always did (raw_cov_cols path). The wiring only
+  affects WHAT VALUES populate the future positions of those
+  slots. The channel-parity guard at inference still catches any
+  drift between cached and live channel sets.
+
+Practical user impact:
+* If you're running a benchmark with Solcast / weather covariates
+  configured as ``role: future``, **rerun it after v2.37.5** —
+  the neural-vs-tree gap will narrow (potentially flip) because
+  the neural models are no longer information-starved.
+* If you've been on tree models for PV forecasting because neural
+  models seemed worse, give NLinear / DLinear / TiDE a fresh try
+  with a Solcast covariate — TiDE in particular is designed for
+  this exact pattern (long horizon + future-known covariates) and
+  should now show its strength.
+
+Tests: 5 new regression tests in
+``tests/unit/test_future_covariate_wiring.py`` pin the contract —
+training-side future covariate placement, inference-side
+placement from a synthetic forecast, the no-fcv legacy path
+(future positions stay zero), reindex + ffill handling of sparse
+covariate observations, multi-covariate channel isolation. All
+56 tests pass (13 integration + 17 config + 7 debug + 14 idle +
+5 future-cov).
+
 ## 2.37.4
 
 Generalises the v2.37.3 solar night-fill to a per-experiment opt-in
