@@ -1166,8 +1166,13 @@ def add_experiment_covariate(
         if exp.get('name') != experiment_name:
             continue
         covs = exp.setdefault('covariates', [])
-        # Reject duplicate entity
-        if any(c.get('entity') == covariate['entity'] for c in covs):
+        # Reject only true duplicates — same (entity, role, source)
+        # tuple. This allows the common pattern of consuming multiple
+        # forecast attributes from a single weather entity (e.g.
+        # weather.met_office_balsham gives cloud_coverage AND
+        # temperature AND humidity from the same ``hourly`` service
+        # forecast) as separate covariates.
+        if any(_same_covariate(c, covariate) for c in covs):
             return False
         # Strip None values so YAML stays clean
         clean = {k: v for k, v in covariate.items() if v is not None}
@@ -1176,6 +1181,28 @@ def add_experiment_covariate(
         return True
 
     return False
+
+
+def _same_covariate(a: dict, b: dict) -> bool:
+    """Two covariates are the same configuration only if entity, role,
+    AND (for future/both) the future-value source all match. A user
+    who adds ``weather.met_office_balsham`` once for ``cloud_coverage``
+    and again for ``temperature`` is configuring two distinct
+    covariates — they share an entity but differ in
+    ``future_value_key``."""
+    if a.get('entity') != b.get('entity'):
+        return False
+    if a.get('role', 'lagged') != b.get('role', 'lagged'):
+        return False
+    if a.get('role', 'lagged') in ('future', 'both'):
+        # For future/both, the (attribute, value_key) pair is what
+        # routes to a specific forecast metric. Different pairs =
+        # different covariates from the same source entity.
+        if a.get('future_attribute', 'forecast') != b.get('future_attribute', 'forecast'):
+            return False
+        if a.get('future_value_key') != b.get('future_value_key'):
+            return False
+    return True
 
 
 def add_experiment_load_subtract(
