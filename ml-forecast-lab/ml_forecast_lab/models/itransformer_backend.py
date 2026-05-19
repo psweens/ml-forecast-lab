@@ -61,6 +61,14 @@ class _iTransformerNet(nn.Module):
         embed_len = (past_window_size
                      if past_window_size is not None and past_window_size < seq_len
                      else seq_len)
+        # Width of the future block (0 in legacy non-extended mode).
+        # Used by the v2.37.7 future_aux_head to consume user future
+        # covariates that the channel embedder ignores by design.
+        self.future_window_size = (
+            seq_len - past_window_size
+            if past_window_size is not None and past_window_size < seq_len
+            else 0
+        )
 
         # Embed each channel's slice values to d_model
         self.channel_embed = nn.Linear(embed_len, d_model)
@@ -88,12 +96,46 @@ class _iTransformerNet(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(head_hidden, n_horizons),
         )
+
+        # Auxiliary future-feature head (v2.37.7). The PF6 slicing
+        # above keeps the channel embedder past-only by design — that
+        # was the right call to avoid the target channel embedding
+        # being biased low by zero-future placeholders. To still let
+        # user future-known covariates (Solcast, weather forecasts)
+        # influence the prediction, a separate MLP reads the future
+        # block as a flat vector and produces a per-horizon
+        # adjustment added to the encoder's head output. Same zero-init
+        # pattern as the nbeats / nhits future head — v2.37.7 starts
+        # behaviourally identical to v2.37.6 and only learns to use
+        # the covariate signal if it reduces residuals.
+        if self.future_window_size > 0:
+            future_flat = self.future_window_size * n_channels
+            aux_hidden = max(d_model, n_horizons)
+            self.future_aux_head = nn.Sequential(
+                nn.Linear(future_flat, aux_hidden),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(aux_hidden, n_horizons),
+            )
+            nn.init.zeros_(self.future_aux_head[-1].weight)
+            nn.init.zeros_(self.future_aux_head[-1].bias)
+        else:
+            self.future_aux_head = None
+
         self.activation = _build_activation(output_activation, scale=sigmoid_scale)
 
     def forward(self, x):
         # x: (batch, seq_len, n_channels)
         if self.revin is not None:
             x = self.revin.normalize(x, past_window_size=self.past_window_size)
+        # Snapshot the future block BEFORE slicing so the auxiliary
+        # head can consume it (v2.37.7). After PF6 below ``x`` is the
+        # past-only tensor and we'd lose the future-known covariates.
+        future_block = None
+        if (self.future_aux_head is not None
+                and self.past_window_size is not None
+                and self.past_window_size < x.size(1)):
+            future_block = x[:, self.past_window_size :, :]
         # PF6: slice to past block before transposing, so the channel
         # embedder consumes only past values for every channel — the
         # target channel's "future" is always zero (no useful signal)
@@ -118,6 +160,12 @@ class _iTransformerNet(nn.Module):
         # Flatten and project to output
         x = x.reshape(x.size(0), -1)  # (batch, n_channels * d_model)
         out = self.head(x)  # (batch, n_horizons)
+        # Future-covariate adjustment (v2.37.7). Zero contribution at
+        # step 0 thanks to the zero-init; learns to add a per-horizon
+        # offset that uses the future-known signal.
+        if future_block is not None:
+            future_flat = future_block.reshape(future_block.size(0), -1)
+            out = out + self.future_aux_head(future_flat)
         if self.revin is not None:
             out = self.revin.denormalize(out)
         out = self.activation(out)

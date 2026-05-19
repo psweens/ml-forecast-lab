@@ -425,11 +425,23 @@
                 <div class="entity-search-results" id="entity-results" style="display:none;"></div>
             </div>
             <div class="exp-field">
-                <label class="field-label">Role <span class="info-tip">?<span class="tip-text"><strong>Lagged</strong>: the model sees past values of this covariate; the inference path forward-fills the last observed value. <strong>Future</strong>: the model reads the entity's <code>forecast</code> attribute and aligns it to the forecast horizon — for weather / Solcast / Forecast.Solar entities where the future is genuinely known. <strong>Both</strong>: use historical for training and the forecast attribute for inference. Future / Both require ``future_attribute`` and (for list-of-dict attributes) ``future_value_key``, settable in YAML.</span></span></label>
-                <select class="setting-input" id="cov-role-input">
+                <label class="field-label">Role <span class="info-tip">?<span class="tip-text"><strong>Lagged</strong>: the model sees past values of this covariate; the inference path forward-fills the last observed value. <strong>Future</strong>: the model reads the entity's forecast attribute and aligns it to the forecast horizon — for weather / Solcast / Forecast.Solar entities where the future is genuinely known. <strong>Both</strong>: use historical for training and the forecast attribute for inference. When you pick Future / Both, the Forecast attribute + Value key fields below populate from the entity's actual HA attributes.</span></span></label>
+                <select class="setting-input" id="cov-role-input" onchange="onCovRoleChanged()">
                     <option value="lagged">Lagged</option>
                     <option value="future">Future (forecast attribute)</option>
                     <option value="both">Both (history + forecast)</option>
+                </select>
+            </div>
+            <div class="exp-field" id="cov-future-attr-field" style="display:none;">
+                <label class="field-label">Forecast attribute <span class="info-tip">?<span class="tip-text">Which HA attribute holds the future-value array. Auto-populated from the entity's live attributes once you pick the entity and a future-role. Common values: <code>forecast</code> (Met.no weather, default), <code>detailedForecast</code> (Solcast, Forecast.Solar). Leave at "Auto" to use the resolver's default ("forecast"); pick from the dropdown to override.</span></span></label>
+                <select class="setting-input" id="cov-future-attr-input" onchange="onCovFutureAttrChanged()">
+                    <option value="">Auto (forecast)</option>
+                </select>
+            </div>
+            <div class="exp-field" id="cov-future-key-field" style="display:none;">
+                <label class="field-label">Value key <span class="info-tip">?<span class="tip-text">For list-of-dict forecast attributes (Solcast, Met.no weather), which key inside each entry holds the numeric value. Auto-populated from the first entry of the chosen forecast attribute. Common values: <code>pv_estimate</code> (Solcast), <code>temperature</code> (Met.no). Leave at "Auto" to let the resolver pick from {value, pv_estimate, state, temperature, ...} in priority order — works for most weather / Solcast integrations.</span></span></label>
+                <select class="setting-input" id="cov-future-key-input">
+                    <option value="">Auto-detect</option>
                 </select>
             </div>
             <div class="exp-field">
@@ -2259,6 +2271,13 @@ window.showTab = function(el) {
                     opt.onclick = function() {
                         inputEl.value = e.entity_id;
                         resultsDiv.style.display = 'none';
+                        // Fire 'change' so listeners (e.g. the
+                        // covariate-form's future-attribute refresh)
+                        // run — programmatic .value assignment alone
+                        // doesn't trigger change.
+                        try {
+                            inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+                        } catch (ev) { /* older browsers */ }
                     };
                     resultsDiv.appendChild(opt);
                 });
@@ -2277,6 +2296,100 @@ window.showTab = function(el) {
         });
     });
 
+    // Show / hide future-attribute fields and trigger refresh when role
+    // changes. Called from the Role select's onchange. Keeps the fields
+    // out of the way for the common (lagged) covariate case.
+    window.onCovRoleChanged = function() {
+        var role = document.getElementById('cov-role-input').value;
+        var showFuture = (role === 'future' || role === 'both');
+        document.getElementById('cov-future-attr-field').style.display =
+            showFuture ? '' : 'none';
+        // The value-key field appears only after a forecast attribute is
+        // picked AND that attribute has sample_keys (list-of-dict format).
+        // Hide it here on every role flip — refreshFutureAttrs will
+        // re-show it if appropriate.
+        document.getElementById('cov-future-key-field').style.display = 'none';
+        if (showFuture) {
+            refreshFutureAttrs();
+        }
+    };
+
+    // Fetch the entity's forecast-shaped attributes from HA and
+    // populate the dropdown. Best-effort: if the entity isn't filled
+    // in yet or the fetch fails, leave the dropdown at "Auto" so the
+    // resolver's defaults still work.
+    window.refreshFutureAttrs = function() {
+        var entity = document.getElementById('cov-entity-input').value.trim();
+        var sel = document.getElementById('cov-future-attr-input');
+        // Reset to just the "Auto" option each time so a stale
+        // entity's attributes don't carry over.
+        sel.innerHTML = '<option value="">Auto (forecast)</option>';
+        if (!entity) return;
+        fetch(BASE + '/api/ha/forecast-attrs?entity=' + encodeURIComponent(entity))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var attrs = (data && data.forecast_attributes) || [];
+            attrs.forEach(function(a) {
+                var opt = document.createElement('option');
+                opt.value = a.name;
+                opt.textContent = a.name + ' (' + a.format + ')';
+                // Stash the sample_keys on the option so the value-key
+                // dropdown can read them when the attribute is picked.
+                opt.dataset.sampleKeys = JSON.stringify(a.sample_keys || []);
+                opt.dataset.format = a.format;
+                sel.appendChild(opt);
+            });
+        })
+        .catch(function() { /* silent — Auto still works */ });
+    };
+
+    // When the user picks a forecast attribute, populate the value-key
+    // dropdown from the attribute's sample_keys (or hide for date-dict
+    // format which doesn't need a value_key).
+    window.onCovFutureAttrChanged = function() {
+        var sel = document.getElementById('cov-future-attr-input');
+        var opt = sel.options[sel.selectedIndex];
+        var keyField = document.getElementById('cov-future-key-field');
+        var keySel = document.getElementById('cov-future-key-input');
+        keySel.innerHTML = '<option value="">Auto-detect</option>';
+        if (!opt || !opt.value) {
+            // "Auto (forecast)" picked or no attribute selected
+            keyField.style.display = 'none';
+            return;
+        }
+        var format = opt.dataset.format;
+        if (format === 'date-dict') {
+            // flat date→value format doesn't need a value_key
+            keyField.style.display = 'none';
+            return;
+        }
+        var keys = [];
+        try { keys = JSON.parse(opt.dataset.sampleKeys || '[]'); } catch (e) {}
+        if (!keys.length) {
+            keyField.style.display = 'none';
+            return;
+        }
+        keys.forEach(function(k) {
+            var o = document.createElement('option');
+            o.value = k;
+            o.textContent = k;
+            keySel.appendChild(o);
+        });
+        keyField.style.display = '';
+    };
+
+    // Refresh the forecast-attr dropdown when the entity is picked from
+    // the autocomplete (the entity input's value is set asynchronously
+    // via the .entity-option click handler — listen on input changes).
+    document.addEventListener('change', function(ev) {
+        if (ev.target && ev.target.id === 'cov-entity-input') {
+            var role = document.getElementById('cov-role-input');
+            if (role && (role.value === 'future' || role.value === 'both')) {
+                refreshFutureAttrs();
+            }
+        }
+    });
+
     window.addCovariate = function() {
         var entity = document.getElementById('cov-entity-input').value.trim();
         if (!entity) { mlfl.toast('Entity is required', 'error'); return; }
@@ -2289,6 +2402,16 @@ window.showTab = function(el) {
         var scaleVal = document.getElementById('cov-scale-input').value;
         if (scaleVal !== '') body.scale = parseFloat(scaleVal);
         if (document.getElementById('cov-binary-input').checked) body.is_binary = true;
+
+        // Future-covariate fields: only sent when role is future/both
+        // AND the user picked a non-default value (Auto = empty string =
+        // omit from POST → backend uses CovariateCfg defaults).
+        if (body.role === 'future' || body.role === 'both') {
+            var futureAttr = document.getElementById('cov-future-attr-input').value;
+            if (futureAttr) body.future_attribute = futureAttr;
+            var futureKey = document.getElementById('cov-future-key-input').value;
+            if (futureKey) body.future_value_key = futureKey;
+        }
 
         fetch(BASE + '/experiment/' + EXP_NAME + '/add-covariate', {
             method: 'POST',

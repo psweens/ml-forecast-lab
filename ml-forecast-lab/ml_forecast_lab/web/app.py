@@ -2004,6 +2004,123 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         return JSONResponse(content=entities[:50])
 
+    @app.get("/api/ha/forecast-attrs")
+    async def ha_forecast_attrs(request: Request):
+        """Inspect an HA entity's attributes and return those that look
+        like a forecast array — used by the covariate UI to populate
+        the ``future_attribute`` dropdown when role is future / both.
+
+        An attribute "looks like a forecast" if:
+        - It's a ``list[dict]`` where each dict has at least one
+          recognisable datetime key (``datetime``, ``period_start``,
+          ``time``, ``dt``, ``start``) and at least one numeric value
+          key (``value``, ``pv_estimate``, ``temperature``, ...);
+        - OR it's a flat ``dict[str, float]`` where the keys parse as
+          datetimes (Forecast.Solar's ``detailedForecast`` schema).
+
+        Returns ``{"forecast_attributes": [{"name": ..., "format":
+        "list-of-dict"|"date-dict", "sample_keys": [...]}, ...]}``.
+        The frontend picks the attribute name into the form and offers
+        the sample_keys as choices for ``future_value_key`` (None =
+        auto-detect via the resolver's common-key fallback).
+        """
+        import aiohttp as _aiohttp
+
+        entity_id = (request.query_params.get("entity") or "").strip()
+        if not entity_id:
+            return JSONResponse(content={"forecast_attributes": []})
+
+        ha_url = os.environ.get("HA_URL", "http://supervisor/core")
+        ha_token = os.environ.get("SUPERVISOR_TOKEN", "")
+        try:
+            async with _aiohttp.ClientSession() as sess:
+                headers = {"Authorization": f"Bearer {ha_token}"}
+                async with sess.get(
+                    f"{ha_url}/api/states/{entity_id}",
+                    headers=headers,
+                    timeout=_aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status != 200:
+                        return JSONResponse(content={
+                            "forecast_attributes": [],
+                            "error": f"HA returned {resp.status}",
+                        })
+                    state_obj = await resp.json()
+        except Exception as e:
+            logger.debug(f"forecast-attrs fetch failed for {entity_id}: {e}")
+            return JSONResponse(content={
+                "forecast_attributes": [],
+                "error": str(e),
+            })
+
+        # Keep this list aligned with covariates.py:VAL_KEYS / DT_KEYS so
+        # the UI surfaces the same set the backend resolver knows how
+        # to auto-detect. Out-of-band keys still work via the explicit
+        # future_value_key field — the dropdown just doesn't suggest
+        # them.
+        DT_KEYS = {
+            'datetime', 'period_start', 'period_end',
+            'time', 'dt', 'start',
+        }
+        VAL_KEYS = {
+            'value', 'pv_estimate', 'state',
+            'temperature', 'cloud_coverage', 'cloud_cover',
+            'wind_speed', 'precipitation', 'humidity',
+        }
+
+        results: list[dict] = []
+        for name, attr in (state_obj.get("attributes") or {}).items():
+            # list-of-dict format (Solcast, Met.no weather, etc.)
+            if isinstance(attr, list) and attr and isinstance(attr[0], dict):
+                first = attr[0]
+                has_dt = any(k in DT_KEYS for k in first.keys())
+                if not has_dt:
+                    continue
+                # Collect numeric keys from the first entry as candidate
+                # value_keys — preserve insertion order so the most
+                # likely match (per VAL_KEYS priority) bubbles up.
+                numeric_keys = [
+                    k for k, v in first.items()
+                    if k not in DT_KEYS and isinstance(v, (int, float))
+                ]
+                # Prefer common value keys at the top of the dropdown,
+                # then any other numeric fields the entity exposes
+                # (e.g. ``pv_estimate90`` on Solcast).
+                common = [k for k in numeric_keys if k in VAL_KEYS]
+                other = [k for k in numeric_keys if k not in VAL_KEYS]
+                sample_keys = common + other
+                if not sample_keys:
+                    continue
+                results.append({
+                    "name": name,
+                    "format": "list-of-dict",
+                    "sample_keys": sample_keys,
+                })
+            # flat date-keyed dict format (Forecast.Solar detailedForecast)
+            elif isinstance(attr, dict) and len(attr) >= 2:
+                # Heuristic: sample first 5 keys, check if they look
+                # like ISO datetimes. Avoids inspecting the whole dict
+                # for large arrays.
+                sample_count = 0
+                dt_count = 0
+                for k in list(attr.keys())[:5]:
+                    sample_count += 1
+                    if not isinstance(k, str):
+                        continue
+                    # Cheap ISO-ish check — full date parsing would
+                    # need datetime.fromisoformat which is overly
+                    # strict for some sources.
+                    if (len(k) >= 10 and k[4] == '-' and k[7] == '-'):
+                        dt_count += 1
+                if sample_count >= 2 and dt_count == sample_count:
+                    results.append({
+                        "name": name,
+                        "format": "date-dict",
+                        "sample_keys": [],  # no value_key needed for this format
+                    })
+
+        return JSONResponse(content={"forecast_attributes": results})
+
     # ---- Forecast accuracy (evolution log) ----
 
     @app.get("/experiment/{name}/forecast-accuracy")
