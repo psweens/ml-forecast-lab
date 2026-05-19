@@ -2332,7 +2332,20 @@ window.showTab = function(el) {
             attrs.forEach(function(a) {
                 var opt = document.createElement('option');
                 opt.value = a.name;
-                opt.textContent = a.name + ' (' + a.format + ')';
+                // Friendlier labels per format so users can tell the
+                // difference between an attribute-based forecast
+                // (state.attributes.detailedForecast on Solcast) and
+                // a service-API forecast (weather.get_forecasts on
+                // HA 2023.9+ weather entities like Met Office).
+                var label;
+                if (a.format === 'weather-service') {
+                    label = a.name + ' forecast (weather service API)';
+                } else if (a.format === 'date-dict') {
+                    label = a.name + ' (date-keyed dict)';
+                } else {
+                    label = a.name + ' (' + a.format + ')';
+                }
+                opt.textContent = label;
                 // Stash the sample_keys on the option so the value-key
                 // dropdown can read them when the attribute is picked.
                 opt.dataset.sampleKeys = JSON.stringify(a.sample_keys || []);

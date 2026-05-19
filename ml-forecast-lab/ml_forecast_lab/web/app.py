@@ -1959,6 +1959,56 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         logger.info(f"Deleted experiment '{name}'")
         return JSONResponse(content={"success": True, "redirect": "/"})
 
+    async def _probe_weather_forecast_keys(
+        ha_url: str, ha_token: str, entity_id: str, forecast_type: str,
+        val_keys_priority: set,
+    ) -> Optional[List[str]]:
+        """One-shot call to ``weather.get_forecasts?return_response`` for
+        ``entity_id`` with the requested ``type`` (hourly/daily/
+        twice_daily) so the UI can offer the entity's actual numeric
+        forecast keys as ``future_value_key`` options.
+
+        Returns the ordered list of numeric keys (common ones from
+        VAL_KEYS first, then any integration-specific extras), or
+        ``None`` on service failure / empty response (caller surfaces
+        the forecast type anyway with an empty key list — Auto still
+        works at resolve time).
+        """
+        import aiohttp as _aiohttp
+        try:
+            async with _aiohttp.ClientSession() as sess:
+                headers = {"Authorization": f"Bearer {ha_token}"}
+                async with sess.post(
+                    f"{ha_url}/api/services/weather/get_forecasts?return_response",
+                    headers=headers,
+                    json={"entity_id": entity_id, "type": forecast_type},
+                    timeout=_aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+                    body = await resp.json()
+        except Exception as e:
+            logger.debug(
+                f"weather.get_forecasts probe failed for "
+                f"{entity_id} type={forecast_type}: {e}"
+            )
+            return None
+        service_resp = (body or {}).get("service_response") or {}
+        entity_block = service_resp.get(entity_id) or {}
+        forecast_list = entity_block.get("forecast") or []
+        if not forecast_list or not isinstance(forecast_list[0], dict):
+            return None
+        first = forecast_list[0]
+        # Exclude datetime / condition / categorical fields; keep only
+        # numerics so the resolver has something to interpolate.
+        numeric_keys = [
+            k for k, v in first.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+        ]
+        common = [k for k in numeric_keys if k in val_keys_priority]
+        other = [k for k in numeric_keys if k not in val_keys_priority]
+        return common + other
+
     # ---- HA entity search (cached) ----
     _entity_cache: Dict[str, Any] = {"data": [], "ts": 0.0}
 
@@ -2117,6 +2167,46 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                         "name": name,
                         "format": "date-dict",
                         "sample_keys": [],  # no value_key needed for this format
+                    })
+
+        # HA 2023.9+ weather entities (Met Office DataHub, OpenWeatherMap,
+        # AccuWeather, modern met.no) expose forecasts via the
+        # weather.get_forecasts service call rather than state
+        # attributes — so the attribute-scan above misses them entirely.
+        # Detect them via the supported_features bitmask and call the
+        # service once per supported forecast type to learn what
+        # numeric keys are available (each integration exposes a
+        # different subset: Met Office gives cloud_coverage, met.no
+        # adds uv_index, etc.).
+        if entity_id.startswith("weather."):
+            FORECAST_DAILY = 1
+            FORECAST_HOURLY = 2
+            FORECAST_TWICE_DAILY = 4
+            supported = (
+                state_obj.get("attributes", {}).get("supported_features", 0)
+            )
+            if isinstance(supported, (int, float)) and supported > 0:
+                supported = int(supported)
+                forecast_types = []
+                if supported & FORECAST_HOURLY:
+                    forecast_types.append("hourly")
+                if supported & FORECAST_DAILY:
+                    forecast_types.append("daily")
+                if supported & FORECAST_TWICE_DAILY:
+                    forecast_types.append("twice_daily")
+                for ftype in forecast_types:
+                    sample_keys = await _probe_weather_forecast_keys(
+                        ha_url, ha_token, entity_id, ftype, VAL_KEYS,
+                    )
+                    if sample_keys is None:
+                        # Service call failed — surface the option
+                        # anyway so the user can still pick it; the
+                        # value_key dropdown will be empty (Auto only).
+                        sample_keys = []
+                    results.append({
+                        "name": ftype,
+                        "format": "weather-service",
+                        "sample_keys": sample_keys,
                     })
 
         return JSONResponse(content={"forecast_attributes": results})
