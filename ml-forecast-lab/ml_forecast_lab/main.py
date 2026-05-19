@@ -187,6 +187,35 @@ def _apply_idle_value_fill(result: 'pd.DataFrame', exp_cfg) -> int:
 _apply_solar_night_fill = _apply_idle_value_fill
 
 
+def _collect_train_future_covariates(
+    combined: 'pd.DataFrame', exp_cfg
+) -> Dict[str, 'pd.Series']:
+    """Build the ``future_covariate_values`` dict for training-side
+    callers of ``compute_known_future_features``. Pulls in-sample
+    historical values from ``combined`` for every covariate declared
+    with ``role`` in ``{future, both}``. Returns an empty dict when
+    no such covariates are configured.
+
+    Centralised so the production cache path, benchmark holdout
+    path, and legacy production-inference path all agree on which
+    columns reach the neural head's future positions. Without this,
+    benchmark scores were measured on a different feature surface
+    from production training and the "best model" pick was unfair
+    to backends that benefit from horizon-anchored covariate signal.
+    """
+    out: Dict[str, 'pd.Series'] = {}
+    covs = getattr(exp_cfg, 'covariates', None)
+    if not covs:
+        return out
+    for cov_cfg in covs:
+        if getattr(cov_cfg, 'role', None) not in ('future', 'both'):
+            continue
+        cov_name = cov_cfg.entity.split('.')[-1]
+        if cov_name in combined.columns:
+            out[cov_name] = combined[cov_name]
+    return out
+
+
 def _resolve_daily_loss_weight(exp_cfg) -> float:
     """
     Resolve the effective ``daily_loss_weight`` for a neural model.
@@ -2700,6 +2729,13 @@ class MLForecastLabApp:
         # No per-model mapping kept here so adding a new model doesn't require
         # touching this file or staying in sync with a JS palette.
 
+        # Pre-fetch site location once on the event loop so the
+        # thread-pool _generate_holdout_predictions can pass it through
+        # to compute_known_future_features without needing async
+        # access. Same for site_location used downstream by every
+        # neural-extended-window build inside the closure.
+        _holdout_site_location = await self._get_site_location()
+
         def _generate_holdout_predictions():
             """Run holdout predictions in thread pool to avoid blocking."""
             _model_predictions = []
@@ -2734,9 +2770,12 @@ class MLForecastLabApp:
                     _holdout_ts = holdout_timestamps
 
                     neural_ok = False
+                    hold_future_features_df = None
                     if m.is_neural:
                         try:
-                            from ml_forecast_lab.features import create_sliding_windows
+                            from ml_forecast_lab.features import (
+                                create_sliding_windows, compute_known_future_features,
+                            )
                             target_col = 'target'
                             engineered = {
                                 'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
@@ -2747,17 +2786,60 @@ class MLForecastLabApp:
 
                             window_size = min(48, len(train_part) // 3)
                             if window_size >= 12:
+                                # Match the production-cache path: build
+                                # an extended window with future-known
+                                # features at horizon positions so the
+                                # benchmark trains the same architecture
+                                # production uses. Without this, the
+                                # holdout-side model was past-window only
+                                # while production was extended-window —
+                                # the benchmark winner could be a model
+                                # that did well past-only but loses to a
+                                # rival that benefits from horizon-anchored
+                                # signal (TiDE in particular).
+                                solar_lat_lon = _holdout_site_location
+                                include_sun_elevation = 'sun_elevation' in cov_cols
+                                include_clear_sky_ghi = 'clear_sky_ghi' in cov_cols
+                                future_cov_train = _collect_train_future_covariates(
+                                    train_part, exp_cfg,
+                                )
+                                hold_future_features_df = compute_known_future_features(
+                                    train_part.index,
+                                    add_temporal=True,
+                                    country=getattr(exp_cfg, 'country', None),
+                                    solar_lat_lon=solar_lat_lon,
+                                    include_sun_elevation=include_sun_elevation,
+                                    include_clear_sky_ghi=include_clear_sky_ghi,
+                                    future_covariate_values=future_cov_train or None,
+                                )
                                 seq_X, seq_y, channel_names = create_sliding_windows(
                                     train_part, target_col, window_size=window_size,
                                     covariate_cols=cov_cols if cov_cols else None,
                                     add_temporal=True,
                                     horizon_steps=horizon_steps,
+                                    future_features_df=hold_future_features_df,
                                 )
                                 hold_seq_kwargs['sequence_data'] = seq_X
                                 hold_seq_kwargs['channel_names'] = channel_names
+                                # Mark extended_window in seq_kwargs so the
+                                # backend's fit/predict know to handle the
+                                # past+future split. past_window_size is
+                                # the original window_size (before the
+                                # future-block extension).
+                                hold_seq_kwargs['extended_window'] = True
+                                hold_seq_kwargs['past_window_size'] = window_size
+                                hold_seq_kwargs['future_feature_cols'] = list(
+                                    hold_future_features_df.columns
+                                )
                                 _y_train_h = seq_y
                                 _X_train_h = X_train_hold[-len(seq_y):]
                                 neural_ok = True
+                                if future_cov_train:
+                                    logger.info(
+                                        f"  Holdout future covariates "
+                                        f"(horizon-aware): "
+                                        f"{list(future_cov_train)}"
+                                    )
                         except Exception as e:
                             logger.warning(f'Holdout sliding windows failed for {m_name}: {e}', exc_info=True)
 
@@ -2775,11 +2857,33 @@ class MLForecastLabApp:
 
                     if m.is_neural and neural_ok:
                         # Bridge fold boundary: prepend train tail for holdout context
-                        from ml_forecast_lab.features import create_sliding_windows
+                        from ml_forecast_lab.features import (
+                            create_sliding_windows, compute_known_future_features,
+                        )
                         combined_holdout = pd.concat([
                             train_part.iloc[-window_size:],
                             holdout_part,
                         ])
+                        # Mirror the training-side extended-window build so
+                        # the inference seq_X matches the trained
+                        # architecture (and future covariate values land
+                        # in the same channel slots the model learned to
+                        # read at horizon positions).
+                        solar_lat_lon = _holdout_site_location
+                        include_sun_elevation = 'sun_elevation' in cov_cols
+                        include_clear_sky_ghi = 'clear_sky_ghi' in cov_cols
+                        future_cov_ho = _collect_train_future_covariates(
+                            combined_holdout, exp_cfg,
+                        )
+                        ho_future_features_df = compute_known_future_features(
+                            combined_holdout.index,
+                            add_temporal=True,
+                            country=getattr(exp_cfg, 'country', None),
+                            solar_lat_lon=solar_lat_lon,
+                            include_sun_elevation=include_sun_elevation,
+                            include_clear_sky_ghi=include_clear_sky_ghi,
+                            future_covariate_values=future_cov_ho or None,
+                        )
                         # Use horizon_steps=[1] for inference X so we get one
                         # window per holdout point — full coverage with no
                         # tail-fill needed. The model was trained with dense
@@ -2790,6 +2894,7 @@ class MLForecastLabApp:
                             covariate_cols=cov_cols if cov_cols else None,
                             add_temporal=True,
                             horizon_steps=[1],
+                            future_features_df=ho_future_features_df,
                         )
                         y_p = m.predict_sequence(seq_X_ho)
                         if y_p.ndim == 2:
@@ -3032,8 +3137,11 @@ class MLForecastLabApp:
         window_size_prod = None
         future_periods_pre = getattr(exp_cfg, 'future_periods', 48)
         horizon_steps_prod = list(range(1, future_periods_pre + 1))
+        prod_future_features_df = None
         if is_neural:
-            from ml_forecast_lab.features import create_sliding_windows
+            from ml_forecast_lab.features import (
+                create_sliding_windows, compute_known_future_features,
+            )
             engineered = {
                 'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
                 'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
@@ -3042,14 +3150,41 @@ class MLForecastLabApp:
             raw_cov_cols_prod = [c for c in combined.columns if c not in engineered and c != 'target']
             window_size_prod = min(48, len(combined) // 3)
             if window_size_prod >= 12:
+                # Match _retrain_and_cache: extended-window training with
+                # future-known features at horizon positions, including
+                # user-configured future covariates. Required so the
+                # legacy non-cached production inference path produces
+                # the same model architecture as the cached path.
+                loc = await self._get_site_location()
+                solar_lat_lon = loc if loc is not None else None
+                include_sun_elevation = 'sun_elevation' in raw_cov_cols_prod
+                include_clear_sky_ghi = 'clear_sky_ghi' in raw_cov_cols_prod
+                future_cov_prod = _collect_train_future_covariates(
+                    combined, exp_cfg,
+                )
+                prod_future_features_df = compute_known_future_features(
+                    combined.index,
+                    add_temporal=True,
+                    country=getattr(exp_cfg, 'country', None),
+                    solar_lat_lon=solar_lat_lon,
+                    include_sun_elevation=include_sun_elevation,
+                    include_clear_sky_ghi=include_clear_sky_ghi,
+                    future_covariate_values=future_cov_prod or None,
+                )
                 seq_X, seq_y, channel_names = create_sliding_windows(
                     combined, 'target', window_size=window_size_prod,
                     covariate_cols=raw_cov_cols_prod if raw_cov_cols_prod else None,
                     add_temporal=True,
                     horizon_steps=horizon_steps_prod,
+                    future_features_df=prod_future_features_df,
                 )
                 seq_kwargs['sequence_data'] = seq_X
                 seq_kwargs['channel_names'] = channel_names
+                seq_kwargs['extended_window'] = True
+                seq_kwargs['past_window_size'] = window_size_prod
+                seq_kwargs['future_feature_cols'] = list(prod_future_features_df.columns)
+                if future_cov_prod:
+                    seq_kwargs['future_covariate_names'] = list(future_cov_prod)
                 y_train_seq = seq_y
                 X_train_seq = X[-len(seq_y):]
                 logger.info(
@@ -3083,13 +3218,87 @@ class MLForecastLabApp:
             # the window's last timestep IS combined.iloc[-1] = last_ts,
             # not last_ts - 1 interval. See features.build_inference_window
             # docstring for the rationale.
-            from ml_forecast_lab.features import build_inference_window
+            from ml_forecast_lab.features import (
+                build_inference_window, compute_known_future_features,
+            )
 
-            window_size = seq_kwargs['sequence_data'].shape[1]
+            # window_size here is the EFFECTIVE seq_X width (past + future
+            # if extended). past_window_size is what build_inference_window
+            # needs for the past block; the future block is rebuilt from
+            # future_features_df. Falls back to whole tensor width for
+            # legacy non-extended caches.
+            extended_window_prod = seq_kwargs.get('extended_window', False)
+            past_window_size_prod = seq_kwargs.get(
+                'past_window_size',
+                seq_kwargs['sequence_data'].shape[1],
+            )
+            inference_future_features_df = None
+            if extended_window_prod:
+                # Real-future inference: fetch the HA forecast attribute
+                # for each user future covariate (matches the cached
+                # production path in _forecast_with_cached).
+                future_index_prod = pd.date_range(
+                    start=last_ts + pd.Timedelta(minutes=exp_cfg.interval_minutes),
+                    periods=future_periods,
+                    freq=f'{exp_cfg.interval_minutes}min',
+                )
+                future_feature_cols_prod = set(
+                    seq_kwargs.get('future_feature_cols') or []
+                )
+                loc_prod = await self._get_site_location()
+                solar_lat_lon_prod = loc_prod if loc_prod is not None else None
+                future_cov_inf: dict[str, pd.Series] = {}
+                neural_future_cov_names_prod = list(
+                    seq_kwargs.get('future_covariate_names') or []
+                )
+                if (
+                    neural_future_cov_names_prod
+                    and exp_cfg.covariates
+                    and self.covariate_resolver
+                ):
+                    cov_by_name = {
+                        c.entity.split('.')[-1]: c for c in exp_cfg.covariates
+                    }
+                    for cov_name in neural_future_cov_names_prod:
+                        cov_cfg = cov_by_name.get(cov_name)
+                        if cov_cfg is None:
+                            continue
+                        try:
+                            cov_dict = {
+                                "entity_id": cov_cfg.entity,
+                                "name": cov_name,
+                                "future_attribute": getattr(cov_cfg, "future_attribute", "forecast"),
+                                "future_value_key": getattr(cov_cfg, "future_value_key", None),
+                            }
+                            future_series = await self.covariate_resolver.fetch_future(
+                                cov_dict, future_index_prod,
+                            )
+                            if future_series is None or future_series.empty:
+                                continue
+                            if cov_cfg.scale is not None:
+                                future_series = future_series * cov_cfg.scale
+                            aligned = future_series.reindex(future_index_prod).ffill().bfill()
+                            if aligned.notna().any():
+                                future_cov_inf[cov_name] = aligned
+                        except Exception as e:
+                            logger.debug(
+                                f"  Future cov fetch failed for {cov_name}: {e}"
+                            )
+                inference_future_features_df = compute_known_future_features(
+                    future_index_prod,
+                    add_temporal=True,
+                    country=getattr(exp_cfg, 'country', None),
+                    solar_lat_lon=solar_lat_lon_prod,
+                    include_sun_elevation='sun_elevation' in future_feature_cols_prod,
+                    include_clear_sky_ghi='clear_sky_ghi' in future_feature_cols_prod,
+                    future_covariate_values=future_cov_inf or None,
+                )
+
             last_window, _ = build_inference_window(
-                combined, 'target', window_size=window_size,
+                combined, 'target', window_size=past_window_size_prod,
                 covariate_cols=raw_cov_cols_prod if raw_cov_cols_prod else None,
                 add_temporal=True,
+                future_features_df=inference_future_features_df,
             )
 
             def _predict_multihead():
@@ -3619,16 +3828,10 @@ class MLForecastLabApp:
                 # The matching inference-side call in _forecast_with_cached
                 # fetches the HA forecast attribute for real-future
                 # timestamps.
-                future_cov_for_neural = {}
-                neural_future_cov_names: list[str] = []
-                if getattr(exp_cfg, 'covariates', None):
-                    for cov_cfg in exp_cfg.covariates:
-                        if cov_cfg.role not in ('future', 'both'):
-                            continue
-                        cov_name = cov_cfg.entity.split('.')[-1]
-                        if cov_name in combined.columns:
-                            future_cov_for_neural[cov_name] = combined[cov_name]
-                            neural_future_cov_names.append(cov_name)
+                future_cov_for_neural = _collect_train_future_covariates(
+                    combined, exp_cfg
+                )
+                neural_future_cov_names = list(future_cov_for_neural)
                 if neural_future_cov_names:
                     logger.info(
                         f"  Neural future covariates (horizon-aware): "
