@@ -84,6 +84,8 @@ class _NBeatsNet(nn.Module):
         else:
             self.past_window_size = seq_len
         self.flat_input_size = self.past_window_size * n_channels
+        # Width of the future block (0 in legacy non-extended mode).
+        self.future_window_size = seq_len - self.past_window_size
 
         self.blocks = nn.ModuleList()
         for _ in range(n_stacks):
@@ -91,15 +93,50 @@ class _NBeatsNet(nn.Module):
                 self.blocks.append(
                     _NBeatsBlock(self.flat_input_size, hidden_size, n_horizons, n_fc_layers)
                 )
+
+        # Auxiliary future-feature head (v2.37.7).
+        #
+        # N-BEATS's basis-function decomposition is inherently past-only —
+        # the stacks cannot consume future-known covariates directly. To
+        # close the gap that left N-BEATS information-starved relative
+        # to the rest of the v2.37.5+ extended-window backends, we add a
+        # small MLP that reads the future block as a flat feature vector
+        # and produces a per-horizon ADJUSTMENT added to the basis
+        # forecast. Backwards-compatible: when ``future_window_size == 0``
+        # (legacy past-only training) the head is ``None`` and the
+        # forward pass falls back to the pre-v2.37.7 behaviour exactly.
+        #
+        # Design choice — additive rather than concatenated: keeps the
+        # basis residual path numerically identical to v2.37.6 and lets
+        # the optimiser learn how much weight to put on the future
+        # signal (initialised small via Xavier so the network starts
+        # behaving like the legacy variant and gradually picks up the
+        # covariate contribution as training reduces residuals).
+        if self.future_window_size > 0:
+            future_flat = self.future_window_size * n_channels
+            aux_hidden = max(hidden_size // 2, n_horizons)
+            self.future_aux_head = nn.Sequential(
+                nn.Linear(future_flat, aux_hidden),
+                nn.ReLU(),
+                nn.Linear(aux_hidden, n_horizons),
+            )
+            # Zero-init the final layer so v2.37.7 starts identical to
+            # v2.37.6 at step 0 — the aux contribution is exactly 0
+            # until training pushes it away. Avoids surprising
+            # regressions on past-only-trained users who upgrade.
+            nn.init.zeros_(self.future_aux_head[-1].weight)
+            nn.init.zeros_(self.future_aux_head[-1].bias)
+        else:
+            self.future_aux_head = None
+
         self.activation = _build_activation(output_activation, scale=sigmoid_scale)
 
     def forward(self, x):
         # x: (batch, seq_len, n_channels)
         batch_size = x.size(0)
-        # PF4: backcast/forecast operate on the past slice only when
-        # ``past_window_size`` is set. The future block is ignored — N-BEATS
-        # has no covariate-aware mechanism and the future block's only
-        # useful signal would be the target (which is zero by construction).
+        # Basis decomposition runs on the past slice only (PF4) — N-BEATS
+        # is past-only by architecture. The future block goes through
+        # the auxiliary head below (v2.37.7).
         past = x[:, : self.past_window_size, :]
         residual = past.reshape(batch_size, -1)  # (batch, past * n_channels)
         forecast_sum = torch.zeros(batch_size, self.n_horizons, device=x.device)
@@ -108,6 +145,14 @@ class _NBeatsNet(nn.Module):
             backcast, forecast = block(residual)
             residual = residual - backcast
             forecast_sum = forecast_sum + forecast
+
+        # Future-covariate adjustment (v2.37.7). Zero contribution at
+        # step 0 thanks to the zero-init above; learns to add a
+        # per-horizon offset that uses the future-known signal.
+        if self.future_aux_head is not None and self.future_window_size > 0:
+            future_block = x[:, self.past_window_size :, :]
+            future_flat = future_block.reshape(batch_size, -1)
+            forecast_sum = forecast_sum + self.future_aux_head(future_flat)
 
         out = self.activation(forecast_sum)
         if self.n_horizons == 1:

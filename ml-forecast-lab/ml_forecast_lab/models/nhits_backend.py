@@ -116,6 +116,8 @@ class _NHiTSNet(nn.Module):
         else:
             self.past_window_size = seq_len
         effective_seq_len = self.past_window_size
+        # Width of the future block (0 in legacy non-extended mode).
+        self.future_window_size = seq_len - self.past_window_size
 
         # Ensure pool_kernels list matches n_stacks (repeat last if too short).
         # Copy the input list first — callers may reuse the same list across
@@ -132,12 +134,35 @@ class _NHiTSNet(nn.Module):
                     _NHiTSBlock(effective_seq_len, n_channels, hidden_size,
                                 n_horizons, pk, n_fc_layers)
                 )
+
+        # Auxiliary future-feature head (v2.37.7). See nbeats_backend.py
+        # for the full rationale: N-HiTS's hierarchical interpolation
+        # is past-only by architecture, so a separate MLP reads the
+        # future block and produces a per-horizon adjustment added to
+        # the basis forecast. Zero-init keeps step-0 behaviour identical
+        # to v2.37.6 — training has to actively pick up the future
+        # signal, no regressions for past-only-trained users.
+        if self.future_window_size > 0:
+            future_flat = self.future_window_size * n_channels
+            aux_hidden = max(hidden_size // 2, n_horizons)
+            self.future_aux_head = nn.Sequential(
+                nn.Linear(future_flat, aux_hidden),
+                nn.ReLU(),
+                nn.Linear(aux_hidden, n_horizons),
+            )
+            nn.init.zeros_(self.future_aux_head[-1].weight)
+            nn.init.zeros_(self.future_aux_head[-1].bias)
+        else:
+            self.future_aux_head = None
+
         self.activation = _build_activation(output_activation, scale=sigmoid_scale)
 
     def forward(self, x):
         # x: (batch, seq_len, n_channels)
         batch_size = x.size(0)
-        # PF4: slice off the future block before feeding the stack.
+        # Hierarchical interpolation runs on the past slice only — N-HiTS
+        # is past-only by architecture. Future block goes through the
+        # auxiliary head below (v2.37.7).
         residual = x[:, : self.past_window_size, :]
         forecast_sum = torch.zeros(batch_size, self.n_horizons, device=x.device)
 
@@ -145,6 +170,11 @@ class _NHiTSNet(nn.Module):
             backcast, forecast = block(residual)
             residual = residual - backcast
             forecast_sum = forecast_sum + forecast
+
+        if self.future_aux_head is not None and self.future_window_size > 0:
+            future_block = x[:, self.past_window_size :, :]
+            future_flat = future_block.reshape(batch_size, -1)
+            forecast_sum = forecast_sum + self.future_aux_head(future_flat)
 
         out = self.activation(forecast_sum)
         if self.n_horizons == 1:

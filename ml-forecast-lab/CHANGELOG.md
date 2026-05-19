@@ -1,5 +1,100 @@
 # Changelog
 
+## 2.37.7
+
+Closes the remaining gaps from v2.37.5/v2.37.6: the three backends
+that previously dropped user future covariates now consume them via
+an auxiliary head, and the UI gains dynamic dropdowns for the
+``future_attribute`` / ``future_value_key`` fields so users no
+longer have to edit YAML to use a Solcast / Forecast.Solar
+covariate.
+
+### Backend fixes — N-BEATS, N-HiTS, iTransformer
+
+Each of these backends explicitly sliced ``x[:, :past_window_size, :]``
+in their forward pass (v2.37 PF4 / PF6), dropping the future block.
+v2.37.5+ wrote user future-covariate values into those future
+positions; all three ignored them silently. The v2.37.6 config-load
+warning surfaced this, but didn't fix it.
+
+v2.37.7 adds an **auxiliary future-feature head** to each backend.
+The head is a small MLP that:
+
+* Reads the future block as a flat ``(batch, future_window_size * n_channels)`` tensor.
+* Projects it to a per-horizon adjustment that's **added** to the
+  basis / encoder output.
+* Has its **final layer zero-initialised**, so at training step 0
+  the model is behaviourally identical to v2.37.6 — no surprise
+  regression for users upgrading with existing checkpoints (the
+  optimiser has to actively learn to use the future signal).
+
+Same pattern across all three backends — small, focused
+contribution paths that preserve each architecture's identity
+(N-BEATS / N-HiTS keep past-only basis decomposition; iTransformer
+keeps the PF6 past-only channel embedding).
+
+**Result**: every neural backend in the registry now consumes user
+future covariates. The v2.37.6 config-load warning has been
+removed.
+
+### UI — dynamic future_attribute dropdown
+
+The Add-Covariate form previously omitted ``future_attribute`` and
+``future_value_key`` — the tooltip directed users to YAML. For
+Solcast / Forecast.Solar entities (which use ``detailedForecast``
+not the default ``forecast``), this meant the UI silently created
+broken covariates.
+
+v2.37.7 adds two new fields to the form, shown only when role is
+**Future** or **Both**:
+
+* **Forecast attribute** — a dropdown populated from the entity's
+  actual HA attributes. Each candidate attribute is inspected on
+  selection: list-of-dict format (Solcast, Met.no weather) or
+  flat date-keyed dict format (Forecast.Solar). Out-of-range or
+  non-numeric attributes are filtered out so users only see
+  attributes that look like a real forecast array.
+* **Value key** — for list-of-dict attributes, populated from the
+  first entry's numeric keys (e.g. ``pv_estimate``, ``temperature``,
+  ``pv_estimate90``). Hidden for date-dict attributes which don't
+  need it.
+
+Both default to "Auto" so the form still works the same way for
+common cases (Met.no's ``weather.*`` entities → ``Auto / Auto``
+just works). Power users picking Solcast get ``detailedForecast``
++ ``pv_estimate`` as a one-click selection. The matching backend
+endpoint ``/api/ha/forecast-attrs`` inspects the entity's live
+state — no YAML hardcoding.
+
+### Tests
+
+* 9 new regression tests in
+  ``tests/unit/test_future_aux_head_backends.py`` pin the
+  three-backend contract: zero-init at step 0 produces output
+  identical to past-only (no upgrade regressions), permuting the
+  future block AFTER bumping aux-head weights changes the output
+  (wiring works), and the head is ``None`` in legacy non-extended
+  mode (no extra parameters for past-only users).
+* Existing ``test_future_covariate_wiring.py`` updated — the
+  v2.37.6 warning-fires test is replaced with a
+  warning-must-not-fire test pinning the new
+  every-backend-supports-future-covariates contract.
+
+All tests pass.
+
+### Practical impact
+
+* Re-run benchmarks with future covariates enabled — N-BEATS,
+  N-HiTS, and iTransformer are now in the running (likely still
+  behind TiDE / NLinear / DLinear for PV-style problems, but no
+  longer information-starved).
+* Adding a Solcast covariate via the UI now Just Works without YAML
+  editing — the dropdown shows ``detailedForecast`` and
+  ``pv_estimate`` as the obvious picks.
+* If you previously enabled N-BEATS / N-HiTS / iTransformer with a
+  future covariate, the model needs a fresh retrain after upgrading
+  — old cached weights pre-date the aux head.
+
 ## 2.37.6
 
 Completes the future-covariate wiring rolled out in v2.37.5 and

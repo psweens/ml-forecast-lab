@@ -233,60 +233,27 @@ def test_collect_train_future_covariates_no_covariates():
     assert _collect_train_future_covariates(combined, exp) == {}
 
 
-def test_incompatible_backend_warning_fires_with_future_covariate(caplog):
-    """A user with role:future covariate + nbeats/nhits/itransformer
-    enabled must get a config-load warning — those backends slice to
-    past-only and silently drop the future covariate. The warning is
-    the only line of defence against benchmark / production training
-    that looks fine in logs but doesn't actually use the configured
-    forecast input."""
+def test_no_warning_now_that_v237_7_fixed_broken_backends(caplog):
+    """v2.37.6 emitted a warning when nbeats / nhits / itransformer
+    were combined with a future covariate (they sliced the future
+    block off). v2.37.7 added auxiliary future-feature heads to all
+    three, so they now consume future covariates and the warning
+    has been removed. Pin so a future regression that re-introduces
+    the past-only behaviour can't silently slip past CI."""
     import logging
     from ml_forecast_lab.config import CovariateCfg, ExperimentCfg
 
     with caplog.at_level(logging.WARNING):
         ExperimentCfg(
             name="optimised_solar", target_entity="predbat.pv_power",
-            models_enabled=["nlinear", "nbeats", "nhits"],
+            models_enabled=["nlinear", "nbeats", "nhits", "itransformer"],
             covariates=[
                 CovariateCfg(entity="sensor.solcast_pv", role="future"),
             ],
         )
-    text = caplog.text
-    assert "nbeats" in text and "nhits" in text
-    assert "nlinear" not in text or "WILL use them" in text  # nlinear listed as compatible
-    assert "sensor.solcast_pv" in text
-
-
-def test_no_warning_when_only_compatible_backends_enabled(caplog):
-    """nlinear / dlinear / tide / lightgbm + a future covariate
-    should NOT trigger the warning — these all consume future
-    positions correctly (per the audit)."""
-    import logging
-    from ml_forecast_lab.config import CovariateCfg, ExperimentCfg
-
-    with caplog.at_level(logging.WARNING):
-        ExperimentCfg(
-            name="optimised_solar", target_entity="predbat.pv_power",
-            models_enabled=["nlinear", "dlinear", "tide", "lightgbm"],
-            covariates=[
-                CovariateCfg(entity="sensor.solcast_pv", role="future"),
-            ],
-        )
-    assert "slice to past-window only" not in caplog.text
-
-
-def test_no_warning_when_no_future_covariates(caplog):
-    """Even with nbeats enabled, no warning if there's no future
-    covariate to drop — the bug is silent only when both conditions
-    hold simultaneously."""
-    import logging
-    from ml_forecast_lab.config import ExperimentCfg
-
-    with caplog.at_level(logging.WARNING):
-        ExperimentCfg(
-            name="x", target_entity="t",
-            models_enabled=["nbeats", "nhits"],
-        )
+    # Critical assertion: the v2.37.6 warning string must not appear.
+    # If a future PR re-adds it, this test fails and forces a
+    # documentation update to explain the new known-broken state.
     assert "slice to past-window only" not in caplog.text
 
 
