@@ -1,5 +1,55 @@
 # Changelog
 
+## 2.38.1
+
+UI follow-up to v2.38.0: the Add-Covariate "Forecast attribute"
+dropdown now auto-detects ``weather.get_forecasts`` service-API
+forecasts in addition to state-attribute forecasts. v2.38.0 added
+backend support but the dropdown only inspected state attributes,
+so HA 2023.9+ weather entities (Met Office DataHub, OpenWeatherMap,
+AccuWeather, modern met.no) showed empty in the UI — users had to
+edit YAML or guess that they should type ``hourly`` manually.
+
+* **Endpoint** ``/api/ha/forecast-attrs``: when entity domain is
+  ``weather.*``, reads the entity's ``supported_features`` bitmask
+  (1 = daily, 2 = hourly, 4 = twice_daily — HA's
+  ``WeatherEntityFeature`` flags). For each supported type, calls
+  ``weather.get_forecasts?return_response`` once during the inspect
+  to learn the entity's actual numeric forecast keys
+  (``temperature``, ``cloud_coverage``, ``humidity``, ``uv_index``,
+  …). Returns those alongside the existing attribute-based options
+  with a new ``format: "weather-service"`` marker so the frontend
+  can label them appropriately.
+* **Frontend**: option labels now read ``hourly forecast (weather
+  service API)`` / ``detailedForecast (list-of-dict)`` / similar so
+  users can tell which mechanism each option uses. Value-key
+  dropdown auto-populates from the probe's numeric-key list. No
+  schema change to ``addCovariate`` POST body — the existing
+  ``future_attribute`` field carries the type name (``hourly`` /
+  ``daily`` / ``twice_daily``) and the v2.38.0 resolver routes
+  through the service API based on entity domain.
+
+Probe-failure handling: if the service call fails or returns no
+forecast (e.g. the entity is unavailable at config time), the
+option is still surfaced with an empty key list — users can pick
+"Auto" for the value key and let the resolver's runtime fallback
+take over.
+
+Practical impact for your Met Office / OpenWeatherMap setup:
+
+1. Open Add-Covariate → search for ``weather.met_office_balsham``.
+2. Select Role: **Future**.
+3. **Forecast attribute** dropdown now shows:
+   - ``hourly forecast (weather service API)``
+   - ``daily forecast (weather service API)``
+   - ``twice_daily forecast (weather service API)``
+4. Pick ``hourly`` → **Value key** dropdown populates with the
+   entity's actual keys (``cloud_coverage``, ``temperature``,
+   ``humidity``, etc.).
+5. Click Add. The covariate is saved with
+   ``future_attribute: hourly`` and the right
+   ``future_value_key`` — no YAML editing needed.
+
 ## 2.38.0
 
 Minor-version cap on the v2.37 future-covariate feature arc. The
