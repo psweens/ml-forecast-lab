@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.38.2
+
+Allows the same entity to be configured as multiple covariates with
+distinct future-value sources — the natural pattern for weather
+entities exposing several useful metrics per ``hourly`` /
+``daily`` / ``twice_daily`` service forecast (e.g. ``cloud_coverage``
+AND ``temperature`` AND ``humidity`` from one
+``weather.met_office_balsham`` entity).
+
+* **Dedup relaxation** (``add_experiment_covariate``): the v2.38.1
+  guard rejected any second covariate sharing an entity_id. Now
+  duplicates are only flagged when the full
+  (entity, role, future_attribute, future_value_key) tuple matches,
+  so the same entity can carry distinct future-role covariates for
+  different metrics.
+* **Column-name disambiguation** (``_cov_column_name``): when the
+  same entity appears in multiple covariate configs, each column
+  in ``combined`` gets a ``__<value_key>`` suffix (e.g.
+  ``met_office_balsham__cloud_coverage``,
+  ``met_office_balsham__temperature``). Single-occurrence entities
+  keep the bare base name so existing cached models survive the
+  upgrade unchanged. The new helper is the single source of truth
+  used by every site (train, benchmark holdout, legacy production,
+  tree-path inference, neural-path inference).
+* **Genuine duplicates still rejected** — clicking Add twice with
+  identical attribute + value_key still returns
+  "Covariate already exists".
+
+5 new regression tests in ``tests/unit/test_future_covariate_wiring.py``
+pin the new helpers (single-entity uses bare name, multi-entity gets
+suffix, ``_same_covariate`` allows differing value_keys but blocks
+true duplicates, ``_cov_column_name`` without ``all_covs`` is
+back-compat).
+
+Practical user impact: in the Add-Covariate UI you can now configure
+``weather.met_office_balsham`` once for ``cloud_coverage``, again
+for ``temperature``, again for ``humidity`` — three separate
+covariates, each a distinct channel in the model.
+
 ## 2.38.1
 
 UI follow-up to v2.38.0: the Add-Covariate "Forecast attribute"

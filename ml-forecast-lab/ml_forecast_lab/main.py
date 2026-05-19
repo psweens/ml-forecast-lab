@@ -187,6 +187,45 @@ def _apply_idle_value_fill(result: 'pd.DataFrame', exp_cfg) -> int:
 _apply_solar_night_fill = _apply_idle_value_fill
 
 
+def _cov_column_name(cov_cfg, all_covs: Optional[list] = None) -> str:
+    """Canonical column name for a covariate's series in the
+    ``combined`` dataframe.
+
+    Default: the last component of the entity_id (e.g.
+    ``sensor.solcast_pv_forecast_forecast_today`` → ``solcast_pv_forecast_forecast_today``).
+
+    When the same entity is configured multiple times in the same
+    experiment (v2.38.2+ — supports e.g. consuming both
+    ``cloud_coverage`` and ``temperature`` from
+    ``weather.met_office_balsham``), the column name gets a
+    ``__<value_key>`` suffix so the per-covariate columns don't
+    collide in the dataframe. ``all_covs`` is the full list of
+    covariate configs for the experiment; if omitted, suffix logic
+    falls back to "single instance" semantics (backwards-compatible
+    with existing experiments).
+    """
+    base = cov_cfg.entity.split('.')[-1]
+    if all_covs is None:
+        return base
+    # Count how many configs share this entity. One occurrence → bare
+    # base name (preserves cache-meta channel parity for existing
+    # experiments). More than one → disambiguate with value_key.
+    same_entity = [c for c in all_covs if c.entity == cov_cfg.entity]
+    if len(same_entity) <= 1:
+        return base
+    value_key = getattr(cov_cfg, 'future_value_key', None)
+    if value_key:
+        return f"{base}__{value_key}"
+    # Fallback: no value_key set (Auto mode). Use future_attribute
+    # if it's distinctive (e.g. ``hourly`` / ``daily``), otherwise
+    # bare base (will collide — caller is responsible for surfacing
+    # the dedup warning).
+    attr = getattr(cov_cfg, 'future_attribute', 'forecast') or 'forecast'
+    if attr != 'forecast':
+        return f"{base}__{attr}"
+    return base
+
+
 def _collect_train_future_covariates(
     combined: 'pd.DataFrame', exp_cfg
 ) -> Dict[str, 'pd.Series']:
@@ -210,7 +249,7 @@ def _collect_train_future_covariates(
     for cov_cfg in covs:
         if getattr(cov_cfg, 'role', None) not in ('future', 'both'):
             continue
-        cov_name = cov_cfg.entity.split('.')[-1]
+        cov_name = _cov_column_name(cov_cfg, all_covs=covs)
         if cov_name in combined.columns:
             out[cov_name] = combined[cov_name]
     return out
@@ -1717,10 +1756,17 @@ class MLForecastLabApp:
             logger.info(f"  Fetching {len(exp_cfg.covariates)} covariate(s)...")
             for cov_cfg in exp_cfg.covariates:
                 try:
+                    # Per-entity-per-key column naming: same entity
+                    # configured multiple times (e.g. cloud_coverage +
+                    # temperature from one weather entity) gets disambiguated
+                    # via the value_key suffix in _cov_column_name.
+                    canonical_name = _cov_column_name(
+                        cov_cfg, all_covs=exp_cfg.covariates,
+                    )
                     # Build dict for CovariateResolver (expects entity_id, not entity)
                     cov_dict = {
                         "entity_id": cov_cfg.entity,
-                        "name": cov_cfg.entity.split(".")[-1],  # sensor.current_charge → current_charge
+                        "name": canonical_name,
                         "binary": cov_cfg.is_binary,
                     }
 
@@ -1771,7 +1817,7 @@ class MLForecastLabApp:
                     logger.warning(f"    ✗ Failed to fetch {cov_cfg.entity}: {e}")
                     cov_stats.append({
                         "entity": cov_cfg.entity,
-                        "name": cov_cfg.entity.split(".")[-1],
+                        "name": _cov_column_name(cov_cfg, all_covs=exp_cfg.covariates),
                         "role": cov_cfg.role,
                         "ok": False,
                         "error": str(e),
@@ -3256,8 +3302,13 @@ class MLForecastLabApp:
                     and exp_cfg.covariates
                     and self.covariate_resolver
                 ):
+                    # Reverse-index covariates by their canonical
+                    # (per-experiment, value_key-suffixed) column name
+                    # so we can find the right config when the same
+                    # entity appears multiple times.
                     cov_by_name = {
-                        c.entity.split('.')[-1]: c for c in exp_cfg.covariates
+                        _cov_column_name(c, all_covs=exp_cfg.covariates): c
+                        for c in exp_cfg.covariates
                     }
                     for cov_name in neural_future_cov_names_prod:
                         cov_cfg = cov_by_name.get(cov_name)
@@ -3353,7 +3404,9 @@ class MLForecastLabApp:
             future_cov_values = {}
             if exp_cfg.covariates and self.covariate_resolver:
                 for cov_cfg in exp_cfg.covariates:
-                    cov_name = cov_cfg.entity.split(".")[-1]
+                    cov_name = _cov_column_name(
+                        cov_cfg, all_covs=exp_cfg.covariates,
+                    )
                     if cov_name in covariate_cols and cov_cfg.role in ('future', 'both'):
                         try:
                             cov_dict = {
@@ -5201,7 +5254,8 @@ class MLForecastLabApp:
                 future_cov_for_inference: dict[str, pd.Series] = {}
                 if neural_future_cov_names and exp_cfg.covariates and self.covariate_resolver:
                     cov_by_name = {
-                        c.entity.split('.')[-1]: c for c in exp_cfg.covariates
+                        _cov_column_name(c, all_covs=exp_cfg.covariates): c
+                        for c in exp_cfg.covariates
                     }
                     for cov_name in neural_future_cov_names:
                         cov_cfg = cov_by_name.get(cov_name)
@@ -5375,7 +5429,9 @@ class MLForecastLabApp:
             future_cov_values: Dict = {}
             if exp_cfg.covariates and self.covariate_resolver:
                 for cov_cfg in exp_cfg.covariates:
-                    cov_name = cov_cfg.entity.split(".")[-1]
+                    cov_name = _cov_column_name(
+                        cov_cfg, all_covs=exp_cfg.covariates,
+                    )
                     if cov_name in raw_cov_cols and cov_cfg.role in ('future', 'both'):
                         try:
                             cov_dict = {

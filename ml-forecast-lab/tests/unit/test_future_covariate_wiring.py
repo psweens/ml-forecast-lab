@@ -222,6 +222,92 @@ def test_collect_train_future_covariates_helper():
     assert "battery_flow" not in out
 
 
+def test_cov_column_name_single_entity_uses_bare_name():
+    """When an entity appears only once in the experiment, the
+    column name is the bare entity_id last-component — preserves
+    cache-meta channel parity for existing pre-v2.38.2 experiments."""
+    from ml_forecast_lab.main import _cov_column_name
+    from ml_forecast_lab.config import CovariateCfg, ExperimentCfg
+
+    cov = CovariateCfg(
+        entity="sensor.solcast_pv_forecast",
+        role="future", future_value_key="pv_estimate",
+    )
+    exp = ExperimentCfg(name="x", target_entity="t", covariates=[cov])
+    assert _cov_column_name(cov, all_covs=exp.covariates) == "solcast_pv_forecast"
+
+
+def test_cov_column_name_multiple_same_entity_disambiguates_by_value_key():
+    """Same entity configured for two metrics (e.g. cloud_coverage AND
+    temperature from one weather entity) gets value_key-suffixed
+    column names so they don't collide in the dataframe."""
+    from ml_forecast_lab.main import _cov_column_name
+    from ml_forecast_lab.config import CovariateCfg, ExperimentCfg
+
+    cov_a = CovariateCfg(
+        entity="weather.met_office_balsham", role="future",
+        future_attribute="hourly", future_value_key="cloud_coverage",
+    )
+    cov_b = CovariateCfg(
+        entity="weather.met_office_balsham", role="future",
+        future_attribute="hourly", future_value_key="temperature",
+    )
+    exp = ExperimentCfg(name="x", target_entity="t", covariates=[cov_a, cov_b])
+    assert _cov_column_name(cov_a, all_covs=exp.covariates) == (
+        "met_office_balsham__cloud_coverage"
+    )
+    assert _cov_column_name(cov_b, all_covs=exp.covariates) == (
+        "met_office_balsham__temperature"
+    )
+
+
+def test_cov_column_name_no_all_covs_keeps_bare_name():
+    """Helper called without ``all_covs`` keeps the bare name —
+    callers that don't know the full covariate set get the legacy
+    behaviour. Backwards-compatible for any external usage."""
+    from ml_forecast_lab.main import _cov_column_name
+    from ml_forecast_lab.config import CovariateCfg
+
+    cov = CovariateCfg(
+        entity="weather.met_office_balsham", role="future",
+        future_value_key="cloud_coverage",
+    )
+    assert _cov_column_name(cov) == "met_office_balsham"
+
+
+def test_same_covariate_allows_different_value_keys():
+    """Two covariates sharing entity + role + future_attribute but
+    differing on ``future_value_key`` must NOT be flagged as
+    duplicates — that's the legitimate use case the v2.38.2 dedup
+    relaxation enables."""
+    from ml_forecast_lab.config import _same_covariate
+
+    a = {
+        "entity": "weather.met_office_balsham",
+        "role": "future",
+        "future_attribute": "hourly",
+        "future_value_key": "cloud_coverage",
+    }
+    b = dict(a, future_value_key="temperature")
+    assert _same_covariate(a, b) is False
+
+
+def test_same_covariate_flags_identical_configs():
+    """The dedup relaxation must still catch genuine duplicates —
+    same entity, role, and full future-value source. Without this
+    a user clicking Add twice would silently double-register the
+    same covariate."""
+    from ml_forecast_lab.config import _same_covariate
+
+    a = {
+        "entity": "weather.met_office_balsham",
+        "role": "future",
+        "future_attribute": "hourly",
+        "future_value_key": "cloud_coverage",
+    }
+    assert _same_covariate(a, dict(a)) is True
+
+
 def test_collect_train_future_covariates_no_covariates():
     """No covariates configured → empty dict, no error."""
     from ml_forecast_lab.main import _collect_train_future_covariates
