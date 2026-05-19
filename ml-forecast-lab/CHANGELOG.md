@@ -1,5 +1,59 @@
 # Changelog
 
+## 2.38.5
+
+Fixes a holdout-prediction shape crash that surfaces whenever a
+neural model with ``future_features_df`` (i.e. any
+``role: future`` covariate) is benchmarked.
+
+User-visible symptom:
+``WARNING Failed holdout predictions for nlinear: mat1 and mat2
+shapes cannot be multiplied (894x2253 and 6528x96)``.
+
+Root cause: ``main.py`` called ``create_sliding_windows`` twice
+in the holdout neural path — once for the fit, once for the
+predict. The fit-side call used the full ``horizon_steps`` list
+(say ``[1..96]``); the predict-side call used
+``horizon_steps=[1]`` to "save tail rows". But
+``create_sliding_windows`` extends each window by
+``max(horizon_steps)`` future positions when
+``future_features_df`` is supplied — so the fit-side window was
+48+96=144 steps and the predict-side was 48+1=49 steps. Linear-
+head backends (NLinear's ``nn.Linear(flat, n_horizons)``, TiDE's
+projection) size their weights at fit time off the fit-window
+flat input; presenting them a narrower predict-window input
+fails the matmul. The exact numbers in the crash:
+
+* fit-flat = 48*46 + 96*45 = **6528** (PF7: future block drops target)
+* predict-flat = 48*46 + 1*45 = **2253**
+* trained Linear is (6528, 96); predict input is (894, 2253) — crash.
+
+Fix: pass the same ``horizon_steps`` to both calls. Trade-off is
+losing the last ``max_horizon - 1`` rows from the holdout tail
+(no window can be formed for them — a genuine constraint of
+sliding-window prediction, not something we could paper over).
+That's strictly preferable to crashing the entire holdout metric.
+
+Also fixed: the length-matching code at line 3027 used ``[-n:]``
+which was correct only when n_samples == len(holdout_part) (the
+old ``horizon_steps=[1]`` case). With the new fix it must use
+``[:n]`` — predictions align with the *first* n holdout
+points, not the last. Without this fix the chart would show
+correctly-shaped but mis-aligned holdout actuals vs predictions.
+
+Tests: 2 new tests in ``tests/unit/test_holdout_neural_shapes.py``
+pin the invariant — fit-side and predict-side
+``create_sliding_windows`` outputs must agree on ``shape[1]``
+when ``future_features_df`` is set. The negative test reproduces
+the 6528 / 2253 mismatch exactly. 235/236 unit tests pass (one
+unrelated XGBoost-not-installed failure).
+
+Affects: NLinear, TiDE, any linear-head neural backend benched
+on a config with ``role: future`` covariates. Tree models
+(XGBoost, RF, LightGBM) and TFT are unaffected (they don't use
+this sliding-window code path or the linear-head sizing
+contract).
+
 ## 2.38.4
 
 Closes the v2.38.3 workaround properly: ``weather.*`` entities used
