@@ -82,23 +82,53 @@ covariates:
     role: lagged
     aggregation: mean
 
+  # Legacy weather integrations (Met.no Norwegian provider) still
+  # expose forecasts as a state attribute — picked up directly.
   - entity: weather.home
     role: future
     future_attribute: forecast
     future_value_key: temperature
     aggregation: mean
+
+  # HA 2023.9+ weather integrations (Met Office DataHub,
+  # OpenWeatherMap, AccuWeather, met.no-via-newer-HA) moved the
+  # forecast OUT of state attributes and behind a service call.
+  # Use ``future_attribute: hourly`` / ``daily`` / ``twice_daily``
+  # to fetch via ``weather.get_forecasts``. The addon picks the
+  # right path automatically based on the entity's domain.
+  - entity: weather.met_office_balsham
+    role: future
+    future_attribute: hourly     # one of: hourly, daily, twice_daily
+    future_value_key: cloud_coverage
+
+  # Solcast / Forecast.Solar still expose forecasts via a state
+  # attribute (``detailedForecast``) — auto-detected by the UI's
+  # dropdown when role is Future.
+  - entity: sensor.solcast_pv_forecast_forecast_today
+    role: future
+    future_attribute: detailedForecast
+    future_value_key: pv_estimate
 ```
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `entity` | string | **required** | HA sensor or weather entity. |
-| `role` | `lagged` \| `future` | `lagged` | `lagged` = historical only (used as a lag feature). `future` = the entity exposes a known-future forecast attribute, available at every horizon step. |
-| `future_attribute` | string | `forecast` | For `role: future`: the entity attribute carrying the known-future series (`forecast` for Met.no, `detailedForecast` for Solcast). |
-| `future_value_key` | string | unset | For `role: future`: the key inside each forecast entry that contains the value (`temperature`, `pv_estimate`, …). If unset, common keys are tried in order. |
+| `role` | `lagged` \| `future` \| `both` | `lagged` | `lagged` = historical only (used as a lag feature). `future` = the entity exposes a known-future forecast, available at every horizon step. `both` = lagged for training, future at inference. |
+| `future_attribute` | string | `forecast` | For `role: future` / `both`: where the future-known series comes from. For **classic attribute-exposing entities** (Met.no `weather.*` on older HA, Solcast, Forecast.Solar), this is the attribute name (`forecast`, `detailedForecast`). For **modern `weather.*` entities** (HA 2023.9+: Met Office DataHub, OpenWeatherMap, AccuWeather, etc.), set this to `hourly`, `daily`, or `twice_daily` — the addon detects the weather domain and routes through the `weather.get_forecasts` service call instead of reading attributes. v2.37.7+ Add-Covariate UI auto-populates this dropdown based on the entity's actual capabilities. |
+| `future_value_key` | string | unset | For `role: future` / `both`: the key inside each forecast entry that contains the value (`temperature`, `pv_estimate`, `cloud_coverage`, …). If unset, common keys are tried in order. The Add-Covariate UI offers the entity's actual keys as a dropdown. |
 | `scale` | float | unset | Multiplicative pre-scaling (e.g. percent → fraction: `0.01`). |
 | `transform` | `log` \| `sqrt` \| `box_cox` | unset | Per-covariate transform before model input. |
 | `aggregation` | `mean` \| `sum` \| `max` \| `min` \| `last` | `mean` | Resampling method when aligning to `interval_minutes`. |
 | `is_binary` | bool | `false` | Marks 0/1 indicators (holiday flag, occupancy). Disables the rolling-statistic features for that signal. |
+
+> **Note on `weather.*` entities and `role: lagged`** — a weather entity's
+> *state* is a categorical string (`partlycloudy`, `sunny`, `rainy`),
+> not numeric. Using a weather entity with `role: lagged` produces
+> non-numeric historical values that the resolver drops. To get
+> **numeric historical** temperature / cloud / wind data, use the
+> per-metric `sensor.*` entities the integration exposes alongside the
+> `weather.*` entity (e.g. `sensor.met_office_balsham_temperature`),
+> not the `weather.*` entity itself.
 
 ### Load subtract
 

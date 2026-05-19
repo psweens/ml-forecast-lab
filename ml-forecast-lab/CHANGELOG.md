@@ -1,5 +1,80 @@
 # Changelog
 
+## 2.38.0
+
+Minor-version cap on the v2.37 future-covariate feature arc. The
+six v2.37.x patch releases between 2.37.2 and 2.37.7 each shipped
+new functionality (debug bundles, idle_value field, end-to-end
+future-covariate wiring, future_aux_head for the 3 broken
+backends, dynamic UI dropdown, weather-service API support) — that
+cumulative scope warrants a minor bump per semver, and v2.38.0 is
+a natural milestone now that the future-covariate feature is
+complete and validated end-to-end (train → benchmark → predict →
+publish, across all 17 backends, with three covariate source
+shapes: state-attribute, service-API, and HA-recorded numeric
+sensor).
+
+This release adds support for the HA 2023.9+
+``weather.get_forecasts`` service API so modern weather integrations
+work as future covariates.
+
+**Background**: HA 2023.9 deprecated the ``forecast`` attribute on
+``weather.*`` entities. Forecasts moved to a separate
+``weather.get_forecasts`` service call that returns the array via
+``service_response`` instead of state attributes. Integrations that
+shipped or migrated after the switch — **Met Office DataHub**,
+**OpenWeatherMap**, **AccuWeather**, modern **met.no** —
+no longer expose ``attributes.forecast``, so the v2.37.5+ future-
+covariate plumbing returned NaN for them. The Add-Covariate UI
+correctly showed no forecast-attribute options (because there
+weren't any).
+
+**Fix**: when the covariate resolver sees an entity in the
+``weather.*`` domain with ``future_attribute`` set to one of
+``hourly`` / ``daily`` / ``twice_daily``, it now calls
+``POST /api/services/weather/get_forecasts?return_response`` with
+the requested type, parses the per-entity ``service_response``,
+and feeds the same downstream alignment path as the attribute
+route. Legacy attribute-exposing integrations (Solcast's
+``detailedForecast``, Forecast.Solar, older met.no, custom
+integrations) are unchanged — the resolver falls through to the
+existing attribute fetch for any other ``future_attribute`` value.
+
+**UI** (no change in this release): the existing v2.37.7 dropdown
+still reads from state attributes. Modern weather entities will
+show no forecast options there. Set ``future_attribute`` manually
+to one of ``hourly`` / ``daily`` / ``twice_daily`` in the YAML
+(via the Forecast attribute field — type it in if the dropdown
+doesn't surface it). A follow-up release will wire
+``supported_features`` bitmask detection into the dropdown so
+modern weather integrations also get one-click setup.
+
+**Note on `weather.*` entities and `role: lagged`**: a weather
+entity's *state* is a categorical string
+(``partlycloudy`` / ``sunny`` / ``rainy``), not numeric. Using a
+weather entity with ``role: lagged`` returns non-numeric values
+that the resolver drops. For **historical** numeric temperature /
+cloud / wind, use the per-metric ``sensor.*`` entities the
+integration exposes alongside the ``weather.*`` entity (e.g.
+``sensor.met_office_balsham_temperature``). Documented in
+DOCS.md.
+
+**Practical user impact**: Met Office DataHub users can now use
+``weather.met_office_<location>`` as a `role: future` covariate
+for their PV experiment:
+
+```yaml
+covariates:
+  - entity: weather.met_office_balsham
+    role: future
+    future_attribute: hourly
+    future_value_key: cloud_coverage
+```
+
+The same recipe works for OpenWeatherMap, AccuWeather, and any
+other HA 2023.9+ weather integration that supports the service
+API (``supported_features`` bitmask non-zero).
+
 ## 2.37.7
 
 Closes the remaining gaps from v2.37.5/v2.37.6: the three backends
