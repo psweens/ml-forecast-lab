@@ -124,11 +124,36 @@ class CovariateResolver:
         name = cov_cfg.get("name", entity_id)
         binary_flag = cov_cfg.get("binary")
 
-        logger.info(f"Fetching covariate history: {entity_id}")
+        # Attribute-history path (v2.38.4+) for ``weather.*`` entities
+        # and any other entity whose .state is categorical but whose
+        # useful numeric data lives in ``.attributes``. Triggered when
+        # ``future_value_key`` is set and the entity is in the weather
+        # domain — that combination signals "the user wants metric X
+        # from a weather entity, both historically and as a forecast."
+        # The future-forecast path (fetch_future) already used
+        # future_value_key; this aligns the history side so the model
+        # can learn the past relationship instead of seeing a
+        # zero-filled past column (v2.38.3 workaround).
+        attribute_key = None
+        value_key_for_history = cov_cfg.get("future_value_key")
+        if (
+            isinstance(entity_id, str)
+            and entity_id.startswith("weather.")
+            and value_key_for_history
+        ):
+            attribute_key = value_key_for_history
+
+        logger.info(
+            f"Fetching covariate history: {entity_id}"
+            + (f" (attribute={attribute_key})" if attribute_key else "")
+        )
 
         try:
-            raw = await self.iface.get_history(entity_id, start, end)
-            df = normalise_history(raw)
+            raw = await self.iface.get_history(
+                entity_id, start, end,
+                include_attributes=attribute_key is not None,
+            )
+            df = normalise_history(raw, attribute_key=attribute_key)
 
             if df.empty:
                 logger.warning(f"No history for {entity_id}")
