@@ -1891,6 +1891,59 @@ class MLForecastLabApp:
                 f"[{remaining_nan} non-idle NaN remain for dropna]"
             )
 
+        # --- Empty-column guard (v2.38.3) --------------------------------
+        # A covariate whose entire column is NaN (every aligned value
+        # parsed as non-numeric) would, on the next line, drag every
+        # single row into the dropna and leave 0 samples for training
+        # ("⚠ No samples remaining after preprocessing — Skipping this
+        # cycle"). Most common cause: a `weather.*` entity configured
+        # as `role: future` whose state is a categorical string
+        # ("partlycloudy") — fetch_history returns no numeric values.
+        # Drop these columns before dropna so one bad covariate can't
+        # kill the experiment; the future-block at inference will still
+        # receive forecast values via the service API path so the model
+        # still gets the signal where it matters most.
+        if exp_cfg.covariates and self.covariate_resolver:
+            cov_role_by_name: dict = {}
+            for c in exp_cfg.covariates:
+                cov_role_by_name[
+                    _cov_column_name(c, all_covs=exp_cfg.covariates)
+                ] = getattr(c, 'role', 'lagged')
+            empty_cols = [
+                c for c in result.columns
+                if c != 'y' and result[c].notna().sum() == 0
+            ]
+            for col in empty_cols:
+                role = cov_role_by_name.get(col, 'lagged')
+                if role in ('future', 'both'):
+                    # Future-role columns will receive real values at
+                    # inference via the forecast/service path. Fill the
+                    # past with zeros so dropna doesn't eat every row
+                    # — the model just sees "no past signal" for this
+                    # channel, which is the truth.
+                    result[col] = 0.0
+                    logger.warning(
+                        f"  Covariate '{col}' (role={role}) had 0%% "
+                        f"historical coverage — filling past with 0 so "
+                        f"the experiment isn't killed. Future values "
+                        f"still come from the forecast attribute / "
+                        f"service API at inference. For richer past "
+                        f"signal on weather.* entities, add the per-"
+                        f"metric sensor.* sibling entity as a separate "
+                        f"role:lagged covariate."
+                    )
+                else:
+                    # Lagged-role column with 0% coverage adds nothing.
+                    # Drop it entirely so the dropna doesn't eat rows.
+                    result = result.drop(columns=[col])
+                    logger.warning(
+                        f"  Covariate '{col}' (role={role}) had 0%% "
+                        f"historical coverage — dropping the column "
+                        f"entirely. Likely cause: entity reports a "
+                        f"non-numeric state, or the recorder has no "
+                        f"matching rows in the requested window."
+                    )
+
         # --- Covariate manifest -------------------------------------------
         # Summarise every covariate's contribution BEFORE dropna so the
         # user can see, in one log block per retrain/forecast cycle:

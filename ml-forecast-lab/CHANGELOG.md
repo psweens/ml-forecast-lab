@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.38.3
+
+Fixes a v2.38.2 regression that killed experiments when a user
+added a ``weather.*`` entity (Met Office DataHub, OpenWeatherMap,
+etc.) as a ``role: future`` covariate. ``weather.*`` entities have
+a **categorical string state** (``partlycloudy`` / ``sunny`` /
+``rainy``), so ``fetch_history`` returned 0 numeric values; the
+resulting column was 100% NaN; ``result.dropna()`` then deleted
+every row, leaving 0 training samples and skipping the cycle with
+``⚠ No samples remaining after preprocessing``.
+
+* **Empty-column guard** in ``_fetch_and_preprocess``: after the
+  covariate-fetch loop and before the dropna, detect columns that
+  are 100% NaN. For ``role: future`` / ``both`` covariates, fill
+  the past with zeros (the future block at inference will still
+  receive real values via the forecast attribute / service API).
+  For ``role: lagged``, drop the column entirely. Logs a clear
+  warning naming the covariate, its role, and the reason so users
+  can spot it without diving into the manifest.
+* **UI — covariate row metadata**: future-role covariates in the
+  Add-Covariate list now show ``attr: hourly`` and
+  ``key: cloud_coverage`` chips so users can tell at a glance which
+  forecast attribute and value key each covariate is pulling from.
+  Especially useful for the v2.38.2 multi-metric pattern where the
+  same entity appears multiple times with different keys — the rows
+  used to look identical. Both server-rendered rows and JS-appended
+  ones (after clicking Add) get the new chips.
+
+Practical user impact: covariates that fail to fetch (or are
+configured against entities without numeric state) no longer kill
+the cycle. The experiment proceeds with the surviving covariates
+and a warning naming the problem. For `weather.*` entities used
+as future covariates, the model still gets the forecast signal at
+inference even though past values are zero-filled — this is the
+common pattern in time-series forecasting when a future-known
+covariate has no observable past (e.g. a calendar / event flag
+that only exists going forward).
+
 ## 2.38.2
 
 Allows the same entity to be configured as multiple covariates with

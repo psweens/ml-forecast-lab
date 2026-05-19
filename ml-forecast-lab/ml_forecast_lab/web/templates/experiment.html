@@ -407,6 +407,16 @@
                 <span class="cov-entity">{{ cov.entity }}</span>
                 <span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">{{ cov.role }}</span></span>
                 <span class="cov-meta">{{ cov.aggregation }}</span>
+                {# Surface the future-value source for role=future/both so
+                   users can tell at a glance which attribute and key the
+                   covariate is pulling from. Especially useful when the
+                   same entity is configured multiple times (e.g.
+                   weather.met_office_balsham → cloud_coverage AND
+                   temperature) — without this, the rows look identical. #}
+                {% if cov.role in ('future', 'both') %}
+                    {% if cov.future_attribute %}<span class="cov-meta" style="font-style:italic;">attr: {{ cov.future_attribute }}</span>{% endif %}
+                    {% if cov.future_value_key %}<span class="cov-meta" style="font-style:italic;">key: {{ cov.future_value_key }}</span>{% endif %}
+                {% endif %}
                 {% if cov.scale is not none %}<span class="cov-meta">scale: {{ cov.scale }}</span>{% endif %}
                 {% if cov.is_binary %}<span class="cov-meta">binary</span>{% endif %}
                 <button class="cov-remove-btn" onclick="removeCovariate('{{ cov.entity }}')" title="Remove">&times;</button>
@@ -2442,9 +2452,24 @@ window.showTab = function(el) {
                 var row = document.createElement('div');
                 row.className = 'covariate-row';
                 row.setAttribute('data-entity', entity);
+                // Match the Jinja-rendered row layout so the new row
+                // looks the same as ones already on the page after a
+                // server re-render. Future-value source fields shown
+                // for role in {future, both} only.
+                var isFutureLike = (body.role === 'future' || body.role === 'both');
+                var futureMeta = '';
+                if (isFutureLike) {
+                    if (body.future_attribute) {
+                        futureMeta += '<span class="cov-meta" style="font-style:italic;">attr: ' + body.future_attribute + '</span>';
+                    }
+                    if (body.future_value_key) {
+                        futureMeta += '<span class="cov-meta" style="font-style:italic;">key: ' + body.future_value_key + '</span>';
+                    }
+                }
                 row.innerHTML = '<span class="cov-entity">' + entity + '</span>' +
                     '<span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">' + body.role + '</span></span>' +
                     '<span class="cov-meta">' + body.aggregation + '</span>' +
+                    futureMeta +
                     (body.scale !== undefined ? '<span class="cov-meta">scale: ' + body.scale + '</span>' : '') +
                     (body.is_binary ? '<span class="cov-meta">binary</span>' : '') +
                     '<button class="cov-remove-btn" onclick="removeCovariate(\'' + entity + '\')" title="Remove">&times;</button>';
