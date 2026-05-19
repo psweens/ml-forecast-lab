@@ -2992,16 +2992,30 @@ class MLForecastLabApp:
                             include_clear_sky_ghi=include_clear_sky_ghi,
                             future_covariate_values=future_cov_ho or None,
                         )
-                        # Use horizon_steps=[1] for inference X so we get one
-                        # window per holdout point — full coverage with no
-                        # tail-fill needed. The model was trained with dense
-                        # horizons so predict_sequence still returns
-                        # (n, future_periods); we take the h=1 column.
+                        # Must use the SAME horizon_steps as the
+                        # fit-side call above. ``create_sliding_windows``
+                        # extends each window by ``max(horizon_steps)``
+                        # future positions when ``future_features_df``
+                        # is provided, so a shorter horizon list at
+                        # predict-time would produce a window with
+                        # fewer future positions — and the trained
+                        # neural head (built around the fit-time flat
+                        # size) can't accept it. v2.38.5: was [1] here,
+                        # which broke NLinear / TiDE / any backend
+                        # whose Linear head is sized off the fit-time
+                        # window length. The trade-off is losing
+                        # ``max_horizon - 1`` rows from the holdout
+                        # tail (no window can be formed for them),
+                        # acceptable given the alternative is a
+                        # ``mat1 and mat2 shapes cannot be multiplied``
+                        # crash on the entire holdout slice. We still
+                        # take the h=1 column from the dense output
+                        # for the display series.
                         seq_X_ho, _, _ = create_sliding_windows(
                             combined_holdout, target_col, window_size=window_size,
                             covariate_cols=cov_cols if cov_cols else None,
                             add_temporal=True,
-                            horizon_steps=[1],
+                            horizon_steps=horizon_steps,
                             future_features_df=ho_future_features_df,
                         )
                         y_p = m.predict_sequence(seq_X_ho)
@@ -3010,12 +3024,23 @@ class MLForecastLabApp:
                         else:
                             y_p_display = y_p.astype(np.float32)
                         _y_holdout_display = holdout_part[target_col].values.astype(np.float32)
-                        # Match length defensively
+                        # Align to the FIRST n_samples holdout points.
+                        # ``create_sliding_windows`` indexes window i to
+                        # predict at ``combined_holdout.index[i + window_size]``;
+                        # with combined_holdout = train_tail[-window_size:] +
+                        # holdout_part, those map to ``holdout_part[0..n_samples)``.
+                        # The previous v2.38.4-and-earlier code took [-n:],
+                        # which was correct only while max_horizon was 1
+                        # (n_samples == len(holdout_part)). With the v2.38.5
+                        # fix using full horizon_steps, n_samples =
+                        # len(holdout_part) - max_horizon + 1, so the last
+                        # max_horizon-1 holdout points have no window — the
+                        # predictions cover the head of the slice, not the tail.
                         if len(y_p_display) != len(_y_holdout_display):
                             n = min(len(y_p_display), len(_y_holdout_display))
-                            y_p_display = y_p_display[-n:]
-                            _y_holdout_display = _y_holdout_display[-n:]
-                            _holdout_ts = holdout_timestamps[-n:]
+                            y_p_display = y_p_display[:n]
+                            _y_holdout_display = _y_holdout_display[:n]
+                            _holdout_ts = holdout_timestamps[:n]
                         else:
                             _holdout_ts = holdout_timestamps
                     else:
