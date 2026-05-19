@@ -189,6 +189,107 @@ def test_future_covariate_aligned_via_reindex_and_ffill():
     assert fdf["sparse"].iloc[-1] == 7.0
 
 
+def test_collect_train_future_covariates_helper():
+    """The ``_collect_train_future_covariates`` helper is shared by
+    every training-side caller (production cache, benchmark holdout,
+    legacy production inference). It must return a dict mapping
+    cov_name → series for ONLY role in {future, both} covariates,
+    and skip ones not yet present in the combined dataframe."""
+    from ml_forecast_lab.main import _collect_train_future_covariates
+    from ml_forecast_lab.config import CovariateCfg, ExperimentCfg
+
+    idx = pd.date_range("2026-05-01", periods=20, freq="30min", tz=None)
+    combined = pd.DataFrame({
+        "target": np.arange(20, dtype=float),
+        "solcast_pv": np.arange(20, dtype=float) * 2,
+        "load_today": np.arange(20, dtype=float) * 3,
+    }, index=idx)
+
+    exp = ExperimentCfg(
+        name="x", target_entity="t",
+        covariates=[
+            CovariateCfg(entity="sensor.solcast_pv", role="future"),
+            CovariateCfg(entity="sensor.load_today", role="lagged"),
+            CovariateCfg(entity="sensor.battery_flow", role="both"),  # not in combined
+        ],
+    )
+    out = _collect_train_future_covariates(combined, exp)
+    # future + both that ARE in combined → included
+    assert set(out.keys()) == {"solcast_pv"}
+    # lagged → excluded
+    assert "load_today" not in out
+    # both but not in combined → excluded (skipped silently)
+    assert "battery_flow" not in out
+
+
+def test_collect_train_future_covariates_no_covariates():
+    """No covariates configured → empty dict, no error."""
+    from ml_forecast_lab.main import _collect_train_future_covariates
+    from ml_forecast_lab.config import ExperimentCfg
+
+    idx = pd.date_range("2026-05-01", periods=10, freq="30min", tz=None)
+    combined = pd.DataFrame({"target": np.zeros(10)}, index=idx)
+    exp = ExperimentCfg(name="x", target_entity="t")
+    assert _collect_train_future_covariates(combined, exp) == {}
+
+
+def test_incompatible_backend_warning_fires_with_future_covariate(caplog):
+    """A user with role:future covariate + nbeats/nhits/itransformer
+    enabled must get a config-load warning — those backends slice to
+    past-only and silently drop the future covariate. The warning is
+    the only line of defence against benchmark / production training
+    that looks fine in logs but doesn't actually use the configured
+    forecast input."""
+    import logging
+    from ml_forecast_lab.config import CovariateCfg, ExperimentCfg
+
+    with caplog.at_level(logging.WARNING):
+        ExperimentCfg(
+            name="optimised_solar", target_entity="predbat.pv_power",
+            models_enabled=["nlinear", "nbeats", "nhits"],
+            covariates=[
+                CovariateCfg(entity="sensor.solcast_pv", role="future"),
+            ],
+        )
+    text = caplog.text
+    assert "nbeats" in text and "nhits" in text
+    assert "nlinear" not in text or "WILL use them" in text  # nlinear listed as compatible
+    assert "sensor.solcast_pv" in text
+
+
+def test_no_warning_when_only_compatible_backends_enabled(caplog):
+    """nlinear / dlinear / tide / lightgbm + a future covariate
+    should NOT trigger the warning — these all consume future
+    positions correctly (per the audit)."""
+    import logging
+    from ml_forecast_lab.config import CovariateCfg, ExperimentCfg
+
+    with caplog.at_level(logging.WARNING):
+        ExperimentCfg(
+            name="optimised_solar", target_entity="predbat.pv_power",
+            models_enabled=["nlinear", "dlinear", "tide", "lightgbm"],
+            covariates=[
+                CovariateCfg(entity="sensor.solcast_pv", role="future"),
+            ],
+        )
+    assert "slice to past-window only" not in caplog.text
+
+
+def test_no_warning_when_no_future_covariates(caplog):
+    """Even with nbeats enabled, no warning if there's no future
+    covariate to drop — the bug is silent only when both conditions
+    hold simultaneously."""
+    import logging
+    from ml_forecast_lab.config import ExperimentCfg
+
+    with caplog.at_level(logging.WARNING):
+        ExperimentCfg(
+            name="x", target_entity="t",
+            models_enabled=["nbeats", "nhits"],
+        )
+    assert "slice to past-window only" not in caplog.text
+
+
 def test_multiple_future_covariates_each_reach_own_channel():
     """Two future covariates (e.g. Solcast PV + met.no temperature)
     must each land in their own channel at horizon positions."""

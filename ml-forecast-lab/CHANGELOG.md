@@ -1,5 +1,82 @@
 # Changelog
 
+## 2.37.6
+
+Completes the future-covariate wiring rolled out in v2.37.5 and
+flags the three backends that can't consume it.
+
+**v2.37.5 left two gaps:**
+
+1. The benchmark / holdout path (``_generate_holdout_predictions``)
+   trained candidates on a **past-window-only** architecture even
+   when production used extended-window. Comparing TiDE vs LightGBM
+   in the benchmark was therefore unfair to TiDE on TWO axes —
+   missing future covariates AND missing the future-position
+   extension architecture entirely. The "best model" picked from
+   the benchmark could differ from what'd actually win in production.
+2. The legacy non-cached production-inference path
+   (``_run_production_inference``) — used on first-ever run before
+   any cached model exists — had the same gap.
+
+**This release wires both:**
+
+* **Benchmark holdout training**: now builds the same extended-window
+  seq_X as production (window_size past + future_periods future)
+  with temporal + solar physics + user future-covariate values at
+  horizon positions. Logs ``Holdout future covariates (horizon-
+  aware): [...]`` when active.
+* **Benchmark holdout inference**: rebuilds the matching extended
+  window from ``combined_holdout`` so ``predict_sequence`` reads
+  the same channel layout it was trained against.
+* **Legacy production inference**: training + inference both extended,
+  user future covariates fetched from HA's forecast attribute at
+  inference time exactly like the cached path.
+* **New shared helper** ``_collect_train_future_covariates``: single
+  source of truth for "which user covariates land at horizon
+  positions during training". Used by all 4 training sites
+  (cached production, benchmark holdout, legacy production
+  inference, and any future caller). Pure function, easy to test.
+
+**Backend audit + warning for 3 broken backends:**
+
+A predict_sequence audit of all 17 neural backends revealed that
+three — **N-BEATS**, **N-HiTS**, and **iTransformer** — explicitly
+slice their input to ``x[:, :past_window_size, :]`` in their
+forward pass (v2.37 PF4 / PF6 commits). They cannot consume future
+covariates regardless of how perfectly we wire them in.
+
+* **Config-load warning**: ``ExperimentCfg.__post_init__`` now warns
+  when ``models_enabled`` includes any of these three AND the
+  experiment has at least one ``role: future`` covariate. The
+  warning names the bad models, names the covariate entities, and
+  confirms which models WILL use them. Surfaces in the addon log
+  immediately at startup so users know not to expect a Solcast
+  benefit on these specific backends.
+* **The 14 working backends** (CNN, Crossformer, DLinear, FITS,
+  GRU, LSTM, NLinear, PatchTST, SparseTSF, TFT, TiDE, TimeMixer,
+  TimesNet, TSMixer) all properly consume future positions and
+  benefit from the v2.37.5 + v2.37.6 wiring.
+* **Fix for the 3 broken backends** requires per-backend
+  forward-pass changes (removing the slice + handling the
+  variable input length). Tracked as future work; not in scope
+  for this release.
+
+**Practical impact:**
+* Re-run any benchmark on an experiment with a future-role
+  covariate — TiDE / NLinear / DLinear should now score
+  comparably to (or better than) LightGBM, which previously had
+  an information advantage. The "best model" pick from the
+  benchmark is now apples-to-apples with production training.
+* If your YAML enables N-BEATS / N-HiTS / iTransformer alongside
+  a Solcast future covariate, expect a warning at startup and
+  unchanged behaviour from those three (they'll see only past lags).
+
+Tests: 5 new regression tests in
+``tests/unit/test_future_covariate_wiring.py`` pin the helper
+contract and the warning behaviour (with-future-cov + broken
+backend → warning; without future cov OR only compatible backends
+→ no warning). Total 58 tests pass.
+
 ## 2.37.5
 
 Closes the **future-covariate asymmetry** between tree and neural

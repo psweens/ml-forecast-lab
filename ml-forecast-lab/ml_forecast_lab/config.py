@@ -682,6 +682,34 @@ class ExperimentCfg:
                 f'got {self.output_activation!r}'
             )
 
+        # Future-covariate compatibility warning. Three v2.37 backends
+        # (nbeats, nhits, itransformer) explicitly slice their input
+        # tensor to ``x[:, :past_window_size, :]`` in their forward
+        # pass — the future block is dropped on the floor. v2.37.5+
+        # writes user future-covariate values into those future
+        # positions; these three backends ignore them silently. Warn
+        # at config-load so the user knows the Solcast prior they
+        # configured won't reach the model if they pick one of these.
+        future_role_covs = [
+            c for c in self.covariates
+            if getattr(c, 'role', None) in ('future', 'both')
+        ]
+        FUTURE_COV_INCOMPATIBLE = {'nbeats', 'nhits', 'itransformer'}
+        if future_role_covs:
+            blind = FUTURE_COV_INCOMPATIBLE & set(self.models_enabled or [])
+            if blind:
+                logger.warning(
+                    f"Experiment {self.name!r}: model(s) {sorted(blind)} "
+                    f"slice to past-window only — they will NOT see your "
+                    f"future-role covariate(s) "
+                    f"{[c.entity for c in future_role_covs]} at horizon "
+                    f"positions. Tree backends (lightgbm/xgboost/catboost) "
+                    f"and the 14 other neural backends (nlinear, dlinear, "
+                    f"tsmixer, tide, etc.) WILL use them. Tracked at "
+                    f"v2.37.6 — fix requires per-backend forward-pass "
+                    f"changes."
+                )
+
 
 @dataclass
 class AppConfig:
