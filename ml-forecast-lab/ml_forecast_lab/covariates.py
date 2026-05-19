@@ -192,21 +192,80 @@ class CovariateResolver:
         attr_name = cov_cfg.get("future_attribute", "forecast")
         value_key = cov_cfg.get("future_value_key")
 
-        try:
-            attr = await self.iface.get_state(entity_id, attribute=attr_name)
-        except Exception as e:
-            logger.warning(
-                "fetch_future: %s attribute fetch failed: %s", entity_id, e,
-            )
-            return pd.Series(np.nan, index=future_index, name=name)
+        # HA 2023.9+ weather entities (Met Office DataHub, OpenWeatherMap,
+        # AccuWeather, met.no, etc.) moved the forecast OUT of state
+        # attributes and into a separate ``weather.get_forecasts``
+        # service call. When the user picks ``future_attribute`` =
+        # ``hourly`` / ``daily`` / ``twice_daily`` (the three forecast
+        # types the service supports) and the entity is in the weather
+        # domain, fetch via the service API instead of the state
+        # attribute. Falls through to the legacy attribute path for
+        # any other future_attribute (so Solcast's ``detailedForecast``,
+        # Forecast.Solar, custom integrations still work unchanged).
+        WEATHER_SERVICE_TYPES = {"hourly", "daily", "twice_daily"}
+        is_weather_service = (
+            isinstance(entity_id, str)
+            and entity_id.startswith("weather.")
+            and attr_name in WEATHER_SERVICE_TYPES
+        )
+        if is_weather_service:
+            try:
+                resp = await self.iface.api_call(
+                    "POST",
+                    "/api/services/weather/get_forecasts?return_response",
+                    json_data={"entity_id": entity_id, "type": attr_name},
+                )
+            except Exception as e:
+                logger.warning(
+                    "fetch_future: %s weather.get_forecasts(type=%s) failed: %s",
+                    entity_id, attr_name, e,
+                )
+                return pd.Series(np.nan, index=future_index, name=name)
 
-        parsed = _parse_forecast_attribute(attr, value_key=value_key)
-        if parsed is None or parsed.empty:
-            logger.debug(
-                "fetch_future: %s attribute %r empty / unparseable; "
-                "returning NaN", entity_id, attr_name,
+            # HA returns ``{service_response: {entity_id: {forecast: [...]}},
+            # context: ...}`` — the per-entity forecast array sits two
+            # levels deep. Defensive lookup so a schema tweak doesn't
+            # crash the resolver.
+            service_resp = (resp or {}).get("service_response") or {}
+            entity_block = service_resp.get(entity_id) or {}
+            forecast_list = entity_block.get("forecast")
+            if not forecast_list:
+                logger.debug(
+                    "fetch_future: %s weather.get_forecasts(type=%s) "
+                    "returned no forecast array; returning NaN",
+                    entity_id, attr_name,
+                )
+                return pd.Series(np.nan, index=future_index, name=name)
+            # Same parser as the attribute path — the forecast array
+            # is a list[dict] with ``datetime`` + numeric keys, exactly
+            # the legacy attribute schema. Reuse _parse_forecast_attribute
+            # so the auto-detect / value_key logic matches.
+            parsed = _parse_forecast_attribute(
+                forecast_list, value_key=value_key,
             )
-            return pd.Series(np.nan, index=future_index, name=name)
+            if parsed is None or parsed.empty:
+                return pd.Series(np.nan, index=future_index, name=name)
+            # Skip the attribute fetch below — we already have the
+            # parsed series. Jump straight to alignment by routing
+            # through the same downstream code path.
+            # Skip the attribute fetch below — we already have the
+            # parsed series. Jump to the alignment block.
+        else:
+            try:
+                attr = await self.iface.get_state(entity_id, attribute=attr_name)
+            except Exception as e:
+                logger.warning(
+                    "fetch_future: %s attribute fetch failed: %s", entity_id, e,
+                )
+                return pd.Series(np.nan, index=future_index, name=name)
+
+            parsed = _parse_forecast_attribute(attr, value_key=value_key)
+            if parsed is None or parsed.empty:
+                logger.debug(
+                    "fetch_future: %s attribute %r empty / unparseable; "
+                    "returning NaN", entity_id, attr_name,
+                )
+                return pd.Series(np.nan, index=future_index, name=name)
 
         # Align timezone of the parsed series to the requested future_index
         # so reindex doesn't drop everything.
