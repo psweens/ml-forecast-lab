@@ -1,5 +1,66 @@
 # Changelog
 
+## 2.38.7
+
+Adds an auto-validating data-availability chip per covariate row in
+the experiment page. Tells you ahead of training whether the
+entity is reachable, the lagged side has numeric history, and the
+future attribute (if configured) actually parses.
+
+Three states surfaced to the UI:
+
+* **✓ ok** (green) — entity reachable; state numeric (or weather
+  attribute-history path works); future attribute parses if
+  configured.
+* **⚠ partial** (yellow) — lagged side ok but future attribute
+  didn't parse (wrong key name or unparseable shape). Chart will
+  still get historical data but the future block will be NaN
+  through the horizon.
+* **✗ broken** (red) — entity missing, state non-numeric without a
+  fallback, or future attribute unreachable.
+
+Implementation:
+
+* New ``classify_covariate_state(entity_id, state_obj, future_attribute,
+  future_value_key)`` pure function in ``web/app.py`` — the decision
+  matrix, no IO.
+* New ``GET /api/covariates/validate?entity_id=...&future_attribute=...&future_value_key=...``
+  endpoint — thin transport wrapper that does one HA
+  ``/api/states/{entity_id}`` call (no history fetch, no service
+  probe) and forwards to the classifier.
+* Experiment template gains a ``.cov-validate-chip`` span per row,
+  initially "…". On ``DOMContentLoaded`` the page kicks off a
+  validation per row with an 80 ms stagger (so a 20-covariate
+  experiment isn't 20 simultaneous HA calls). The newly added row
+  in ``addCovariate``'s success handler also fires a validation.
+* Session-scoped JS cache keyed by ``entity|attr|key`` with a 5 min
+  TTL — re-opening the experiment page doesn't re-hit HA for
+  unchanged rows.
+* Data attributes on each row (``data-entity``, ``data-future-attribute``,
+  ``data-future-value-key``) carry the config the validator needs;
+  the Jinja template and the dynamic-row JS were updated in sync so
+  both paths populate them.
+
+The classifier folds in the v2.38.4 attribute-history path: a
+weather entity with categorical state but ``future_value_key``
+pointing at a numeric attribute (the
+``weather.met_office_balsham`` + ``temperature`` pattern) is
+classified ok, since the resolver's lagged-side fetch routes
+through the attribute path.
+
+Tests: 8 new tests in
+``tests/unit/test_validate_covariate_endpoint.py`` pin the
+decision matrix end-to-end through the classifier. The pure-function
+shape avoids any FastAPI / httpx test-client dependency.
+
+224/225 unit tests pass (one unrelated XGBoost-not-installed failure
+pre-existing).
+
+User impact: silent failures you previously only discovered by
+reading training logs ("``met_office_balsham__results: 0 raw → 0
+aligned``" / "``Failed holdout predictions for nlinear``") now
+surface as a yellow / red chip the moment the row is added.
+
 ## 2.38.6
 
 Fixes SeasonalNaive returning **zero for every holdout step**

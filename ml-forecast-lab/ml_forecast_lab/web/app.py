@@ -365,6 +365,113 @@ class AppState:
         return False
 
 
+def classify_covariate_state(
+    entity_id: str,
+    state_obj: dict,
+    future_attribute: Optional[str] = None,
+    future_value_key: Optional[str] = None,
+) -> dict:
+    """Classify a covariate row's data availability from a single
+    HA ``/api/states`` response (v2.38.7). Pure function — no IO —
+    so it's straightforward to unit-test without the FastAPI machinery.
+
+    Decision matrix:
+
+    * State numeric, no ``future_attribute`` → **ok** (last value).
+    * State numeric, ``future_attribute`` parses → **ok**.
+    * State numeric, ``future_attribute`` given but doesn't parse → **partial**.
+    * State categorical (``weather.partlycloudy`` etc.), ``future_attribute``
+      parses → **partial** (lagged side won't carry numeric history
+      unless the resolver routes through the v2.38.4 attribute path
+      for ``weather.*`` entities — UI flags it so the user knows the
+      past block depends on that path working).
+    * State categorical, ``weather.*`` + ``future_value_key`` and the
+      named attribute exists numerically on the state object → **ok**
+      (v2.38.4 attribute-history path will handle the lagged side).
+    * State categorical, ``future_attribute`` missing or broken → **broken**.
+
+    Return shape::
+
+        {
+            ok: bool,
+            status: "ok" | "partial" | "broken",
+            state_value: float | null,
+            last_changed: str | null,
+            message: str,
+            attribute_preview: <numeric>|null,
+        }
+    """
+    from ml_forecast_lab.covariates import _parse_forecast_attribute
+    from ml_forecast_lab.ha_interface import state_to_float
+
+    raw_state = state_obj.get("state")
+    last_changed = state_obj.get("last_changed")
+    attrs = state_obj.get("attributes") or {}
+    state_value = state_to_float(raw_state)
+    state_is_numeric = state_value is not None
+
+    attribute_preview = None
+    attribute_parsed_ok = None
+    if future_attribute:
+        attr_raw = attrs.get(future_attribute)
+        if attr_raw is None:
+            attribute_parsed_ok = False
+        else:
+            parsed = _parse_forecast_attribute(attr_raw, value_key=future_value_key)
+            if parsed is not None and not parsed.empty:
+                attribute_parsed_ok = True
+                attribute_preview = float(parsed.iloc[0])
+            else:
+                attribute_parsed_ok = False
+
+    weather_attr_path_ok = (
+        entity_id.startswith("weather.")
+        and future_value_key
+        and isinstance(attrs.get(future_value_key), (int, float))
+    )
+
+    if (not state_is_numeric
+            and not weather_attr_path_ok
+            and attribute_parsed_ok is not True):
+        return {
+            "ok": False, "status": "broken",
+            "state_value": None, "last_changed": last_changed,
+            "message": (
+                f"State '{raw_state}' is not numeric and no usable "
+                "future_attribute / weather attribute-history path."
+            ),
+            "attribute_preview": None,
+        }
+
+    if future_attribute and attribute_parsed_ok is False:
+        return {
+            "ok": True, "status": "partial",
+            "state_value": state_value,
+            "last_changed": last_changed,
+            "message": (
+                f"Lagged side ok (last={state_value}) but future "
+                f"attribute '{future_attribute}' didn't parse "
+                "— check key name or value_key."
+            ),
+            "attribute_preview": None,
+        }
+
+    bits = []
+    if state_is_numeric:
+        bits.append(f"last={state_value}")
+    elif weather_attr_path_ok:
+        bits.append(f"{future_value_key}={attrs[future_value_key]}")
+    if attribute_parsed_ok:
+        bits.append(f"future attr parses (first={attribute_preview})")
+    return {
+        "ok": True, "status": "ok",
+        "state_value": state_value,
+        "last_changed": last_changed,
+        "message": ", ".join(bits) or "Entity reachable",
+        "attribute_preview": attribute_preview,
+    }
+
+
 def create_app(config_path: Optional[Path] = None) -> FastAPI:
     """
     Create and configure the FastAPI application.
@@ -2210,6 +2317,72 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                     })
 
         return JSONResponse(content={"forecast_attributes": results})
+
+    @app.get("/api/covariates/validate")
+    async def validate_covariate(request: Request):  # noqa: D401 (handler)
+        """Lite-flavour data-availability check for one covariate row
+        (v2.38.7). Single HA ``/api/states/{entity_id}`` call — no
+        history fetch, no service probe — so the UI can validate on
+        page load and after add without burning the user's HA quota.
+
+        See ``classify_covariate_state`` for the decision matrix and
+        return-shape contract. This handler is a thin transport
+        wrapper: fetch HA, classify, jsonify.
+        """
+        import aiohttp as _aiohttp
+
+        entity_id = (request.query_params.get("entity_id") or "").strip()
+        future_attribute = (request.query_params.get("future_attribute") or "").strip()
+        future_value_key = (request.query_params.get("future_value_key") or "").strip() or None
+
+        if not entity_id:
+            return JSONResponse(content={
+                "ok": False, "status": "broken",
+                "state_value": None, "last_changed": None,
+                "message": "entity_id is required",
+                "attribute_preview": None,
+            })
+
+        ha_url = os.environ.get("HA_URL", "http://supervisor/core")
+        ha_token = os.environ.get("SUPERVISOR_TOKEN", "")
+        try:
+            async with _aiohttp.ClientSession() as sess:
+                headers = {"Authorization": f"Bearer {ha_token}"}
+                async with sess.get(
+                    f"{ha_url}/api/states/{entity_id}",
+                    headers=headers,
+                    timeout=_aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status == 404:
+                        return JSONResponse(content={
+                            "ok": False, "status": "broken",
+                            "state_value": None, "last_changed": None,
+                            "message": "Entity not found in HA",
+                            "attribute_preview": None,
+                        })
+                    if resp.status != 200:
+                        return JSONResponse(content={
+                            "ok": False, "status": "broken",
+                            "state_value": None, "last_changed": None,
+                            "message": f"HA returned {resp.status}",
+                            "attribute_preview": None,
+                        })
+                    state_obj = await resp.json()
+        except Exception as e:
+            logger.debug(f"validate-covariate fetch failed for {entity_id}: {e}")
+            return JSONResponse(content={
+                "ok": False, "status": "broken",
+                "state_value": None, "last_changed": None,
+                "message": f"HA fetch error: {e}",
+                "attribute_preview": None,
+            })
+
+        return JSONResponse(content=classify_covariate_state(
+            entity_id=entity_id,
+            state_obj=state_obj,
+            future_attribute=future_attribute or None,
+            future_value_key=future_value_key,
+        ))
 
     # ---- Forecast accuracy (evolution log) ----
 
