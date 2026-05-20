@@ -1,5 +1,68 @@
 # Changelog
 
+## 2.38.6
+
+Fixes SeasonalNaive returning **zero for every holdout step**
+whenever any ``role: future`` covariate was configured — the
+"flat blue baseline" symptom users reported on the cumulative
+holdout chart.
+
+Root cause: ``create_sliding_windows`` extends each window with
+``max(horizon_steps)`` future positions when ``future_features_df``
+is supplied (the v2.37+ horizon-anchored covariate path). The
+target channel's slot in those future positions is always a
+zero placeholder — only the configured future-covariate
+channels get populated by name match. SeasonalNaive's
+``_per_window_predict`` used ``seq_len = len(target_series)``,
+so every lookback ``idx = seq_len + offset`` landed in the
+zero-padded future tail of the window. The recursion at
+``offset >= 0`` then propagated 0 through the rest of the
+horizon. Result: SeasonalNaive predicted 0 everywhere, while
+every other model produced normal daily PV bell curves.
+
+This is the same architectural blind spot as v2.38.5 (extended-
+window awareness missing on a model), but on a different
+backend. NLinear / TiDE took a shape-multiply crash; SeasonalNaive
+silently returned zeros.
+
+Fix:
+
+* ``SeasonalNaiveModel.fit`` captures ``past_window_size`` from
+  kwargs when ``extended_window=True`` (same kwargs the
+  benchmark holdout-neural path already sets at L2937-2938
+  of main.py).
+* ``_per_window_predict`` confines all index arithmetic to
+  ``[0, past_window_size)`` so lookbacks always land in real
+  past data.
+* ``save``/``load`` persist the new field so a model loaded
+  from disk keeps its extended-window awareness.
+
+Tests: 3 new tests in
+``tests/unit/test_seasonal_naive_extended_window.py``:
+
+- Legacy past-only mode unchanged (back-compat).
+- Extended-window mode produces non-zero predictions — the
+  exact "flat blue line" reproducer.
+- Recursion across the period boundary keeps propagating real
+  values (not zeros).
+
+216/216 unit tests pass (excluding the pre-existing
+XGBoost-not-installed failure).
+
+User impact: SeasonalNaive now produces a sensible daily PV
+bell curve on the holdout chart instead of flat zero. The
+Demšar ranking will reflect the real baseline performance
+again — previously it was being compared against a degenerate
+"always 0" baseline which any model trivially beat.
+
+Note (separate, not fixed here): the existing
+``offset = h + 1 - period`` formula appears off-by-one — for
+h=0 it indexes ``past_series[1]`` instead of ``past_series[0]``.
+This shifts the predicted seasonal cycle by one position
+(15 min at 30-min sampling). Pre-existing behaviour, present
+since the model was added. Worth a follow-up PR but not in
+scope for the "flat zero" fix.
+
 ## 2.38.5
 
 Fixes a holdout-prediction shape crash that surfaces whenever a

@@ -54,6 +54,18 @@ class SeasonalNaiveModel(ForecastModel):
         self.target_channel = int(target_channel)
         self.sequence_length = sequence_length
 
+        # past_window_size: in extended-window mode (any role:future
+        # covariate triggers ``create_sliding_windows`` to append future
+        # positions to each window), the target channel's *future* slots
+        # are always zero placeholders. v2.38.6: capture the
+        # past-block length so ``_per_window_predict`` can confine its
+        # lookbacks to the past slice instead of dereferencing through
+        # those zeros. Pre-v2.38.6 the baseline returned 0 for every
+        # holdout step whenever any future covariate was configured,
+        # making it look "broken" on the chart while in fact every
+        # lookup hit a placeholder.
+        self._past_window_size: Optional[int] = None
+
         # Cached tail of the training series; used at inference time when the
         # caller provides only a flat feature row (no sequence) and we need
         # to back-fill enough history to look one period back.
@@ -91,6 +103,18 @@ class SeasonalNaiveModel(ForecastModel):
         self._validate_X(X_train)
         y_train = self._validate_y(y_train)
 
+        # Extended-window awareness (v2.38.6): when the caller (the
+        # holdout-neural and benchmark-neural paths) appended future
+        # positions to each window via ``future_features_df``, only
+        # the first ``past_window_size`` positions of every window
+        # carry real target values. The tail is zero-padded
+        # placeholder data the future-covariate channels populate.
+        # Without this hint ``_per_window_predict`` would index into
+        # the placeholder zone and emit 0 for every horizon.
+        extended = bool(kwargs.get('extended_window', False))
+        pw = kwargs.get('past_window_size')
+        self._past_window_size = int(pw) if extended and pw else None
+
         if y_train.ndim == 2 and y_train.shape[1] > 1:
             self._n_horizons = y_train.shape[1]
             tail_source = y_train[:, 0]  # Use horizon-0 column as the series
@@ -116,7 +140,14 @@ class SeasonalNaiveModel(ForecastModel):
         window: (seq_len, n_channels) — target lives on self.target_channel.
         """
         target_series = window[:, self.target_channel]
-        seq_len = len(target_series)
+        # In extended-window mode the window's tail is future-position
+        # placeholders, so only the first ``past_window_size`` entries
+        # of target_series carry real values. Confine all lookbacks to
+        # that slice.
+        if self._past_window_size is not None:
+            past_len = min(self._past_window_size, len(target_series))
+        else:
+            past_len = len(target_series)
         period = self.seasonal_period
         out = np.zeros(n_horizons, dtype=np.float32)
 
@@ -131,16 +162,18 @@ class SeasonalNaiveModel(ForecastModel):
                 # offset >= 0 means we're forecasting more than one period ahead.
                 out[h] = out[offset]
             else:
-                idx = seq_len + offset  # negative offset → look back from end
-                if 0 <= idx < seq_len:
+                idx = past_len + offset  # negative offset → look back from end of PAST
+                if 0 <= idx < past_len:
                     out[h] = target_series[idx]
                 elif self._train_tail is not None and len(self._train_tail) >= -idx:
                     # Borrow from the cached training tail when the window
                     # alone isn't long enough.
                     out[h] = self._train_tail[idx]
                 else:
-                    # Last resort: most recent observation (non-seasonal naive).
-                    out[h] = target_series[-1]
+                    # Last resort: most recent past observation (non-seasonal
+                    # naive). In extended mode use ``past_len - 1`` so we don't
+                    # accidentally grab a zero-placeholder from the future block.
+                    out[h] = target_series[past_len - 1]
         return out
 
     def predict_sequence(self, X: np.ndarray) -> np.ndarray:
@@ -188,6 +221,7 @@ class SeasonalNaiveModel(ForecastModel):
                     "params": self.get_params(),
                     "train_tail": self._train_tail,
                     "n_horizons": self._n_horizons,
+                    "past_window_size": self._past_window_size,
                 }, f)
             logger.info(f"Saved SeasonalNaive to {path}")
         except Exception as e:
@@ -200,6 +234,7 @@ class SeasonalNaiveModel(ForecastModel):
             self.set_params(**data["params"])
             self._train_tail = data.get("train_tail")
             self._n_horizons = data.get("n_horizons", 1)
+            self._past_window_size = data.get("past_window_size")
             self._is_fitted = True
             logger.info(f"Loaded SeasonalNaive from {path}")
         except Exception as e:
