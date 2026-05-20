@@ -403,8 +403,11 @@
         <div class="covariate-list" id="covariate-list">
             {% if exp_config and exp_config.covariates %}
             {% for cov in exp_config.covariates %}
-            <div class="covariate-row" data-entity="{{ cov.entity }}">
+            <div class="covariate-row" data-entity="{{ cov.entity }}"
+                 data-future-attribute="{{ cov.future_attribute or '' }}"
+                 data-future-value-key="{{ cov.future_value_key or '' }}">
                 <span class="cov-entity">{{ cov.entity }}</span>
+                <span class="cov-meta cov-validate-chip" title="Checking data availability...">…</span>
                 <span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">{{ cov.role }}</span></span>
                 <span class="cov-meta">{{ cov.aggregation }}</span>
                 {# Surface the future-value source for role=future/both so
@@ -2413,6 +2416,74 @@ window.showTab = function(el) {
         }
     });
 
+    // v2.38.7: covariate data-availability validator. Calls the lite
+    // /api/covariates/validate endpoint and paints the row's chip:
+    //   ✓ green  — entity reachable, state numeric (or weather attr path
+    //               works), future attribute parses if configured
+    //   ⚠ yellow — lagged side ok but future_attribute didn't parse,
+    //               or vice versa
+    //   ✗ red    — entity missing or no usable data
+    // Results cached for the session (5 min TTL) keyed by entity|attr|key
+    // so re-opening the page doesn't re-hit HA for rows we already
+    // checked.
+    var _validateCache = {};
+    var _VALIDATE_TTL_MS = 5 * 60 * 1000;
+    function _validateCacheKey(entity, attr, key) {
+        return entity + '|' + (attr || '') + '|' + (key || '');
+    }
+    function _paintChip(chip, status, message) {
+        if (!chip) return;
+        var glyph, color, bg;
+        if (status === 'ok') { glyph = '✓'; color = '#1f8b3a'; bg = '#1f8b3a22'; }
+        else if (status === 'partial') { glyph = '⚠'; color = '#b9821a'; bg = '#b9821a22'; }
+        else { glyph = '✗'; color = '#b03030'; bg = '#b0303022'; }
+        chip.textContent = glyph;
+        chip.style.color = color;
+        chip.style.backgroundColor = bg;
+        chip.style.padding = '0.1rem 0.4rem';
+        chip.style.borderRadius = '4px';
+        chip.style.fontSize = '0.75rem';
+        chip.title = message || status;
+    }
+    window.validateCovariateRow = function(row) {
+        if (!row) return;
+        var entity = row.getAttribute('data-entity');
+        var attr = row.getAttribute('data-future-attribute') || '';
+        var key = row.getAttribute('data-future-value-key') || '';
+        var chip = row.querySelector('.cov-validate-chip');
+        if (!entity || !chip) return;
+        var cacheKey = _validateCacheKey(entity, attr, key);
+        var cached = _validateCache[cacheKey];
+        if (cached && (Date.now() - cached.ts) < _VALIDATE_TTL_MS) {
+            _paintChip(chip, cached.status, cached.message);
+            return;
+        }
+        var url = BASE + '/api/covariates/validate?entity_id=' + encodeURIComponent(entity);
+        if (attr) url += '&future_attribute=' + encodeURIComponent(attr);
+        if (key) url += '&future_value_key=' + encodeURIComponent(key);
+        fetch(url)
+            .then(function(r) { return r.json(); })
+            .then(function(result) {
+                _validateCache[cacheKey] = {
+                    status: result.status,
+                    message: result.message,
+                    ts: Date.now(),
+                };
+                _paintChip(chip, result.status, result.message);
+            })
+            .catch(function(err) {
+                _paintChip(chip, 'broken', 'Validation request failed: ' + err);
+            });
+    };
+    // On load, validate every existing row. Spread the requests slightly
+    // so a 20-covariate experiment doesn't fire 20 simultaneous HA calls.
+    document.addEventListener('DOMContentLoaded', function() {
+        var rows = document.querySelectorAll('#covariate-list .covariate-row');
+        rows.forEach(function(row, i) {
+            setTimeout(function() { window.validateCovariateRow(row); }, i * 80);
+        });
+    });
+
     window.addCovariate = function() {
         var entity = document.getElementById('cov-entity-input').value.trim();
         if (!entity) { mlfl.toast('Entity is required', 'error'); return; }
@@ -2452,6 +2523,8 @@ window.showTab = function(el) {
                 var row = document.createElement('div');
                 row.className = 'covariate-row';
                 row.setAttribute('data-entity', entity);
+                row.setAttribute('data-future-attribute', body.future_attribute || '');
+                row.setAttribute('data-future-value-key', body.future_value_key || '');
                 // Match the Jinja-rendered row layout so the new row
                 // looks the same as ones already on the page after a
                 // server re-render. Future-value source fields shown
@@ -2467,6 +2540,7 @@ window.showTab = function(el) {
                     }
                 }
                 row.innerHTML = '<span class="cov-entity">' + entity + '</span>' +
+                    '<span class="cov-meta cov-validate-chip" title="Checking data availability...">…</span>' +
                     '<span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">' + body.role + '</span></span>' +
                     '<span class="cov-meta">' + body.aggregation + '</span>' +
                     futureMeta +
@@ -2474,6 +2548,10 @@ window.showTab = function(el) {
                     (body.is_binary ? '<span class="cov-meta">binary</span>' : '') +
                     '<button class="cov-remove-btn" onclick="removeCovariate(\'' + entity + '\')" title="Remove">&times;</button>';
                 list.appendChild(row);
+                // v2.38.7: kick off a data-availability check for the
+                // newly added row so the chip resolves to ok/partial/broken
+                // without the user having to wait until training starts.
+                validateCovariateRow(row);
                 // Clear form
                 document.getElementById('cov-entity-input').value = '';
                 document.getElementById('cov-scale-input').value = '';
