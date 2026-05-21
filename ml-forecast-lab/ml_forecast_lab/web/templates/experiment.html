@@ -345,7 +345,7 @@
                        onchange="saveSettingsField(this)">
             </div>
             <div class="exp-field">
-                <label class="field-label">Conformal coverage <span class="info-tip">?<span class="tip-text">Nominal coverage for the conformal prediction interval published with every forecast. Higher values widen the band — pick 0.9 when the downstream automation must avoid false-negatives (e.g. "definitely not empty before 6pm"). 0.8 is the default. Empirical coverage may differ from nominal under regime change; the Results tab surfaces the achieved coverage so calibration drift is visible.</span></span></label>
+                <label class="field-label">Conformal coverage <span class="info-tip">?<span class="tip-text">Nominal coverage for the conformal prediction interval published with every forecast. Higher values widen the band — pick 0.9 when the downstream automation must avoid false-negatives (e.g. "definitely not empty before 6pm"). 0.8 is the default. Bands are computed with split conformal over a 14-day rolling residual buffer (not adaptive — see <code>DOCS.md</code> for retrain semantics). Empirical coverage may differ from nominal under regime change; the Forecast Accuracy tab reports the achieved coverage overall plus per-hour and weekday/weekend breakdowns so you can spot which slice of the week is mis-covered.</span></span></label>
                 <input type="number" class="setting-input" data-field="conformal_coverage" min="0.5" max="0.99" step="0.05"
                        value="{{ exp_config.conformal_coverage if exp_config else 0.8 }}"
                        onchange="saveSettingsField(this)">
@@ -1654,7 +1654,7 @@
             <div class="vnum" id="v-coverage-tile">
                 <div class="vnum-label">
                     Uncertainty bands
-                    <span class="info-tip">?<span class="tip-text">Empirical coverage: of all the actuals that have arrived, how many fell inside the published 80% confidence band (the `_lower_80` / `_upper_80` companion sensors). A well-calibrated model should hit ≈ 80% — much higher and the bands are unnecessarily wide; much lower and they're claiming more confidence than the model actually has. Use this to sanity-check whether downstream automations can trust the band.</span></span>
+                    <span class="info-tip">?<span class="tip-text">Empirical coverage: of all the actuals that have arrived, how many fell inside the published 80% confidence band (the `_lower_80` / `_upper_80` companion sensors). A well-calibrated model should hit ≈ 80% — much higher and the bands are unnecessarily wide; much lower and they're claiming more confidence than the model actually has. The sub-line surfaces the worst-mis-covered bucket (hour-of-day, weekday/weekend, or lead-time) when it deviates by ≥5pp from the nominal 80%, so you can see whether the bands are systematically off in a specific regime — e.g. "62% on weekday evenings" means evenings are under-covered even when the overall headline looks fine. Use this to sanity-check whether downstream automations can trust the band.</span></span>
                 </div>
                 <div class="vnum-value" id="v-coverage">—</div>
                 <div class="vnum-sub" id="v-coverage-sub">target 80%</div>
