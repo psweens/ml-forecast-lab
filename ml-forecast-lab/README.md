@@ -2,7 +2,7 @@
 
 **Multi-model machine learning forecasting for Home Assistant.**
 
-Train and benchmark 24 forecasting backends on any HA sensor, then promote the winner. The add-on retrains it on schedule and publishes forecasts back to Home Assistant as companion sensors with calibrated 80% prediction bands.
+Train and benchmark 24 forecasting backends on any HA sensor, then promote the winner. The app retrains it on schedule and publishes forecasts back to Home Assistant as companion sensors with calibrated 80% prediction bands.
 
 The intended workflow is **benchmark once, run forever**. After the initial benchmark, production mode is set-and-forget; re-benchmark only when the sensor's behaviour drifts or you want to try newer architectures.
 
@@ -14,7 +14,7 @@ You're the right user if you have:
 
 - A Raspberry Pi 5 (8 GB recommended) **or** an amd64 / armv7 HA host.
 - At least **2 weeks** of recorder history for the sensor you want to forecast (4+ weeks is better — see the data-volume guidance in `docs/MODEL_GUIDE.md`).
-- ~2 GB of free disk space for the add-on image plus model cache.
+- ~2 GB of free disk space for the app image plus model cache.
 
 You do **not** need:
 
@@ -38,18 +38,18 @@ Once installed, you'll see an **ML Forecast Lab** entry in the HA sidebar that o
 
 ## Install
 
-1. In Home Assistant, go to **Settings → Add-ons → Add-on store**.
+1. In Home Assistant, go to **Settings → Apps → App store**.
 2. Click the **⋮** menu (top right) → **Repositories**.
 3. Add `https://github.com/psweens/ml-forecast-lab` and close the dialog.
 4. **ML Forecast Lab** now appears in the store. Click **Install**.
 5. First build takes **10–15 minutes on a Pi 5** — LightGBM, XGBoost, and PyTorch all compile native extensions for `aarch64`. Subsequent updates use the cached image.
-6. **Start the add-on.** It boots with an empty config and waits for you to add an experiment via the web UI — no manual file creation needed.
+6. **Start the app.** It boots with an empty config and waits for you to add an experiment via the web UI — no manual file creation needed.
 
 **Supported architectures:** `aarch64` (Raspberry Pi 4/5), `amd64` (x86-64 servers), `armv7`.
 
 ## Create your first experiment
 
-1. Open the web UI via the **ML Forecast Lab** sidebar entry (or **Open Web UI** on the add-on page).
+1. Open the web UI via the **ML Forecast Lab** sidebar entry (or **Open Web UI** on the app page).
 2. On the dashboard, click **Add Experiment** and fill the form:
    - **Name** — a short id (`household_load`, `solar_generation`, …).
    - **Target entity** — the HA sensor you want to forecast. The picker autocompletes from your entity list.
@@ -96,10 +96,10 @@ The UI re-reads `mlfl.yaml` on each request, so hand edits and UI changes can be
 
 ## First forecast
 
-1. **Open the web UI.** Click **Open Web UI** on the add-on page (the direct port 5052 is no longer exposed — access is via HA ingress).
+1. **Open the web UI.** Click **Open Web UI** on the app page (the direct port 5052 is no longer exposed — access is via HA ingress).
 2. **Run the benchmark.** Open your experiment → **Run Pipeline**. Every enabled model trains with walk-forward cross-validation. With 5 models and 30 days of history on a Pi 5 you'll see results in 5–15 minutes.
 3. **Pick the winner.** The composite Demšar rank highlights one model. Override from the Models tab if you want.
-4. **Click Publish.** That single button promotes the chosen model AND switches the experiment to production mode — no YAML edit needed. The add-on retrains every 24 h and publishes:
+4. **Click Publish.** That single button promotes the chosen model AND switches the experiment to production mode — no YAML edit needed. The app retrains every 24 h and publishes:
 
    - `sensor.mlfl_household_load_forecast` — next-interval forecast value.
    - `sensor.mlfl_household_load_upper_80` / `_lower_80` — conformal prediction bands (calibrated against recent residuals; appear after ~10 forecasts have been compared against actuals).
@@ -119,8 +119,8 @@ The UI re-reads `mlfl.yaml` on each request, so hand edits and UI changes can be
 
 This is the first public release of a project that was developed in a private repository. You are amongst the first external users — please open issues for anything that surprises you, including documentation gaps. It's the fastest path to a v2.34.x patch.
 
-Open an issue at https://github.com/psweens/ml-forecast-lab/issues — please include the add-on version, the relevant section of `mlfl.yaml`, and the last 50 lines of the add-on log.
+Open an issue at https://github.com/psweens/ml-forecast-lab/issues — please include the app version, the relevant section of `mlfl.yaml`, and the last 50 lines of the app log.
 
-The add-on is maintained on a best-effort basis as a side project. For security issues, follow [`SECURITY.md`](https://github.com/psweens/ml-forecast-lab/blob/main/SECURITY.md) (private disclosure via GitHub).
+The app is maintained on a best-effort basis as a side project. For security issues, follow [`SECURITY.md`](https://github.com/psweens/ml-forecast-lab/blob/main/SECURITY.md) (private disclosure via GitHub).
 
-If the add-on has been useful to you, [buying me a coffee](https://www.buymeacoffee.com/psweens) helps keep development going. ☕
+If the app has been useful to you, [buying me a coffee](https://www.buymeacoffee.com/psweens) helps keep development going. ☕
