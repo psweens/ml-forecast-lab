@@ -9,8 +9,11 @@ seasonality, 24 for hourly daily, 7 for daily weekly).
 This is the "fair comparison" reference — any learned model that fails to
 beat seasonal-naive on its target series is providing no value over a
 look-back-one-period rule. Including it as a registered backend means it
-shows up in the Demšar ranking automatically and is benchmarked on the
-same CV folds as every other model.
+shows up in the composite mean-rank leaderboard automatically and is
+benchmarked on the same CV folds as every other model. (See
+``docs/RANKING_NOTES.md`` for the caveat on what "rank" does and does
+not claim — the full Demšar (2006) Friedman / Nemenyi procedure does
+not apply to folds of one series.)
 
 The implementation has no learnable parameters: ``fit`` only stores the
 recent training tail to fall back on at inference time when the input

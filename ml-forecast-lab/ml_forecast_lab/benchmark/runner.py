@@ -128,6 +128,12 @@ class BenchmarkResult:
     timestamp: datetime = field(default_factory=datetime.now)
     cv_strategy: str = 'walk_forward'
     n_folds: int = 5
+    # Models that failed at least one fold are excluded from the ranked
+    # pool so they don't artificially take last-place "wins" off other
+    # models. They still appear in ``model_results`` for diagnostic
+    # surfaces; the UI shows them in a "did not complete" list rather
+    # than at the bottom of the leaderboard.
+    did_not_complete: List[str] = field(default_factory=list)
 
     def to_dataframe(self) -> pd.DataFrame:
         """
@@ -801,24 +807,49 @@ class BenchmarkRunner:
                 logger.error(f'Benchmark failed for model {model_name}: {e}', exc_info=True)
                 result.model_results[model_name] = ModelResult(model_name=model_name)
 
-        # Composite ranking across folds (Demšar 2006). Computed twice:
-        # once on per-interval (h=1) metrics for the primary leaderboard,
-        # once on daily-cumulative metrics for the secondary leaderboard.
-        interval_mean_ranks, interval_ranks = self._compute_composite_ranks(
+        # Composite mean-rank across folds (Demšar-style averaging step;
+        # see docs/RANKING_NOTES.md for why the full Demšar test does
+        # not apply to CV folds of one series). Computed twice: once on
+        # per-interval (h=1) metrics for the primary leaderboard, once
+        # on daily-cumulative metrics for the secondary leaderboard.
+        # Bootstrap CIs over fold resamples express the within-experiment
+        # uncertainty.
+        (
+            interval_mean_ranks, interval_ranks,
+            interval_rank_cis, dnc_interval,
+        ) = self._compute_composite_ranks(
             result.model_results, metric_source='fold_metrics',
         )
-        daily_mean_ranks, daily_ranks = self._compute_composite_ranks(
+        (
+            daily_mean_ranks, daily_ranks,
+            daily_rank_cis, _dnc_daily,
+        ) = self._compute_composite_ranks(
             result.model_results, metric_source='daily_fold_metrics',
         )
 
-        # Store both mean ranks in ModelResult.metrics for UI access
+        # Store both mean ranks (and CIs) on ModelResult.metrics for UI
+        # access. DNC models get inf so legacy callers that read
+        # metrics['mean_rank'] still see them as unranked.
         for name in result.model_results:
-            result.model_results[name].metrics['mean_rank'] = interval_mean_ranks.get(name, float('inf'))
-            result.model_results[name].metrics['mean_rank_daily'] = daily_mean_ranks.get(name, float('inf'))
+            result.model_results[name].metrics['mean_rank'] = (
+                interval_mean_ranks.get(name, float('inf'))
+            )
+            result.model_results[name].metrics['mean_rank_daily'] = (
+                daily_mean_ranks.get(name, float('inf'))
+            )
+            ci = interval_rank_cis.get(name)
+            if ci is not None:
+                result.model_results[name].metrics['mean_rank_low'] = ci[0]
+                result.model_results[name].metrics['mean_rank_high'] = ci[1]
+            ci_d = daily_rank_cis.get(name)
+            if ci_d is not None:
+                result.model_results[name].metrics['mean_rank_daily_low'] = ci_d[0]
+                result.model_results[name].metrics['mean_rank_daily_high'] = ci_d[1]
 
         # Primary ranking still drives Promote / Tuning / sensor publishing
         result.rankings = interval_ranks
         result.daily_rankings = daily_ranks
+        result.did_not_complete = dnc_interval
         sorted_models = sorted(interval_mean_ranks.items(), key=lambda x: x[1])
         mean_ranks = interval_mean_ranks  # for downstream logging
 
@@ -853,32 +884,67 @@ class BenchmarkRunner:
         self,
         model_results: Dict[str, ModelResult],
         metric_source: str,
-    ) -> Tuple[Dict[str, float], Dict[str, int]]:
+        bootstrap_ci: bool = True,
+        bootstrap_iters: int = 1000,
+        bootstrap_seed: int = 0,
+    ) -> Tuple[Dict[str, float], Dict[str, int], Dict[str, Tuple[float, float]], List[str]]:
         """
-        Compute Demšar (2006) composite ranks across CV folds.
+        Compute a Demšar-style composite mean rank across CV folds, plus
+        bootstrap uncertainty bands and a list of models excluded for
+        incomplete folds.
 
-        Within each fold, models are ranked independently by each ranking
-        metric (typically MAE, RMSE, MASE). Per-metric ranks are averaged
-        to give a composite fold rank, then averaged across folds to give
-        the model's mean composite rank.
+        Note on the "Demšar" attribution: Demšar (2006) describes a full
+        Friedman + post-hoc procedure intended for ranking K algorithms
+        across N **independent** datasets. Here we apply only the
+        mean-rank averaging step across CV folds of one series — folds
+        are not independent, so the Friedman / Nemenyi test does not
+        apply. We surface bootstrap CIs over fold resamples to express
+        the within-experiment uncertainty honestly. See
+        ``docs/RANKING_NOTES.md`` for the full caveat.
+
+        Within each fold, models are ranked independently by each
+        ranking metric (typically MAE, RMSE, MASE). Per-metric ranks are
+        averaged to give a composite fold rank, then averaged across
+        folds to give the model's mean composite rank.
+
+        Models that did not complete every fold (a fold raised inside
+        feature build / fit / predict, or the model errored at the outer
+        level) are returned in the ``did_not_complete`` list and
+        excluded from the ranked pool, so they don't artificially take
+        last-place "wins" off the models that did complete.
 
         Parameters
         ----------
         model_results : dict[str, ModelResult]
             All model results to rank.
         metric_source : str
-            Attribute name on `ModelResult` to read per-fold metrics from.
-            Use `'fold_metrics'` for per-interval ranking and
-            `'daily_fold_metrics'` for daily-cumulative ranking.
+            Attribute name on `ModelResult` to read per-fold metrics
+            from. Use ``'fold_metrics'`` for per-interval ranking and
+            ``'daily_fold_metrics'`` for daily-cumulative ranking.
+        bootstrap_ci : bool
+            Whether to compute bootstrap CIs on mean ranks. Skipped when
+            there are fewer than 2 folds (a CI off a single fold is
+            meaningless).
+        bootstrap_iters : int
+            Number of bootstrap resamples. Default 1000.
+        bootstrap_seed : int
+            RNG seed for reproducibility.
 
         Returns
         -------
         mean_ranks : dict[str, float]
-            Model name → mean composite rank (lower = better).
+            Model name → mean composite rank (lower = better). Only
+            includes rankable models (those that completed every fold).
         integer_ranks : dict[str, int]
-            Model name → 1-indexed final rank derived from `mean_ranks`.
-            Models with infinite mean rank (no valid folds in this metric
-            source) are excluded.
+            Model name → 1-indexed final rank derived from
+            ``mean_ranks``.
+        rank_cis : dict[str, tuple[float, float]]
+            Model name → (low, high) 95% bootstrap CI on mean rank.
+            Empty for any model when ``bootstrap_ci`` is False or there
+            are <2 valid folds.
+        did_not_complete : list[str]
+            Names of models excluded from the rankable pool because
+            they failed at least one fold (or all folds).
         """
         _higher_better = {'r_squared', 'coverage'}
         ranking_metrics = [m for m in self.metrics if m not in _higher_better]
@@ -887,29 +953,51 @@ class BenchmarkRunner:
 
         model_names = list(model_results.keys())
         if not model_names:
-            return {}, {}
+            return {}, {}, {}, []
 
         n_folds = max(
             len(getattr(mr, metric_source, [])) for mr in model_results.values()
         )
 
-        # Compute per-fold composite ranks
-        fold_ranks: Dict[str, List[float]] = {name: [] for name in model_names}
+        # Identify did-not-complete models up front so they're excluded
+        # from BOTH the ranking and from the per-fold rank sort below.
+        # A model is rankable only if it produced a non-empty metric
+        # dict for every one of the n_folds in this metric_source.
+        # (Empty {} is appended by run_single_model when a fold's
+        # feature build, fit, or predict raised.)
+        rankable_names: List[str] = []
+        did_not_complete: List[str] = []
+        for name in model_names:
+            fm_list = getattr(model_results[name], metric_source, [])
+            complete = (
+                len(fm_list) == n_folds
+                and all(bool(fm) for fm in fm_list)
+            )
+            if complete:
+                rankable_names.append(name)
+            else:
+                did_not_complete.append(name)
+
+        if not rankable_names:
+            return {}, {}, {}, did_not_complete
+
+        # Compute per-fold composite ranks restricted to rankable models.
+        # This is the array we both average (for mean_rank) and bootstrap
+        # (for the CI). Shape: {model: [composite_rank_fold_0, ...]}.
+        fold_ranks: Dict[str, List[float]] = {name: [] for name in rankable_names}
         for fold_idx in range(n_folds):
-            per_metric_ranks: Dict[str, List[int]] = {name: [] for name in model_names}
+            per_metric_ranks: Dict[str, List[int]] = {
+                name: [] for name in rankable_names
+            }
             for metric_name in ranking_metrics:
                 higher_is_better = metric_name in _higher_better
                 fold_values: Dict[str, float] = {}
-                for name in model_names:
-                    mr = model_results[name]
-                    fm_list = getattr(mr, metric_source, [])
-                    if fold_idx < len(fm_list) and fm_list[fold_idx]:
-                        fold_values[name] = fm_list[fold_idx].get(
-                            metric_name,
-                            -np.inf if higher_is_better else np.inf,
-                        )
-                    else:
-                        fold_values[name] = -np.inf if higher_is_better else np.inf
+                for name in rankable_names:
+                    fm_list = getattr(model_results[name], metric_source, [])
+                    fold_values[name] = fm_list[fold_idx].get(
+                        metric_name,
+                        -np.inf if higher_is_better else np.inf,
+                    )
 
                 # Skip this metric for this fold if NO model has a valid value
                 if all(np.isinf(v) for v in fold_values.values()):
@@ -923,20 +1011,46 @@ class BenchmarkRunner:
                 for r, (name, _) in enumerate(sorted_fold):
                     per_metric_ranks[name].append(r + 1)
 
-            for name in model_names:
+            for name in rankable_names:
                 if per_metric_ranks[name]:
                     fold_ranks[name].append(float(np.mean(per_metric_ranks[name])))
 
         # Mean composite rank per model across the folds with valid data
         mean_ranks: Dict[str, float] = {}
-        for name, ranks in fold_ranks.items():
+        for name in rankable_names:
+            ranks = fold_ranks[name]
             mean_ranks[name] = float(np.mean(ranks)) if ranks else float('inf')
 
-        # Final integer ranking: drop models with no valid folds, then sort
-        rankable = {name: mr for name, mr in mean_ranks.items() if not np.isinf(mr)}
-        sorted_models = sorted(rankable.items(), key=lambda x: x[1])
+        # Bootstrap CI: resample fold IDs with replacement, recompute
+        # the across-fold mean per resample, take the 2.5/97.5 percentile.
+        # Cheap because we operate on the already-computed per-fold ranks.
+        # With small N (e.g. 5 folds) the CI will be wide — that's the
+        # point: honest about how much fold-to-fold noise there is in
+        # the leaderboard rather than promoting a single "winner" badge
+        # that's actually within noise of #2.
+        rank_cis: Dict[str, Tuple[float, float]] = {}
+        valid_n_folds = max(
+            (len(ranks) for ranks in fold_ranks.values()),
+            default=0,
+        )
+        if bootstrap_ci and valid_n_folds >= 2:
+            rng = np.random.default_rng(bootstrap_seed)
+            for name in rankable_names:
+                ranks_arr = np.asarray(fold_ranks[name], dtype=float)
+                if len(ranks_arr) < 2:
+                    continue
+                idx = rng.integers(
+                    0, len(ranks_arr), size=(bootstrap_iters, len(ranks_arr)),
+                )
+                resampled_means = ranks_arr[idx].mean(axis=1)
+                low = float(np.quantile(resampled_means, 0.025))
+                high = float(np.quantile(resampled_means, 0.975))
+                rank_cis[name] = (low, high)
+
+        # Final integer ranking over the rankable pool only
+        sorted_models = sorted(mean_ranks.items(), key=lambda x: x[1])
         integer_ranks = {name: idx + 1 for idx, (name, _) in enumerate(sorted_models)}
-        return mean_ranks, integer_ranks
+        return mean_ranks, integer_ranks, rank_cis, did_not_complete
 
     def get_best_model(self, result: BenchmarkResult) -> str:
         """

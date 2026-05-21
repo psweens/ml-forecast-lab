@@ -1218,13 +1218,20 @@ class HistoryDB:
         (1−α/2)-th quantile of |residual| at each lead bucket. For an
         80%-band (level=0.8), that is the 90th percentile.
 
-        Using deployed forecast/actual pairs as the calibration sample
-        (adaptive / online conformal) avoids the cost of refitting the
-        model on a held-out window every production cycle. The tradeoff
-        is that residuals aren't strictly exchangeable (temporal drift,
-        model retrains), so finite-sample coverage is approximate rather
-        than guaranteed. For diagnostic intervals on a home-automation
-        sensor this is an acceptable simplification.
+        This is split conformal prediction with a rolling residual
+        buffer (capped at ``max_age_days``), not ACI / Gibbs-Candès
+        (2021) or any other adaptive variant — there is no α_t update
+        step, no exponential reweighting. Using deployed forecast /
+        actual pairs as the calibration sample avoids the cost of
+        refitting the model on a held-out window every production
+        cycle. The tradeoff is that residuals aren't strictly
+        exchangeable (trend, weekly seasonality, regime shifts,
+        retrain boundaries), so finite-sample coverage is approximate
+        rather than guaranteed. The realised-coverage diagnostic
+        (``get_forecast_coverage``) — including the hour-of-day and
+        weekday/weekend breakdowns — is the user-visible signal that
+        the bands need recalibrating. For diagnostic intervals on a
+        home-automation sensor this is an acceptable simplification.
 
         Parameters
         ----------
@@ -1400,6 +1407,7 @@ class HistoryDB:
         max_age_days: int = 30,
         model_name: Optional[str] = None,
         model_version: Optional[str] = None,
+        tz: Optional[str] = None,
     ) -> dict:
         """
         Compute empirical coverage of published interval forecasts.
@@ -1417,10 +1425,27 @@ class HistoryDB:
         -------
         dict with keys:
             ``by_lead``: {lead_minutes: [...], coverage: [...], n: [...]}
+            ``by_hour_of_day``: {hour: [0..23], coverage: [...], n: [...]}
+                Coverage bucketed by local hour-of-day (using ``tz``;
+                falls back to UTC if not provided). Regime-shift signal
+                that the per-lead view doesn't show — e.g. weekday
+                evenings being systematically under-covered.
+            ``by_weekday_weekend``: {bucket: ["weekday", "weekend"], coverage: [...], n: [...]}
+                Two-bucket split. The conformal residual buffer pools
+                weekday and weekend cycles together, so consistent
+                divergence here is the cleanest signal that
+                exchangeability is failing.
+            ``worst_bucket``: {kind, label, coverage, n} | None
+                The most-mis-covered bucket across the breakdowns,
+                where ``kind`` is ``'hour_of_day'``,
+                ``'weekday_weekend'``, or ``'lead'`` and the row has
+                at least 20 observations to keep tiny buckets out of
+                the user's verdict chip.
             ``overall``: {coverage: float, n: int} or empty dict
             ``level``: float (nominal level read from ``level`` kwarg
                 of the conformal run; here inferred by the caller and
                 echoed in the UI).
+            ``tz``: str (echoed; what the hour-of-day uses)
         """
         cursor = self.conn.cursor()
         interval_sec = max(60, int(interval_minutes) * 60)
@@ -1435,7 +1460,14 @@ class HistoryDB:
             (actuals_table,),
         )
         if not cursor.fetchone():
-            return {"by_lead": {"lead_minutes": [], "coverage": [], "n": []}, "overall": {}}
+            return {
+                "by_lead": {"lead_minutes": [], "coverage": [], "n": []},
+                "by_hour_of_day": {"hour": [], "coverage": [], "n": []},
+                "by_weekday_weekend": {"bucket": [], "coverage": [], "n": []},
+                "worst_bucket": None,
+                "overall": {},
+                "tz": tz or "UTC",
+            }
 
         # Optional filters — coverage of a rotated-out model (or
         # pre-retrain weights of the current model) tells the user
@@ -1508,7 +1540,14 @@ class HistoryDB:
             by_lead_rows = cursor.fetchall()
         except sqlite3.Error as e:
             logger.error(f"Coverage query failed: {e}", exc_info=True)
-            return {"by_lead": {"lead_minutes": [], "coverage": [], "n": []}, "overall": {}}
+            return {
+                "by_lead": {"lead_minutes": [], "coverage": [], "n": []},
+                "by_hour_of_day": {"hour": [], "coverage": [], "n": []},
+                "by_weekday_weekend": {"bucket": [], "coverage": [], "n": []},
+                "worst_bucket": None,
+                "overall": {},
+                "tz": tz or "UTC",
+            }
 
         by_lead = {
             "lead_minutes": [int(r[0]) for r in by_lead_rows],
@@ -1572,7 +1611,151 @@ class HistoryDB:
                 "n": int(overall_row[1]),
             }
 
-        return {"by_lead": by_lead, "overall": overall}
+        # Regime-shift breakdowns. The conformal bands are calibrated
+        # against a single rolling residual buffer that pools across
+        # hours-of-day and weekday/weekend cycles. Household series
+        # routinely violate exchangeability across those dimensions
+        # (load shapes differ between Tuesday morning and Sunday
+        # evening), so systematic divergence shows up here even when
+        # the overall coverage looks fine. We compute these in Python
+        # rather than SQL so the TZ conversion (HA's local time, not
+        # UTC) doesn't depend on the SQLite build's strftime support.
+        # The cohort-winner logic from the per-lead query is preserved:
+        # we restrict to rows from the dominant (model_name,
+        # model_version) cohort so each bucket reflects ONE weight
+        # regime, not a blend.
+        by_hour_of_day = {"hour": [], "coverage": [], "n": []}
+        by_weekday_weekend = {"bucket": [], "coverage": [], "n": []}
+        try:
+            cursor.execute(f"""
+                WITH actuals_grid AS (
+                    SELECT
+                        strftime('%Y-%m-%d %H:%M:%S',
+                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                            'unixepoch') AS grid_dt,
+                        AVG(value) AS value
+                    FROM {actuals_table}
+                    GROUP BY grid_dt
+                ),
+                joined AS (
+                    SELECT
+                        fl.target_dt,
+                        fl.model_name,
+                        fl.model_version,
+                        CASE WHEN ag.value BETWEEN fl.lower AND fl.upper
+                             THEN 1.0 ELSE 0.0 END AS in_band
+                    FROM forecast_log fl
+                    INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
+                    WHERE fl.experiment = ?
+                      AND fl.target_dt <= ?
+                      AND fl.issued_at >= ?
+                      AND fl.upper IS NOT NULL
+                      AND fl.lower IS NOT NULL
+                      {model_filter_sql}
+                )
+                SELECT j.target_dt, j.in_band
+                FROM joined j
+                INNER JOIN (
+                    SELECT model_name, model_version, COUNT(*) AS n
+                    FROM joined
+                    GROUP BY model_name, model_version
+                    ORDER BY n DESC, model_version DESC
+                    LIMIT 1
+                ) w
+                ON j.model_name = w.model_name
+                  AND (j.model_version = w.model_version
+                       OR (j.model_version IS NULL AND w.model_version IS NULL))
+            """, (
+                interval_sec, interval_sec,
+                experiment, now_str, cutoff_str,
+                *model_filter_param,
+            ))
+            cohort_rows = cursor.fetchall()
+        except sqlite3.Error as e:
+            logger.warning(f"Coverage cohort query failed: {e}")
+            cohort_rows = []
+
+        worst_bucket: Optional[dict] = None
+        if cohort_rows:
+            df_cov = pd.DataFrame(cohort_rows, columns=["target_dt", "in_band"])
+            df_cov["target_dt"] = pd.to_datetime(
+                df_cov["target_dt"], errors="coerce", utc=True,
+            )
+            df_cov = df_cov.dropna(subset=["target_dt"])
+            if tz:
+                try:
+                    df_cov["local_dt"] = df_cov["target_dt"].dt.tz_convert(tz)
+                except Exception as _e:
+                    # Unknown tz string — fall back silently to UTC so
+                    # the diagnostic still works; the UI will say "UTC"
+                    logger.debug(f"Unknown tz {tz!r}: {_e}; falling back to UTC")
+                    df_cov["local_dt"] = df_cov["target_dt"]
+                    tz = "UTC"
+            else:
+                df_cov["local_dt"] = df_cov["target_dt"]
+
+            hour_grp = df_cov.groupby(df_cov["local_dt"].dt.hour)["in_band"].agg(
+                ["mean", "count"]
+            )
+            for h, row in hour_grp.iterrows():
+                by_hour_of_day["hour"].append(int(h))
+                by_hour_of_day["coverage"].append(round(float(row["mean"]), 4))
+                by_hour_of_day["n"].append(int(row["count"]))
+
+            # weekday/weekend split — weekday is Mon-Fri (dt.dayofweek < 5)
+            is_weekend = df_cov["local_dt"].dt.dayofweek >= 5
+            for label, mask in (("weekday", ~is_weekend), ("weekend", is_weekend)):
+                rows = df_cov[mask]
+                if len(rows) == 0:
+                    continue
+                by_weekday_weekend["bucket"].append(label)
+                by_weekday_weekend["coverage"].append(round(float(rows["in_band"].mean()), 4))
+                by_weekday_weekend["n"].append(int(len(rows)))
+
+            # Worst bucket across all three breakdowns. Minimum 20 obs
+            # so a stale single-bucket outlier doesn't dominate the
+            # verdict chip. "Worst" means biggest absolute deviation
+            # from the nominal level (passed in by the caller via the
+            # response's `level`; we don't know it here so we compare
+            # to 0.5 for ordering and let the caller refine).
+            MIN_N = 20
+            candidates = []
+            for h, cov, n in zip(by_hour_of_day["hour"], by_hour_of_day["coverage"], by_hour_of_day["n"]):
+                if n >= MIN_N:
+                    candidates.append({
+                        "kind": "hour_of_day", "label": f"hour {h:02d}",
+                        "coverage": cov, "n": n,
+                    })
+            for label, cov, n in zip(by_weekday_weekend["bucket"], by_weekday_weekend["coverage"], by_weekday_weekend["n"]):
+                if n >= MIN_N:
+                    candidates.append({
+                        "kind": "weekday_weekend", "label": label,
+                        "coverage": cov, "n": n,
+                    })
+            for lead, cov, n in zip(by_lead["lead_minutes"], by_lead["coverage"], by_lead["n"]):
+                if n >= MIN_N:
+                    candidates.append({
+                        "kind": "lead", "label": f"+{int(lead)}min",
+                        "coverage": cov, "n": n,
+                    })
+            if candidates:
+                # Pick the bucket whose coverage is furthest from the
+                # nominal level. The caller already knows the level
+                # from get_conformal_quantiles, so we conservatively
+                # use 0.5 as a worst-case nominal here and the caller
+                # can recompute "worst" against the true level if
+                # needed; with no level we default to "lowest coverage
+                # given an upper-bound assumption of nominal=1.0".
+                worst_bucket = min(candidates, key=lambda c: c["coverage"])
+
+        return {
+            "by_lead": by_lead,
+            "by_hour_of_day": by_hour_of_day,
+            "by_weekday_weekend": by_weekday_weekend,
+            "worst_bucket": worst_bucket,
+            "overall": overall,
+            "tz": tz or "UTC",
+        }
 
     @_locked
     def get_forecast_evolution(

@@ -41,7 +41,7 @@
 
     <div class="action-buttons">
         <button id="btn-run" class="btn btn-primary" onclick="startPipeline()"
-                title="Train every enabled model on this experiment with walk-forward cross-validation, then rank them by the Demšar composite (MAE + RMSE + MASE). Existing forecasts and the production model are untouched until you click Publish. Use the Settings tab to enable / disable models first.">
+                title="Train every enabled model on this experiment with walk-forward cross-validation, then rank them by composite mean rank (Demšar-style averaging of per-fold MAE / RMSE / MASE ranks; not the full Demšar (2006) Friedman/Nemenyi test). Existing forecasts and the production model are untouched until you click Publish. Use the Settings tab to enable / disable models first.">
             <span id="btn-run-text">{% if is_running %}Running...{% else %}Run Pipeline{% endif %}</span>
         </button>
         {% if experiment.best_model %}
@@ -301,7 +301,7 @@
                        onchange="saveSettingsField(this)">
             </div>
             <div class="exp-field">
-                <label class="field-label">Production metric <span class="info-tip">?<span class="tip-text">Which error metric the Demšar composite weighs most heavily when picking the winner. <b>Seasonal MASE</b> (default): error relative to "same time yesterday" — handles diurnal patterns gracefully; usually the right pick for household sensors. <b>MAE</b>: raw absolute error, easy to read in your sensor's units. <b>RMSE</b>: penalises large misses more — pick if a few big errors hurt much more than many small ones. <b>MASE</b>: vs 1-step naive — only beats seasonal MASE on signals without daily seasonality.</span></span></label>
+                <label class="field-label">Production metric <span class="info-tip">?<span class="tip-text">Which error metric the composite mean rank weighs most heavily when picking the winner (Demšar-style averaging step only; see <code>docs/RANKING_NOTES.md</code>). <b>Seasonal MASE</b> (default): error relative to "same time yesterday" — handles diurnal patterns gracefully; usually the right pick for household sensors. <b>MAE</b>: raw absolute error, easy to read in your sensor's units. <b>RMSE</b>: penalises large misses more — pick if a few big errors hurt much more than many small ones. <b>MASE</b>: vs 1-step naive — only beats seasonal MASE on signals without daily seasonality.</span></span></label>
                 <select class="setting-input" data-field="production_metric" onchange="saveSettingsField(this)">
                     <option value="seasonal_mase" {% if not exp_config or exp_config.production_metric == 'seasonal_mase' %}selected{% endif %}>Seasonal MASE (vs same time yesterday)</option>
                     <option value="mae" {% if exp_config and exp_config.production_metric == 'mae' %}selected{% endif %}>MAE</option>
@@ -705,7 +705,22 @@
 <!-- ====== TAB: Results ====== -->
 <div class="tab-section" id="sec-results" style="display:none;">
 <section class="section">
-    <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Two complementary views: <strong>Per-Interval Accuracy</strong> measures the next-step (h=1) prediction error — what the model gets right at the 30-minute level. <strong>Daily Cumulative Accuracy</strong> (table below) sums each day's predictions and actuals before computing errors — better for use cases like daily energy or hot-water demand where you care about totals rather than exact timing. Both rankings use the Demšar (2006) composite over MAE, RMSE, and MASE. The Per-Interval rank still drives Promote, Tuning, and live forecasting; the Daily rank is informational so you can pick the model that matches your objective.</span></span></h2>
+    <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Two complementary views: <strong>Per-Interval Accuracy</strong> measures the next-step (h=1) prediction error — what the model gets right at the 30-minute level. <strong>Daily Cumulative Accuracy</strong> (table below) sums each day's predictions and actuals before computing errors — better for use cases like daily energy or hot-water demand where you care about totals rather than exact timing. Both rankings use a composite mean rank over MAE, RMSE, and MASE — the Demšar-style averaging step, not the full Demšar (2006) Friedman/Nemenyi test (which assumes independent datasets, not CV folds of one series; see <code>docs/RANKING_NOTES.md</code>). 95% bootstrap CIs over fold resamples express the within-experiment noise — when two models' CIs overlap the leaderboard is genuinely "tied". The Per-Interval rank still drives Promote, Tuning, and live forecasting; the Daily rank is informational.</span></span></h2>
+
+    {# leader_rank_high: CI upper bound of the rank-1 model. Used below
+       to mark other models as "tied with #1" when their CI low end is
+       at or below this value. Computed once here so each row doesn't
+       have to re-scan the models list. Falls back to None when bootstrap
+       was skipped (single-fold benchmark) so the tie logic safely
+       degrades to "no ties shown". Jinja's plain `{% set %}` inside
+       a loop is loop-local, so we use a namespace to escape it. #}
+    {% set _leader_ns = namespace(high=none) %}
+    {% for m in models %}
+        {% if m.rank == 1 and m.mean_rank_high is not none %}
+            {% set _leader_ns.high = m.mean_rank_high %}
+        {% endif %}
+    {% endfor %}
+    {% set leader_rank_high = _leader_ns.high %}
 
     {# Previous-runs comparison strip. Lets users spot whether today's
        benchmark is actually better than yesterday's without diffing
@@ -780,8 +795,8 @@
                     <th>Interval RMSE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Root Mean Square Error on the next-step (h=1) prediction — penalises large per-interval errors more heavily than MAE. Lower is better.</span></span></th>
                     <th>Interval MASE <span class="info-tip">?<span class="tip-text">Mean Absolute Scaled Error on the next-step (h=1) prediction — error relative to a naive forecast. Below 1.0 means the model beats naive; above 1.0 means worse. Handles near-zero values reliably unlike MAPE.</span></span></th>
                     <th>Train Time <span class="info-tip">?<span class="tip-text">Average wall-clock training time per CV fold in seconds.</span></span></th>
-                    <th>Mean Rank <span class="info-tip">?<span class="tip-text">Average rank across CV folds (1.0 = ranked 1st in every fold). Lower is better. A model with mean rank 1.4 was typically 1st or 2nd across folds, indicating strong generalisability.</span></span></th>
-                    <th>Rank</th>
+                    <th>Mean Rank <span class="info-tip">?<span class="tip-text">Composite mean rank across CV folds (1.0 = ranked 1st in every fold). Lower is better. The bracketed numbers are a 95% bootstrap confidence interval over fold resamples — when two models' CIs overlap they're "tied within fold noise" and the leader badge isn't really meaningful. This is the Demšar-style averaging step only; the full Demšar (2006) Friedman/Nemenyi test does not apply to CV folds of one series — see <code>docs/RANKING_NOTES.md</code>.</span></span></th>
+                    <th>Rank <span class="info-tip">?<span class="tip-text">Integer rank derived from Mean Rank. A "T#1" badge means this model's bootstrap CI overlaps the leader's — i.e. the data doesn't support picking a single winner.</span></span></th>
                 </tr>
             </thead>
             <tbody>
@@ -810,14 +825,36 @@
                     <td>{{ "%.1f" | format(model.train_time_seconds) }}s</td>
                     <td>
                         <span class="metric-value">{{ "%.1f" | format(model.mean_rank) }}</span>
+                        {% if model.mean_rank_low is not none and model.mean_rank_high is not none %}
+                        <span class="metric-std">[{{ "%.1f" | format(model.mean_rank_low) }}–{{ "%.1f" | format(model.mean_rank_high) }}]</span>
+                        {% endif %}
                     </td>
                     <td>
+                        {# A model is "tied with #1" if its CI low end is at or below the leader's CI high end.
+                           leader_rank_high is computed in the section header below and stashed on the page. #}
+                        {% set is_tied = (
+                            model.rank > 1
+                            and model.mean_rank_low is not none
+                            and leader_rank_high is not none
+                            and model.mean_rank_low <= leader_rank_high
+                        ) %}
+                        {% if is_tied %}
+                        <span class="rank-badge rank-1" title="CI overlaps the leader's — tied within fold noise">T#1</span>
+                        {% else %}
                         <span class="rank-badge rank-{{ model.rank }}">{{ model.rank }}</span>
+                        {% endif %}
                     </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
+        {% if benchmark_result and benchmark_result.did_not_complete %}
+        <div style="margin-top:0.75rem;font-size:0.85rem;color:var(--text-muted);">
+            <strong>Did not complete:</strong>
+            {{ benchmark_result.did_not_complete | sort | join(", ") }}
+            <span class="info-tip">?<span class="tip-text">These models errored on at least one CV fold and are excluded from the ranked pool. If they were ranked as "last place" instead, they would artificially inflate the leader's apparent dominance — every survivor would gain a free "win" against them.</span></span>
+        </div>
+        {% endif %}
     </div>
 
     {% set has_daily = models | selectattr('daily_mae') | list %}
@@ -825,7 +862,7 @@
     <h3 style="color: var(--text-primary); margin: 2rem 0 1rem 0;">
         Daily Cumulative Accuracy
         <span style="color: var(--text-secondary); font-size: 0.85rem; font-weight: normal;">— per-day totals, what daily-energy use cases care about</span>
-        <span class="info-tip">?<span class="tip-text">Same MAE / RMSE / MASE methodology, but computed on per-day totals (each day's predictions summed, each day's actuals summed, then compared). Rewards models that get daily totals right even when their per-interval predictions are noisy. The Daily Rank column ranks models using the same Demšar composite as above, but applied to these daily metrics. Daily Rank is informational only — it does not drive Promote, Tuning, or live forecasting.</span></span>
+        <span class="info-tip">?<span class="tip-text">Same MAE / RMSE / MASE methodology, but computed on per-day totals (each day's predictions summed, each day's actuals summed, then compared). Rewards models that get daily totals right even when their per-interval predictions are noisy. The Daily Rank uses the same composite mean-rank averaging step as the per-interval table (Demšar-style aggregation only — the full Demšar (2006) test does not apply to CV folds; see <code>docs/RANKING_NOTES.md</code>). Daily Rank is informational only — it does not drive Promote, Tuning, or live forecasting.</span></span>
     </h3>
     <div class="table-container">
         <table class="metrics-table">
@@ -859,6 +896,9 @@
                     <td>
                         {% if model.daily_mean_rank is not none %}
                         <span class="metric-value">{{ "%.1f" | format(model.daily_mean_rank) }}</span>
+                        {% if model.daily_mean_rank_low is not none and model.daily_mean_rank_high is not none %}
+                        <span class="metric-std">[{{ "%.1f" | format(model.daily_mean_rank_low) }}–{{ "%.1f" | format(model.daily_mean_rank_high) }}]</span>
+                        {% endif %}
                         {% else %}—{% endif %}
                     </td>
                     <td>
@@ -3480,8 +3520,21 @@ window.showTab = function(el) {
             covStatus = _classify('coverage', delta);
             document.getElementById('v-coverage').textContent = covPct.toFixed(0) + '%';
             var dir = covPct > targetPct ? 'over' : covPct < targetPct ? 'under' : 'on';
-            document.getElementById('v-coverage-sub').textContent =
-                'target ' + targetPct.toFixed(0) + '% · ' + dir + ' by ' + delta.toFixed(1) + 'pp';
+            var subText = 'target ' + targetPct.toFixed(0) + '% · ' + dir + ' by ' + delta.toFixed(1) + 'pp';
+            // Surface the worst-mis-covered bucket from the breakdowns
+            // (hour-of-day / weekday-weekend / lead) when it deviates
+            // by at least 5pp from nominal — that's the signal that
+            // the bands are mis-calibrated in a specific regime even
+            // when the overall headline looks fine. Mirrors the Track
+            // 2 acceptance criterion ("realised coverage last 30 days:
+            // X% overall, Y% on weekday evenings").
+            var worst = a.coverage && a.coverage.worst_bucket;
+            if (worst && typeof worst.coverage === 'number' &&
+                Math.abs(worst.coverage - nominal) >= 0.05) {
+                var worstPct = (worst.coverage * 100).toFixed(0);
+                subText += ' · worst: ' + worstPct + '% on ' + worst.label;
+            }
+            document.getElementById('v-coverage-sub').textContent = subText;
             _applyChip('chip-calibration', covStatus,
                 dir === 'on' ? 'on target' :
                 dir === 'over' ? 'bands wide' : 'bands tight');

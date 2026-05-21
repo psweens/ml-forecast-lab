@@ -103,7 +103,9 @@ models_enabled:
 
 ## After the benchmark
 
-Open the **Models** tab — composite Demšar rank ranks across MAE / RMSE / MASE simultaneously. The winner is the model whose rank is most consistent across folds and metrics, not just the lowest single-metric error.
+Open the **Models** tab — the composite mean rank averages per-fold ranks across MAE / RMSE / MASE simultaneously (the Demšar-style averaging step; not the full Demšar (2006) Friedman/Nemenyi test, which doesn't apply to CV folds of one series — see [`RANKING_NOTES.md`](RANKING_NOTES.md)). The winner is the model whose rank is most consistent across folds and metrics, not just the lowest single-metric error.
+
+Each rank now ships with a 95% bootstrap CI over fold resamples (e.g. `mean_rank 1.4 [1.0–2.8]`) so you can spot when two models are tied within fold noise. If a model is flagged **T#1** instead of **#1**, its CI overlaps the leader's — the data doesn't really support picking between them and the simpler/faster choice is fine.
 
 If two models tie within rank 1.0–1.4, prefer the simpler / faster one. The trees (`lightgbm`, `xgboost`) usually edge out the heavy transformers on consumer-grade data unless you have months of high-resolution history.
 

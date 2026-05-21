@@ -12,7 +12,10 @@ references:
 statsforecast's implementations are numba-JIT-compiled and parallelisable, so
 they remain genuinely lightweight even on the smaller HA series. They're
 included as separate backends rather than a single switchable one so each
-shows up independently in the Demšar ranking.
+shows up independently on the composite mean-rank leaderboard. (See
+``docs/RANKING_NOTES.md`` for what the rank does and does not claim —
+the full Demšar (2006) Friedman / Nemenyi procedure does not apply to
+folds of one series.)
 
 Each model treats the target series as univariate — covariate channels of
 the input window are ignored. The fit consumes only the most recent

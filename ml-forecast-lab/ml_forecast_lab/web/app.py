@@ -61,6 +61,15 @@ class ModelResult(BaseModel):
     train_time_seconds: float
     rank: int
     mean_rank: float = 0.0
+    # 95% bootstrap CI on mean_rank computed by resampling CV folds
+    # with replacement (B=1000). Used by the UI to surface ties — if
+    # this model's CI overlaps the leader's CI we render its rank as
+    # "tied with #1" rather than a discrete number. See
+    # docs/RANKING_NOTES.md for what the CI does and does not claim.
+    # Null when the benchmark had <2 valid folds (a CI off one fold
+    # is meaningless).
+    mean_rank_low: Optional[float] = None
+    mean_rank_high: Optional[float] = None
     is_production: bool = False
     fold_results: Optional[List[Dict[str, float]]] = None
     train_mae: Optional[MetricValue] = None
@@ -70,14 +79,18 @@ class ModelResult(BaseModel):
     # computed on per-day totals (each day's predictions summed, each
     # day's actuals summed, then compared). Better for use cases where
     # daily totals matter more than 30-minute precision (e.g. hot-water
-    # or energy demand). The Daily Rank is computed via the same Demšar
-    # composite as the primary rank but using the daily metrics; it is
-    # purely informational and does NOT drive Promote/Tuning workflows.
+    # or energy demand). The Daily Rank uses the same composite
+    # mean-rank averaging step (Demšar-style aggregation only — the
+    # full Demšar (2006) test does not apply, see
+    # docs/RANKING_NOTES.md) and is informational; it does NOT drive
+    # Promote/Tuning workflows.
     daily_mae: Optional[MetricValue] = None
     daily_rmse: Optional[MetricValue] = None
     daily_mase: Optional[MetricValue] = None
     daily_rank: Optional[int] = None
     daily_mean_rank: Optional[float] = None
+    daily_mean_rank_low: Optional[float] = None
+    daily_mean_rank_high: Optional[float] = None
 
 
 class BenchmarkResult(BaseModel):
@@ -110,6 +123,12 @@ class BenchmarkResult(BaseModel):
     # 0.1–0.2 "moderate", >0.2 "shifted" — used as a UI verdict to
     # explain why CV scores might disagree with live behaviour.
     drift: Optional[Dict[str, Any]] = None
+    # Names of models that failed at least one fold during the
+    # benchmark. Surfaced separately in the UI under a "did not
+    # complete" section so they don't appear at the bottom of the
+    # leaderboard with a fabricated last-place rank that inflates
+    # other models' apparent dominance.
+    did_not_complete: List[str] = []
 
 
 class ExperimentStatus(BaseModel):
@@ -2511,6 +2530,15 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             result["model_fallback"] = model_fallback
         # Merge empirical interval coverage. Always on raw values (that's
         # what the published entities are); independent of evaluation_mode.
+        # Pass HA's configured time zone so the hour-of-day breakdown
+        # surfaces in the user's local "evening peak" / "Sunday morning"
+        # terms rather than UTC.
+        try:
+            ha_tz = getattr(
+                request.app.state.appstate, "ha_time_zone", None,
+            ) if request is not None else None
+        except Exception:
+            ha_tz = None
         try:
             coverage = await asyncio.to_thread(
                 db.get_forecast_coverage,
@@ -2519,9 +2547,38 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 days,
                 model_name,
                 model_version,
+                ha_tz,
             )
+            # Recompute worst-bucket against the actual nominal level
+            # (0.8 by default). db.get_forecast_coverage uses 0.5 as a
+            # safe upper-bound assumption when computing "worst" so
+            # that the candidate list is already filtered by min-N;
+            # here we just reorder by distance from the true nominal
+            # so the verdict-card chip reflects the right gap.
+            nominal = 0.8
+            buckets = []
+            for kind, container, key, label_fmt in [
+                ("hour_of_day", coverage.get("by_hour_of_day", {}), "hour", lambda v: f"hour {int(v):02d}"),
+                ("weekday_weekend", coverage.get("by_weekday_weekend", {}), "bucket", lambda v: str(v)),
+                ("lead", coverage.get("by_lead", {}), "lead_minutes", lambda v: f"+{int(v)}min"),
+            ]:
+                for v, cov, n in zip(container.get(key, []), container.get("coverage", []), container.get("n", [])):
+                    if n >= 20:
+                        buckets.append({
+                            "kind": kind, "label": label_fmt(v),
+                            "coverage": cov, "n": n,
+                            "deviation": round(cov - nominal, 4),
+                        })
+            if buckets:
+                # Worst = biggest absolute deviation from the nominal
+                # 80%. Picking the largest |deviation| matches the
+                # verdict-card UX: "your bands are off by the most
+                # here".
+                coverage["worst_bucket"] = max(
+                    buckets, key=lambda b: abs(b["deviation"]),
+                )
             result["coverage"] = coverage
-            result["nominal_interval_level"] = 0.8
+            result["nominal_interval_level"] = nominal
         except Exception as e:
             result["coverage"] = {"error": _safe_error(e)}
 
