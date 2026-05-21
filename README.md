@@ -48,7 +48,7 @@ First build takes 10–15 minutes on a Raspberry Pi 5. Subsequent updates use th
 
 ## What it does
 
-ML Forecast Lab trains every enabled forecasting backend on your sensor's history, ranks them on identical cross-validation folds with a composite Demšar score across MAE / RMSE / MASE, and shows you which one wins. You promote the winner to **production**, and the app retrains it on schedule and publishes forecasts back to Home Assistant as companion sensors with calibrated 80% conformal prediction bands.
+ML Forecast Lab trains every enabled forecasting backend on your sensor's history, ranks them on identical cross-validation folds with a composite mean rank across MAE / RMSE / MASE (the Demšar 2006 averaging step — see [`docs/RANKING_NOTES.md`](docs/RANKING_NOTES.md) for the caveat on what the rank does and does not claim), and shows you which one wins. Each rank ships with a 95% bootstrap CI over fold resamples so genuine ties are flagged rather than papered over with a single-winner badge. You promote the winner to **production**, and the app retrains it on schedule and publishes forecasts back to Home Assistant as companion sensors with calibrated 80% conformal prediction bands (split conformal with a rolling residual buffer; not adaptive — see [`DOCS.md`](ml-forecast-lab/DOCS.md#how-the-conformal-bands-are-calibrated) for the calibration semantics across retrains).
 
 24 backends are wired in: tree (LightGBM, XGBoost, CatBoost), recurrent (LSTM, GRU), convolutional (CNN, TimesNet), linear / MLP (DLinear, NLinear, TSMixer, TimeMixer, TiDE, SparseTSF), N-BEATS family (N-BEATS, N-HiTS), transformers (PatchTST, iTransformer, Crossformer, TFT), classical (AutoARIMA, AutoETS, AutoTheta), frequency-domain (FITS), and a Seasonal Naive baseline. See [`docs/MODEL_GUIDE.md`](docs/MODEL_GUIDE.md) for picking the right ones.
 
@@ -81,7 +81,7 @@ ML Forecast Lab trains every enabled forecasting backend on your sensor's histor
                 ▼                                          │
       ┌──────────────────┐         ┌──────────────────┐
       │   Benchmarker    │────────▶│   Model Cache    │
-      │ Demšar ranking   │         │ (per experiment) │
+      │ Composite rank   │         │ (per experiment) │
       └────────┬─────────┘         └────────┬─────────┘
                │                            │
                ▼                            ▼
@@ -159,7 +159,7 @@ The 24 model backends are implementations of published architectures by their re
 - [Optuna](https://optuna.org/) for Bayesian hyperparameter tuning.
 - [pvlib](https://pvlib-python.readthedocs.io/) for the Ineichen clear-sky-irradiance feature.
 - [FastAPI](https://fastapi.tiangolo.com/), [Jinja2](https://palletsprojects.com/p/jinja/), [HTMX](https://htmx.org/), and [Plotly](https://plotly.com/javascript/) for the web UI.
-- Demšar (2006), *Statistical Comparisons of Classifiers over Multiple Data Sets* — methodology for the composite cross-validation rank.
+- Demšar (2006), *Statistical Comparisons of Classifiers over Multiple Data Sets* — the per-fold rank-averaging step used by the composite mean rank. The full Friedman / Nemenyi procedure described in the paper isn't applied here (it assumes independent datasets, not CV folds of one series); see [`docs/RANKING_NOTES.md`](docs/RANKING_NOTES.md) for what the rank does and does not claim.
 - The [`home-assistant/hassio-addons`](https://github.com/hassio-addons) Ubuntu base image and the Home Assistant app platform itself.
 
 ## Support development

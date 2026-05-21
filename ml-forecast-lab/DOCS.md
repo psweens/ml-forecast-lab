@@ -217,6 +217,52 @@ When `include_clear_sky_irradiance` is on, the app also gates production forecas
 | `stability_focus` | `per_moment` \| `daily_total` | `per_moment` | Which stability metric drives the Forecast Accuracy verdict chip. `per_moment` is right when downstream consumers care about *when* something happens (HVAC pre-heat, battery dispatch). `daily_total` (cumulative sources only) is right when only the daily integral matters. |
 | `clear_forecast_log_on_retrain` | bool | `true` | Whether to prune forecast-log rows older than the latest retrain when a champion is promoted. Keeps stability metrics honest — set `false` only if you want to preserve full history for offline analysis. |
 
+#### How the conformal bands are calibrated
+
+The published `_upper_<pct>` / `_lower_<pct>` sensors use **split
+conformal prediction with a rolling residual buffer** — not ACI
+(Gibbs-Candès 2021) or any other adaptive variant. The implementation
+trades the formal coverage guarantee for zero retraining cost:
+
+- **Calibration set.** Per-lead absolute residuals from the deployed
+  `(forecast, actual)` pairs in `forecast_log`, capped at the most
+  recent 14 days.
+- **Per-lead-bucket quantile.** For the requested `conformal_coverage`
+  level (default 0.8), we take the `(1 − α/2)`-th quantile (= 90th
+  percentile for 80% bands) of `|residual|` per lead bucket.
+- **Cohort filtering.** Quantiles are filtered to the current
+  `(model_name, model_version)` so the band width reflects the
+  champion's actual behaviour, not a previous version's. If the
+  current version has fewer than 10 residuals (cold-start right after
+  a retrain), the query falls back to pooling all versions of the
+  same model so bands don't silently disappear.
+
+**Behaviour across retrains:**
+
+- **Same champion, new weights** (e.g. the 24h auto-retrain).
+  `model_version` bumps. The cohort filter discards previous-version
+  residuals, so the effective calibration window collapses to "since
+  the last retrain". Bands typically widen for ~10 forecast cycles
+  while the new buffer fills, then settle.
+- **Champion change.** `forecast_log` rows from the previous champion
+  are deleted (`clear_forecast_log_on_retrain` controls this, default
+  on). Calibration restarts from scratch. The cold-start chip in the
+  Forecast Accuracy tab shows "Calibrating · N of M residuals" until
+  the new champion has enough samples.
+
+**When the bands lie.** Split CP assumes the calibration residuals
+are exchangeable with the test residuals. Household sensors routinely
+violate that — trend, weekly seasonality, regime shifts — so realised
+coverage on any specific bucket (weekday evening, Sunday morning,
+24h-ahead) can diverge from the nominal level even when the headline
+coverage looks fine. The Forecast Accuracy tab surfaces the worst-
+mis-covered bucket alongside the headline coverage chip; the offline
+diagnostic at `scripts/conformal_coverage_check.py` prints the full
+hour-of-day / weekday-weekend / per-lead breakdown for ad-hoc
+analysis. If buckets ≥5pp off nominal persist across multiple days,
+the bands need an adaptive method — see the script's output for
+options.
+
 ---
 
 ## Published Home Assistant sensors
@@ -245,7 +291,7 @@ Open the UI via the app's **Open Web UI** button (HA ingress).
   - **Settings.** All knobs above as a form. Editing here writes back to `mlfl.yaml` atomically. Includes a pre-flight **Data sanity check** that reports rows fetched vs expected, biggest gap, recorder freshness, missing-value rate, and (for cumulative sensors) max-increment hits — run this before a benchmark to catch a 14-day flatline before you spend an hour training.
   - **Models.** Per-model toggle, default vs tuned MAE, **Promote to Production** button. Quick-preset chips (Fast / Balanced / Thorough) flip groups of toggles to match the starter sets in `docs/MODEL_GUIDE.md`.
   - **Tuning.** Bayesian optimisation (Optuna TPE) per model with default vs tuned holdout comparison. **Tune All Enabled** sweeps every enabled backend sequentially.
-  - **Results.** Composite Demšar rank across MAE / RMSE / MASE, the always-on "vs Seasonal Naive" skill chip, a pairwise model-comparison matrix (paired-t test on per-fold MAE), the training-window vs test-window drift verdict (PSI), and a "Compare with previous run" strip — the last five benchmarks are retained and diff-able.
+  - **Results.** Composite mean rank across MAE / RMSE / MASE (Demšar-style averaging of per-fold ranks — see [`docs/RANKING_NOTES.md`](docs/RANKING_NOTES.md) for what the rank does and does not claim) with 95% bootstrap CIs over fold resamples so the leaderboard can flag genuine ties ("T#1") rather than promoting a single winner that's within noise of second place. Models that errored on at least one fold are listed separately under **Did not complete** rather than ranked last — keeps the comparison like-for-like. Plus the always-on "vs Seasonal Naive" skill chip, a pairwise model-comparison matrix (paired-t test on per-fold MAE), the training-window vs test-window drift verdict (PSI), and a "Compare with previous run" strip — the last five benchmarks are retained and diff-able.
   - **Forecast Accuracy.** Three-layer diagnostic: verdict chip, per-horizon error chart, retrain-history chips (filter the chart to a specific `(model_name, model_version)` cohort). Conformal-band calibration countdown surfaces "Calibrating · N of 10 residuals" rather than a silent blank.
   - **Predictions** and **Covariate Analysis.** Forecast-trace overlay and an automatic search across covariate combinations to identify which signals genuinely improve forecasts.
 - **System page.** CPU-core / nice-priority controls (actually applied) and a global "Run all benchmarks" trigger.

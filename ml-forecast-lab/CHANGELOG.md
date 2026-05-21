@@ -1,5 +1,61 @@
 # Changelog
 
+## 2.39.0
+
+Honest uncertainty on the leaderboard, regime-aware conformal
+coverage diagnostics, and like-for-like ranking when some backends
+fail.
+
+**Leaderboard now shows rank uncertainty.** Every model's mean rank
+ships with a 95% bootstrap confidence interval over fold resamples
+(e.g. `mean_rank 1.4 [1.0–2.8]`). When a non-leader's CI overlaps
+the rank-1 model's, the leaderboard renders its badge as **T#1**
+("tied within fold noise") rather than a discrete number — so you
+don't promote a "winner" that's actually within noise of #2. With
+small fold counts the CIs are typically wide; that's the point. A
+new `docs/RANKING_NOTES.md` explains exactly what the rank does
+and does not claim and where the Demšar (2006) framework genuinely
+applies vs where it doesn't.
+
+**"Did not complete" handling.** Models that errored on at least
+one CV fold are now listed under a separate "Did not complete"
+section instead of being assigned last-place on the failed folds.
+Previously, a backend that OOM'd on one fold gave every surviving
+model a free "win" against it, inflating the leader's apparent
+dominance. The comparison is now strictly like-for-like across
+the ranked pool.
+
+**Conformal coverage: regime breakdowns.** The Forecast Accuracy
+tab now surfaces *where* the published 80% bands are mis-covering,
+not just the headline number. The verdict chip now adds e.g.
+*"target 80% · under by 4pp · worst: 62% on weekday evenings"*
+when a specific hour-of-day or weekday/weekend bucket is materially
+off (≥5pp). Hour-of-day uses your HA-configured local time.
+
+**Offline coverage diagnostic.** New
+`scripts/conformal_coverage_check.py` reads a `history.db` dump
+and prints the full per-hour, per-weekday/weekend, per-lead
+breakdown — useful for ad-hoc analysis without a running app.
+
+**Documentation truthfulness fixes.** Code comments and docstrings
+in `main.py` and `db.py` previously described the conformal band
+as "Adaptive (online) conformal". It is not — the implementation
+is split conformal with a rolling residual buffer. Updated to
+describe what's actually happening. A new "How the conformal bands
+are calibrated" section in `DOCS.md` walks through the buffer
+semantics across retrains (same-champion bump vs champion change,
+cold-start fallback, when the bands lie).
+
+Tests: 4 new test cases in `tests/unit/test_benchmark.py` cover
+the bootstrap CI computation, did-not-complete exclusion, and the
+all-fail edge case. Full unit suite (224 tests) passes.
+
+User impact: the leaderboard now tells you when its #1 pick is
+actually contested rather than presenting a single winner with
+false confidence, the coverage diagnostic tells you which slice
+of the week your bands are wrong in, and the conformal docs no
+longer over-promise about the band methodology.
+
 ## 2.38.7
 
 Adds an auto-validating data-availability chip per covariate row in

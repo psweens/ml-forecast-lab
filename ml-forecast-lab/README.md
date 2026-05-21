@@ -98,7 +98,7 @@ The UI re-reads `mlfl.yaml` on each request, so hand edits and UI changes can be
 
 1. **Open the web UI.** Click **Open Web UI** on the app page (the direct port 5052 is no longer exposed — access is via HA ingress).
 2. **Run the benchmark.** Open your experiment → **Run Pipeline**. Every enabled model trains with walk-forward cross-validation. With 5 models and 30 days of history on a Pi 5 you'll see results in 5–15 minutes.
-3. **Pick the winner.** The composite Demšar rank highlights one model. Override from the Models tab if you want.
+3. **Pick the winner.** The composite mean rank (Demšar-style averaging across folds — see [`docs/RANKING_NOTES.md`](docs/RANKING_NOTES.md)) highlights one model, with a 95% bootstrap CI so genuine ties show as **T#1**. Override from the Models tab if you want.
 4. **Click Publish.** That single button promotes the chosen model AND switches the experiment to production mode — no YAML edit needed. The app retrains every 24 h and publishes:
 
    - `sensor.mlfl_household_load_forecast` — next-interval forecast value.

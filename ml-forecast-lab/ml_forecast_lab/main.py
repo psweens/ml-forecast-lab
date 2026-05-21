@@ -14,7 +14,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -2150,6 +2150,7 @@ class MLForecastLabApp:
         status="running", daily_rankings=None,
         naive_was_enabled: Optional[bool] = None,
         drift: Optional[dict] = None,
+        did_not_complete: Optional[List[str]] = None,
     ):
         """
         Update web app state with current benchmark progress.
@@ -2159,10 +2160,17 @@ class MLForecastLabApp:
         Parameters
         ----------
         daily_rankings : dict[str, int], optional
-            Per-model daily-cumulative integer rank (Demšar composite over
-            daily metrics). When omitted (e.g. progressive intermediate
-            updates) the daily rank columns simply show "—" until the final
-            update arrives.
+            Per-model daily-cumulative integer rank (composite mean rank
+            over daily metrics, Demšar-style averaging step only — the
+            full Demšar (2006) test does not apply to CV folds, see
+            ``docs/RANKING_NOTES.md``). When omitted (e.g. progressive
+            intermediate updates) the daily rank columns simply show "—"
+            until the final update arrives.
+        did_not_complete : list[str], optional
+            Model names that failed at least one fold during the
+            benchmark. Surfaced separately in the UI so they don't
+            appear at the bottom of the leaderboard with a fake
+            last-place rank.
         """
         from ml_forecast_lab.web.app import (
             BenchmarkResult as WebBenchmarkResult,
@@ -2225,6 +2233,11 @@ class MLForecastLabApp:
             ):
                 daily_mean_rank = None
 
+            mean_rank_low = runner_model_result.metrics.get("mean_rank_low")
+            mean_rank_high = runner_model_result.metrics.get("mean_rank_high")
+            daily_mean_rank_low = runner_model_result.metrics.get("mean_rank_daily_low")
+            daily_mean_rank_high = runner_model_result.metrics.get("mean_rank_daily_high")
+
             web_models.append(WebModelResult(
                 name=model_name,
                 mae=MetricValue(
@@ -2242,6 +2255,8 @@ class MLForecastLabApp:
                 train_time_seconds=runner_model_result.mean_train_time,
                 rank=rank,
                 mean_rank=runner_model_result.metrics.get("mean_rank", 0.0),
+                mean_rank_low=mean_rank_low,
+                mean_rank_high=mean_rank_high,
                 is_production=(model_name == best_model_name),
                 fold_results=[fm for fm in fold_metrics_list if fm],
                 train_mae=MetricValue(
@@ -2262,6 +2277,8 @@ class MLForecastLabApp:
                 ) if "mase" in daily_means else None,
                 daily_rank=daily_rankings.get(model_name),
                 daily_mean_rank=daily_mean_rank,
+                daily_mean_rank_low=daily_mean_rank_low,
+                daily_mean_rank_high=daily_mean_rank_high,
             ))
 
         # Pairwise comparison: paired difference of per-fold MAE values
@@ -2341,6 +2358,7 @@ class MLForecastLabApp:
             naive_baseline_mae=naive_baseline_mae,
             naive_baseline_was_enabled=naive_was_enabled,
             drift=drift,
+            did_not_complete=list(did_not_complete or []),
         )
 
         self.web_app.state.appstate.benchmark_results[exp_cfg.name] = web_result
@@ -2739,20 +2757,43 @@ class MLForecastLabApp:
                     drift=drift_stats,
                 )
 
-        # Final composite ranking via the runner's shared Demšar helper.
-        # Computed twice: once on per-interval (h=1) metrics for the primary
-        # leaderboard, once on daily-cumulative metrics for the secondary
-        # leaderboard. The interval rank still drives Promote / Tuning /
+        # Final composite mean-rank via the runner's shared helper
+        # (Demšar-style averaging across folds; see
+        # docs/RANKING_NOTES.md for the caveat — the full Demšar test
+        # is not applicable to CV folds of one series). Computed twice:
+        # once on per-interval (h=1) metrics for the primary
+        # leaderboard, once on daily-cumulative metrics for the
+        # secondary leaderboard. Bootstrap CIs over fold resamples are
+        # carried into model_result.metrics so the UI can surface ties
+        # honestly. The interval rank still drives Promote / Tuning /
         # sensor publishing; daily_rankings is informational only.
-        interval_mean_ranks, rankings = runner._compute_composite_ranks(
+        (
+            interval_mean_ranks, rankings,
+            interval_rank_cis, dnc_interval,
+        ) = runner._compute_composite_ranks(
             completed_models, metric_source='fold_metrics',
         )
-        daily_mean_ranks, daily_rankings = runner._compute_composite_ranks(
+        (
+            daily_mean_ranks, daily_rankings,
+            daily_rank_cis, _dnc_daily,
+        ) = runner._compute_composite_ranks(
             completed_models, metric_source='daily_fold_metrics',
         )
         for name in completed_models:
-            completed_models[name].metrics['mean_rank'] = interval_mean_ranks.get(name, float('inf'))
-            completed_models[name].metrics['mean_rank_daily'] = daily_mean_ranks.get(name, float('inf'))
+            completed_models[name].metrics['mean_rank'] = (
+                interval_mean_ranks.get(name, float('inf'))
+            )
+            completed_models[name].metrics['mean_rank_daily'] = (
+                daily_mean_ranks.get(name, float('inf'))
+            )
+            ci = interval_rank_cis.get(name)
+            if ci is not None:
+                completed_models[name].metrics['mean_rank_low'] = ci[0]
+                completed_models[name].metrics['mean_rank_high'] = ci[1]
+            ci_d = daily_rank_cis.get(name)
+            if ci_d is not None:
+                completed_models[name].metrics['mean_rank_daily_low'] = ci_d[0]
+                completed_models[name].metrics['mean_rank_daily_high'] = ci_d[1]
         mean_ranks = interval_mean_ranks  # for downstream logging
 
         # If Seasonal Naive was force-included for the skill chip (not
@@ -2770,19 +2811,33 @@ class MLForecastLabApp:
             runner.production_metric, np.nan
         ) if best_model_name else np.nan
 
-        # Log final rankings
+        # Log final rankings — composite mean rank (Demšar-style
+        # averaging across folds; not a Friedman/Nemenyi test). CI
+        # printed in [low, high] form so a reader can spot ties.
         logger.info("")
-        logger.info("  Final rankings (composite Demšar across folds):")
+        logger.info("  Final rankings (composite mean rank, 95%% bootstrap CI):")
         for name, _ in sorted_by_mean_rank:
             mr = completed_models[name]
             daily_str = (
                 f", daily=#{daily_rankings[name]}"
                 if daily_rankings.get(name) else ""
             )
+            ci_low = mr.metrics.get('mean_rank_low')
+            ci_high = mr.metrics.get('mean_rank_high')
+            ci_str = (
+                f" [{ci_low:.2f}-{ci_high:.2f}]"
+                if ci_low is not None and ci_high is not None
+                else ""
+            )
             logger.info(
                 f"    #{rankings[name]} {name}: "
                 f"{runner.production_metric}={mr.metrics.get(runner.production_metric, np.nan):.4f}, "
-                f"mean_rank={mean_ranks[name]:.2f}{daily_str}"
+                f"mean_rank={mean_ranks[name]:.2f}{ci_str}{daily_str}"
+            )
+        if dnc_interval:
+            logger.info(
+                f"  Did not complete (excluded from rankings): "
+                f"{', '.join(sorted(dnc_interval))}"
             )
 
         # Update web UI with final mean-rank-based rankings
@@ -2794,6 +2849,7 @@ class MLForecastLabApp:
                 daily_rankings=daily_rankings,
                 naive_was_enabled=_naive_was_enabled,
                 drift=drift_stats,
+                did_not_complete=dnc_interval,
             )
 
         # Build a BenchmarkResult-compatible object for downstream use
@@ -2807,6 +2863,7 @@ class MLForecastLabApp:
             metric_used=runner.production_metric,
             cv_strategy=runner.cv_strategy,
             n_folds=runner.cv_folds,
+            did_not_complete=dnc_interval,
         )
 
         # 7. Generate holdout predictions from each model for visualisation
@@ -4664,12 +4721,23 @@ class MLForecastLabApp:
         )
 
         # Auto-compute conformal 80% interval bands when bounds aren't
-        # provided explicitly and we have a residual history. Adaptive
-        # (online) conformal — quantiles come from deployed forecast /
-        # actual pairs in forecast_log, no extra model fit required.
-        # Cold-start returns no quantiles → bands stay absent until the
-        # residual buffer fills, which surfaces naturally as "point-only
-        # forecast" in the UI.
+        # provided explicitly and we have a residual history.
+        #
+        # NOTE on method: this is split conformal prediction with a
+        # rolling residual buffer (capped at `max_age_days=14`), NOT
+        # ACI / Gibbs-Candès (2021) or any other adaptive variant —
+        # there is no α_t update step, no γ-step, no exponential
+        # reweighting. Quantiles come from deployed forecast / actual
+        # pairs in forecast_log so no extra model fit is required. The
+        # cost is that residuals aren't strictly exchangeable (trend,
+        # weekly seasonality, regime shifts) so finite-sample coverage
+        # is approximate; the realised-coverage diagnostic on the
+        # Forecast Accuracy tab is the user-visible signal that the
+        # bands need recalibrating. Cold-start returns no quantiles →
+        # bands stay absent until the residual buffer fills, which
+        # surfaces naturally as "point-only forecast" in the UI.
+        # See DOCS.md "Conformal band calibration" for how the buffer
+        # behaves across retrains.
         if (
             y_pred_upper is None
             and y_pred_lower is None

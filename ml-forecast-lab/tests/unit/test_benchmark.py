@@ -239,3 +239,88 @@ class TestMeanRankScoring:
         models = {"lightgbm": LightGBMModel()}
         result = runner.run_benchmark(df, models)
         assert "mean_rank" in result.model_results["lightgbm"].metrics
+
+    def test_mean_rank_bootstrap_ci_populated(self):
+        """``_compute_composite_ranks`` must populate ``mean_rank_low`` and
+        ``mean_rank_high`` on every rankable model when n_folds >= 2. With
+        N=1 the CI is meaningless and must be omitted."""
+        from ml_forecast_lab.benchmark.runner import ModelResult
+
+        cfg = _make_experiment_cfg(cv_folds=3)
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        # Two synthetic models with hand-crafted per-fold metrics so the
+        # rank order is deterministic and the bootstrap operates on a
+        # known input. Model A wins on folds 0,1; model B wins on fold 2.
+        a = ModelResult(model_name="A")
+        b = ModelResult(model_name="B")
+        a.fold_metrics = [{"mae": 1.0, "rmse": 1.0}, {"mae": 1.0, "rmse": 1.0}, {"mae": 5.0, "rmse": 5.0}]
+        b.fold_metrics = [{"mae": 2.0, "rmse": 2.0}, {"mae": 2.0, "rmse": 2.0}, {"mae": 1.0, "rmse": 1.0}]
+
+        means, ranks, cis, dnc = runner._compute_composite_ranks(
+            {"A": a, "B": b}, metric_source="fold_metrics",
+            bootstrap_iters=200, bootstrap_seed=0,
+        )
+        assert dnc == [], "Neither model failed; DNC must be empty"
+        assert ranks == {"A": 1, "B": 2}, (
+            f"A wins 2 of 3 folds, expected #1; got {ranks}"
+        )
+        assert "A" in cis and "B" in cis, "Bootstrap CIs must be populated"
+        a_low, a_high = cis["A"]
+        # Mean rank of A across (1,1,2) is 4/3 ≈ 1.33; CI should span at
+        # least the rank-1 floor and not exceed rank-2.
+        assert 1.0 <= a_low <= a_high <= 2.0, (
+            f"A's CI {cis['A']} should sit in [1, 2]"
+        )
+        # CI should be wider than zero for both models (varying fold ranks)
+        assert a_high > a_low, "Bootstrap CI must have non-zero width"
+
+    def test_did_not_complete_excluded_from_rank(self):
+        """A model that errored on at least one fold (empty {} entry)
+        must NOT appear in the ranked pool — otherwise it takes a
+        last-place phantom slot off every survivor, inflating the
+        leaderboard's apparent dominance.
+        """
+        from ml_forecast_lab.benchmark.runner import ModelResult
+
+        cfg = _make_experiment_cfg(cv_folds=3)
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        complete = ModelResult(model_name="complete")
+        partial = ModelResult(model_name="partial")
+        complete.fold_metrics = [{"mae": 1.0, "rmse": 1.0}] * 3
+        # Partial completed only 2 of 3 folds (one empty {} → DNC)
+        partial.fold_metrics = [{"mae": 2.0, "rmse": 2.0}, {}, {"mae": 2.0, "rmse": 2.0}]
+
+        means, ranks, cis, dnc = runner._compute_composite_ranks(
+            {"complete": complete, "partial": partial},
+            metric_source="fold_metrics",
+            bootstrap_iters=50,
+        )
+        assert "partial" in dnc, "Partial model must be in DNC"
+        assert "partial" not in ranks, (
+            "DNC model must be excluded from the rankable pool — otherwise "
+            "the surviving model gets a free last-place 'win' against it"
+        )
+        assert ranks == {"complete": 1}
+
+    def test_all_models_fail_returns_empty_rank(self):
+        """Edge case: every model errored on at least one fold. Nothing
+        should be ranked, and all should appear in DNC."""
+        from ml_forecast_lab.benchmark.runner import ModelResult
+
+        cfg = _make_experiment_cfg(cv_folds=3)
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        a = ModelResult(model_name="a")
+        b = ModelResult(model_name="b")
+        a.fold_metrics = [{}, {"mae": 1.0, "rmse": 1.0}, {}]
+        b.fold_metrics = []  # Outer-level failure: zero folds
+
+        means, ranks, cis, dnc = runner._compute_composite_ranks(
+            {"a": a, "b": b}, metric_source="fold_metrics",
+            bootstrap_iters=50,
+        )
+        assert ranks == {}
+        assert means == {}
+        assert sorted(dnc) == ["a", "b"]
