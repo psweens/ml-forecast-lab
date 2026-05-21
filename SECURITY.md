@@ -19,7 +19,7 @@ Include in your report:
 - A minimal reproduction or proof-of-concept.
 - Any suggested remediation, if you have one.
 
-This is a free community add-on maintained on a best-effort basis. I
+This is a free community app maintained on a best-effort basis. I
 will aim to acknowledge a report within seven days and work toward a fix
 within a reasonable timeframe relative to severity, but I make no
 guarantees. Coordinated disclosure is appreciated.
@@ -28,15 +28,15 @@ guarantees. Coordinated disclosure is appreciated.
 
 In scope:
 
-- The add-on container, its Python code, and its web UI as shipped from
+- The app container, its Python code, and its web UI as shipped from
   this repository.
-- The interaction between the add-on and the Home Assistant supervisor
+- The interaction between the app and the Home Assistant supervisor
   REST API.
 
 Out of scope:
 
 - Vulnerabilities in upstream dependencies — please report those to the
-  respective project. Where the add-on can pin to a patched version, an
+  respective project. Where the app can pin to a patched version, an
   issue here is welcome.
 - Vulnerabilities in the user's own Home Assistant configuration,
   network, or host operating system.

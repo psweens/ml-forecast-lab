@@ -11,7 +11,7 @@ Train, benchmark, and deploy time-series models for any HA sensor — with acade
 [![Latest release][release-shield]][release-link]
 [![Licence][licence-shield]][licence-link]
 [![Tests][tests-shield]][tests-link]
-[![Home Assistant add-on][ha-shield]][ha-link]
+[![Home Assistant app][ha-shield]][ha-link]
 [![Architectures][arch-shield]][release-link]
 
 <a href="https://www.buymeacoffee.com/psweens"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="60"></a>
@@ -22,11 +22,11 @@ Train, benchmark, and deploy time-series models for any HA sensor — with acade
 
 ## What this repository is
 
-A Home Assistant add-on for HA power users who want to forecast a sensor — not data scientists who want a fresh framework. Plug in any sensor, the add-on benchmarks 24 model backends on your data, picks the winner, retrains it on schedule, and publishes forecasts back to HA with calibrated 80% bands. Designed for the Pi 5 sweet spot: 8 GB RAM, no GPU, ARM64.
+A Home Assistant app for HA power users who want to forecast a sensor — not data scientists who want a fresh framework. Plug in any sensor, the app benchmarks 24 model backends on your data, picks the winner, retrains it on schedule, and publishes forecasts back to HA with calibrated 80% bands. Designed for the Pi 5 sweet spot: 8 GB RAM, no GPU, ARM64.
 
-The intended mindset is **benchmark once, run forever**. After the first benchmark you click Promote, and the add-on takes care of retraining + publishing — re-benchmark only when your sensor's behaviour drifts or you want to try newer architectures.
+The intended mindset is **benchmark once, run forever**. After the first benchmark you click Promote, and the app takes care of retraining + publishing — re-benchmark only when your sensor's behaviour drifts or you want to try newer architectures.
 
-If you're browsing on GitHub, the install button below is the fastest path. The per-add-on [README](ml-forecast-lab/README.md) and [DOCS](ml-forecast-lab/DOCS.md) render on HA's **Info** and **Documentation** tabs once installed.
+If you're browsing on GitHub, the install button below is the fastest path. The per-app [README](ml-forecast-lab/README.md) and [DOCS](ml-forecast-lab/DOCS.md) render on HA's **Info** and **Documentation** tabs once installed.
 
 ![Dashboard with three production experiments](docs/images/dashboard.png)
 
@@ -38,9 +38,9 @@ ML Forecast Lab is here to close that gap: the same models researchers use, pack
 
 ## Install
 
-[![Open your Home Assistant instance and show the add add-on repository dialog with this repository pre-filled.][openhainstall-shield]][openhainstall-link]
+[![Open your Home Assistant instance and show the add app repository dialog with this repository pre-filled.][openhainstall-shield]][openhainstall-link]
 
-Or add the repository manually: **Settings → Add-ons → Add-on store → ⋮ → Repositories**, then paste `https://github.com/psweens/ml-forecast-lab`.
+Or add the repository manually: **Settings → Apps → App store → ⋮ → Repositories**, then paste `https://github.com/psweens/ml-forecast-lab`.
 
 First build takes 10–15 minutes on a Raspberry Pi 5. Subsequent updates use the cached image.
 
@@ -48,7 +48,7 @@ First build takes 10–15 minutes on a Raspberry Pi 5. Subsequent updates use th
 
 ## What it does
 
-ML Forecast Lab trains every enabled forecasting backend on your sensor's history, ranks them on identical cross-validation folds with a composite Demšar score across MAE / RMSE / MASE, and shows you which one wins. You promote the winner to **production**, and the add-on retrains it on schedule and publishes forecasts back to Home Assistant as companion sensors with calibrated 80% conformal prediction bands.
+ML Forecast Lab trains every enabled forecasting backend on your sensor's history, ranks them on identical cross-validation folds with a composite Demšar score across MAE / RMSE / MASE, and shows you which one wins. You promote the winner to **production**, and the app retrains it on schedule and publishes forecasts back to Home Assistant as companion sensors with calibrated 80% conformal prediction bands.
 
 24 backends are wired in: tree (LightGBM, XGBoost, CatBoost), recurrent (LSTM, GRU), convolutional (CNN, TimesNet), linear / MLP (DLinear, NLinear, TSMixer, TimeMixer, TiDE, SparseTSF), N-BEATS family (N-BEATS, N-HiTS), transformers (PatchTST, iTransformer, Crossformer, TFT), classical (AutoARIMA, AutoETS, AutoTheta), frequency-domain (FITS), and a Seasonal Naive baseline. See [`docs/MODEL_GUIDE.md`](docs/MODEL_GUIDE.md) for picking the right ones.
 
@@ -104,7 +104,7 @@ Retrain (default 24 h) trains all enabled models from scratch and refreshes the 
 
 | Where it lives | What it covers |
 |---|---|
-| [`ml-forecast-lab/README.md`](ml-forecast-lab/README.md) | HA store **Info** tab — what the add-on is, hardware requirements, install, minimal `mlfl.yaml`, first forecast. |
+| [`ml-forecast-lab/README.md`](ml-forecast-lab/README.md) | HA store **Info** tab — what the app is, hardware requirements, install, minimal `mlfl.yaml`, first forecast. |
 | [`ml-forecast-lab/DOCS.md`](ml-forecast-lab/DOCS.md) | HA store **Documentation** tab — full configuration reference, published sensors, web-UI tour, operations, troubleshooting. |
 | [`ml-forecast-lab/CHANGELOG.md`](ml-forecast-lab/CHANGELOG.md) | HA store **Changelog** tab — per-version release notes. |
 | [`docs/MODEL_GUIDE.md`](docs/MODEL_GUIDE.md) | Practical "which of the 24 backends should I enable?" with starter sets keyed to data volume, target shape, and Pi compute budget. |
@@ -129,7 +129,7 @@ This is a side project with one maintainer, so contribution paths are narrower t
 
 **Useful to open:**
 
-- **Bug reports.** Include the add-on version, the relevant slice of `mlfl.yaml`, and the last 50 lines of the add-on log. The phase tags (`[BENCH]`, `[MODEL]`, `[HA]`, `[PUB]`, …) make triage quick.
+- **Bug reports.** Include the app version, the relevant slice of `mlfl.yaml`, and the last 50 lines of the app log. The phase tags (`[BENCH]`, `[MODEL]`, `[HA]`, `[PUB]`, …) make triage quick.
 - **Documentation gaps.** If something in DOCS / MODEL_GUIDE didn't prepare you for what you hit, that's a first-class issue.
 - **Tested model configurations.** Which backend won on what kind of HA sensor, with how much history, on which hardware. The current guidance in `docs/MODEL_GUIDE.md` is grounded in a narrow set of household sensors; broader data sharpens it.
 - **Better defaults for the 24 backends on Pi-scale data.** The benchmark harness in `ml_forecast_lab/benchmark/` is already built; results that beat the current defaults are welcome as PRs to `model_overrides`.
@@ -160,7 +160,7 @@ The 24 model backends are implementations of published architectures by their re
 - [pvlib](https://pvlib-python.readthedocs.io/) for the Ineichen clear-sky-irradiance feature.
 - [FastAPI](https://fastapi.tiangolo.com/), [Jinja2](https://palletsprojects.com/p/jinja/), [HTMX](https://htmx.org/), and [Plotly](https://plotly.com/javascript/) for the web UI.
 - Demšar (2006), *Statistical Comparisons of Classifiers over Multiple Data Sets* — methodology for the composite cross-validation rank.
-- The [`home-assistant/hassio-addons`](https://github.com/hassio-addons) Ubuntu base image and the Home Assistant add-on platform itself.
+- The [`home-assistant/hassio-addons`](https://github.com/hassio-addons) Ubuntu base image and the Home Assistant app platform itself.
 
 ## Support development
 
@@ -179,7 +179,7 @@ ML Forecast Lab is free and open-source, and stays that way. If it's saved you t
 [licence-link]: LICENSE
 [tests-shield]: https://img.shields.io/github/actions/workflow/status/psweens/ml-forecast-lab/tests.yml?branch=main&style=flat-square&label=tests&color=41bdf5
 [tests-link]: https://github.com/psweens/ml-forecast-lab/actions/workflows/tests.yml
-[ha-shield]: https://img.shields.io/badge/Home%20Assistant-add--on-41bdf5?style=flat-square&logo=home-assistant&logoColor=white
+[ha-shield]: https://img.shields.io/badge/Home%20Assistant-app-41bdf5?style=flat-square&logo=home-assistant&logoColor=white
 [ha-link]: https://www.home-assistant.io/
 [arch-shield]: https://img.shields.io/badge/arch-aarch64%20%7C%20amd64%20%7C%20armv7-41bdf5?style=flat-square
 [openhainstall-shield]: https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg

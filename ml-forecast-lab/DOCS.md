@@ -1,6 +1,6 @@
 # ML Forecast Lab — Documentation
 
-This is the full reference for users running the add-on. For a quick install and a first forecast, see [README.md](README.md). For picking which of the 24 backends to enable, see [`docs/MODEL_GUIDE.md`](https://github.com/psweens/ml-forecast-lab/blob/main/docs/MODEL_GUIDE.md) in the repository.
+This is the full reference for users running the app. For a quick install and a first forecast, see [README.md](README.md). For picking which of the 24 backends to enable, see [`docs/MODEL_GUIDE.md`](https://github.com/psweens/ml-forecast-lab/blob/main/docs/MODEL_GUIDE.md) in the repository.
 
 ## Contents
 
@@ -20,9 +20,9 @@ This is the full reference for users running the add-on. For a quick install and
 |---|---|---|
 | `/addon_configs/ml_forecast_lab/mlfl.yaml` | **Your experiment configuration.** Canonical path. | Yes — this is the one file you edit. |
 | `/config/mlfl.yaml` | Legacy fallback path; still loaded if the canonical path is missing. | Yes, but prefer the canonical path. |
-| `/share/ml_forecast_lab/` *(or `/data/ml_forecast_lab/` inside the container)* | Model cache, SQLite history, forecast log, retrain rollbacks. Managed by the add-on. | No. |
+| `/share/ml_forecast_lab/` *(or `/data/ml_forecast_lab/` inside the container)* | Model cache, SQLite history, forecast log, retrain rollbacks. Managed by the app. | No. |
 
-The add-on searches these in order: explicit `--config-path` (development only) → `/addon_configs/ml_forecast_lab/mlfl.yaml` → `/config/mlfl.yaml` → the bundled example. If nothing is found a stub config is created.
+The app searches these in order: explicit `--config-path` (development only) → `/addon_configs/ml_forecast_lab/mlfl.yaml` → `/config/mlfl.yaml` → the bundled example. If nothing is found a stub config is created.
 
 ---
 
@@ -64,7 +64,7 @@ The add-on searches these in order: explicit `--config-path` (development only) 
 
 ### Cumulative-source handling
 
-Many HA sensors report running totals (`*_today` energy, daily heat). Configure these explicitly so the add-on can extract per-interval increments correctly.
+Many HA sensors report running totals (`*_today` energy, daily heat). Configure these explicitly so the app can extract per-interval increments correctly.
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
@@ -94,7 +94,7 @@ covariates:
   # OpenWeatherMap, AccuWeather, met.no-via-newer-HA) moved the
   # forecast OUT of state attributes and behind a service call.
   # Use ``future_attribute: hourly`` / ``daily`` / ``twice_daily``
-  # to fetch via ``weather.get_forecasts``. The addon picks the
+  # to fetch via ``weather.get_forecasts``. The app picks the
   # right path automatically based on the entity's domain.
   - entity: weather.met_office_balsham
     role: future
@@ -114,7 +114,7 @@ covariates:
 |---|---|---|---|
 | `entity` | string | **required** | HA sensor or weather entity. |
 | `role` | `lagged` \| `future` \| `both` | `lagged` | `lagged` = historical only (used as a lag feature). `future` = the entity exposes a known-future forecast, available at every horizon step. `both` = lagged for training, future at inference. |
-| `future_attribute` | string | `forecast` | For `role: future` / `both`: where the future-known series comes from. For **classic attribute-exposing entities** (Met.no `weather.*` on older HA, Solcast, Forecast.Solar), this is the attribute name (`forecast`, `detailedForecast`). For **modern `weather.*` entities** (HA 2023.9+: Met Office DataHub, OpenWeatherMap, AccuWeather, etc.), set this to `hourly`, `daily`, or `twice_daily` — the addon detects the weather domain and routes through the `weather.get_forecasts` service call instead of reading attributes. v2.37.7+ Add-Covariate UI auto-populates this dropdown based on the entity's actual capabilities. |
+| `future_attribute` | string | `forecast` | For `role: future` / `both`: where the future-known series comes from. For **classic attribute-exposing entities** (Met.no `weather.*` on older HA, Solcast, Forecast.Solar), this is the attribute name (`forecast`, `detailedForecast`). For **modern `weather.*` entities** (HA 2023.9+: Met Office DataHub, OpenWeatherMap, AccuWeather, etc.), set this to `hourly`, `daily`, or `twice_daily` — the app detects the weather domain and routes through the `weather.get_forecasts` service call instead of reading attributes. v2.37.7+ Add-Covariate UI auto-populates this dropdown based on the entity's actual capabilities. |
 | `future_value_key` | string | unset | For `role: future` / `both`: the key inside each forecast entry that contains the value (`temperature`, `pv_estimate`, `cloud_coverage`, …). If unset, common keys are tried in order. The Add-Covariate UI offers the entity's actual keys as a dropdown. |
 | `scale` | float | unset | Multiplicative pre-scaling (e.g. percent → fraction: `0.01`). |
 | `transform` | `log` \| `sqrt` \| `box_cox` | unset | Per-covariate transform before model input. |
@@ -163,7 +163,7 @@ Two zero-cost deterministic covariates for solar PV (or any sun-driven target). 
 | `include_sun_elevation` | bool | `false` | Adds the sun's angle above the horizon (degrees, negative at night) as a covariate. Strong physical signal for diurnal patterns. |
 | `include_clear_sky_irradiance` | bool | `false` | Adds the theoretical clear-sky GHI (W/m²) from `pvlib`'s Ineichen model. Zero at night. Turns "predict solar generation" into "predict cloud-cover attenuation". |
 
-When `include_clear_sky_irradiance` is on, the add-on also gates production forecasts to zero at night based on past `clear_sky_ghi` — preventing the "small positive forecast at 3 a.m." pattern.
+When `include_clear_sky_irradiance` is on, the app also gates production forecasts to zero at night based on past `clear_sky_ghi` — preventing the "small positive forecast at 3 a.m." pattern.
 
 ### Cross-validation
 
@@ -221,7 +221,7 @@ When `include_clear_sky_irradiance` is on, the add-on also gates production fore
 
 ## Published Home Assistant sensors
 
-When an experiment is in `mode: production`, the add-on publishes the following sensors. The placeholder `<name>` is the experiment's `publish_name` (or `name` if unset) prefixed by `publish_prefix`.
+When an experiment is in `mode: production`, the app publishes the following sensors. The placeholder `<name>` is the experiment's `publish_name` (or `name` if unset) prefixed by `publish_prefix`.
 
 | Entity | Value | Notes |
 |---|---|---|
@@ -238,7 +238,7 @@ When an experiment is in `mode: production`, the add-on publishes the following 
 
 ## Web UI tour
 
-Open the UI via the add-on's **Open Web UI** button (HA ingress).
+Open the UI via the app's **Open Web UI** button (HA ingress).
 
 - **Dashboard.** One card per experiment. Click into a card to drill in. The grid refreshes via HTMX without losing scroll position or expanded panels.
 - **Experiment page tabs.**
@@ -256,7 +256,7 @@ Open the UI via the add-on's **Open Web UI** button (HA ingress).
 
 ### Logs
 
-The add-on log is visible from the HA add-on page or via the Web UI's **Logs** tab. Every line carries a short phase tag in square brackets — useful for `grep`-ing:
+The app log is visible from the HA app page or via the Web UI's **Logs** tab. Every line carries a short phase tag in square brackets — useful for `grep`-ing:
 
 | Tag | Subsystem |
 |---|---|
@@ -276,15 +276,15 @@ The add-on log is visible from the HA add-on page or via the Web UI's **Logs** t
 
 **Persistent log files** (v2.37+) live in `/data/ml_forecast_lab/logs/` inside the container:
 
-* `mlfl.log` — size-rotated, 10 MB × 5 backups (≈50 MB total). Always tails the most recent activity. Open it with the **File editor** add-on or via Samba.
+* `mlfl.log` — size-rotated, 10 MB × 5 backups (≈50 MB total). Always tails the most recent activity. Open it with the **File editor** app or via Samba.
 * `mlfl-daily.log` + `mlfl-daily.log.YYYY-MM-DD` — one file per UTC day, kept for 14 days. Easier to grep against a specific date when investigating an issue.
 * Both files use the same `[PHASE] level [module] message` format as the console log, so they're directly greppable.
-* Suppress the daily archive by setting `MLFL_DAILY_LOG_KEEP=0` in the add-on environment (the size-rotated log keeps working).
+* Suppress the daily archive by setting `MLFL_DAILY_LOG_KEEP=0` in the app environment (the size-rotated log keeps working).
 * Disk footprint is bounded — ~50 MB live + (typical INFO-level daily volume × 14 days).
 
 ### Backing up trained models
 
-`/share/ml_forecast_lab/` contains the model cache, SQLite database, and forecast log. The HA **Backups** add-on already picks this up if you have backups configured for add-on data. To export by hand: download the directory through the Samba / SSH add-on.
+`/share/ml_forecast_lab/` contains the model cache, SQLite database, and forecast log. The HA **Backups** app already picks this up if you have backups configured for app data. To export by hand: download the directory through the Samba / SSH app.
 
 ### Rolling back a bad retrain
 
@@ -295,13 +295,13 @@ Every retrain archives the previous champion under `<model_dir>/previous/` befor
 To wipe accuracy history and start fresh:
 
 1. From the experiment header, click **Delete experiment**, or delete the entry from `mlfl.yaml`.
-2. Restart the add-on. The next benchmark starts from zero.
+2. Restart the app. The next benchmark starts from zero.
 
 The SQLite database survives the experiment deletion — only the per-experiment cached model and forecast-log rows are removed.
 
-### Updating the add-on
+### Updating the app
 
-Updates are delivered via the HA add-on store like any other add-on. Read the [CHANGELOG](CHANGELOG.md) before upgrading — the changelog calls out behaviour changes that require config edits.
+Updates are delivered via the HA app store like any other app. Read the [CHANGELOG](CHANGELOG.md) before upgrading — the changelog calls out behaviour changes that require config edits.
 
 ---
 
@@ -309,13 +309,13 @@ Updates are delivered via the HA add-on store like any other add-on. Read the [C
 
 ### "Not enough data" when starting a benchmark
 
-The add-on needs roughly `cv_folds × interval_minutes × test_size` worth of history per fold. With defaults (5 folds, 30-min interval), aim for **at least 30 days** in HA's recorder. If your recorder retention is the HA default of 10 days, either raise `recorder.purge_keep_days` in `configuration.yaml` or wait — the add-on will pick up once enough history has accumulated.
+The app needs roughly `cv_folds × interval_minutes × test_size` worth of history per fold. With defaults (5 folds, 30-min interval), aim for **at least 30 days** in HA's recorder. If your recorder retention is the HA default of 10 days, either raise `recorder.purge_keep_days` in `configuration.yaml` or wait — the app will pick up once enough history has accumulated.
 
 ### Companion sensors don't appear after promotion
 
-Check the add-on log for `[HA]` errors. The most common causes:
+Check the app log for `[HA]` errors. The most common causes:
 
-- `homeassistant_api: true` got disabled in `config.yaml` (it shouldn't have been; the add-on declares it). Restart the add-on to refresh the token.
+- `homeassistant_api: true` got disabled in `config.yaml` (it shouldn't have been; the app declares it). Restart the app to refresh the token.
 - The experiment is still in `mode: lab`. Promotion in the UI also flips the mode; if you changed YAML by hand, make sure `mode: production` is set.
 - A sensor name collision. The first publish logs `Publishing forecast for <name>: base=sensor.mlfl_<name>` — check the actual entity ID and search HA's developer tools.
 
@@ -352,7 +352,7 @@ Three usual causes:
 
 Disable the heaviest backends (`tft`, `crossformer`, `timesnet`, `patchtst`) and rerun the benchmark. The Quick-preset **Fast** chip on the Models tab does this in one click. If OOMs persist, lower `cpu_cores` to `2` — concurrent backend training is more memory-hungry than CPU-bound.
 
-### Add-on takes 10+ minutes to start the first time
+### App takes 10+ minutes to start the first time
 
 Expected. LightGBM, XGBoost, and PyTorch all compile native extensions for `aarch64` on first install. Subsequent updates use the cached image and start in seconds.
 
