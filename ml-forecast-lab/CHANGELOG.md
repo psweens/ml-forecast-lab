@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.39.1
+
+Surfaces covariate validation messages in the UI so warnings are
+actually readable — especially on mobile.
+
+The data-availability chip (✓ / ⚠ / ✗) shipped in v2.38.7 already
+explained *why* a row was flagged, but only via the chip's native
+`title=` tooltip — invisible on touch devices and easy to miss on
+desktop. The Settings → Covariates section now paints the message
+inline under each non-ok row (yellow italic for `partial`, red for
+`broken`) and adds a small `N errors · M warnings` tally next to
+the **Covariates** heading so problems are discoverable at a
+glance without scrolling the list.
+
+No backend changes — the `message` string was already returned by
+`/api/covariates/validate`. Frontend-only fix in
+`web/templates/experiment.html` and `web/static/style.css`.
+
 ## 2.39.0
 
 Honest uncertainty on the leaderboard, regime-aware conformal
