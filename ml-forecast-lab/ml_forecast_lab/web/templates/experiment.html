@@ -399,7 +399,10 @@
 
     <!-- Covariates -->
     <div class="settings-group">
-        <h3 class="settings-group-title">Covariates</h3>
+        <h3 class="settings-group-title">
+            Covariates
+            <span id="covariate-warnings-summary" class="cov-warn-summary" hidden></span>
+        </h3>
         <div class="covariate-list" id="covariate-list">
             {% if exp_config and exp_config.covariates %}
             {% for cov in exp_config.covariates %}
@@ -423,6 +426,7 @@
                 {% if cov.scale is not none %}<span class="cov-meta">scale: {{ cov.scale }}</span>{% endif %}
                 {% if cov.is_binary %}<span class="cov-meta">binary</span>{% endif %}
                 <button class="cov-remove-btn" onclick="removeCovariate('{{ cov.entity }}')" title="Remove">&times;</button>
+                <span class="cov-validate-msg" hidden></span>
             </div>
             {% endfor %}
             {% else %}
@@ -2484,6 +2488,43 @@ window.showTab = function(el) {
         chip.style.borderRadius = '4px';
         chip.style.fontSize = '0.75rem';
         chip.title = message || status;
+        // Mobile users can't see the title= tooltip, so for partial/broken
+        // rows we also paint an inline message under the row that explains
+        // exactly what's wrong. ok rows hide it — no point in noise.
+        var row = chip.closest('.covariate-row');
+        var msgEl = row && row.querySelector('.cov-validate-msg');
+        if (msgEl) {
+            if (status === 'ok') {
+                msgEl.hidden = true;
+                msgEl.textContent = '';
+                msgEl.className = 'cov-validate-msg';
+            } else {
+                msgEl.hidden = false;
+                msgEl.textContent = (status === 'partial' ? '⚠ ' : '✗ ') + (message || status);
+                msgEl.className = 'cov-validate-msg cov-validate-msg-' + status;
+            }
+        }
+        _refreshWarningsSummary();
+    }
+    // Tally non-ok rows and surface a count next to the Covariates heading
+    // so the user can see at a glance whether anything needs attention
+    // without scrolling the list.
+    function _refreshWarningsSummary() {
+        var summary = document.getElementById('covariate-warnings-summary');
+        if (!summary) return;
+        var warns = document.querySelectorAll('#covariate-list .cov-validate-msg-partial').length;
+        var errs = document.querySelectorAll('#covariate-list .cov-validate-msg-broken').length;
+        if (!warns && !errs) {
+            summary.hidden = true;
+            summary.textContent = '';
+            return;
+        }
+        var parts = [];
+        if (errs) parts.push(errs + ' error' + (errs === 1 ? '' : 's'));
+        if (warns) parts.push(warns + ' warning' + (warns === 1 ? '' : 's'));
+        summary.textContent = parts.join(' · ');
+        summary.className = 'cov-warn-summary ' + (errs ? 'cov-warn-summary-error' : 'cov-warn-summary-warn');
+        summary.hidden = false;
     }
     window.validateCovariateRow = function(row) {
         if (!row) return;
@@ -2586,7 +2627,8 @@ window.showTab = function(el) {
                     futureMeta +
                     (body.scale !== undefined ? '<span class="cov-meta">scale: ' + body.scale + '</span>' : '') +
                     (body.is_binary ? '<span class="cov-meta">binary</span>' : '') +
-                    '<button class="cov-remove-btn" onclick="removeCovariate(\'' + entity + '\')" title="Remove">&times;</button>';
+                    '<button class="cov-remove-btn" onclick="removeCovariate(\'' + entity + '\')" title="Remove">&times;</button>' +
+                    '<span class="cov-validate-msg" hidden></span>';
                 list.appendChild(row);
                 // v2.38.7: kick off a data-availability check for the
                 // newly added row so the chip resolves to ok/partial/broken
@@ -2619,6 +2661,7 @@ window.showTab = function(el) {
                     var list = document.getElementById('covariate-list');
                     list.innerHTML = '<p id="no-covariates-msg" style="color:var(--text-secondary);font-size:0.85rem;">No covariates configured.</p>';
                 }
+                _refreshWarningsSummary();
             } else {
                 mlfl.toast('Failed: ' + result.error, 'error');
             }
