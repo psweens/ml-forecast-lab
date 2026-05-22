@@ -406,9 +406,16 @@
         <div class="covariate-list" id="covariate-list">
             {% if exp_config and exp_config.covariates %}
             {% for cov in exp_config.covariates %}
+            {# CovariateCfg.future_attribute defaults to the string
+               "forecast" (not None), so a naive ``cov.future_attribute
+               or ''`` leaks the default onto every lagged-only row.
+               That makes the validator try to parse a non-existent
+               `forecast` attribute on plain numeric sensors and flag
+               them as ``partial``. Only emit the future-side data
+               attributes when the role actually uses them. #}
             <div class="covariate-row" data-entity="{{ cov.entity }}"
-                 data-future-attribute="{{ cov.future_attribute or '' }}"
-                 data-future-value-key="{{ cov.future_value_key or '' }}">
+                 data-future-attribute="{% if cov.role in ('future', 'both') %}{{ cov.future_attribute or '' }}{% endif %}"
+                 data-future-value-key="{% if cov.role in ('future', 'both') %}{{ cov.future_value_key or '' }}{% endif %}">
                 <span class="cov-entity">{{ cov.entity }}</span>
                 <span class="cov-meta cov-validate-chip" title="Checking data availability...">…</span>
                 <span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">{{ cov.role }}</span></span>

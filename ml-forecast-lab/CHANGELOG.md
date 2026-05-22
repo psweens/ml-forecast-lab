@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.39.2
+
+Fixes three false positives / misleading messages in the covariate
+validator surfaced after v2.39.1 made the messages visible:
+
+**Lagged-only rows no longer warn about "future attribute 'forecast'".**
+`CovariateCfg.future_attribute` defaults to the string `'forecast'`,
+so the Jinja template was emitting `data-future-attribute="forecast"`
+on every row regardless of role. The validator dutifully tried to
+parse a non-existent `forecast` attribute on plain numeric sensors
+and flagged them as `partial`. The template now only emits the
+future-side data attributes when `role` is `future` / `both`.
+
+**Weather-service forecasts no longer false-flag as partial.** HA
+2023.9+ moved hourly/daily/twice_daily forecasts out of state
+attributes and into the `weather.get_forecasts` service call. The
+resolver already short-circuits to that service (covariates.py:230),
+but the validator was still parsing the missing state attribute and
+returning `partial`. `classify_covariate_state` now recognises
+weather-service future types and treats them as expected-to-work
+rather than probing a path that's no longer there.
+
+**Partial message describes the actual lagged source.** When a
+categorical-state weather entity uses the attribute-history path for
+lagged history, the message used to read `Lagged side ok (last=None)`
+— misleading, because `None` isn't the real lagged value. It now
+reads `Lagged side ok (via attribute 'uv_index' (current=4.2))` so
+the message reflects what the resolver actually does.
+
+Five new tests in `test_validate_covariate_endpoint.py` cover the
+weather-service path, the lagged-side wording, and the
+legacy-attribute compatibility (Solcast `forecast`, custom
+integrations) that the service short-circuit must not break.
+
 ## 2.39.1
 
 Surfaces covariate validation messages in the UI so warnings are

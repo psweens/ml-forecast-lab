@@ -146,3 +146,76 @@ def test_unavailable_state_no_attribute_is_broken():
     )
     assert out["ok"] is False
     assert out["status"] == "broken"
+
+
+def test_weather_service_future_attribute_is_ok():
+    """HA 2023.9+ weather entities expose hourly/daily/twice_daily
+    forecasts via the ``weather.get_forecasts`` service call, not as
+    state attributes. The state-only validator shouldn't false-flag
+    them as partial when ``attrs.get('hourly')`` returns None — the
+    resolver fetches via the service path."""
+    out = classify_covariate_state(
+        entity_id="weather.met_office_balsham",
+        state_obj=_state("partlycloudy", attrs={"uv_index": 4.2}),
+        future_attribute="hourly",
+        future_value_key="uv_index",
+    )
+    assert out["ok"] is True
+    assert out["status"] == "ok"
+    assert "weather.get_forecasts(hourly)" in out["message"]
+
+
+def test_weather_service_future_with_no_lagged_path_still_ok():
+    """Same as above but without a weather-attr-history path for
+    lagged. The future side is service-fetched (ok) — the state
+    isn't numeric but we don't false-flag it broken since the
+    user explicitly asked for service-fetched future data."""
+    out = classify_covariate_state(
+        entity_id="weather.met_office_balsham",
+        state_obj=_state("partlycloudy", attrs={}),
+        future_attribute="daily",
+    )
+    assert out["ok"] is True
+    assert out["status"] == "ok"
+
+
+def test_partial_message_describes_weather_attr_lagged_path():
+    """When state is categorical but lagged history pulls via the
+    weather-attr-history path, the partial message must NOT say
+    ``last=None`` — that was misleading. It should describe the
+    actual lagged source (the attribute name + current value)."""
+    out = classify_covariate_state(
+        entity_id="weather.met_office_balsham",
+        state_obj=_state("partlycloudy", attrs={
+            "uv_index": 4.2,
+            # Non-service future attr that won't parse (scalar):
+            "forecast_summary": 5.0,
+        }),
+        future_attribute="forecast_summary",
+        future_value_key="uv_index",
+    )
+    assert out["status"] == "partial"
+    assert "last=None" not in out["message"]
+    assert "uv_index" in out["message"]
+
+
+def test_weather_service_legacy_attribute_still_parses():
+    """Non-service future attributes on a weather entity (e.g. the
+    legacy ``forecast`` attribute Solcast/custom integrations still
+    expose) must continue to be parsed from state — the service
+    short-circuit only applies to {hourly, daily, twice_daily}."""
+    out = classify_covariate_state(
+        entity_id="weather.met_office_balsham",
+        state_obj=_state("partlycloudy", attrs={
+            "temperature": 14.5,
+            "forecast": [
+                {"datetime": "2026-05-19T00:00:00", "temperature": 14.5},
+                {"datetime": "2026-05-19T01:00:00", "temperature": 13.8},
+            ],
+        }),
+        future_attribute="forecast",
+        future_value_key="temperature",
+    )
+    assert out["ok"] is True
+    assert out["status"] == "ok"
+    assert out["attribute_preview"] == 14.5
