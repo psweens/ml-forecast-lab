@@ -408,6 +408,13 @@ def classify_covariate_state(
       named attribute exists numerically on the state object → **ok**
       (v2.38.4 attribute-history path will handle the lagged side).
     * State categorical, ``future_attribute`` missing or broken → **broken**.
+    * ``weather.*`` entity with ``future_attribute`` in {hourly, daily,
+      twice_daily} → the resolver fetches via the
+      ``weather.get_forecasts`` SERVICE (HA 2023.9+, see
+      covariates.py:230), NOT via state attributes. The state-only
+      fetch this validator does can't probe that path, so we treat
+      it as "expected to work" rather than false-flagging it as
+      partial / broken on a missing state attribute.
 
     Return shape::
 
@@ -429,9 +436,21 @@ def classify_covariate_state(
     state_value = state_to_float(raw_state)
     state_is_numeric = state_value is not None
 
+    # HA 2023.9+ moved weather forecasts out of state attributes and
+    # into the weather.get_forecasts service call. The resolver short-
+    # circuits to that service when future_attribute is one of the
+    # service types, so we can't (and shouldn't) try to parse it from
+    # the state we just fetched — there's nothing there to parse.
+    WEATHER_SERVICE_TYPES = {"hourly", "daily", "twice_daily"}
+    is_weather_service_future = (
+        isinstance(entity_id, str)
+        and entity_id.startswith("weather.")
+        and future_attribute in WEATHER_SERVICE_TYPES
+    )
+
     attribute_preview = None
     attribute_parsed_ok = None
-    if future_attribute:
+    if future_attribute and not is_weather_service_future:
         attr_raw = attrs.get(future_attribute)
         if attr_raw is None:
             attribute_parsed_ok = False
@@ -451,7 +470,8 @@ def classify_covariate_state(
 
     if (not state_is_numeric
             and not weather_attr_path_ok
-            and attribute_parsed_ok is not True):
+            and attribute_parsed_ok is not True
+            and not is_weather_service_future):
         return {
             "ok": False, "status": "broken",
             "state_value": None, "last_changed": last_changed,
@@ -463,12 +483,25 @@ def classify_covariate_state(
         }
 
     if future_attribute and attribute_parsed_ok is False:
+        # Describe the actual lagged-side source so the message isn't
+        # misleading. ``last=None`` for a categorical weather state was
+        # confusing when the resolver pulls lagged history from the
+        # weather-attr-history path instead.
+        if state_is_numeric:
+            lagged_desc = f"last={state_value}"
+        elif weather_attr_path_ok:
+            lagged_desc = (
+                f"via attribute '{future_value_key}'"
+                f" (current={attrs[future_value_key]})"
+            )
+        else:
+            lagged_desc = "no lagged source"
         return {
             "ok": True, "status": "partial",
             "state_value": state_value,
             "last_changed": last_changed,
             "message": (
-                f"Lagged side ok (last={state_value}) but future "
+                f"Lagged side ok ({lagged_desc}) but future "
                 f"attribute '{future_attribute}' didn't parse "
                 "— check key name or value_key."
             ),
@@ -482,6 +515,11 @@ def classify_covariate_state(
         bits.append(f"{future_value_key}={attrs[future_value_key]}")
     if attribute_parsed_ok:
         bits.append(f"future attr parses (first={attribute_preview})")
+    elif is_weather_service_future:
+        bits.append(
+            f"future via weather.get_forecasts({future_attribute})"
+            " — not directly probed"
+        )
     return {
         "ok": True, "status": "ok",
         "state_value": state_value,
