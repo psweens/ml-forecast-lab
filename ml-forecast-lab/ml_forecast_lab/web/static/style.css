@@ -542,6 +542,23 @@ select.setting-input, select.form-input { cursor: pointer; }
     color: var(--accent-secondary); font-size: 0.85rem; flex: 1; min-width: 180px;
 }
 .cov-meta { color: var(--text-secondary); font-size: 0.8rem; }
+/* Inline validation message — pushed onto a new line within the flex row
+   so the explanation sits directly under the entity it describes. Hidden
+   for ok rows; colour-coded for partial / broken. Replaces the
+   invisible-on-mobile native title= tooltip. */
+.cov-validate-msg {
+    flex-basis: 100%; margin: 0.1rem 0 0.1rem 0.25rem;
+    font-size: 0.75rem; font-style: italic; line-height: 1.3;
+}
+.cov-validate-msg-partial { color: #d4a017; }
+.cov-validate-msg-broken { color: #d65555; }
+.cov-warn-summary {
+    margin-left: 0.5rem; padding: 0.1rem 0.45rem;
+    border-radius: 4px; font-size: 0.7rem; font-weight: 600;
+    vertical-align: middle;
+}
+.cov-warn-summary-warn { color: #b9821a; background: #b9821a22; }
+.cov-warn-summary-error { color: #b03030; background: #b0303022; }
 .cov-remove-btn {
     background: none; border: none; color: var(--text-secondary);
     cursor: pointer; font-size: 1.2rem; padding: 0.2rem 0.4rem;
