@@ -418,6 +418,35 @@ class TestMeanRankScoring:
         assert ranks == {}
         assert sorted(dnc) == ["a", "b"]
 
+    def test_daily_dnc_separated_from_interval_dnc_in_result(self):
+        """v2.39.3 visualisation fix: a model ranked in the per-interval
+        leaderboard but excluded from the daily ranking (e.g. all daily
+        folds skipped) must land in result.did_not_complete_DAILY, NOT
+        result.did_not_complete — otherwise the UI shows a per-interval-
+        ranked model under the main 'Did not complete' section, which is
+        contradictory."""
+        cfg = _make_experiment_cfg(cv_folds=4)
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        idx = pd.date_range("2024-01-01", periods=240, freq="30min")
+        rng = np.random.default_rng(11)
+        df = pd.DataFrame({
+            "feature_1": rng.random(240),
+            "target": rng.random(240),
+        }, index=idx)
+
+        from ml_forecast_lab.models.lightgbm_backend import LightGBMModel
+        result = runner.run_benchmark(df, {"lightgbm": LightGBMModel()})
+
+        # Whatever the daily-rank outcome, the two DNC lists must be
+        # disjoint and a model present in did_not_complete_daily must NOT
+        # also be in did_not_complete (that's the contradiction we fixed).
+        assert hasattr(result, "did_not_complete_daily")
+        overlap = set(result.did_not_complete) & set(result.did_not_complete_daily)
+        assert not overlap, (
+            f"daily-DNC and interval-DNC lists must be disjoint; overlap={overlap}"
+        )
+
     def test_bootstrap_ci_is_paired_across_models(self):
         """v2.39.3 bug 5: bootstrap iterations must apply the SAME resampled
         fold IDs to every model, not draw independent IDs per model. With

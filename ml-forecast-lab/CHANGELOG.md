@@ -138,12 +138,40 @@ have no way to notice from the UI.
   20-covariate experiment. Lazy module-level session bound to the
   running loop, reused across requests.
 
-Tests: 13 new test cases covering the new contracts (SeasonalNaive
+**Visualisation follow-ups (verifying the rankings/results render
+correctly):**
+
+- **All-skipped / inf-mean models no longer get fabricated integer
+  ranks.** A model that passed the completeness check but produced no
+  ranked folds (every fold ``__skipped__`` or all-inf) was still
+  assigned a 1/2/3 rank in dict-insertion order. Now demoted to DNC for
+  that metric_source so the leaderboard doesn't show meaningless ranks.
+
+- **Daily DNCs surfaced separately from interval DNCs.** A model ranked
+  in the per-interval leaderboard but excluded from the daily ranking
+  (fold span <2 distinct dates) was being added to the same
+  ``did_not_complete`` list — so it appeared BOTH with a rank in the
+  main table AND under "Did not complete". Now there's a separate
+  ``did_not_complete_daily`` field rendered under the Daily Cumulative
+  Accuracy table ("No daily rank: …") with its own explanation.
+
+- **Holdout residual chart no longer paints a spurious spike at the
+  NaN-padded tail.** The residual map guarded only the actual side;
+  with the v2.39.3 prediction NaN-padding, ``actual - null`` coerces to
+  ``actual`` in JS. Now guards both sides → the residual line gaps
+  where predictions stop.
+
+- **Cumulative holdout view gaps the prediction line at the tail**
+  instead of flat-lining as if the model predicted 0 there
+  (``cumsum`` now propagates ``null`` rather than treating it as 0).
+
+Tests: 16 new test cases covering the new contracts (SeasonalNaive
 cache rejection + extended-window pw=0 honoured, validator
 string-numerics + partial-on-empty-lagged, paired bootstrap rank-sum
-invariant, daily DNC sentinel handling, ``remove_experiment_covariate``
+invariant, daily DNC sentinel handling, all-skipped → DNC, n_folds=0 →
+empty, daily-DNC list separation, ``remove_experiment_covariate``
 disambiguation, ``worst_bucket`` selection by max|deviation| at two
-different nominal levels). Full unit suite (266 tests) passes.
+different nominal levels). Full unit suite (269 tests) passes.
 
 ## 2.39.2
 

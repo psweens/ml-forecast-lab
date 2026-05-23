@@ -134,6 +134,11 @@ class BenchmarkResult:
     # surfaces; the UI shows them in a "did not complete" list rather
     # than at the bottom of the leaderboard.
     did_not_complete: List[str] = field(default_factory=list)
+    # Models excluded from the daily-cumulative ranking specifically
+    # (ranked in the per-interval leaderboard, but a fold's daily totals
+    # weren't computable). Surfaced under the Daily table, not the main
+    # leaderboard's DNC section.
+    did_not_complete_daily: List[str] = field(default_factory=list)
 
     def to_dataframe(self) -> pd.DataFrame:
         """
@@ -856,12 +861,14 @@ class BenchmarkRunner:
                 result.model_results[name].metrics['mean_rank_daily_high'] = ci_d[1]
 
         # Primary ranking still drives Promote / Tuning / sensor publishing.
-        # did_not_complete unions interval + daily failures so the UI can
-        # surface ALL models that couldn't be ranked anywhere (pre-v2.39.3
-        # the daily list was discarded).
+        # Interval DNCs go in did_not_complete (main leaderboard); daily-only
+        # DNCs go in did_not_complete_daily (surfaced under the Daily table)
+        # so a per-interval-ranked model isn't shown as not-completed.
+        # Pre-v2.39.3 the daily list was discarded entirely.
         result.rankings = interval_ranks
         result.daily_rankings = daily_ranks
-        result.did_not_complete = sorted(set(dnc_interval) | set(dnc_daily))
+        result.did_not_complete = dnc_interval
+        result.did_not_complete_daily = sorted(set(dnc_daily) - set(dnc_interval))
         sorted_models = sorted(interval_mean_ranks.items(), key=lambda x: x[1])
         mean_ranks = interval_mean_ranks  # for downstream logging
 

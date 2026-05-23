@@ -2183,6 +2183,7 @@ class MLForecastLabApp:
         naive_was_enabled: Optional[bool] = None,
         drift: Optional[dict] = None,
         did_not_complete: Optional[List[str]] = None,
+        did_not_complete_daily: Optional[List[str]] = None,
     ):
         """
         Update web app state with current benchmark progress.
@@ -2391,6 +2392,7 @@ class MLForecastLabApp:
             naive_baseline_was_enabled=naive_was_enabled,
             drift=drift,
             did_not_complete=list(did_not_complete or []),
+            did_not_complete_daily=list(did_not_complete_daily or []),
         )
 
         self.web_app.state.appstate.benchmark_results[exp_cfg.name] = web_result
@@ -2820,10 +2822,13 @@ class MLForecastLabApp:
         ) = runner._compute_composite_ranks(
             completed_models, metric_source='daily_fold_metrics',
         )
-        # Surface daily-only DNCs alongside interval ones so the UI's
-        # 'Did not complete' section can explain why a model has '—' in
-        # the Daily Rank column. Pre-v2.39.3 _dnc_daily was discarded.
-        dnc_combined = sorted(set(dnc_interval) | set(dnc_daily))
+        # Daily-only DNCs (models ranked in the per-interval table but
+        # excluded from the daily ranking — e.g. fold span <2 distinct
+        # dates) are surfaced under the Daily table specifically, NOT
+        # the main 'Did not complete' section, so a per-interval-ranked
+        # model isn't confusingly listed as not having completed.
+        # Pre-v2.39.3 _dnc_daily was discarded entirely.
+        dnc_daily_only = sorted(set(dnc_daily) - set(dnc_interval))
         for name in completed_models:
             completed_models[name].metrics['mean_rank'] = (
                 interval_mean_ranks.get(name, float('inf'))
@@ -2879,17 +2884,12 @@ class MLForecastLabApp:
                 f"{runner.production_metric}={mr.metrics.get(runner.production_metric, np.nan):.4f}, "
                 f"mean_rank={mean_ranks[name]:.2f}{ci_str}{daily_str}"
             )
-        if dnc_combined:
-            interval_only = sorted(set(dnc_interval) - set(dnc_daily))
-            daily_only = sorted(set(dnc_daily) - set(dnc_interval))
-            both = sorted(set(dnc_interval) & set(dnc_daily))
+        if dnc_interval or dnc_daily_only:
             parts = []
-            if both:
-                parts.append(f"both: {', '.join(both)}")
-            if interval_only:
-                parts.append(f"interval-only: {', '.join(interval_only)}")
-            if daily_only:
-                parts.append(f"daily-only: {', '.join(daily_only)}")
+            if dnc_interval:
+                parts.append(f"interval: {', '.join(sorted(dnc_interval))}")
+            if dnc_daily_only:
+                parts.append(f"daily-only: {', '.join(dnc_daily_only)}")
             logger.info(
                 "  Did not complete (excluded from corresponding "
                 "rankings): " + "; ".join(parts)
@@ -2904,7 +2904,8 @@ class MLForecastLabApp:
                 daily_rankings=daily_rankings,
                 naive_was_enabled=_naive_was_enabled,
                 drift=drift_stats,
-                did_not_complete=dnc_combined,
+                did_not_complete=dnc_interval,
+                did_not_complete_daily=dnc_daily_only,
             )
 
         # Build a BenchmarkResult-compatible object for downstream use
@@ -2918,7 +2919,8 @@ class MLForecastLabApp:
             metric_used=runner.production_metric,
             cv_strategy=runner.cv_strategy,
             n_folds=runner.cv_folds,
-            did_not_complete=dnc_combined,
+            did_not_complete=dnc_interval,
+            did_not_complete_daily=dnc_daily_only,
         )
 
         # 7. Generate holdout predictions from each model for visualisation

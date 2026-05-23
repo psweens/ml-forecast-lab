@@ -160,6 +160,14 @@ class BenchmarkResult(BaseModel):
     # leaderboard with a fabricated last-place rank that inflates
     # other models' apparent dominance.
     did_not_complete: List[str] = []
+    # Names of models excluded from the DAILY-cumulative ranking
+    # specifically — typically because the test span on some fold
+    # covered <2 distinct dates so daily totals weren't computable.
+    # These models ARE ranked in the per-interval leaderboard; this
+    # list is rendered under the Daily Cumulative Accuracy table only,
+    # so a per-interval-ranked model isn't confusingly shown as
+    # "did not complete".
+    did_not_complete_daily: List[str] = []
 
 
 class ExperimentStatus(BaseModel):
