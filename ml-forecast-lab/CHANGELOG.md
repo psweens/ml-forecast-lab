@@ -1,5 +1,45 @@
 # Changelog
 
+## 2.39.4
+
+Incremental covariate-history caching — cuts the per-forecast-cycle HA
+load for covariate-heavy experiments.
+
+The target series was already cached incrementally
+(`main._fetch_and_preprocess`): each cycle reads the SQLite cache, finds
+the latest stored timestamp, and fetches only the delta from HA. Covariates
+were not — every forecast cycle re-fetched the **full `days_history`
+window** for **every** covariate (`CovariateResolver.fetch_history` called
+HA directly with no cache). On a 30-min cycle with a 30-day history that's
+the same ~30 days of each covariate re-pulled from the recorder every 30
+minutes when only one new interval actually arrived.
+
+`CovariateResolver` now takes an optional `history_db` and caches raw
+`(ds, value)` observations per `(entity, attribute_key)`, fetching only the
+delta since the last cached observation — the same pattern the target uses.
+Keyed by `attribute_key` so two covariates on one weather entity reading
+different attributes (`temperature` vs `cloud_coverage`) cache independently;
+namespaced under `cov_` so it never collides with a target table. Any cache
+error degrades to the original full-window fetch, so caching can't break a
+forecast cycle. When no `history_db` is injected (unit tests, embedded use)
+behaviour is unchanged.
+
+**Measured effect** (synthetic benchmark, real `CovariateResolver` +
+`HistoryDB`): rows fetched from HA per cycle drop **~46×** (e.g. 43,205 → 934
+for 5 weather covariates over 30 days at a 5-min recorder cadence). That is
+the dominant per-cycle cost on a Pi-class host — the recorder query + JSON
+serialization + network transfer all scale with row count. Client-side
+parse/resample CPU is roughly unchanged (the merged window is still
+resampled in full each cycle for correctness), so the end-to-end win is
+concentrated where the HA round-trip is expensive: covariate-heavy
+experiments on slow hosts. Experiments with no covariates are unaffected
+(the target was already cached).
+
+Tests: 5 new cases in `test_covariate_cache.py` (delta-only second-cycle
+fetch, resample equivalence vs full-window fetch, per-attribute cache keys,
+graceful degradation on cache error, unchanged behaviour without a
+`history_db`). Full unit suite (274 tests) passes.
+
 ## 2.39.3
 
 Code-review pass over everything since 2.38.0. 15 correctness fixes and

@@ -570,8 +570,10 @@ class MLForecastLabApp:
             # Initialise CovariateResolver
             from ml_forecast_lab.covariates import CovariateResolver
 
-            self.covariate_resolver = CovariateResolver(self.ha_interface)
-            logger.info("CovariateResolver initialised")
+            self.covariate_resolver = CovariateResolver(
+                self.ha_interface, history_db=self.history_db,
+            )
+            logger.info("CovariateResolver initialised (covariate history cached)")
 
             # Initialise ModelRegistry with all available backends
             from ml_forecast_lab.models.registry import ModelRegistry
