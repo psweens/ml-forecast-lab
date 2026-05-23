@@ -6,7 +6,8 @@ with intelligent binary detection and adaptive resampling strategies.
 """
 
 import logging
-from datetime import datetime
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import numpy as np
@@ -24,6 +25,8 @@ class CovariateResolver:
         self,
         iface: HAInterface,
         covariate_configs: Optional[list[dict]] = None,
+        history_db: Optional[Any] = None,
+        cache_max_age_days: int = 365,
     ):
         """
         Initialise covariate resolver.
@@ -35,9 +38,22 @@ class CovariateResolver:
                 - name: Covariate name (optional, defaults to entity_id)
                 - binary: Explicit binary flag (optional, overrides auto-detection)
                 - constant_value: Value to use for future (optional, for non-forecasted covariates)
+            history_db: Optional ``HistoryDB``. When supplied, covariate
+                history is cached in SQLite and only the delta since the
+                last cached observation is fetched from HA on each call —
+                mirroring the incremental caching the target series
+                already uses. Every forecast cycle re-fetches the full
+                ``days_history`` window per covariate otherwise; on a
+                covariate-heavy experiment that is the dominant per-cycle
+                HA recorder + network cost. When ``None`` (e.g. unit
+                tests), behaviour is the original full-window fetch.
+            cache_max_age_days: Rolling-window bound for the per-covariate
+                cache tables, pruned after each fetch.
         """
         self.iface = iface
         self.covariate_configs = covariate_configs or []
+        self.history_db = history_db
+        self.cache_max_age_days = cache_max_age_days
         logger.info(f"CovariateResolver initialised with {len(self.covariate_configs)} covariates")
 
     def _detect_binary(self, series: pd.Series) -> bool:
@@ -143,11 +159,9 @@ class CovariateResolver:
         )
 
         try:
-            raw = await self.iface.get_history(
-                entity_id, start, end,
-                include_attributes=attribute_key is not None,
+            df = await self._fetch_raw_history(
+                entity_id, start, end, attribute_key,
             )
-            df = normalise_history(raw, attribute_key=attribute_key)
 
             if df.empty:
                 logger.warning(f"No history for {entity_id}")
@@ -174,6 +188,118 @@ class CovariateResolver:
         except Exception as e:
             logger.error(f"Error fetching covariate {entity_id}: {e}", exc_info=True)
             return pd.Series(dtype=float, name=name)
+
+    def _cov_cache_table(
+        self, entity_id: str, attribute_key: Optional[str],
+    ) -> str:
+        """SQLite cache-table name for a covariate's raw observations.
+
+        Namespaced under ``cov_`` so it never collides with a target
+        series cached under ``safe_table_name(entity_id)``, and keyed by
+        ``attribute_key`` so two covariates on the same entity reading
+        different attributes (e.g. ``temperature`` vs ``cloud_coverage``)
+        cache independently.
+        """
+        raw_key = f"cov_{entity_id}"
+        if attribute_key:
+            raw_key = f"{raw_key}__{attribute_key}"
+        return self.history_db.safe_table_name(raw_key)
+
+    async def _fetch_raw_history(
+        self,
+        entity_id: str,
+        start: datetime,
+        end: datetime,
+        attribute_key: Optional[str],
+    ) -> pd.DataFrame:
+        """Return raw ``[ds, value]`` observations in ``[start, end]``.
+
+        When a ``history_db`` is configured this reads the cached rows,
+        fetches only the delta newer than the latest cached observation
+        from HA, persists the new rows, and returns the merged frame —
+        the same incremental pattern the target series uses in
+        ``main._fetch_and_preprocess``. Resampling happens in the caller
+        on the merged raw rows, so the result is identical to a
+        full-window fetch (modulo recorder restatements, which match the
+        target's ``INSERT OR IGNORE`` semantics). Any cache error
+        degrades to a full-window fetch so caching can never break a
+        forecast cycle.
+        """
+        include_attrs = attribute_key is not None
+
+        # No DB → original full-window behaviour.
+        if self.history_db is None:
+            raw = await self.iface.get_history(
+                entity_id, start, end, include_attributes=include_attrs,
+            )
+            return normalise_history(raw, attribute_key=attribute_key)
+
+        start_naive = pd.Timestamp(start)
+        if start_naive.tzinfo is not None:
+            start_naive = start_naive.tz_localize(None)
+
+        # --- Read cache (rows within the requested window) ---
+        cached = pd.DataFrame(columns=["ds", "value"])
+        table: Optional[str] = None
+        try:
+            table = self._cov_cache_table(entity_id, attribute_key)
+            c = self.history_db.get_history(table)  # columns [ds, y]
+            if not c.empty:
+                c = c.rename(columns={"y": "value"})
+                c = c[c["ds"] >= start_naive]
+                if len(c) > 0:
+                    cached = c[["ds", "value"]]
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug(f"Covariate cache read failed for {entity_id}: {e}")
+            cached = pd.DataFrame(columns=["ds", "value"])
+
+        # --- Determine the delta fetch start ---
+        if len(cached) > 0:
+            last_cached = cached["ds"].max()
+            fetch_start = pd.Timestamp(last_cached)
+            if fetch_start.tzinfo is None:
+                fetch_start = fetch_start.tz_localize("UTC")
+            fetch_start = fetch_start.to_pydatetime()
+        else:
+            fetch_start = start
+
+        raw = await self.iface.get_history(
+            entity_id, fetch_start, end, include_attributes=include_attrs,
+        )
+        new_df = normalise_history(raw, attribute_key=attribute_key)
+        if (
+            not new_df.empty
+            and hasattr(new_df["ds"].dtype, "tz")
+            and new_df["ds"].dt.tz is not None
+        ):
+            new_df["ds"] = new_df["ds"].dt.tz_localize(None)
+
+        # --- Persist new rows + prune the rolling window ---
+        if table is not None:
+            try:
+                if not new_df.empty:
+                    self.history_db.store_history(table, new_df)
+                oldest = datetime.now(timezone.utc) - timedelta(
+                    days=self.cache_max_age_days,
+                )
+                self.history_db.cleanup(table, oldest)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug(f"Covariate cache write failed for {entity_id}: {e}")
+
+        # --- Merge cached + delta ---
+        if len(cached) > 0 and not new_df.empty:
+            merged = pd.concat(
+                [cached, new_df[["ds", "value"]]], ignore_index=True,
+            )
+            merged = (
+                merged.drop_duplicates(subset=["ds"], keep="last")
+                .sort_values("ds")
+                .reset_index(drop=True)
+            )
+            return merged
+        if len(cached) > 0:
+            return cached.sort_values("ds").reset_index(drop=True)
+        return new_df
 
     async def fetch_future(
         self,

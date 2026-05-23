@@ -1,0 +1,190 @@
+"""Incremental covariate-history caching (v2.39.4).
+
+The target series is cached incrementally in main._fetch_and_preprocess;
+covariates were re-fetched for the full days_history window every cycle.
+CovariateResolver now caches raw observations in SQLite and fetches only
+the delta when a history_db is supplied. These tests lock in:
+
+  - delta-only fetch on the second cycle (the speed win),
+  - resample equivalence vs a full-window fetch (correctness),
+  - per-(entity, attribute) cache keys,
+  - graceful degradation when the cache misbehaves,
+  - unchanged full-fetch behaviour when no history_db is injected.
+"""
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from ml_forecast_lab.covariates import CovariateResolver
+from ml_forecast_lab.db import HistoryDB
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+class _RecordingIface:
+    """Mock HAInterface whose get_history serves synthetic rows from a
+    fixed full series, sliced to the requested [start, end] window, and
+    records every call's window so tests can assert delta behaviour."""
+
+    def __init__(self, full_rows):
+        self.full_rows = full_rows
+        self.calls = []  # list of (start, end, include_attributes)
+
+    async def get_history(self, entity_id, start, end, include_attributes=False):
+        self.calls.append((pd.Timestamp(start), pd.Timestamp(end), include_attributes))
+        s = pd.Timestamp(start)
+        e = pd.Timestamp(end)
+        if s.tzinfo is None:
+            s = s.tz_localize("UTC")
+        if e.tzinfo is None:
+            e = e.tz_localize("UTC")
+        out = []
+        for r in self.full_rows:
+            ts = pd.Timestamp(r["last_changed"])
+            if s <= ts <= e:
+                out.append(r)
+        return out
+
+
+def _numeric_rows(start, end, cadence_min=15):
+    ts = pd.date_range(start, end, freq=f"{cadence_min}min", tz="UTC")
+    rng = np.random.default_rng(0)
+    return [
+        {"last_changed": t.isoformat(), "state": f"{rng.random() * 100:.3f}"}
+        for t in ts
+    ]
+
+
+@pytest.fixture
+def db(tmp_db):
+    return HistoryDB(tmp_db)
+
+
+def test_second_cycle_fetches_only_delta(db):
+    """The win: with a history_db, cycle 2 fetches from the last cached
+    observation, not the full days_history window."""
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc)
+    start = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    rows = _numeric_rows(start, now + pd.Timedelta(hours=1))
+    iface = _RecordingIface(rows)
+    resolver = CovariateResolver(iface, history_db=db)
+    cov = {"entity_id": "sensor.x", "name": "x"}
+
+    # Cycle 1: cold cache → full-window fetch.
+    s1 = _run(resolver.fetch_history(cov, start, now, "30min"))
+    assert not s1.empty
+    first_window = iface.calls[0][1] - iface.calls[0][0]
+    assert first_window >= pd.Timedelta(days=13)  # ~full days_history
+
+    # Cycle 2, 30 minutes later: should fetch only the recent delta.
+    now2 = now + pd.Timedelta(minutes=30)
+    s2 = _run(resolver.fetch_history(cov, start, now2, "30min"))
+    assert not s2.empty
+    second_window = iface.calls[1][1] - iface.calls[1][0]
+    assert second_window <= pd.Timedelta(hours=2), (
+        f"cycle 2 should fetch a small delta, not the full window; "
+        f"got {second_window}"
+    )
+
+
+def test_cached_result_matches_full_fetch(db):
+    """Correctness: the resampled series built from cache+delta must be
+    identical to one built from a single full-window fetch."""
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc)
+    start = datetime(2026, 5, 8, tzinfo=timezone.utc)
+    rows = _numeric_rows(start, now + pd.Timedelta(hours=1))
+
+    # Cached resolver: two cycles (cold, then delta).
+    cached_resolver = CovariateResolver(_RecordingIface(rows), history_db=db)
+    cov = {"entity_id": "sensor.x", "name": "x"}
+    mid = now - pd.Timedelta(hours=6)
+    _run(cached_resolver.fetch_history(cov, start, mid, "30min"))
+    cached_series = _run(cached_resolver.fetch_history(cov, start, now, "30min"))
+
+    # Reference resolver: NO db → single full-window fetch at `now`.
+    ref_resolver = CovariateResolver(_RecordingIface(rows), history_db=None)
+    ref_series = _run(ref_resolver.fetch_history(cov, start, now, "30min"))
+
+    merged = pd.concat([cached_series, ref_series], axis=1).dropna()
+    assert len(merged) > 0
+    np.testing.assert_allclose(
+        merged.iloc[:, 0].values, merged.iloc[:, 1].values, rtol=1e-9,
+        err_msg="cache+delta resample diverged from full-window resample",
+    )
+
+
+def test_distinct_attribute_keys_use_separate_caches(db):
+    """Two covariates on the same weather entity reading different
+    attributes must not share a cache table (else one would shadow the
+    other's values)."""
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc)
+    start = datetime(2026, 5, 14, tzinfo=timezone.utc)
+    ts = pd.date_range(start, now, freq="15min", tz="UTC")
+    rows = [
+        {"last_changed": t.isoformat(), "state": "partlycloudy",
+         "attributes": {"temperature": 10.0 + i, "cloud_coverage": 90.0 - i}}
+        for i, t in enumerate(ts)
+    ]
+    resolver = CovariateResolver(_RecordingIface(rows), history_db=db)
+
+    temp = _run(resolver.fetch_history(
+        {"entity_id": "weather.x", "name": "t", "future_value_key": "temperature"},
+        start, now, "30min"))
+    cloud = _run(resolver.fetch_history(
+        {"entity_id": "weather.x", "name": "c", "future_value_key": "cloud_coverage"},
+        start, now, "30min"))
+
+    # Distinct tables, distinct value ranges (temp ~10-100, cloud ~0-90).
+    t_table = resolver._cov_cache_table("weather.x", "temperature")
+    c_table = resolver._cov_cache_table("weather.x", "cloud_coverage")
+    assert t_table != c_table
+    assert temp.mean() != pytest.approx(cloud.mean())
+
+
+def test_cache_error_degrades_to_full_fetch():
+    """A misbehaving history_db must not break the fetch — it falls back
+    to the full-window path and still returns data."""
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc)
+    start = datetime(2026, 5, 14, tzinfo=timezone.utc)
+    rows = _numeric_rows(start, now)
+
+    class _BrokenDB:
+        def safe_table_name(self, e):
+            return "cov_x"
+
+        def get_history(self, t):
+            raise RuntimeError("db down")
+
+        def store_history(self, t, df):
+            raise RuntimeError("db down")
+
+        def cleanup(self, t, oldest):
+            raise RuntimeError("db down")
+
+    resolver = CovariateResolver(_RecordingIface(rows), history_db=_BrokenDB())
+    s = _run(resolver.fetch_history({"entity_id": "sensor.x", "name": "x"}, start, now, "30min"))
+    assert not s.empty, "cache failure must degrade to a working full fetch"
+
+
+def test_no_history_db_keeps_full_fetch_each_call():
+    """Back-compat: without a history_db every call fetches the full
+    window (the pre-v2.39.4 behaviour relied on by existing callers)."""
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc)
+    start = datetime(2026, 5, 8, tzinfo=timezone.utc)
+    rows = _numeric_rows(start, now)
+    iface = _RecordingIface(rows)
+    resolver = CovariateResolver(iface, history_db=None)
+    cov = {"entity_id": "sensor.x", "name": "x"}
+
+    _run(resolver.fetch_history(cov, start, now, "30min"))
+    _run(resolver.fetch_history(cov, start, now, "30min"))
+    # Both calls span the full window — no delta narrowing without a db.
+    for s, e, _ in iface.calls:
+        assert (e - s) >= pd.Timedelta(days=6)
