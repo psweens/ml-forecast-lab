@@ -140,3 +140,88 @@ def test_extended_window_recursion_propagates_real_values_not_zeros():
     # uses ``offset = h + 1 - period``, not ``h - period``), so
     # ``preds[period+k] == preds[k+1]`` for k in [0, period-1).
     np.testing.assert_array_equal(preds[period:2 * period - 1], preds[1:period])
+
+
+def test_load_rejects_stale_pickle_without_past_window_size(tmp_path):
+    """v2.39.3 bug 1: pickles written by versions <2.38.6 don't carry
+    ``past_window_size`` — silently loading them with the default None
+    re-introduces the zero-prediction regression on extended-window
+    inference. ``load()`` must reject the stale cache so the
+    orchestrator forces a re-fit."""
+    import pickle
+    from pathlib import Path
+
+    cache = Path(tmp_path) / "stale_seasonal_naive.pkl"
+    # Mimic a pre-v2.38.6 pickle: the key isn't in the dict at all.
+    stale_payload = {
+        "params": {
+            "seasonal_period": 48,
+            "target_channel": 0,
+            "sequence_length": None,
+        },
+        "train_tail": np.zeros(96, dtype=np.float32),
+        "n_horizons": 48,
+    }
+    with open(cache, "wb") as f:
+        pickle.dump(stale_payload, f)
+
+    model = SeasonalNaiveModel(seasonal_period=48)
+    raised = False
+    try:
+        model.load(str(cache))
+    except IOError as exc:
+        raised = True
+        assert "past_window_size" in str(exc)
+    assert raised, (
+        "load() should reject pickles missing the past_window_size field "
+        "to prevent the silent zero-prediction regression"
+    )
+
+
+def test_load_accepts_modern_pickle_with_past_window_size(tmp_path):
+    """Round-trip: a pickle written by save() (always includes the
+    field, even when None) loads successfully — only the legacy 'key
+    absent' case is rejected."""
+    cache = tmp_path / "modern_seasonal_naive.pkl"
+    fitted = SeasonalNaiveModel(seasonal_period=48)
+    fitted.fit(
+        np.zeros((100, 48), dtype=np.float32),
+        np.linspace(0.0, 1.0, 100, dtype=np.float32),
+    )
+    fitted.save(str(cache))
+
+    loaded = SeasonalNaiveModel(seasonal_period=48)
+    loaded.load(str(cache))
+    assert loaded.is_fitted
+    # past_window_size key was written; load accepted it (even though
+    # value is None because extended_window wasn't set on fit).
+    assert loaded._past_window_size is None
+
+
+def test_fit_with_explicit_zero_past_window_size_is_honoured():
+    """v2.39.3 plausible C1: ``past_window_size=0`` should be honoured
+    (degenerate but the caller's explicit intent) rather than silently
+    coerced to None via the old truthiness check. The fallback at h
+    where no real-past slot exists must not wrap to a future-placeholder
+    zero (also v2.39.3 plausible C3)."""
+    n_samples = 80
+    seq_len = 48
+    X = np.zeros((n_samples, seq_len, 2), dtype=np.float32)
+    # Make the target column distinguishable from zeros so we can see
+    # whether the fallback wrapped to placeholders.
+    X[:, :, 0] = 7.0  # constant past
+    y = np.full(n_samples, 7.0, dtype=np.float32)
+    model = SeasonalNaiveModel(seasonal_period=48, sequence_length=seq_len)
+    model.fit(
+        X.reshape(n_samples, -1), y,
+        extended_window=True, past_window_size=0,
+    )
+    assert model._past_window_size == 0, (
+        "past_window_size=0 should be honoured, not coerced to None"
+    )
+    # The new last-resort branch returns 0.0 when past_len == 0 (no real
+    # past), NOT the placeholder zone — but here target_series is all
+    # 7.0 so there are no placeholders to confuse with; the check is
+    # that we don't raise IndexError.
+    preds = model.predict_sequence(X[:1])
+    assert preds.shape == (1, 1)

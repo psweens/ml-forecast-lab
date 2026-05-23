@@ -922,6 +922,13 @@
                 {% endfor %}
             </tbody>
         </table>
+        {% if benchmark_result and benchmark_result.did_not_complete_daily %}
+        <div style="margin-top:0.75rem;font-size:0.85rem;color:var(--text-muted);">
+            <strong>No daily rank:</strong>
+            {{ benchmark_result.did_not_complete_daily | sort | join(", ") }}
+            <span class="info-tip">?<span class="tip-text">These models are ranked in the per-interval table above but couldn't be ranked on daily totals — typically a CV fold's test span covered fewer than 2 distinct dates, so a per-day sum wasn't computable. They are NOT failures; the per-interval rank still drives Promote / Tuning / live forecasting.</span></span>
+        </div>
+        {% endif %}
     </div>
     {% endif %}
 
@@ -2816,7 +2823,14 @@ window.showTab = function(el) {
         for (var i = 0; i < arr.length; i++) {
             var thisDate = timestamps[i].split('T')[0];
             if (thisDate !== lastDate) { sum = 0; lastDate = thisDate; }
-            sum += (arr[i] !== null && arr[i] !== undefined) ? arr[i] : 0;
+            // Null entries (e.g. the holdout-neural tail where no window
+            // can be formed) break the cumulative line with a gap rather
+            // than silently flat-lining as if the model predicted 0.
+            if (arr[i] === null || arr[i] === undefined) {
+                result.push(null);
+                continue;
+            }
+            sum += arr[i];
             result.push(sum);
         }
         return result;
@@ -2856,7 +2870,15 @@ window.showTab = function(el) {
         labData.model_predictions.forEach(function(mp) {
             traces.push({
                 x: mp.timestamps,
-                y: mp.actuals.map(function(a, i) { return (a !== null && a !== undefined) ? a - mp.predictions[i] : null; }),
+                y: mp.actuals.map(function(a, i) {
+                    var p = mp.predictions[i];
+                    // Guard BOTH sides: with the v2.39.3 holdout-tail
+                    // NaN-padding, a prediction can be null while the
+                    // actual is real — `a - null` coerces to `a` in JS
+                    // and would paint a spurious residual spike.
+                    if (a === null || a === undefined || p === null || p === undefined) return null;
+                    return a - p;
+                }),
                 name: modelDisplay(mp.model_name), mode: 'lines',
                 line: { width: 1.5 }
             });

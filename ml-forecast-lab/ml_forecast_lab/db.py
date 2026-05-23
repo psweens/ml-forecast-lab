@@ -1408,6 +1408,7 @@ class HistoryDB:
         model_name: Optional[str] = None,
         model_version: Optional[str] = None,
         tz: Optional[str] = None,
+        nominal: float = 0.8,
     ) -> dict:
         """
         Compute empirical coverage of published interval forecasts.
@@ -1483,6 +1484,45 @@ class HistoryDB:
         model_filter_sql = (" AND " + " AND ".join(_clauses)) if _clauses else ""
         model_filter_param = tuple(_params)
 
+        # v2.39.3: materialise the actuals_grid aggregation ONCE into a
+        # TEMP table, then reuse it across the three subsequent queries
+        # (per-lead, overall, breakdown). Pre-v2.39.3 each query rebuilt
+        # the same WITH-clause CTE — the AVG/GROUP BY scan on the
+        # actuals table ran three times per Forecast Accuracy tab load
+        # while holding the SQLite write lock, which compounded with the
+        # production retrain pipeline.
+        try:
+            cursor.execute(
+                "DROP TABLE IF EXISTS _mlfl_actuals_grid_tmp"
+            )
+            cursor.execute(
+                f"""
+                CREATE TEMP TABLE _mlfl_actuals_grid_tmp AS
+                SELECT
+                    strftime('%Y-%m-%d %H:%M:%S',
+                        (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                        'unixepoch') AS grid_dt,
+                    AVG(value) AS value
+                FROM {actuals_table}
+                GROUP BY grid_dt
+                """,
+                (interval_sec, interval_sec),
+            )
+            cursor.execute(
+                "CREATE INDEX _mlfl_actuals_grid_tmp_idx "
+                "ON _mlfl_actuals_grid_tmp(grid_dt)"
+            )
+        except sqlite3.Error as e:
+            logger.warning(f"Failed to build temp actuals grid: {e}")
+            return {
+                "by_lead": {"lead_minutes": [], "coverage": [], "n": []},
+                "by_hour_of_day": {"hour": [], "coverage": [], "n": []},
+                "by_weekday_weekend": {"bucket": [], "coverage": [], "n": []},
+                "worst_bucket": None,
+                "overall": {},
+                "tz": tz or "UTC",
+            }
+
         # v2.34.0: per-lead coverage is computed per cohort and one
         # winner picked per bucket (most rows, ties broken by newest
         # version). Previously, when the caller's filter widened
@@ -1493,16 +1533,7 @@ class HistoryDB:
         # well calibrated, which the blended value misrepresents.
         try:
             cursor.execute(f"""
-                WITH actuals_grid AS (
-                    SELECT
-                        strftime('%Y-%m-%d %H:%M:%S',
-                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                            'unixepoch') AS grid_dt,
-                        AVG(value) AS value
-                    FROM {actuals_table}
-                    GROUP BY grid_dt
-                ),
-                per_cohort AS (
+                WITH per_cohort AS (
                     SELECT
                         CAST((fl.lead_minutes / ?) * ? AS INTEGER) AS lead_bucket,
                         fl.model_name,
@@ -1511,7 +1542,7 @@ class HistoryDB:
                                  THEN 1.0 ELSE 0.0 END) AS coverage,
                         COUNT(*) AS n
                     FROM forecast_log fl
-                    INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
+                    INNER JOIN _mlfl_actuals_grid_tmp ag ON ag.grid_dt = fl.target_dt
                     WHERE fl.experiment = ?
                       AND fl.target_dt <= ?
                       AND fl.issued_at >= ?
@@ -1532,7 +1563,6 @@ class HistoryDB:
                 WHERE rn = 1
                 ORDER BY lead_bucket
             """, (
-                interval_sec, interval_sec,
                 bucket_min, bucket_min,
                 experiment, now_str, cutoff_str,
                 *model_filter_param,
@@ -1540,6 +1570,10 @@ class HistoryDB:
             by_lead_rows = cursor.fetchall()
         except sqlite3.Error as e:
             logger.error(f"Coverage query failed: {e}", exc_info=True)
+            try:
+                cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_grid_tmp")
+            except sqlite3.Error:
+                pass
             return {
                 "by_lead": {"lead_minutes": [], "coverage": [], "n": []},
                 "by_hour_of_day": {"hour": [], "coverage": [], "n": []},
@@ -1564,16 +1598,7 @@ class HistoryDB:
         # than it really was for the current champion.
         try:
             cursor.execute(f"""
-                WITH actuals_grid AS (
-                    SELECT
-                        strftime('%Y-%m-%d %H:%M:%S',
-                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                            'unixepoch') AS grid_dt,
-                        AVG(value) AS value
-                    FROM {actuals_table}
-                    GROUP BY grid_dt
-                ),
-                per_cohort AS (
+                WITH per_cohort AS (
                     SELECT
                         fl.model_name,
                         fl.model_version,
@@ -1581,7 +1606,7 @@ class HistoryDB:
                                  THEN 1.0 ELSE 0.0 END) AS coverage,
                         COUNT(*) AS n
                     FROM forecast_log fl
-                    INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
+                    INNER JOIN _mlfl_actuals_grid_tmp ag ON ag.grid_dt = fl.target_dt
                     WHERE fl.experiment = ?
                       AND fl.target_dt <= ?
                       AND fl.issued_at >= ?
@@ -1595,7 +1620,6 @@ class HistoryDB:
                 ORDER BY n DESC, model_version DESC
                 LIMIT 1
             """, (
-                interval_sec, interval_sec,
                 experiment, now_str, cutoff_str,
                 *model_filter_param,
             ))
@@ -1628,16 +1652,7 @@ class HistoryDB:
         by_weekday_weekend = {"bucket": [], "coverage": [], "n": []}
         try:
             cursor.execute(f"""
-                WITH actuals_grid AS (
-                    SELECT
-                        strftime('%Y-%m-%d %H:%M:%S',
-                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                            'unixepoch') AS grid_dt,
-                        AVG(value) AS value
-                    FROM {actuals_table}
-                    GROUP BY grid_dt
-                ),
-                joined AS (
+                WITH joined AS (
                     SELECT
                         fl.target_dt,
                         fl.model_name,
@@ -1645,7 +1660,7 @@ class HistoryDB:
                         CASE WHEN ag.value BETWEEN fl.lower AND fl.upper
                              THEN 1.0 ELSE 0.0 END AS in_band
                     FROM forecast_log fl
-                    INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
+                    INNER JOIN _mlfl_actuals_grid_tmp ag ON ag.grid_dt = fl.target_dt
                     WHERE fl.experiment = ?
                       AND fl.target_dt <= ?
                       AND fl.issued_at >= ?
@@ -1666,7 +1681,6 @@ class HistoryDB:
                   AND (j.model_version = w.model_version
                        OR (j.model_version IS NULL AND w.model_version IS NULL))
             """, (
-                interval_sec, interval_sec,
                 experiment, now_str, cutoff_str,
                 *model_filter_param,
             ))
@@ -1715,9 +1729,8 @@ class HistoryDB:
             # Worst bucket across all three breakdowns. Minimum 20 obs
             # so a stale single-bucket outlier doesn't dominate the
             # verdict chip. "Worst" means biggest absolute deviation
-            # from the nominal level (passed in by the caller via the
-            # response's `level`; we don't know it here so we compare
-            # to 0.5 for ordering and let the caller refine).
+            # from the nominal level — passed in via the ``nominal``
+            # kwarg (default 0.8 matching the published-band default).
             MIN_N = 20
             candidates = []
             for h, cov, n in zip(by_hour_of_day["hour"], by_hour_of_day["coverage"], by_hour_of_day["n"]):
@@ -1740,13 +1753,25 @@ class HistoryDB:
                     })
             if candidates:
                 # Pick the bucket whose coverage is furthest from the
-                # nominal level. The caller already knows the level
-                # from get_conformal_quantiles, so we conservatively
-                # use 0.5 as a worst-case nominal here and the caller
-                # can recompute "worst" against the true level if
-                # needed; with no level we default to "lowest coverage
-                # given an upper-bound assumption of nominal=1.0".
-                worst_bucket = min(candidates, key=lambda c: c["coverage"])
+                # nominal level the bands were calibrated at. Caller
+                # passes ``nominal=exp_cfg.conformal_coverage`` (default
+                # 0.8); the comparison uses |dev| so over-conservative
+                # (e.g. 99% on a nominal 80%) and under-conservative
+                # (e.g. 60% on the same target) buckets are both
+                # candidates for "worst". Pre-v2.39.3 this picked
+                # min(coverage), which silently ignored over-covered
+                # buckets even when their |deviation| was larger.
+                worst_bucket = max(
+                    candidates,
+                    key=lambda c: abs(c["coverage"] - nominal),
+                )
+
+        try:
+            cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_grid_tmp")
+        except sqlite3.Error:
+            # TEMP tables are connection-scoped and dropped when the
+            # connection closes — failure to explicitly drop is harmless.
+            pass
 
         return {
             "by_lead": by_lead,

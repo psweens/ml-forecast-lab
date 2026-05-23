@@ -134,6 +134,11 @@ class BenchmarkResult:
     # surfaces; the UI shows them in a "did not complete" list rather
     # than at the bottom of the leaderboard.
     did_not_complete: List[str] = field(default_factory=list)
+    # Models excluded from the daily-cumulative ranking specifically
+    # (ranked in the per-interval leaderboard, but a fold's daily totals
+    # weren't computable). Surfaced under the Daily table, not the main
+    # leaderboard's DNC section.
+    did_not_complete_daily: List[str] = field(default_factory=list)
 
     def to_dataframe(self) -> pd.DataFrame:
         """
@@ -649,7 +654,7 @@ class BenchmarkRunner:
             # predictions are noisy (zero-mean noise cancels out in the sum).
             # Use case: hot-water / energy demand where the daily total is
             # what matters more than 30-minute precision.
-            daily_fold_m = {}
+            daily_fold_m: dict = {}
             try:
                 if len(test_timestamps) > 0 and len(train_timestamps) > 0:
                     # Align timestamp slices to the metric arrays. The neural
@@ -679,6 +684,15 @@ class BenchmarkRunner:
                             y_train=daily_train['y_train'].values,
                             season=1,
                         )
+                    else:
+                        # Fold legitimately too short to compute daily totals
+                        # (e.g. test span covers <2 distinct dates on a small
+                        # walk-forward step). Mark with a sentinel so the
+                        # ranking layer can distinguish 'errored on this fold'
+                        # (empty {}) from 'metric not computable here' — the
+                        # model still ranked normally on every fold where
+                        # daily totals were computable.
+                        daily_fold_m = {'__skipped__': True}
             except Exception as e:
                 logger.debug(
                     f'Daily metric computation failed for fold {fold_idx}: {e}'
@@ -822,7 +836,7 @@ class BenchmarkRunner:
         )
         (
             daily_mean_ranks, daily_ranks,
-            daily_rank_cis, _dnc_daily,
+            daily_rank_cis, dnc_daily,
         ) = self._compute_composite_ranks(
             result.model_results, metric_source='daily_fold_metrics',
         )
@@ -846,10 +860,15 @@ class BenchmarkRunner:
                 result.model_results[name].metrics['mean_rank_daily_low'] = ci_d[0]
                 result.model_results[name].metrics['mean_rank_daily_high'] = ci_d[1]
 
-        # Primary ranking still drives Promote / Tuning / sensor publishing
+        # Primary ranking still drives Promote / Tuning / sensor publishing.
+        # Interval DNCs go in did_not_complete (main leaderboard); daily-only
+        # DNCs go in did_not_complete_daily (surfaced under the Daily table)
+        # so a per-interval-ranked model isn't shown as not-completed.
+        # Pre-v2.39.3 the daily list was discarded entirely.
         result.rankings = interval_ranks
         result.daily_rankings = daily_ranks
         result.did_not_complete = dnc_interval
+        result.did_not_complete_daily = sorted(set(dnc_daily) - set(dnc_interval))
         sorted_models = sorted(interval_mean_ranks.items(), key=lambda x: x[1])
         mean_ranks = interval_mean_ranks  # for downstream logging
 
@@ -961,17 +980,23 @@ class BenchmarkRunner:
 
         # Identify did-not-complete models up front so they're excluded
         # from BOTH the ranking and from the per-fold rank sort below.
-        # A model is rankable only if it produced a non-empty metric
-        # dict for every one of the n_folds in this metric_source.
-        # (Empty {} is appended by run_single_model when a fold's
-        # feature build, fit, or predict raised.)
+        # A model is rankable for this metric_source if every fold's
+        # entry is either non-empty (real metrics) or the ``__skipped__``
+        # sentinel emitted by run_single_model when the metric isn't
+        # computable on that fold (e.g. daily totals on a fold spanning
+        # <2 distinct dates) — that's a metric-level skip, not a model
+        # failure. Truly empty ``{}`` means the fold's fit/predict
+        # raised and counts as DNC.
+        def _is_failure(fm: dict) -> bool:
+            return not fm  # empty dict counts as failure
+
         rankable_names: List[str] = []
         did_not_complete: List[str] = []
         for name in model_names:
             fm_list = getattr(model_results[name], metric_source, [])
             complete = (
                 len(fm_list) == n_folds
-                and all(bool(fm) for fm in fm_list)
+                and not any(_is_failure(fm) for fm in fm_list)
             )
             if complete:
                 rankable_names.append(name)
@@ -984,8 +1009,26 @@ class BenchmarkRunner:
         # Compute per-fold composite ranks restricted to rankable models.
         # This is the array we both average (for mean_rank) and bootstrap
         # (for the CI). Shape: {model: [composite_rank_fold_0, ...]}.
+        # We track per-fold rank vectors aligned by index so the bootstrap
+        # below can do a PAIRED resample — drawing a fold-id matrix once
+        # per iteration and applying the SAME ids to every model. Without
+        # pairing, fold-to-fold correlation (hard folds hurt everyone) is
+        # destroyed and the CIs overstate ties.
         fold_ranks: Dict[str, List[float]] = {name: [] for name in rankable_names}
+        # Maps fold_idx → set of model names that had a rank computed for
+        # that fold. Used to keep the paired bootstrap matrix aligned.
+        ranked_fold_ids: List[int] = []
         for fold_idx in range(n_folds):
+            # Skip folds where EVERY rankable model is on the sentinel
+            # (metric not computable for any) — they contribute no rank.
+            all_skipped = all(
+                getattr(model_results[name], metric_source, [])[fold_idx].get(
+                    '__skipped__'
+                )
+                for name in rankable_names
+            )
+            if all_skipped:
+                continue
             per_metric_ranks: Dict[str, List[int]] = {
                 name: [] for name in rankable_names
             }
@@ -994,13 +1037,20 @@ class BenchmarkRunner:
                 fold_values: Dict[str, float] = {}
                 for name in rankable_names:
                     fm_list = getattr(model_results[name], metric_source, [])
-                    fold_values[name] = fm_list[fold_idx].get(
+                    fm = fm_list[fold_idx]
+                    if fm.get('__skipped__'):
+                        # This model legitimately has no metric here;
+                        # exclude from this metric's rank-sort rather
+                        # than punishing it with last place.
+                        continue
+                    fold_values[name] = fm.get(
                         metric_name,
                         -np.inf if higher_is_better else np.inf,
                     )
 
-                # Skip this metric for this fold if NO model has a valid value
-                if all(np.isinf(v) for v in fold_values.values()):
+                if not fold_values or all(
+                    np.isinf(v) for v in fold_values.values()
+                ):
                     continue
 
                 sorted_fold = sorted(
@@ -1011,38 +1061,66 @@ class BenchmarkRunner:
                 for r, (name, _) in enumerate(sorted_fold):
                     per_metric_ranks[name].append(r + 1)
 
+            fold_recorded = False
             for name in rankable_names:
                 if per_metric_ranks[name]:
                     fold_ranks[name].append(float(np.mean(per_metric_ranks[name])))
+                    fold_recorded = True
+                else:
+                    # Pad with NaN so the per-fold arrays stay aligned
+                    # across models for the paired bootstrap. The mean
+                    # / bootstrap layer will skip NaN entries per model.
+                    fold_ranks[name].append(float('nan'))
+            if fold_recorded:
+                ranked_fold_ids.append(fold_idx)
 
-        # Mean composite rank per model across the folds with valid data
+        # Mean composite rank per model across the folds with valid data.
+        # A model that passed the completeness check but ended up with NO
+        # ranked folds (every fold was '__skipped__' for it, or every
+        # fold's metrics were all-inf) gets demoted to DNC for this
+        # metric_source — emitting integer ranks for inf-mean models
+        # would just be dict-insertion-order noise.
         mean_ranks: Dict[str, float] = {}
-        for name in rankable_names:
-            ranks = fold_ranks[name]
-            mean_ranks[name] = float(np.mean(ranks)) if ranks else float('inf')
+        for name in list(rankable_names):
+            ranks = np.asarray(fold_ranks[name], dtype=float)
+            valid = ranks[~np.isnan(ranks)]
+            if not valid.size:
+                rankable_names.remove(name)
+                did_not_complete.append(name)
+                continue
+            mean_ranks[name] = float(np.mean(valid))
 
-        # Bootstrap CI: resample fold IDs with replacement, recompute
-        # the across-fold mean per resample, take the 2.5/97.5 percentile.
-        # Cheap because we operate on the already-computed per-fold ranks.
-        # With small N (e.g. 5 folds) the CI will be wide — that's the
-        # point: honest about how much fold-to-fold noise there is in
-        # the leaderboard rather than promoting a single "winner" badge
-        # that's actually within noise of #2.
+        # Paired bootstrap CI: resample fold IDs with replacement ONCE
+        # per iteration, then apply the SAME ids to every model. Joint
+        # resampling preserves the across-model fold structure
+        # (model A's rank in fold k IS comparable to model B's in fold
+        # k), which is what the leaderboard's 'tied with #1' chip wants
+        # to compare. Pre-v2.39.3 each model drew its own ids in
+        # sequence — independent draws inflated marginal CIs and the
+        # tie-detection over-reported ties.
         rank_cis: Dict[str, Tuple[float, float]] = {}
-        valid_n_folds = max(
-            (len(ranks) for ranks in fold_ranks.values()),
-            default=0,
-        )
-        if bootstrap_ci and valid_n_folds >= 2:
+        # Number of folds where any model produced a rank (the bootstrap
+        # operates on this aligned matrix).
+        n_ranked_folds = len(ranked_fold_ids)
+        if bootstrap_ci and n_ranked_folds >= 2:
             rng = np.random.default_rng(bootstrap_seed)
+            # Single (bootstrap_iters, n_ranked_folds) index matrix —
+            # the same fold-id columns reused across every model.
+            idx_matrix = rng.integers(
+                0, n_ranked_folds,
+                size=(bootstrap_iters, n_ranked_folds),
+            )
             for name in rankable_names:
                 ranks_arr = np.asarray(fold_ranks[name], dtype=float)
-                if len(ranks_arr) < 2:
+                if ranks_arr.size < 2:
                     continue
-                idx = rng.integers(
-                    0, len(ranks_arr), size=(bootstrap_iters, len(ranks_arr)),
-                )
-                resampled_means = ranks_arr[idx].mean(axis=1)
+                resampled = ranks_arr[idx_matrix]  # shape (iters, n_folds)
+                # nanmean tolerates per-model NaN entries (skipped folds)
+                with np.errstate(invalid='ignore'):
+                    resampled_means = np.nanmean(resampled, axis=1)
+                resampled_means = resampled_means[~np.isnan(resampled_means)]
+                if resampled_means.size == 0:
+                    continue
                 low = float(np.quantile(resampled_means, 0.025))
                 high = float(np.quantile(resampled_means, 0.975))
                 rank_cis[name] = (low, high)

@@ -124,23 +124,17 @@ class CovariateResolver:
         name = cov_cfg.get("name", entity_id)
         binary_flag = cov_cfg.get("binary")
 
-        # Attribute-history path (v2.38.4+) for ``weather.*`` entities
-        # and any other entity whose .state is categorical but whose
-        # useful numeric data lives in ``.attributes``. Triggered when
-        # ``future_value_key`` is set and the entity is in the weather
-        # domain — that combination signals "the user wants metric X
-        # from a weather entity, both historically and as a forecast."
-        # The future-forecast path (fetch_future) already used
-        # future_value_key; this aligns the history side so the model
-        # can learn the past relationship instead of seeing a
-        # zero-filled past column (v2.38.3 workaround).
+        # Attribute-history path (v2.38.4+): when ``future_value_key``
+        # is set, pull historical numerics from
+        # ``record.attributes[future_value_key]`` instead of the
+        # entity's ``.state``. Originally weather-only; v2.39.3
+        # generalises so two configs of the same non-weather entity
+        # with distinct ``future_value_key`` values resolve to
+        # different signals (otherwise both fall back to ``.state``
+        # and the model trains on two columns of identical data).
         attribute_key = None
         value_key_for_history = cov_cfg.get("future_value_key")
-        if (
-            isinstance(entity_id, str)
-            and entity_id.startswith("weather.")
-            and value_key_for_history
-        ):
+        if value_key_for_history:
             attribute_key = value_key_for_history
 
         logger.info(

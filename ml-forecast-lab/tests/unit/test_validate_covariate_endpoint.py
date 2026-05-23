@@ -165,18 +165,22 @@ def test_weather_service_future_attribute_is_ok():
     assert "weather.get_forecasts(hourly)" in out["message"]
 
 
-def test_weather_service_future_with_no_lagged_path_still_ok():
+def test_weather_service_future_with_no_lagged_path_returns_partial():
     """Same as above but without a weather-attr-history path for
-    lagged. The future side is service-fetched (ok) — the state
-    isn't numeric but we don't false-flag it broken since the
-    user explicitly asked for service-fetched future data."""
+    lagged: the future side is service-fetched (ok) but the lagged
+    channel will be empty because state is categorical and no
+    future_value_key was set to route through the attribute path.
+    v2.39.3: surface this as ``partial`` (per the docstring contract)
+    rather than misleadingly green-chipping a row whose past channel
+    the empty-column guard will end up zero-filling at train time."""
     out = classify_covariate_state(
         entity_id="weather.met_office_balsham",
         state_obj=_state("partlycloudy", attrs={}),
         future_attribute="daily",
     )
     assert out["ok"] is True
-    assert out["status"] == "ok"
+    assert out["status"] == "partial"
+    assert "lagged history will be empty" in out["message"]
 
 
 def test_partial_message_describes_weather_attr_lagged_path():
@@ -197,6 +201,24 @@ def test_partial_message_describes_weather_attr_lagged_path():
     assert out["status"] == "partial"
     assert "last=None" not in out["message"]
     assert "uv_index" in out["message"]
+
+
+def test_weather_string_numeric_attribute_no_longer_false_broken():
+    """v2.39.3 bug 10: weather integrations frequently store attribute
+    numerics as strings (OpenWeatherMap returns ``temperature: '16.5'``).
+    The production resolver tolerates strings via ``state_to_float``;
+    the validator must too — pre-v2.39.3 it used ``isinstance(int, float)``
+    and red-chipped working covariates."""
+    out = classify_covariate_state(
+        entity_id="weather.openweathermap",
+        state_obj=_state("partlycloudy", attrs={"temperature": "16.5"}),
+        future_value_key="temperature",
+    )
+    assert out["ok"] is True
+    assert out["status"] != "broken", (
+        "string-numeric attributes are parseable via state_to_float and "
+        "must not be flagged broken"
+    )
 
 
 def test_weather_service_legacy_attribute_still_parses():

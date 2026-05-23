@@ -43,6 +43,37 @@ from starlette.requests import Request
 logger = logging.getLogger(__name__)
 
 
+# Shared aiohttp session for short HA probes from request handlers
+# (forecast-attrs, validate-covariate, ha-entities). The v2.38.7 chip
+# fires one /api/covariates/validate per row on page load — without a
+# shared session, a 20-row experiment opened 20 separate TLS handshakes
+# in ~1.6s, competing with the training loop's HA traffic. Lazy-init on
+# the running event loop so test code doesn't pay the cost just for
+# importing the module.
+_shared_ha_session: Optional['_aiohttp.ClientSession'] = None
+_shared_ha_session_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _get_shared_ha_session():
+    """Return a process-wide aiohttp ClientSession bound to the running
+    loop. Recreated if the loop changed (e.g. test fixtures spawning
+    fresh loops) or if the cached session has been closed."""
+    import aiohttp as _aiohttp
+    global _shared_ha_session, _shared_ha_session_loop
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop: only happens off the request path; fall back to a
+        # one-shot session the caller will own and close.
+        return _aiohttp.ClientSession()
+    if (_shared_ha_session is None
+            or _shared_ha_session.closed
+            or _shared_ha_session_loop is not loop):
+        _shared_ha_session = _aiohttp.ClientSession()
+        _shared_ha_session_loop = loop
+    return _shared_ha_session
+
+
 # Data models
 class MetricValue(BaseModel):
     """Single metric value with mean and std across folds."""
@@ -129,6 +160,14 @@ class BenchmarkResult(BaseModel):
     # leaderboard with a fabricated last-place rank that inflates
     # other models' apparent dominance.
     did_not_complete: List[str] = []
+    # Names of models excluded from the DAILY-cumulative ranking
+    # specifically — typically because the test span on some fold
+    # covered <2 distinct dates so daily totals weren't computable.
+    # These models ARE ranked in the per-interval leaderboard; this
+    # list is rendered under the Daily Cumulative Accuracy table only,
+    # so a per-interval-ranked model isn't confusingly shown as
+    # "did not complete".
+    did_not_complete_daily: List[str] = []
 
 
 class ExperimentStatus(BaseModel):
@@ -462,10 +501,15 @@ def classify_covariate_state(
             else:
                 attribute_parsed_ok = False
 
+    # The attribute-history path (covariates.py:137-144, v2.38.4+ and
+    # generalised in v2.39.3) routes through ``state_to_float`` which
+    # already parses numeric strings (OpenWeatherMap / met.no often
+    # store temperature as ``'16.5'``). Don't reject those here.
     weather_attr_path_ok = (
-        entity_id.startswith("weather.")
+        isinstance(entity_id, str)
+        and entity_id.startswith("weather.")
         and future_value_key
-        and isinstance(attrs.get(future_value_key), (int, float))
+        and state_to_float(attrs.get(future_value_key)) is not None
     )
 
     if (not state_is_numeric
@@ -506,6 +550,33 @@ def classify_covariate_state(
                 "— check key name or value_key."
             ),
             "attribute_preview": None,
+        }
+
+    # Categorical state + (parsing future_attribute OR weather service
+    # future) but no lagged-side numeric source = partial: the future
+    # block works but the resolver will receive an all-NaN lagged
+    # column, which the v2.38.3 empty-column guard either drops or
+    # zero-fills. Without this branch the validator returned ``ok``
+    # for the case its own docstring promises is partial.
+    if (not state_is_numeric
+            and not weather_attr_path_ok
+            and (attribute_parsed_ok is True or is_weather_service_future)):
+        future_desc = (
+            f"weather.get_forecasts({future_attribute})"
+            if is_weather_service_future
+            else f"attribute '{future_attribute}'"
+        )
+        return {
+            "ok": True, "status": "partial",
+            "state_value": None,
+            "last_changed": last_changed,
+            "message": (
+                f"Future side ok ({future_desc}) but state "
+                f"'{raw_state}' is non-numeric and no future_value_key "
+                "is set — lagged history will be empty (model loses "
+                "the past signal for this channel)."
+            ),
+            "attribute_preview": attribute_preview,
         }
 
     bits = []
@@ -2403,28 +2474,28 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         ha_url = os.environ.get("HA_URL", "http://supervisor/core")
         ha_token = os.environ.get("SUPERVISOR_TOKEN", "")
         try:
-            async with _aiohttp.ClientSession() as sess:
-                headers = {"Authorization": f"Bearer {ha_token}"}
-                async with sess.get(
-                    f"{ha_url}/api/states/{entity_id}",
-                    headers=headers,
-                    timeout=_aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    if resp.status == 404:
-                        return JSONResponse(content={
-                            "ok": False, "status": "broken",
-                            "state_value": None, "last_changed": None,
-                            "message": "Entity not found in HA",
-                            "attribute_preview": None,
-                        })
-                    if resp.status != 200:
-                        return JSONResponse(content={
-                            "ok": False, "status": "broken",
-                            "state_value": None, "last_changed": None,
-                            "message": f"HA returned {resp.status}",
-                            "attribute_preview": None,
-                        })
-                    state_obj = await resp.json()
+            sess = _get_shared_ha_session()
+            headers = {"Authorization": f"Bearer {ha_token}"}
+            async with sess.get(
+                f"{ha_url}/api/states/{entity_id}",
+                headers=headers,
+                timeout=_aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status == 404:
+                    return JSONResponse(content={
+                        "ok": False, "status": "broken",
+                        "state_value": None, "last_changed": None,
+                        "message": "Entity not found in HA",
+                        "attribute_preview": None,
+                    })
+                if resp.status != 200:
+                    return JSONResponse(content={
+                        "ok": False, "status": "broken",
+                        "state_value": None, "last_changed": None,
+                        "message": f"HA returned {resp.status}",
+                        "attribute_preview": None,
+                    })
+                state_obj = await resp.json()
         except Exception as e:
             logger.debug(f"validate-covariate fetch failed for {entity_id}: {e}")
             return JSONResponse(content={
@@ -2578,6 +2649,13 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception:
             ha_tz = None
         try:
+            # Read the user's configured nominal level — defaults to
+            # 0.8 if absent. The verdict-card chip, worst-bucket
+            # selection, and reported deviations all need to compare
+            # against the level the bands were calibrated at; hard-
+            # coding 0.8 here mis-labels every experiment running on
+            # a different ``conformal_coverage`` (e.g. 0.9 / 0.95).
+            nominal = float(getattr(exp_cfg, 'conformal_coverage', 0.8))
             coverage = await asyncio.to_thread(
                 db.get_forecast_coverage,
                 name, actuals_table,
@@ -2586,14 +2664,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 model_name,
                 model_version,
                 ha_tz,
+                nominal,
             )
-            # Recompute worst-bucket against the actual nominal level
-            # (0.8 by default). db.get_forecast_coverage uses 0.5 as a
-            # safe upper-bound assumption when computing "worst" so
-            # that the candidate list is already filtered by min-N;
-            # here we just reorder by distance from the true nominal
-            # so the verdict-card chip reflects the right gap.
-            nominal = 0.8
             buckets = []
             for kind, container, key, label_fmt in [
                 ("hour_of_day", coverage.get("by_hour_of_day", {}), "hour", lambda v: f"hour {int(v):02d}"),
@@ -2609,7 +2681,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                         })
             if buckets:
                 # Worst = biggest absolute deviation from the nominal
-                # 80%. Picking the largest |deviation| matches the
+                # level. Picking the largest |deviation| matches the
                 # verdict-card UX: "your bands are off by the most
                 # here".
                 coverage["worst_bucket"] = max(
