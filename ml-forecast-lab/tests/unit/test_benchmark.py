@@ -324,3 +324,109 @@ class TestMeanRankScoring:
         assert ranks == {}
         assert means == {}
         assert sorted(dnc) == ["a", "b"]
+
+    def test_skipped_metric_sentinel_does_not_mark_model_as_dnc(self):
+        """v2.39.3 bug 7: the daily-rank path emits ``{'__skipped__': True}``
+        for folds whose test/train spans <2 distinct dates (legitimate, not
+        a failure). The completeness check must distinguish that sentinel
+        from empty {} (real fold-level error) — pre-v2.39.3 it conflated
+        both as DNC, silently dropping models that fitted and predicted
+        successfully from the daily leaderboard."""
+        from ml_forecast_lab.benchmark.runner import ModelResult
+
+        cfg = _make_experiment_cfg(cv_folds=3)
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        a = ModelResult(model_name="a")
+        b = ModelResult(model_name="b")
+        # Both models computed daily metrics on folds 0 and 2; fold 1 was
+        # too short for daily totals (sentinel emitted). Neither errored.
+        a.daily_fold_metrics = [
+            {"mae": 1.0, "rmse": 1.0},
+            {"__skipped__": True},
+            {"mae": 1.0, "rmse": 1.0},
+        ]
+        b.daily_fold_metrics = [
+            {"mae": 2.0, "rmse": 2.0},
+            {"__skipped__": True},
+            {"mae": 2.0, "rmse": 2.0},
+        ]
+
+        means, ranks, cis, dnc = runner._compute_composite_ranks(
+            {"a": a, "b": b}, metric_source="daily_fold_metrics",
+            bootstrap_iters=50,
+        )
+        assert dnc == [], (
+            "Sentinel-skipped folds must NOT mark a model as DNC — only "
+            f"empty {{}} does. Got dnc={dnc}"
+        )
+        assert ranks == {"a": 1, "b": 2}, (
+            f"Both models ranked normally on the folds where the metric was "
+            f"computable; got ranks={ranks}"
+        )
+
+    def test_bootstrap_ci_is_paired_across_models(self):
+        """v2.39.3 bug 5: bootstrap iterations must apply the SAME resampled
+        fold IDs to every model, not draw independent IDs per model. With
+        paired resampling, when one model's mean-rank is computed for
+        iteration k, the other model's mean-rank for iteration k MUST be
+        computable from the same fold-id columns (i.e. they share the bootstrap
+        index matrix). Independent draws inflate marginal CIs and the UI's
+        'T#1 (tied within fold noise)' chip over-reports ties.
+
+        Operationally: if every fold's rank-1 model is the SAME model, the
+        paired bootstrap of (rank_A - rank_B) is always negative, so the
+        leader's CI on (rank_A - rank_B) sits strictly below 0 — non-tie.
+        Independent draws would produce a near-zero spread around 0.
+        """
+        from ml_forecast_lab.benchmark.runner import ModelResult
+        import numpy as np
+
+        cfg = _make_experiment_cfg(cv_folds=5)
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        # Model A wins on every fold by a wide margin; B is always second.
+        # A's rank vector is [1,1,1,1,1], B's is [2,2,2,2,2]. Under PAIRED
+        # bootstrap every iteration is (rank_A=1, rank_B=2) so A's mean
+        # rank CI collapses to [1.0, 1.0]. Under INDEPENDENT bootstrap A
+        # still gets [1.0, 1.0] because its values are constant — so the
+        # paired-vs-independent difference is invisible on constant vectors.
+        # Use mixed ranks so the pairing is observable:
+        a = ModelResult(model_name="a")
+        b = ModelResult(model_name="b")
+        # On 3 folds A wins, on 2 folds B wins — but A is overall better
+        a.fold_metrics = [
+            {"mae": 1.0, "rmse": 1.0},  # A wins
+            {"mae": 1.0, "rmse": 1.0},
+            {"mae": 5.0, "rmse": 5.0},  # B wins
+            {"mae": 1.0, "rmse": 1.0},
+            {"mae": 5.0, "rmse": 5.0},
+        ]
+        b.fold_metrics = [
+            {"mae": 5.0, "rmse": 5.0},
+            {"mae": 5.0, "rmse": 5.0},
+            {"mae": 1.0, "rmse": 1.0},
+            {"mae": 5.0, "rmse": 5.0},
+            {"mae": 1.0, "rmse": 1.0},
+        ]
+        means, ranks, cis, _ = runner._compute_composite_ranks(
+            {"a": a, "b": b}, metric_source="fold_metrics",
+            bootstrap_iters=2000, bootstrap_seed=42,
+        )
+        # Under paired bootstrap every resample sums the per-fold ranks of A
+        # and B at the SAME fold-ids, so the sum (rank_A + rank_B) at every
+        # iteration is exactly 3 (one is 1, the other 2). That means
+        # mean_A + mean_B is exactly 3.0 (no variance), which is a structural
+        # property of paired ranks that the bootstrap preserves.
+        a_low, a_high = cis["a"]
+        b_low, b_high = cis["b"]
+        # Pairing constraint: (a_low + b_high) and (a_high + b_low) both
+        # equal 3.0 within float precision.
+        assert abs((a_low + b_high) - 3.0) < 1e-9, (
+            f"Paired bootstrap should preserve rank-sum=3 invariant: "
+            f"a_low={a_low}, b_high={b_high}"
+        )
+        assert abs((a_high + b_low) - 3.0) < 1e-9, (
+            f"Paired bootstrap should preserve rank-sum=3 invariant: "
+            f"a_high={a_high}, b_low={b_low}"
+        )

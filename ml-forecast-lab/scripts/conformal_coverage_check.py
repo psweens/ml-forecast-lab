@@ -74,6 +74,7 @@ def main() -> int:
         model_name=args.model_name,
         model_version=args.model_version,
         tz=args.tz,
+        nominal=args.nominal,
     )
 
     nominal = args.nominal

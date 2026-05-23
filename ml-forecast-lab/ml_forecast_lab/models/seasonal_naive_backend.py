@@ -116,7 +116,11 @@ class SeasonalNaiveModel(ForecastModel):
         # the placeholder zone and emit 0 for every horizon.
         extended = bool(kwargs.get('extended_window', False))
         pw = kwargs.get('past_window_size')
-        self._past_window_size = int(pw) if extended and pw else None
+        # ``pw is not None`` — not truthiness — so an explicit
+        # ``past_window_size=0`` would be honoured (caller's intent, even
+        # though degenerate) rather than silently falling back to the
+        # legacy path the v2.38.6 fix exists to prevent.
+        self._past_window_size = int(pw) if extended and pw is not None else None
 
         if y_train.ndim == 2 and y_train.shape[1] > 1:
             self._n_horizons = y_train.shape[1]
@@ -176,7 +180,14 @@ class SeasonalNaiveModel(ForecastModel):
                     # Last resort: most recent past observation (non-seasonal
                     # naive). In extended mode use ``past_len - 1`` so we don't
                     # accidentally grab a zero-placeholder from the future block.
-                    out[h] = target_series[past_len - 1]
+                    # When past_len == 0 (degenerate extended_window with
+                    # past_window_size=0) the previous index of -1 wrapped to
+                    # the last future-placeholder zero — re-introducing the
+                    # v2.38.6 bug. Fall back to 0.0 instead.
+                    if past_len > 0:
+                        out[h] = target_series[past_len - 1]
+                    else:
+                        out[h] = 0.0
         return out
 
     def predict_sequence(self, X: np.ndarray) -> np.ndarray:
@@ -237,7 +248,22 @@ class SeasonalNaiveModel(ForecastModel):
             self.set_params(**data["params"])
             self._train_tail = data.get("train_tail")
             self._n_horizons = data.get("n_horizons", 1)
-            self._past_window_size = data.get("past_window_size")
+            # v2.38.6 introduced ``past_window_size`` in the pickle so
+            # ``_per_window_predict`` knows where the real-past slice
+            # ends in extended-window mode (future covariates configured).
+            # Caches written before v2.38.6 don't carry the field — if
+            # we silently default to None they fall back to the legacy
+            # ``past_len = len(target_series)`` path and emit 0 for
+            # every horizon, exactly the bug v2.38.6 fixed. Reject the
+            # stale pickle so the orchestrator re-fits instead.
+            if "past_window_size" not in data:
+                raise IOError(
+                    "SeasonalNaive cache predates v2.38.6 "
+                    "(no past_window_size field) — re-fit required to "
+                    "avoid the zero-prediction regression with future "
+                    "covariates."
+                )
+            self._past_window_size = data["past_window_size"]
             self._is_fitted = True
             logger.info(f"Loaded SeasonalNaive from {path}")
         except Exception as e:

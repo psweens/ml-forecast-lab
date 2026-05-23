@@ -354,6 +354,17 @@ class HAInterface:
                 preserves the v2.37 minimal-response payload size
                 optimization for the common numeric-sensor case.
 
+                v2.39.3: when True we ALSO pass
+                ``significant_changes_only`` so HA only returns rows
+                where the state actually changed, not every recorder
+                tick. Weather entities update their full attribute
+                dict (forecast arrays etc.) on every recorder write
+                even when the user-visible state doesn't change; the
+                full-payload + every-tick combination produced ~5x
+                response sizes on long lookbacks. ``significant_changes_only``
+                cuts that back without losing any rows that affect
+                the attribute we actually parse.
+
         Returns:
             List of history dicts with 'state', 'last_changed', etc.
         """
@@ -369,6 +380,12 @@ class HAInterface:
             # minimal_response strips attributes from the payload —
             # cuts ~80% of the response size for numeric sensors.
             params["minimal_response"] = ""
+        else:
+            # Attributes are included; restrict to significant changes
+            # so the much-larger per-row payload doesn't compound with
+            # every-recorder-tick row counts. Critical for weather.*
+            # entities on benchmark cycles with 30+ day lookbacks.
+            params["significant_changes_only"] = ""
 
         result = await self.api_call(
             "GET", endpoint, params=params, read_timeout=HISTORY_READ_TIMEOUT

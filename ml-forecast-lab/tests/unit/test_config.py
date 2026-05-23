@@ -152,3 +152,102 @@ class TestLoadConfig:
         config_path.write_text(yaml.dump(config_data))
         cfg = load_config(config_path)
         assert cfg.experiments[0].name == "test"
+
+
+class TestRemoveExperimentCovariateDisambiguation:
+    """v2.39.3 bug 3: remove_experiment_covariate must mirror the
+    v2.38.2 add path's (entity, role, future_attribute, future_value_key)
+    matching tuple. Removing without disambiguators when the same entity
+    is configured multiple times silently stripped every matching row
+    in one shot — a user clicking × on the 'temperature' row would lose
+    the sibling 'cloud_coverage' row too."""
+
+    def _write(self, tmp_path, covs):
+        from ml_forecast_lab.config import atomic_yaml_write
+        path = tmp_path / "mlfl.yaml"
+        atomic_yaml_write(path, {
+            "experiments": [{
+                "name": "e1",
+                "target_entity": "sensor.t",
+                "covariates": covs,
+            }],
+        })
+        return path
+
+    def test_disambiguated_removal_keeps_sibling_row(self, tmp_path):
+        from ml_forecast_lab.config import remove_experiment_covariate
+        path = self._write(tmp_path, [
+            {"entity": "weather.x", "role": "future",
+             "future_attribute": "hourly", "future_value_key": "temperature"},
+            {"entity": "weather.x", "role": "future",
+             "future_attribute": "hourly", "future_value_key": "cloud_coverage"},
+        ])
+        removed = remove_experiment_covariate(
+            path, "e1", "weather.x",
+            role="future",
+            future_attribute="hourly",
+            future_value_key="temperature",
+        )
+        assert removed is True
+        import yaml as _yaml
+        with open(path) as f:
+            data = _yaml.safe_load(f)
+        covs = data["experiments"][0]["covariates"]
+        assert len(covs) == 1
+        assert covs[0]["future_value_key"] == "cloud_coverage"
+
+    def test_undisambiguated_removal_with_multiple_same_entity_refuses(
+        self, tmp_path, caplog,
+    ):
+        from ml_forecast_lab.config import remove_experiment_covariate
+        path = self._write(tmp_path, [
+            {"entity": "weather.x", "role": "future",
+             "future_value_key": "temperature"},
+            {"entity": "weather.x", "role": "future",
+             "future_value_key": "cloud_coverage"},
+        ])
+        removed = remove_experiment_covariate(path, "e1", "weather.x")
+        assert removed is False
+        import yaml as _yaml
+        with open(path) as f:
+            data = _yaml.safe_load(f)
+        # No data lost — both covariates still present.
+        assert len(data["experiments"][0]["covariates"]) == 2
+
+    def test_undisambiguated_removal_works_when_only_one_same_entity(
+        self, tmp_path,
+    ):
+        """Backward-compat: the common case (one row per entity) still
+        works with the legacy (config_path, exp, entity) signature."""
+        from ml_forecast_lab.config import remove_experiment_covariate
+        path = self._write(tmp_path, [
+            {"entity": "sensor.foo", "role": "lagged"},
+        ])
+        assert remove_experiment_covariate(path, "e1", "sensor.foo") is True
+        import yaml as _yaml
+        with open(path) as f:
+            data = _yaml.safe_load(f)
+        assert data["experiments"][0]["covariates"] == []
+
+
+class TestSameCovariateRespectsLaggedValueKey:
+    """v2.39.3 bug N6: two lagged covariates of the same weather entity
+    with different future_value_key values resolve to different
+    attribute-history signals (covariates.py:139), so the dedup must
+    treat them as distinct rather than blocking the second add."""
+
+    def test_lagged_with_distinct_value_keys_are_not_dedup(self):
+        from ml_forecast_lab.config import _same_covariate
+        a = {"entity": "weather.x", "role": "lagged",
+             "future_value_key": "temperature"}
+        b = {"entity": "weather.x", "role": "lagged",
+             "future_value_key": "cloud_coverage"}
+        assert _same_covariate(a, b) is False
+
+    def test_lagged_with_same_value_keys_still_dedup(self):
+        from ml_forecast_lab.config import _same_covariate
+        a = {"entity": "weather.x", "role": "lagged",
+             "future_value_key": "temperature"}
+        b = {"entity": "weather.x", "role": "lagged",
+             "future_value_key": "temperature"}
+        assert _same_covariate(a, b) is True

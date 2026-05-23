@@ -171,28 +171,38 @@ def test_fetch_history_routes_weather_entity_with_value_key_through_attribute_pa
     assert not result.isna().all()
 
 
-def test_fetch_history_keeps_state_path_for_normal_sensor():
-    """A regular numeric sensor (``sensor.outdoor_temp``) shouldn't
-    invoke the attribute path even if future_value_key happens to
-    be set. Back-compat for the legacy numeric-sensor case."""
+def test_fetch_history_routes_non_weather_with_value_key_via_attribute_path():
+    """v2.39.3: when future_value_key is set, route ANY entity through
+    the attribute-history path — not just weather.* (the old guard).
+    Without this, two configs of the same non-weather entity with
+    distinct future_value_key values both fall back to ``.state`` and
+    the model trains on two columns of identical data.
+
+    Users who set future_value_key on a sensor that doesn't actually
+    expose that attribute will see an empty column and get the v2.38.3
+    empty-column-guard log — preferred over the previous silent ignore."""
     iface = MagicMock()
     iface.get_history = AsyncMock(return_value=[
-        {"last_changed": "2026-05-01T12:00:00+00:00", "state": "14.5"},
+        {
+            "last_changed": "2026-05-01T12:00:00+00:00",
+            "state": "active",
+            "attributes": {"value": 14.5},
+        },
     ])
     resolver = CovariateResolver(iface)
 
     cov_cfg = {
         "entity_id": "sensor.outdoor_temp",
         "name": "outdoor_temp",
-        "future_value_key": "value",  # set but irrelevant for non-weather
+        "future_value_key": "value",
     }
     from datetime import datetime, timezone
     start = datetime(2026, 5, 1, tzinfo=timezone.utc)
     end = datetime(2026, 5, 2, tzinfo=timezone.utc)
     _run(resolver.fetch_history(cov_cfg, start, end, freq="30min"))
 
-    # get_history called with include_attributes=False (the default)
-    assert iface.get_history.call_args.kwargs.get("include_attributes") is False
+    # Attribute path is engaged → include_attributes=True
+    assert iface.get_history.call_args.kwargs.get("include_attributes") is True
 
 
 def test_fetch_history_keeps_state_path_for_weather_without_value_key():

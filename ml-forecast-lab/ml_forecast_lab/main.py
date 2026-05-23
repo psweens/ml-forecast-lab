@@ -203,6 +203,14 @@ def _cov_column_name(cov_cfg, all_covs: Optional[list] = None) -> str:
     covariate configs for the experiment; if omitted, suffix logic
     falls back to "single instance" semantics (backwards-compatible
     with existing experiments).
+
+    v2.39.3: when two same-entity configs both lack a distinguishing
+    ``future_value_key`` AND share the default ``future_attribute``,
+    the previous code returned the bare base for both — silent
+    DataFrame column collision (second assignment overwrote first).
+    The fallback now appends a positional ``__N`` suffix so each
+    row resolves to a distinct column and emits a warning so the
+    user can disambiguate explicitly.
     """
     base = cov_cfg.entity.split('.')[-1]
     if all_covs is None:
@@ -216,14 +224,28 @@ def _cov_column_name(cov_cfg, all_covs: Optional[list] = None) -> str:
     value_key = getattr(cov_cfg, 'future_value_key', None)
     if value_key:
         return f"{base}__{value_key}"
-    # Fallback: no value_key set (Auto mode). Use future_attribute
-    # if it's distinctive (e.g. ``hourly`` / ``daily``), otherwise
-    # bare base (will collide — caller is responsible for surfacing
-    # the dedup warning).
+    # Fallback: no value_key set. Use future_attribute if it's
+    # distinctive (e.g. ``hourly`` / ``daily``); otherwise we'd
+    # collide on bare base, so disambiguate by position within the
+    # same-entity group and warn so the user knows to set
+    # future_value_key explicitly.
     attr = getattr(cov_cfg, 'future_attribute', 'forecast') or 'forecast'
     if attr != 'forecast':
         return f"{base}__{attr}"
-    return base
+    try:
+        position = same_entity.index(cov_cfg)
+    except ValueError:
+        position = 0
+    if position == 0:
+        return base
+    logger.warning(
+        "Covariate %r is configured multiple times with no distinguishing "
+        "future_value_key / future_attribute — assigning positional column "
+        "name %r to avoid a silent DataFrame collision. Set "
+        "future_value_key on each row to disambiguate explicitly.",
+        cov_cfg.entity, f"{base}__{position + 1}",
+    )
+    return f"{base}__{position + 1}"
 
 
 def _collect_train_future_covariates(
@@ -1913,18 +1935,27 @@ class MLForecastLabApp:
         # receive forecast values via the service API path so the model
         # still gets the signal where it matters most.
         if exp_cfg.covariates and self.covariate_resolver:
-            cov_role_by_name: dict = {}
+            # Track every role assigned to each canonical column name —
+            # two covariates of the same entity may share a column name
+            # (one role=lagged, one role=future). The drop-vs-zero-fill
+            # decision must consider all of them: drop only when every
+            # role for that column would discard it, otherwise zero-fill
+            # so the future-side channel still gets values at inference.
+            cov_roles_by_name: Dict[str, set] = {}
             for c in exp_cfg.covariates:
-                cov_role_by_name[
-                    _cov_column_name(c, all_covs=exp_cfg.covariates)
-                ] = getattr(c, 'role', 'lagged')
+                col_name = _cov_column_name(c, all_covs=exp_cfg.covariates)
+                cov_roles_by_name.setdefault(col_name, set()).add(
+                    getattr(c, 'role', 'lagged')
+                )
             empty_cols = [
                 c for c in result.columns
                 if c != 'y' and result[c].notna().sum() == 0
             ]
             for col in empty_cols:
-                role = cov_role_by_name.get(col, 'lagged')
-                if role in ('future', 'both'):
+                roles = cov_roles_by_name.get(col, {'lagged'})
+                has_future = bool(roles & {'future', 'both'})
+                role_label = '|'.join(sorted(roles))
+                if has_future:
                     # Future-role columns will receive real values at
                     # inference via the forecast/service path. Fill the
                     # past with zeros so dropna doesn't eat every row
@@ -1932,25 +1963,26 @@ class MLForecastLabApp:
                     # channel, which is the truth.
                     result[col] = 0.0
                     logger.warning(
-                        f"  Covariate '{col}' (role={role}) had 0%% "
-                        f"historical coverage — filling past with 0 so "
-                        f"the experiment isn't killed. Future values "
-                        f"still come from the forecast attribute / "
-                        f"service API at inference. For richer past "
-                        f"signal on weather.* entities, add the per-"
-                        f"metric sensor.* sibling entity as a separate "
-                        f"role:lagged covariate."
+                        "  Covariate '%s' (role=%s) had 0%% "
+                        "historical coverage — filling past with 0 so "
+                        "the experiment isn't killed. Future values "
+                        "still come from the forecast attribute / "
+                        "service API at inference. For richer past "
+                        "signal on weather.* entities, add the per-"
+                        "metric sensor.* sibling entity as a separate "
+                        "role:lagged covariate.", col, role_label,
                     )
                 else:
-                    # Lagged-role column with 0% coverage adds nothing.
+                    # Lagged-only column with 0% coverage adds nothing.
                     # Drop it entirely so the dropna doesn't eat rows.
                     result = result.drop(columns=[col])
                     logger.warning(
-                        f"  Covariate '{col}' (role={role}) had 0%% "
-                        f"historical coverage — dropping the column "
-                        f"entirely. Likely cause: entity reports a "
-                        f"non-numeric state, or the recorder has no "
-                        f"matching rows in the requested window."
+                        "  Covariate '%s' (role=%s) had 0%% "
+                        "historical coverage — dropping the column "
+                        "entirely. Likely cause: entity reports a "
+                        "non-numeric state, or the recorder has no "
+                        "matching rows in the requested window.",
+                        col, role_label,
                     )
 
         # --- Covariate manifest -------------------------------------------
@@ -2387,6 +2419,13 @@ class MLForecastLabApp:
         # metric doesn't pool residuals across two model-weight regimes.
         # Gated on ExperimentCfg.clear_forecast_log_on_retrain (default
         # True); no-op when the champion hasn't changed.
+        #
+        # Pass exclude_model_name=best_model_name so the INCOMING
+        # champion's residuals (and any from this run already logged
+        # under its name) survive — without it the conformal residual
+        # buffer is wiped experiment-wide and the published _upper_/
+        # _lower_ bands disappear for ~10 forecast cycles while the
+        # new champion accumulates enough residuals.
         if (
             champion_changed
             and self.history_db
@@ -2394,13 +2433,15 @@ class MLForecastLabApp:
         ):
             try:
                 deleted = self.history_db.cleanup_forecast_log(
-                    exp_cfg.name, datetime.utcnow()
+                    exp_cfg.name, datetime.utcnow(),
+                    exclude_model_name=best_model_name,
                 )
                 if deleted:
                     logger.info(
                         f"Champion change for {exp_cfg.name} "
                         f"({best_model_name}): cleared {deleted} "
-                        f"pre-promotion forecast_log rows"
+                        f"pre-promotion forecast_log rows "
+                        f"(retained rows belonging to new champion)"
                     )
             except Exception as e:
                 logger.warning(
@@ -2775,10 +2816,14 @@ class MLForecastLabApp:
         )
         (
             daily_mean_ranks, daily_rankings,
-            daily_rank_cis, _dnc_daily,
+            daily_rank_cis, dnc_daily,
         ) = runner._compute_composite_ranks(
             completed_models, metric_source='daily_fold_metrics',
         )
+        # Surface daily-only DNCs alongside interval ones so the UI's
+        # 'Did not complete' section can explain why a model has '—' in
+        # the Daily Rank column. Pre-v2.39.3 _dnc_daily was discarded.
+        dnc_combined = sorted(set(dnc_interval) | set(dnc_daily))
         for name in completed_models:
             completed_models[name].metrics['mean_rank'] = (
                 interval_mean_ranks.get(name, float('inf'))
@@ -2834,10 +2879,20 @@ class MLForecastLabApp:
                 f"{runner.production_metric}={mr.metrics.get(runner.production_metric, np.nan):.4f}, "
                 f"mean_rank={mean_ranks[name]:.2f}{ci_str}{daily_str}"
             )
-        if dnc_interval:
+        if dnc_combined:
+            interval_only = sorted(set(dnc_interval) - set(dnc_daily))
+            daily_only = sorted(set(dnc_daily) - set(dnc_interval))
+            both = sorted(set(dnc_interval) & set(dnc_daily))
+            parts = []
+            if both:
+                parts.append(f"both: {', '.join(both)}")
+            if interval_only:
+                parts.append(f"interval-only: {', '.join(interval_only)}")
+            if daily_only:
+                parts.append(f"daily-only: {', '.join(daily_only)}")
             logger.info(
-                f"  Did not complete (excluded from rankings): "
-                f"{', '.join(sorted(dnc_interval))}"
+                "  Did not complete (excluded from corresponding "
+                "rankings): " + "; ".join(parts)
             )
 
         # Update web UI with final mean-rank-based rankings
@@ -2849,7 +2904,7 @@ class MLForecastLabApp:
                 daily_rankings=daily_rankings,
                 naive_was_enabled=_naive_was_enabled,
                 drift=drift_stats,
-                did_not_complete=dnc_interval,
+                did_not_complete=dnc_combined,
             )
 
         # Build a BenchmarkResult-compatible object for downstream use
@@ -2863,7 +2918,7 @@ class MLForecastLabApp:
             metric_used=runner.production_metric,
             cv_strategy=runner.cv_strategy,
             n_folds=runner.cv_folds,
-            did_not_complete=dnc_interval,
+            did_not_complete=dnc_combined,
         )
 
         # 7. Generate holdout predictions from each model for visualisation
@@ -3093,11 +3148,21 @@ class MLForecastLabApp:
                         # len(holdout_part) - max_horizon + 1, so the last
                         # max_horizon-1 holdout points have no window — the
                         # predictions cover the head of the slice, not the tail.
+                        #
+                        # v2.39.3: keep the chart spanning the full holdout
+                        # window by padding the prediction array with NaN
+                        # for the trailing positions that have no window.
+                        # The actuals stay intact so the user sees the
+                        # truncation visually (gap at the right edge of
+                        # the chart) rather than the chart silently ending
+                        # ``max_horizon-1`` points early.
                         if len(y_p_display) != len(_y_holdout_display):
                             n = min(len(y_p_display), len(_y_holdout_display))
-                            y_p_display = y_p_display[:n]
-                            _y_holdout_display = _y_holdout_display[:n]
-                            _holdout_ts = holdout_timestamps[:n]
+                            target_len = len(_y_holdout_display)
+                            padded = np.full(target_len, np.nan, dtype=np.float32)
+                            padded[:n] = y_p_display[:n]
+                            y_p_display = padded
+                            _holdout_ts = holdout_timestamps
                         else:
                             _holdout_ts = holdout_timestamps
                     else:
@@ -3135,7 +3200,11 @@ class MLForecastLabApp:
                         model_name=m_name,
                         timestamps=_holdout_ts,
                         actuals=[float(v) if not np.isnan(v) else None for v in _y_holdout_display],
-                        predictions=[float(v) for v in y_p_display],
+                        # NaN-pad the trailing positions the holdout-neural
+                        # path can't form windows for (v2.39.3); maps to
+                        # JSON null so the chart renders a visible gap at
+                        # the right edge rather than silently truncating.
+                        predictions=[float(v) if not np.isnan(v) else None for v in y_p_display],
                     ))
 
                     if hasattr(m, 'training_metadata') and m.training_metadata:
@@ -6485,7 +6554,15 @@ class MLForecastLabApp:
 
         # Update status
         if self.web_app:
-            cov_names = [c.entity.split(".")[-1] for c in exp_cfg.covariates]
+            # Build labels from the SAME canonical column names that the
+            # configs loop below (line ~6530) uses for the results dict
+            # keys — otherwise the Jinja `results.get(label, {})` lookup
+            # misses for any same-entity-multi-config covariate
+            # (template renders duplicate blank rows).
+            cov_names = [
+                _cov_column_name(c, all_covs=exp_cfg.covariates)
+                for c in exp_cfg.covariates
+            ]
             covariate_labels = ["All covariates", "No covariates"] + [
                 f"Without {name}" for name in cov_names
             ]

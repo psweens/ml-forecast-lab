@@ -1,5 +1,150 @@
 # Changelog
 
+## 2.39.3
+
+Code-review pass over everything since 2.38.0. 15 correctness fixes and
+3 performance fixes — most are silent quality regressions a user would
+have no way to notice from the UI.
+
+**Critical (silent data loss / quality regressions):**
+
+- **SeasonalNaive cache predating v2.38.6 silently re-introduces the
+  zero-prediction bug on HA restart.** Pickles written by versions
+  <2.38.6 don't carry the ``past_window_size`` field; ``load()`` was
+  defaulting to ``None`` and falling back to the legacy
+  ``past_len = len(target_series)`` path that indexes into the
+  zero-padded future block when ``role: future`` covariates are
+  configured. ``load()`` now rejects stale pickles so the orchestrator
+  forces a re-fit.
+
+- **Conformal residual buffer wiped experiment-wide on champion change.**
+  ``cleanup_forecast_log`` was being called without ``exclude_model_name``,
+  so promoting a new champion deleted ALL residuals for the experiment
+  (including those already belonging to the incoming champion).
+  Published ``_upper_/_lower_`` bands disappeared for ~10 forecast cycles
+  while the new buffer rebuilt. Pass the new champion's name through so
+  its rows survive.
+
+- **``remove_experiment_covariate`` stripped every same-entity row at
+  once.** v2.38.2 enabled the same entity to be configured multiple
+  times with distinct ``future_value_key`` values (cloud_coverage +
+  temperature), but the remove path still matched on entity_id alone —
+  clicking × on one row removed the sibling rows too. Now mirrors the
+  ``_same_covariate`` (entity, role, future_attribute, future_value_key)
+  tuple matching from the add path; refuses to remove without
+  disambiguators when multiple same-entity rows exist.
+
+**High (misleading users in important diagnostic surface):**
+
+- **Verdict-card nominal hardcoded to 0.8.** Users with
+  ``conformal_coverage: 0.95`` saw "target 80%" verdict text and a
+  worst-bucket selected against the wrong nominal. The whole v2.39.0
+  regime-aware coverage feature is now correct for non-default levels.
+
+- **Bootstrap CI is now a paired bootstrap.** Each model drew its own
+  fold-id resamples — independent draws across models inflated marginal
+  CIs and the "T#1 (tied within fold noise)" chip over-reported ties.
+  One shared ``(bootstrap_iters, n_folds)`` index matrix per
+  ``_compute_composite_ranks`` call now applies the same fold ids to
+  every model so the across-model fold structure is preserved.
+
+- **Empty-column guard's drop-vs-zero-fill decision made on wrong role
+  when the same entity had multiple roles.** ``cov_roles_by_name`` was
+  a dict overwriting on duplicate key. Now a set per column; drop only
+  when every role for that column is lagged, otherwise zero-fill so the
+  future-side channel still gets values at inference.
+
+- **Daily-rank "did not complete" mis-classified models whose fold legitimately
+  spanned <2 distinct dates.** The completeness check treated empty ``{}``
+  (real fold failure) and "metric not computable on this fold"
+  identically — silently dropping models that fitted and predicted fine.
+  ``run_single_model`` now emits a ``{'__skipped__': True}`` sentinel for
+  the latter case and ``_compute_composite_ranks`` distinguishes them,
+  ranking the model normally on the folds where the metric is
+  computable.
+
+**Medium (correctness / UX gaps):**
+
+- **Daily-only DNCs now surfaced in BenchmarkResult.did_not_complete.**
+  ``_dnc_daily`` was destructured with an underscore prefix and
+  discarded; users saw ``—`` in the Daily Rank column with no entry in
+  the "Did not complete" section explaining why.
+
+- **``classify_covariate_state`` returns ``partial`` for non-weather
+  categorical state with a parseable future_attribute.** The docstring
+  promised partial for this case but the implementation only returned
+  partial when the attribute failed to parse — green chip on rows where
+  the lagged channel is all-NaN.
+
+- **Validator no longer false-flags weather entities whose attributes
+  are string numerics.** OpenWeatherMap / met.no return
+  ``temperature: '16.5'``; the production path tolerates strings via
+  ``state_to_float`` and the validator now does too.
+
+- **Non-weather entity with ``future_value_key`` now routes through the
+  attribute-history path.** Pre-fix the path was weather-only, so two
+  configs of the same non-weather entity with distinct value_keys both
+  fell back to ``.state`` and the model trained on two columns of
+  identical data.
+
+- **``_cov_column_name`` silent column collision.** When two same-entity
+  configs both lack a distinguishing ``future_value_key`` and share the
+  default ``future_attribute``, both returned the bare base — second
+  ``result[cov_name] = ...`` silently overwrote the first. Now appends
+  a positional ``__N`` suffix and warns so the user knows to set
+  ``future_value_key`` explicitly.
+
+- **Deep-covariate-analysis labels now match the results dict keys.**
+  Label list used ``entity.split('.')[-1]`` while the results dict
+  used ``_cov_column_name`` (suffixed) — duplicate blank rows in the
+  analysis tab for any multi-key same-entity covariate.
+
+- **Holdout chart no longer silently truncates the trailing
+  ``max_horizon-1`` points.** The v2.38.5 alignment fix was correct
+  but the chart ended ~24 h short of the holdout window with no
+  annotation. Predictions are now NaN-padded to span the full window
+  so the right-edge gap is visible.
+
+**Low (CLI-only / cosmetic):**
+
+- **``worst_bucket`` in ``db.get_forecast_coverage`` now selected by
+  max|deviation| from a caller-supplied nominal.** Pre-fix it picked
+  ``min(coverage)``, so over-covered buckets were never flagged. The
+  CLI ``scripts/conformal_coverage_check.py`` reads this field
+  directly and now respects ``--nominal`` for the selection. The web
+  UI was already overriding correctly.
+
+**Training-speed concerns:**
+
+- **HA history fetch with ``include_attributes=True`` now passes
+  ``significant_changes_only``.** Without it, weather entities return
+  every recorder tick with their full attribute dict (forecast arrays
+  + supported_features etc.) — ~5× larger payloads per covariate per
+  fold for the v2.38.4 attribute-history path. The flag only suppresses
+  ticks where the state didn't change; the attribute we actually parse
+  is unaffected. Lengthens benchmark/retrain cycles measurably less.
+
+- **Coverage tab now builds the ``actuals_grid`` aggregation once per
+  request, not three times.** Previously each of the per-lead, overall,
+  and breakdown queries rebuilt the same WITH-clause CTE — three
+  aggregations per Forecast Accuracy tab load while holding the SQLite
+  write lock, which could contend with the training pipeline's
+  residual/forecast writes. Materialised once into a TEMP table now.
+
+- **Shared aiohttp session for the validate-covariate endpoint.** The
+  v2.38.7 chip fires one ``/api/covariates/validate`` per row on page
+  load; pre-fix each handler invocation opened a fresh
+  ``ClientSession`` (full TLS handshake), 20 in parallel for a
+  20-covariate experiment. Lazy module-level session bound to the
+  running loop, reused across requests.
+
+Tests: 13 new test cases covering the new contracts (SeasonalNaive
+cache rejection + extended-window pw=0 honoured, validator
+string-numerics + partial-on-empty-lagged, paired bootstrap rank-sum
+invariant, daily DNC sentinel handling, ``remove_experiment_covariate``
+disambiguation, ``worst_bucket`` selection by max|deviation| at two
+different nominal levels). Full unit suite (266 tests) passes.
+
 ## 2.39.2
 
 Fixes three false positives / misleading messages in the covariate

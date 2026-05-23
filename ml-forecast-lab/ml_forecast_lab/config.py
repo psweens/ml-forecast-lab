@@ -1057,6 +1057,9 @@ def remove_experiment_covariate(
     config_path: Path | str,
     experiment_name: str,
     entity_id: str,
+    role: Optional[str] = None,
+    future_attribute: Optional[str] = None,
+    future_value_key: Optional[str] = None,
 ) -> bool:
     """
     Remove a covariate from an experiment's config.
@@ -1065,17 +1068,32 @@ def remove_experiment_covariate(
     or its short suffix (``current_charge``) — the covariate-analysis UI uses the
     short form because that's what becomes the dataframe column name.
 
+    When the experiment configures the same entity multiple times (v2.38.2+
+    allows this for e.g. ``cloud_coverage`` and ``temperature`` from the same
+    ``weather.*`` entity), pass ``role`` / ``future_attribute`` /
+    ``future_value_key`` to identify the specific row to remove.  Without
+    those disambiguators a same-entity dedup would strip every matching row
+    in one call, silently losing the other channels.
+
     Returns True if a covariate was removed, False if not found.
     """
     config_path = Path(config_path)
     with open(config_path, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f) or {}
 
-    def _matches(cov: dict, target: str) -> bool:
+    def _entity_matches(cov: dict, target: str) -> bool:
         ent = cov.get('entity') or ''
         if not ent:
             return False
         return ent == target or ent.split('.')[-1] == target
+
+    target_spec = {'entity': entity_id}
+    if role is not None:
+        target_spec['role'] = role
+    if future_attribute is not None:
+        target_spec['future_attribute'] = future_attribute
+    if future_value_key is not None:
+        target_spec['future_value_key'] = future_value_key
 
     removed = False
     for exp in data.get('experiments', []):
@@ -1083,7 +1101,40 @@ def remove_experiment_covariate(
             continue
         covs = exp.get('covariates', [])
         original_len = len(covs)
-        exp['covariates'] = [c for c in covs if not _matches(c, entity_id)]
+        same_entity = [c for c in covs if _entity_matches(c, entity_id)]
+        if role is None and future_attribute is None and future_value_key is None and len(same_entity) > 1:
+            # Caller didn't disambiguate but the entity has multiple rows
+            # — refuse rather than silently stripping all of them. The UI
+            # should always send the full (entity, role, future_attribute,
+            # future_value_key) tuple in this case.
+            logger.warning(
+                'remove_experiment_covariate(%r, %r): entity is configured '
+                '%d times — refusing to remove without role / future_attribute '
+                '/ future_value_key disambiguation. Pass them explicitly.',
+                experiment_name, entity_id, len(same_entity),
+            )
+            return False
+        # When disambiguators given, match against the same (entity, role,
+        # future_attribute, future_value_key) tuple as the add path uses.
+        # Without disambiguators (single same-entity row), fall back to
+        # entity-only match.
+        if role is None and future_attribute is None and future_value_key is None:
+            exp['covariates'] = [c for c in covs if not _entity_matches(c, entity_id)]
+        else:
+            # Normalise target's entity to the matching row's actual stored
+            # form so the _same_covariate comparison succeeds regardless of
+            # short-suffix vs full-entity input.
+            kept = []
+            removed_one = False
+            for c in covs:
+                if not removed_one and _entity_matches(c, entity_id):
+                    cmp_target = dict(target_spec)
+                    cmp_target['entity'] = c.get('entity', '')
+                    if _same_covariate(c, cmp_target):
+                        removed_one = True
+                        continue
+                kept.append(c)
+            exp['covariates'] = kept
         removed = len(exp['covariates']) < original_len
         break
 
@@ -1185,23 +1236,26 @@ def add_experiment_covariate(
 
 def _same_covariate(a: dict, b: dict) -> bool:
     """Two covariates are the same configuration only if entity, role,
-    AND (for future/both) the future-value source all match. A user
-    who adds ``weather.met_office_balsham`` once for ``cloud_coverage``
-    and again for ``temperature`` is configuring two distinct
-    covariates — they share an entity but differ in
-    ``future_value_key``."""
+    AND the future-value source all match. A user who adds
+    ``weather.met_office_balsham`` once for ``cloud_coverage`` and
+    again for ``temperature`` is configuring two distinct covariates
+    — they share an entity but differ in ``future_value_key``.
+
+    The same disambiguation applies to ``role='lagged'`` because the
+    v2.38.4 attribute-history path uses ``future_value_key`` to choose
+    which weather attribute to pull historical numerics from — two
+    lagged covariates from the same ``weather.*`` entity with
+    different ``future_value_key`` values pull different signals."""
     if a.get('entity') != b.get('entity'):
         return False
     if a.get('role', 'lagged') != b.get('role', 'lagged'):
         return False
-    if a.get('role', 'lagged') in ('future', 'both'):
-        # For future/both, the (attribute, value_key) pair is what
-        # routes to a specific forecast metric. Different pairs =
-        # different covariates from the same source entity.
-        if a.get('future_attribute', 'forecast') != b.get('future_attribute', 'forecast'):
-            return False
-        if a.get('future_value_key') != b.get('future_value_key'):
-            return False
+    # (attribute, value_key) routes to a specific forecast or attribute
+    # metric for every role — different pairs = different covariates.
+    if a.get('future_attribute', 'forecast') != b.get('future_attribute', 'forecast'):
+        return False
+    if a.get('future_value_key') != b.get('future_value_key'):
+        return False
     return True
 
 
