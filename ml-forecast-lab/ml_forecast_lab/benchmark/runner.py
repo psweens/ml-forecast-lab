@@ -831,7 +831,7 @@ class BenchmarkRunner:
         )
         (
             daily_mean_ranks, daily_ranks,
-            daily_rank_cis, _dnc_daily,
+            daily_rank_cis, dnc_daily,
         ) = self._compute_composite_ranks(
             result.model_results, metric_source='daily_fold_metrics',
         )
@@ -855,10 +855,13 @@ class BenchmarkRunner:
                 result.model_results[name].metrics['mean_rank_daily_low'] = ci_d[0]
                 result.model_results[name].metrics['mean_rank_daily_high'] = ci_d[1]
 
-        # Primary ranking still drives Promote / Tuning / sensor publishing
+        # Primary ranking still drives Promote / Tuning / sensor publishing.
+        # did_not_complete unions interval + daily failures so the UI can
+        # surface ALL models that couldn't be ranked anywhere (pre-v2.39.3
+        # the daily list was discarded).
         result.rankings = interval_ranks
         result.daily_rankings = daily_ranks
-        result.did_not_complete = dnc_interval
+        result.did_not_complete = sorted(set(dnc_interval) | set(dnc_daily))
         sorted_models = sorted(interval_mean_ranks.items(), key=lambda x: x[1])
         mean_ranks = interval_mean_ranks  # for downstream logging
 
@@ -1064,12 +1067,21 @@ class BenchmarkRunner:
             if fold_recorded:
                 ranked_fold_ids.append(fold_idx)
 
-        # Mean composite rank per model across the folds with valid data
+        # Mean composite rank per model across the folds with valid data.
+        # A model that passed the completeness check but ended up with NO
+        # ranked folds (every fold was '__skipped__' for it, or every
+        # fold's metrics were all-inf) gets demoted to DNC for this
+        # metric_source — emitting integer ranks for inf-mean models
+        # would just be dict-insertion-order noise.
         mean_ranks: Dict[str, float] = {}
-        for name in rankable_names:
+        for name in list(rankable_names):
             ranks = np.asarray(fold_ranks[name], dtype=float)
             valid = ranks[~np.isnan(ranks)]
-            mean_ranks[name] = float(np.mean(valid)) if valid.size else float('inf')
+            if not valid.size:
+                rankable_names.remove(name)
+                did_not_complete.append(name)
+                continue
+            mean_ranks[name] = float(np.mean(valid))
 
         # Paired bootstrap CI: resample fold IDs with replacement ONCE
         # per iteration, then apply the SAME ids to every model. Joint

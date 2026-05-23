@@ -365,6 +365,59 @@ class TestMeanRankScoring:
             f"computable; got ranks={ranks}"
         )
 
+    def test_all_folds_skipped_demotes_to_dnc_not_fake_integer_ranks(self):
+        """v2.39.3 follow-up: when every fold's daily metric is the
+        ``__skipped__`` sentinel (e.g. test span <2 distinct dates on
+        every walk-forward fold), the model is complete (no real
+        failures) but has NO ranked folds. The pre-fix would emit
+        integer ranks {a: 1, b: 2} in dict-insertion order — meaningless.
+        These models must surface as DNC for this metric_source."""
+        from ml_forecast_lab.benchmark.runner import ModelResult
+
+        cfg = _make_experiment_cfg(cv_folds=3)
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        a = ModelResult(model_name="a")
+        b = ModelResult(model_name="b")
+        a.daily_fold_metrics = [{"__skipped__": True}] * 3
+        b.daily_fold_metrics = [{"__skipped__": True}] * 3
+
+        means, ranks, cis, dnc = runner._compute_composite_ranks(
+            {"a": a, "b": b}, metric_source="daily_fold_metrics",
+        )
+        assert means == {}
+        assert ranks == {}
+        assert sorted(dnc) == ["a", "b"], (
+            "All-sentinel models must surface as DNC, not get fake "
+            f"integer ranks; got dnc={dnc}, ranks={ranks}"
+        )
+
+    def test_zero_folds_returns_empty_not_insertion_order_ranks(self):
+        """Edge case from Angle B/C: when every model has zero
+        fold-metric entries (e.g. an exotic test fixture or upstream
+        failure), pre-fix the completeness check passed vacuously
+        (``len([]) == 0``), every model's mean_rank ended up inf, and
+        integer ranks were assigned in dict-insertion order (1, 2, 3,
+        ...). Output is now empty so callers don't downstream-trust
+        meaningless ranks."""
+        from ml_forecast_lab.benchmark.runner import ModelResult
+
+        cfg = _make_experiment_cfg(cv_folds=2)
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        a = ModelResult(model_name="a")
+        b = ModelResult(model_name="b")
+        # Both have zero entries — n_folds resolves to 0.
+        a.fold_metrics = []
+        b.fold_metrics = []
+
+        means, ranks, cis, dnc = runner._compute_composite_ranks(
+            {"a": a, "b": b}, metric_source="fold_metrics",
+        )
+        assert means == {}
+        assert ranks == {}
+        assert sorted(dnc) == ["a", "b"]
+
     def test_bootstrap_ci_is_paired_across_models(self):
         """v2.39.3 bug 5: bootstrap iterations must apply the SAME resampled
         fold IDs to every model, not draw independent IDs per model. With
