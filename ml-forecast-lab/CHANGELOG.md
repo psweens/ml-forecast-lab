@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.40.3
+
+Fixes the live Training progress reading past 100% (e.g. **"9/5 models
+complete — 180%"**).
+
+The progress counters (the live Training tab JS, and the two server-side
+readers behind the dashboard card / page restore) incremented
+`completed_models` on every `model_end` event but **never reset it on
+`pipeline_start`**. So when one open SSE stream saw more than one run — a
+re-run, a scheduled benchmark, or replayed history on reconnect — the count
+accumulated across runs (a finished 5-model run + 4 of the next ⇒ 9/5).
+
+Now the completion counter **resets at each `pipeline_start`** (only the
+latest run's completions count) and is **clamped to the declared total**, so
+it can never read past the total or exceed 100% even if a stray `model_end`
+slips through. The two duplicated server-side readers were consolidated into
+a single tested `training_events.summarise_history()` helper to stop them
+drifting apart again.
+
+Tests: 5 new cases in `test_training_progress.py` (single run, stale-prior-run
+no-inflate, clamp-to-total, current-model/epoch tracking, empty history).
+
 ## 2.40.2
 
 **Bugfix: the loss-balance slider was a no-op on the paths that produce

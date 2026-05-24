@@ -236,6 +236,13 @@ var EMBEDDED_HISTORY = {{ embedded_history | tojson }};
                 // Try to extract model count
                 const match = (ev.message || '').match(/(\d+) model/);
                 if (match) totalModels = parseInt(match[1]);
+                // Reset the completion counter for THIS run. Without this a
+                // re-run on the same open stream (or replayed history) keeps
+                // incrementing across runs and reads past the total
+                // (the "9/5 = 180%" bug).
+                completedModels = 0;
+                document.getElementById('progress-bar').style.width = '0%';
+                document.getElementById('progress-pct').textContent = '0%';
                 break;
 
             case 'model_start':
@@ -271,11 +278,13 @@ var EMBEDDED_HISTORY = {{ embedded_history | tojson }};
                 completedModels++;
                 // Detect early stop from epoch data if no explicit early_stop event
                 detectEarlyStopFromData(ev.model_name);
-                const pct = totalModels > 0 ? Math.round(completedModels / totalModels * 100) : 0;
+                // Clamp so a stray extra model_end can never read > 100% / > total.
+                const _doneShown = totalModels > 0 ? Math.min(completedModels, totalModels) : completedModels;
+                const pct = totalModels > 0 ? Math.min(100, Math.round(completedModels / totalModels * 100)) : 0;
                 document.getElementById('progress-bar').style.width = pct + '%';
                 document.getElementById('progress-pct').textContent = pct + '%';
                 document.getElementById('progress-label').textContent =
-                    `${completedModels}/${totalModels} models complete`;
+                    `${_doneShown}/${totalModels} models complete`;
                 logEvent('success', `Completed: ${ev.model_name}`);
                 // Re-render chart to show early stop markers
                 if (!isReplaying && ev.model_name === displayModel) {

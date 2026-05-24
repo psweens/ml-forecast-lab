@@ -5906,6 +5906,11 @@ window.showTab = function(el) {
                 logEvent('info', ev.message || 'Pipeline started');
                 var match = (ev.message || '').match(/(\d+) model/);
                 if (match) totalModels = parseInt(match[1]);
+                // Reset per-run so a re-run / replayed history can't push the
+                // counter past the total (the "9/5 = 180%" bug).
+                completedModels = 0;
+                document.getElementById('progress-bar').style.width = '0%';
+                document.getElementById('progress-pct').textContent = '0%';
                 break;
             case 'model_start':
                 currentModel = ev.model_name;
@@ -5927,10 +5932,11 @@ window.showTab = function(el) {
                 break;
             case 'model_end':
                 completedModels++;
-                var pct = totalModels > 0 ? Math.round(completedModels / totalModels * 100) : 0;
+                var _doneShown = totalModels > 0 ? Math.min(completedModels, totalModels) : completedModels;
+                var pct = totalModels > 0 ? Math.min(100, Math.round(completedModels / totalModels * 100)) : 0;
                 document.getElementById('progress-bar').style.width = pct + '%';
                 document.getElementById('progress-pct').textContent = pct + '%';
-                document.getElementById('progress-label').textContent = completedModels + '/' + totalModels + ' models complete';
+                document.getElementById('progress-label').textContent = _doneShown + '/' + totalModels + ' models complete';
                 logEvent('success', 'Completed: ' + ev.model_name);
                 if (!isReplaying && ev.model_name === displayModel) renderChartForModel(displayModel);
                 break;
