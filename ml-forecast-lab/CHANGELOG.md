@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.39.5
+
+Flags unstable models on the leaderboard so an outlier-robust mean rank
+can't make a blow-up-prone model look like a solid pick.
+
+The composite mean rank is deliberately outlier-robust — a single
+catastrophic CV fold costs a model only one last-place finish, so a
+model that is strong on most folds but blows up on one can out-rank a
+consistently-mediocre model. The mean rank tells you "usually beats the
+others"; it does NOT tell you "safe to deploy." A real example: N-HiTS
+showing `MASE 9201 ± 18402` (one fold blew up) ranked *above* a DLinear
+at `MASE 1.15 ± 0.33` (tight, reliable), purely because N-HiTS won most
+individual folds.
+
+The Results leaderboard now shows a `⚠ unstable` badge next to any model
+whose per-fold spread on the production metric reveals this, with a
+tooltip explaining which regime tripped it:
+
+- **catastrophic fold** — the worst fold is >= 10x the median fold
+  ("one fold blew up; mean rank hides this"), or
+- **high dispersion** — std >= mean across folds (coefficient of
+  variation >= 1.0; "unstable fold-to-fold").
+
+Leaderboard-only: the ranking math is unchanged, and the flag does not
+alter Promote / Tuning / live-forecast selection — it surfaces the
+signal so you can choose worst-case stability over "typically wins" when
+it matters. Assessed on the production metric (falling back to mase /
+mae); models with fewer than 2 finite folds or all-zero error are never
+flagged. The `unstable` / `instability_reason` fields default to
+`False` / `None`, so benchmark results persisted by older versions
+deserialize unchanged.
+
+Tests: 7 new cases in `test_model_instability.py` (blow-up fold,
+consistent model, high-dispersion-without-blowup, single-fold guard,
+all-zero guard, primary-metric fallback, NaN/empty-fold handling). Full
+unit suite (281 tests) passes.
+
 ## 2.39.4
 
 Incremental covariate-history caching — cuts the per-forecast-cycle HA

@@ -258,6 +258,15 @@ main { flex: 1; }
 .rank-2 { background: var(--accent-secondary); color: var(--bg-primary); }
 .rank-3 { background: #9b59b6; color: white; }
 
+/* Unstable-model flag: surfaces a model whose mean-rank standing hides a
+   blow-up fold (the rank is outlier-robust; the badge isn't). */
+.unstable-badge {
+    display: inline-block; margin-left: 0.4rem; padding: 0.05rem 0.4rem;
+    border-radius: 0.5rem; font-size: 0.7rem; font-weight: 600;
+    white-space: nowrap; vertical-align: middle; cursor: help;
+    color: #b9821a; background: #b9821a22; border: 1px solid #b9821a55;
+}
+
 /* --- Fold metrics (collapsible) --- */
 .fold-metrics {
     margin-top: 1.5rem; padding: 1.5rem; background: var(--bg-tertiary);

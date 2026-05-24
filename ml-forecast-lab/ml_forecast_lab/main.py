@@ -248,6 +248,68 @@ def _cov_column_name(cov_cfg, all_covs: Optional[list] = None) -> str:
     return f"{base}__{position + 1}"
 
 
+def _assess_model_instability(
+    fold_metrics_list: list,
+    primary_metrics: list,
+) -> tuple:
+    """Flag a model whose per-fold error spread hides a blow-up fold.
+
+    The composite mean rank is outlier-robust: a single catastrophic
+    fold costs only one last-place finish, so a model that is strong on
+    most folds but catastrophic on one can out-rank a consistently
+    mediocre model (see docs/RANKING_NOTES.md). This inspects the
+    per-fold values of the first available metric in ``primary_metrics``
+    (production metric first, then mase / mae fallbacks) and flags two
+    regimes:
+
+      - catastrophic fold: the worst fold is >= 10x the median fold —
+        the "great on 4 folds, blew up on 1" pattern the mean rank hides;
+      - high dispersion: std >= mean (coefficient of variation >= 1.0),
+        i.e. fold-to-fold spread is at least as large as the mean.
+
+    Returns ``(unstable: bool, reason: Optional[str])``. ``reason`` is
+    ``None`` when stable or when there are fewer than 2 finite folds to
+    judge from (a flag off a single fold would be meaningless).
+    """
+    for metric in primary_metrics:
+        if not metric:
+            continue
+        vals = []
+        for fm in fold_metrics_list:
+            if not fm:
+                continue
+            v = fm.get(metric)
+            if v is None:
+                continue
+            if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+                continue
+            vals.append(float(v))
+        if len(vals) < 2:
+            continue  # not enough data for THIS metric — try the next
+        arr = np.asarray(vals, dtype=float)
+        mean = float(arr.mean())
+        if mean <= 0:
+            return False, None  # degenerate / all-zero error — nothing to flag
+        std = float(arr.std())
+        median = float(np.median(arr))
+        worst = float(arr.max())
+        blowup = worst / median if median > 0 else float("inf")
+        if blowup >= 10.0:
+            return True, (
+                f"worst fold ({worst:.3g}) is {blowup:.0f}x its median fold "
+                f"({median:.3g}) on {metric} — one fold blew up; mean rank "
+                f"hides this"
+            )
+        cv = std / mean
+        if cv >= 1.0:
+            return True, (
+                f"{metric} swings ±{cv * 100:.0f}% across folds "
+                f"(mean {mean:.3g} +/- {std:.3g}) — unstable fold-to-fold"
+            )
+        return False, None  # assessed on the primary metric; it's stable
+    return False, None
+
+
 def _collect_train_future_covariates(
     combined: 'pd.DataFrame', exp_cfg
 ) -> Dict[str, 'pd.Series']:
@@ -2273,6 +2335,15 @@ class MLForecastLabApp:
             daily_mean_rank_low = runner_model_result.metrics.get("mean_rank_daily_low")
             daily_mean_rank_high = runner_model_result.metrics.get("mean_rank_daily_high")
 
+            # Stability check — surface a model whose mean-rank standing
+            # is propped up by being good on most folds while hiding a
+            # catastrophic fold (the mean rank is outlier-robust and
+            # won't show it). Assessed on the production metric.
+            unstable, instability_reason = _assess_model_instability(
+                [fm for fm in fold_metrics_list if fm],
+                [exp_cfg.production_metric, "mase", "mae"],
+            )
+
             web_models.append(WebModelResult(
                 name=model_name,
                 mae=MetricValue(
@@ -2314,6 +2385,8 @@ class MLForecastLabApp:
                 daily_mean_rank=daily_mean_rank,
                 daily_mean_rank_low=daily_mean_rank_low,
                 daily_mean_rank_high=daily_mean_rank_high,
+                unstable=unstable,
+                instability_reason=instability_reason,
             ))
 
         # Pairwise comparison: paired difference of per-fold MAE values

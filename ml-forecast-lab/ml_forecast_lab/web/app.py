@@ -122,6 +122,16 @@ class ModelResult(BaseModel):
     daily_mean_rank: Optional[float] = None
     daily_mean_rank_low: Optional[float] = None
     daily_mean_rank_high: Optional[float] = None
+    # Stability flag: True when the model's per-fold error metric spread
+    # is large enough that its mean-rank "typically wins" story hides a
+    # blow-up fold. The composite mean rank is outlier-robust (a single
+    # catastrophic fold only costs one last-place finish), so a model
+    # that is great on most folds but catastrophic on one can out-rank a
+    # consistently-mediocre model. This flag surfaces that so an
+    # unstable model can't masquerade as a solid mid-pack pick. See
+    # docs/RANKING_NOTES.md.
+    unstable: bool = False
+    instability_reason: Optional[str] = None
 
 
 class BenchmarkResult(BaseModel):
