@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.40.0
+
+New feature: a **per-interval ⟷ cumulative loss-balance slider** for neural
+training (Settings → Data & Forecast).
+
+Until now the cumulative-trajectory loss was an *additive* term:
+`L = L_interval + λ·L_daily` (`daily_loss_weight`), where the per-interval
+term always carried weight 1.0 and λ piled cumulative pressure on top — with
+no way to ask for a purely cumulative objective. The new slider reframes this
+as a **convex blend**:
+
+    L = (1 − α) · L_interval  +  α · L_cumulative
+
+α = 0 is pure per-interval (each step's value), α = 1 is pure
+cumulative-trajectory (matches the running daily total at every horizon step,
+which also pins the end-of-day total). Use the cumulative end when only the
+daily figure matters — e.g. a Mixergy hot-water tank's daily demand.
+
+**Magnitude-aware:** each term is divided by a detached exponential moving
+average of itself before blending, so the slider position is the true balance
+of *gradient influence*, not a nominal weight. Without this the cumulative
+term (typically 10-100× the per-interval term in raw magnitude, and
+loss-function-dependent) would dominate even at α ≈ 0.3. The EMA updates only
+on training batches (validation runs under `no_grad`), so val-loss stays
+comparable for early stopping.
+
+**Backward compatible & opt-in:** `loss_balance` defaults to `None` →
+the exact pre-2.40 additive `daily_loss_weight` path, byte-for-byte. Moving
+the slider sets `loss_balance` (0–1) and supersedes the weight; toggling it
+off restores the legacy path. Neural backends only; tree models ignore it.
+`_composite_horizon_loss` became an instance method (transparent to the 18
+backend call sites, which already invoked it via `self.`).
+
+Tests: 13 new cases in `test_loss_balance.py` (legacy additive equivalence,
+first-call normalisation, α-extreme behaviour, EMA train/val update rule,
+single-horizon collapse, clamping, differentiability, and an end-to-end
+NLinear fit through the blend path). Full unit suite passes.
+
 ## 2.39.5
 
 Flags unstable models on the leaderboard so an outlier-robust mean rank

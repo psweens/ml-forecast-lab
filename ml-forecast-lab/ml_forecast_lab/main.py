@@ -413,6 +413,21 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
             # migrated) — silently skip rather than break the whole run.
             pass
 
+    # Interval↔cumulative loss balance (v2.40). Cross-cutting training-time
+    # attribute read by ForecastModel._composite_horizon_loss; set directly
+    # on the instance rather than via each backend's set_params whitelist.
+    # None → legacy additive daily_loss_weight path (above). Reset the
+    # per-term EMA so every training run normalises from its own scale.
+    if 'loss_balance' not in overrides:
+        alpha = getattr(exp_cfg, 'loss_balance', None)
+        if alpha is not None:
+            try:
+                alpha = float(alpha)
+            except (TypeError, ValueError):
+                alpha = None
+        model.loss_balance = alpha
+        model._loss_ema = None
+
 
 class MLForecastLabApp:
     """

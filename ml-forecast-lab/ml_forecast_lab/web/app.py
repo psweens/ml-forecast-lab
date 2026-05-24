@@ -3910,6 +3910,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             # (e.g. from hand-edited YAML) pass through clamped to ≥ 0 so sophisticated
             # users can still override the default λ without UI churn.
             "daily_loss_weight": lambda v: max(0.0, float(v)),
+            # Convex interval↔cumulative blend in [0,1]. null → off (legacy
+            # daily_loss_weight path); 0 = pure interval, 1 = pure cumulative.
+            "loss_balance": lambda v: float(v) if 0.0 <= float(v) <= 1.0 else None,
             "max_increment": lambda v: float(v) if float(v) > 0 else None,
             "conformal_coverage": lambda v: float(v) if 0.5 <= float(v) <= 0.99 else None,
             "country": lambda v: (str(v).strip().upper() or None) if v else None,
@@ -3926,7 +3929,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         }
 
         # Fields where None/null means "use global default" (valid, not an error)
-        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country"}
+        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country", "loss_balance"}
 
         updates = {}
         for field, validator in editable.items():
