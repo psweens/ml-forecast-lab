@@ -520,7 +520,33 @@ class ExperimentCfg:
 
     Applied to torch neural backends only; silently ignored by tree models.
     Typical useful range: 0.1–1.0 (stronger under MSE than MAE due to loss
-    geometry)."""
+    geometry).
+
+    Superseded by ``loss_balance`` when that is set."""
+
+    loss_balance: Optional[float] = None
+    """Convex blend between per-interval and cumulative-trajectory loss for
+    neural backends, in [0, 1]. ``None`` (default) keeps the legacy additive
+    behaviour driven by ``daily_loss_weight`` — zero change for existing
+    experiments. When set:
+
+        L = (1 - α)·L_interval + α·L_cumulative
+
+    where α is this value: ``0.0`` = pure per-interval loss, ``1.0`` = pure
+    cumulative-trajectory loss (matches the predicted cumulative curve at
+    every horizon step, which also pins the end-of-day total). Use the
+    cumulative end for targets where only the daily total matters (e.g. a
+    Mixergy hot-water tank's daily demand).
+
+    Magnitude handling: each term is divided by a detached exponential
+    moving average of itself before blending, so α is the true fraction of
+    gradient influence rather than being swamped by whichever term is
+    intrinsically larger — the cumulative term is typically 10-100× the
+    per-interval term in raw magnitude, so a naive blend would make even
+    α=0.3 behave like "almost all cumulative".
+
+    Supersedes ``daily_loss_weight`` when set. Neural backends only; tree
+    models ignore it."""
 
     recency_half_life_days: float = 0.0
     """Half-life for exponential recency weighting in days. ``0`` (default,
@@ -666,6 +692,10 @@ class ExperimentCfg:
         if self.daily_loss_weight < 0:
             raise ValueError(
                 f'daily_loss_weight must be >= 0, got {self.daily_loss_weight}'
+            )
+        if self.loss_balance is not None and not (0.0 <= self.loss_balance <= 1.0):
+            raise ValueError(
+                f'loss_balance must be in [0, 1] or None, got {self.loss_balance}'
             )
         valid_optimisers = {'adam', 'adamw'}
         if self.optimiser not in valid_optimisers:
