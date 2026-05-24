@@ -362,6 +362,28 @@ def _resolve_daily_loss_weight(exp_cfg) -> float:
     return 0.5 if is_nonneg else 0.0
 
 
+def _apply_loss_balance(model, exp_cfg, overrides=None) -> None:
+    """Apply the resolved interval↔cumulative blend (α) to a neural model.
+
+    Centralised so EVERY training path — benchmark CV, production retrain,
+    holdout refits, tuning, covariate analysis — sets it identically.
+    The lack of one choke point is exactly what made the slider a no-op on
+    the primary paths in v2.40.0-2.40.1: each path set ``daily_loss_weight``
+    by hand and forgot ``loss_balance``, so the production / benchmark models
+    never received it (v2.40.2 fix).
+
+    No-op for tree backends; skipped when the caller already pinned
+    ``loss_balance`` via ``overrides`` / ``model_params``. Resets the
+    per-term EMA so each fresh run normalises from its own scale.
+    """
+    if not getattr(model, 'is_neural', False):
+        return
+    if overrides and 'loss_balance' in overrides:
+        return
+    model.loss_balance = exp_cfg.effective_loss_balance
+    model._loss_ema = None
+
+
 def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
     """
     Propagate experiment-level neural training settings to a model.
@@ -413,16 +435,9 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
             # migrated) — silently skip rather than break the whole run.
             pass
 
-    # Interval↔cumulative loss balance (v2.40). Single slider control:
-    # loss_balance is ALWAYS resolved to a float (explicit slider value,
-    # else migrated from the effective daily_loss_weight incl. the PF9
-    # non-negative default), so training uses the EMA convex-blend path —
-    # which is byte-identical to legacy interval-only at α=0 (the default).
-    # Set directly on the instance (not via per-backend set_params
-    # whitelists); reset the per-term EMA so each run normalises afresh.
-    if 'loss_balance' not in overrides:
-        model.loss_balance = exp_cfg.effective_loss_balance
-        model._loss_ema = None
+    # Interval↔cumulative loss balance — centralised in one helper so every
+    # training path applies it identically (see _apply_loss_balance).
+    _apply_loss_balance(model, exp_cfg, overrides)
 
 
 class MLForecastLabApp:
@@ -2704,6 +2719,7 @@ class MLForecastLabApp:
                 if (m.is_neural and hasattr(m, 'daily_loss_weight')
                         and 'daily_loss_weight' not in overrides):
                     m.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
+                _apply_loss_balance(m, exp_cfg, overrides)
                 if (m.is_neural and hasattr(m, 'optimiser')
                         and 'optimiser' not in overrides):
                     m.set_params(optimiser=exp_cfg.optimiser)
@@ -3062,6 +3078,7 @@ class MLForecastLabApp:
                     if (m.is_neural and hasattr(m, 'daily_loss_weight')
                             and 'daily_loss_weight' not in overrides):
                         m.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
+                    _apply_loss_balance(m, exp_cfg, overrides)
                     if (m.is_neural and hasattr(m, 'optimiser')
                             and 'optimiser' not in overrides):
                         m.set_params(optimiser=exp_cfg.optimiser)
@@ -3464,6 +3481,7 @@ class MLForecastLabApp:
         if (model.is_neural and hasattr(model, 'daily_loss_weight')
                 and 'daily_loss_weight' not in overrides):
             model.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
+        _apply_loss_balance(model, exp_cfg, overrides)
         if (model.is_neural and hasattr(model, 'optimiser')
                 and 'optimiser' not in overrides):
             model.set_params(optimiser=exp_cfg.optimiser)
@@ -4124,6 +4142,7 @@ class MLForecastLabApp:
         if (model.is_neural and hasattr(model, 'daily_loss_weight')
                 and 'daily_loss_weight' not in overrides):
             model.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
+        _apply_loss_balance(model, exp_cfg, overrides)
         if (model.is_neural and hasattr(model, 'optimiser')
                 and 'optimiser' not in overrides):
             model.set_params(optimiser=exp_cfg.optimiser)

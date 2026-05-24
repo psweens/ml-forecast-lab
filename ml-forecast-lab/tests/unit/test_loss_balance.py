@@ -148,6 +148,56 @@ def test_blend_loss_is_differentiable():
     assert yp.grad is not None and torch.isfinite(yp.grad).all()
 
 
+def test_apply_loss_balance_wires_neural_model():
+    """v2.40.2 regression: the helper every training path uses must set
+    loss_balance (and reset the EMA) on neural models — the bug was that
+    the benchmark / retrain paths set daily_loss_weight by hand and never
+    set loss_balance, so the slider was a no-op on the models that produce
+    the user's results."""
+    from ml_forecast_lab.main import _apply_loss_balance
+    from ml_forecast_lab.config import ExperimentCfg
+
+    class _Neural:
+        is_neural = True
+        loss_balance = None
+        _loss_ema = {"interval": 1.0, "daily": 1.0}
+
+    cfg = ExperimentCfg(name="e", target_entity="sensor.x", loss_balance=0.8)
+    m = _Neural()
+    _apply_loss_balance(m, cfg)
+    assert m.loss_balance == pytest.approx(0.8)
+    assert m._loss_ema is None  # reset so the run normalises afresh
+
+
+def test_apply_loss_balance_noop_for_tree_model():
+    from ml_forecast_lab.main import _apply_loss_balance
+    from ml_forecast_lab.config import ExperimentCfg
+
+    class _Tree:
+        is_neural = False
+        loss_balance = "untouched"
+
+    cfg = ExperimentCfg(name="e", target_entity="sensor.x", loss_balance=0.8)
+    t = _Tree()
+    _apply_loss_balance(t, cfg)
+    assert t.loss_balance == "untouched"
+
+
+def test_apply_loss_balance_respects_overrides():
+    """A swept / pinned loss_balance in overrides must not be clobbered."""
+    from ml_forecast_lab.main import _apply_loss_balance
+    from ml_forecast_lab.config import ExperimentCfg
+
+    class _Neural:
+        is_neural = True
+        loss_balance = 0.3
+
+    cfg = ExperimentCfg(name="e", target_entity="sensor.x", loss_balance=0.8)
+    m = _Neural()
+    _apply_loss_balance(m, cfg, overrides={"loss_balance": 0.3})
+    assert m.loss_balance == pytest.approx(0.3)
+
+
 def test_effective_loss_balance_resolution():
     """The slider's displayed/used α (config.effective_loss_balance) is the
     single source of truth: explicit value wins; else migrate from the

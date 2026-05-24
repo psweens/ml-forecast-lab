@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.40.2
+
+**Bugfix: the loss-balance slider was a no-op on the paths that produce
+results.** Setting it (e.g. to 0.8) didn't change end-of-day cumulative
+accuracy because the primary training paths — the **benchmark CV loop**
+(which feeds the Daily Cumulative Accuracy table) and the **production
+retrain** (the live forecast model) — set `daily_loss_weight` by hand and
+never set `loss_balance`. Only the secondary analysis paths
+(tuning / covariate analysis) went through `_apply_experiment_neural_params`
+where the value was wired in. So the slider persisted to YAML but the models
+that matter never received it.
+
+Root cause was duplication: four separate hand-rolled neural-param setup
+sites. Fixed by centralising into a single `_apply_loss_balance(model,
+exp_cfg, overrides)` helper called by all four (benchmark, production
+retrain, holdout refit, holdout-neural) plus `_apply_experiment_neural_params`.
+The slider now actually drives training everywhere.
+
+**To see the effect:** re-run the pipeline (benchmark) and/or let the
+production model retrain — the change only takes effect on the next training
+run, not on cached-model forecast cycles. Also confirm the production model
+is a **neural** backend (LightGBM / XGBoost ignore the loss entirely), and
+that the horizon spans the day you care about (`future_periods × interval`).
+
+Tests: 3 new cases pinning `_apply_loss_balance` (wires neural models, no-op
+for tree models, respects overrides) — the gap a unit test would have caught.
+
 ## 2.40.1
 
 Consolidates the v2.40.0 loss controls to a **single always-on slider**.
