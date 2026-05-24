@@ -820,7 +820,8 @@
                                onchange="selectModel('{{ experiment.name }}', '{{ model.name }}')"
                                style="accent-color:var(--accent-secondary);cursor:pointer;">
                     </td>
-                    <td class="model-name">{{ model.name | model_display }}</td>
+                    <td class="model-name">{{ model.name | model_display }}{% if model.unstable %}
+                        <span class="unstable-badge" title="{{ model.instability_reason or 'Unstable across CV folds' }}">⚠ unstable</span>{% endif %}</td>
                     <td>
                         <span class="metric-value">{{ "%.3f" | format(model.mae.mean) }}</span>
                         <span class="metric-std">± {{ "%.3f" | format(model.mae.std) }}</span>
