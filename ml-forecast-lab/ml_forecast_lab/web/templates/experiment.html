@@ -350,32 +350,18 @@
                        value="{{ exp_config.conformal_coverage if exp_config else 0.8 }}"
                        onchange="saveSettingsField(this)">
             </div>
-            <div class="exp-field">
-                <label class="field-label">Daily cumulative loss (neural) <span class="info-tip">?<span class="tip-text">Weight λ for the cumulative-trajectory loss term added to the per-interval loss. 0 disables. 0.1–1.0 is the typical useful range; stronger values constrain the shape of the predicted cumulative curve more aggressively. Designed for cumulative-origin targets like <code>sensor.x_today</code> (daily demand, daily energy). Applies to torch neural models; silently ignored by tree backends.</span></span></label>
-                <input type="number" class="setting-input" data-field="daily_loss_weight" min="0" max="1.5" step="0.1"
-                       value="{{ exp_config.daily_loss_weight if exp_config else 0.0 }}"
-                       onchange="saveSettingsField(this)">
-            </div>
             <div class="exp-field" style="grid-column:1/-1;">
                 <label class="field-label">Loss balance: per-interval ⟷ cumulative (neural)
-                    <span class="info-tip">?<span class="tip-text">Blends the two neural training objectives on a single scale. <b>Per-interval</b> (left, 0.0) optimises each step's value — best when 30-min timing matters. <b>Cumulative</b> (right, 1.0) optimises the running daily total at every horizon step, which pins the end-of-day total — best when only the daily figure matters (e.g. a hot-water tank's daily demand). Each term is normalised by a moving average of its own magnitude, so the slider position is the true balance of influence, not just a nominal weight. When enabled this <b>supersedes</b> the Daily cumulative loss weight above. Neural models only; tree models ignore it.</span></span>
-                </label>
-                <label style="display:flex;align-items:center;gap:0.5rem;margin:0.25rem 0;color:var(--text-secondary);font-size:0.9rem;">
-                    <input type="checkbox" id="loss-balance-enable"
-                           {% if exp_config and exp_config.loss_balance is not none %}checked{% endif %}
-                           onchange="toggleLossBalance(this)"
-                           style="accent-color:var(--accent-secondary);cursor:pointer;">
-                    Enable balance slider (overrides the weight above)
+                    <span class="info-tip">?<span class="tip-text">Blends the two neural training objectives on a single scale. <b>Per-interval</b> (left, 0.0 — the default) optimises each step's value, best when 30-min timing matters. <b>Cumulative</b> (right, 1.0) optimises the running daily total at every horizon step, which pins the end-of-day total — best when only the daily figure matters (e.g. a hot-water tank's daily demand). Each term is normalised by a moving average of its own magnitude, so the slider position is the true balance of influence, not just a nominal weight. Neural models only; tree models ignore it.</span></span>
                 </label>
                 <div style="display:flex;align-items:center;gap:0.75rem;">
                     <span style="font-size:0.8rem;color:var(--text-secondary);min-width:5.5rem;">Per-interval</span>
                     <input type="range" id="loss-balance-slider" min="0" max="1" step="0.05" style="flex:1;cursor:pointer;"
-                           value="{{ exp_config.loss_balance if (exp_config and exp_config.loss_balance is not none) else 0.5 }}"
-                           {% if not (exp_config and exp_config.loss_balance is not none) %}disabled{% endif %}
+                           value="{{ "%.2f"|format(exp_config.effective_loss_balance) if exp_config else "0.00" }}"
                            oninput="document.getElementById('loss-balance-val').textContent = parseFloat(this.value).toFixed(2);"
                            onchange="saveLossBalance()">
                     <span style="font-size:0.8rem;color:var(--text-secondary);min-width:4.5rem;text-align:right;">Cumulative</span>
-                    <span id="loss-balance-val" class="metric-value" style="min-width:2.5rem;text-align:right;">{{ "%.2f"|format(exp_config.loss_balance) if (exp_config and exp_config.loss_balance is not none) else "0.50" }}</span>
+                    <span id="loss-balance-val" class="metric-value" style="min-width:2.5rem;text-align:right;">{{ "%.2f"|format(exp_config.effective_loss_balance) if exp_config else "0.00" }}</span>
                 </div>
             </div>
         </div>
@@ -2308,11 +2294,13 @@ window.showTab = function(el) {
         });
     };
 
-    // Loss-balance slider: persists `loss_balance` (0..1) when enabled, or
-    // null when disabled (falls back to the legacy daily_loss_weight path).
-    function _postLossBalance(value) {
-        var data = { experiment: EXP_NAME, loss_balance: value };
-        return fetch(BASE + '/api/experiment-settings', {
+    // Loss-balance slider: the single neural interval↔cumulative control.
+    // Always active; persists `loss_balance` (0..1) on release.
+    window.saveLossBalance = function() {
+        var slider = document.getElementById('loss-balance-slider');
+        if (!slider) return;
+        var data = { experiment: EXP_NAME, loss_balance: parseFloat(slider.value) };
+        fetch(BASE + '/api/experiment-settings', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data)
@@ -2321,22 +2309,6 @@ window.showTab = function(el) {
                 mlfl.toast('Save failed: ' + (result.error || 'unknown error'), 'error');
             }
         }).catch(function(err) { mlfl.toast('Save failed: ' + err, 'error'); });
-    }
-
-    window.saveLossBalance = function() {
-        var slider = document.getElementById('loss-balance-slider');
-        if (!slider || slider.disabled) return;
-        _postLossBalance(parseFloat(slider.value));
-    };
-
-    window.toggleLossBalance = function(cb) {
-        var slider = document.getElementById('loss-balance-slider');
-        if (slider) slider.disabled = !cb.checked;
-        if (cb.checked) {
-            _postLossBalance(slider ? parseFloat(slider.value) : 0.5);
-        } else {
-            _postLossBalance(null);  // off → legacy daily_loss_weight path
-        }
     };
 
     window.saveSettingsToggle = function(el, field) {
