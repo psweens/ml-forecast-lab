@@ -54,26 +54,37 @@ def test_legacy_additive_matches_interval_plus_lambda_daily():
     assert torch.allclose(loss, expected, atol=1e-6)
 
 
-@pytest.mark.parametrize("alpha", [0.0, 0.25, 0.5, 0.75, 1.0])
+def test_blend_alpha_zero_is_raw_interval_loss():
+    """α=0 (the default) short-circuits to the raw interval loss — byte-for-
+    byte identical to the legacy interval-only path, with no EMA rescale —
+    so making every neural experiment default to α=0 changes nothing."""
+    obj = _Dummy(loss_balance=0.0)
+    yp, yt = _mk()
+    loss, _ = _loss(obj, yp, yt)
+    assert torch.allclose(loss, torch.nn.functional.mse_loss(yp, yt), atol=1e-6)
+    assert obj._loss_ema is None, "α=0 must not touch the EMA"
+
+
+@pytest.mark.parametrize("alpha", [0.25, 0.5, 0.75, 1.0])
 def test_blend_first_call_normalises_both_terms_to_one(alpha):
-    """On the first blended call the EMA seeds to each term's own value, so
-    both normalised terms equal 1.0 and the blend is (1-α)·1 + α·1 = 1.0
-    regardless of α. Confirms the magnitude normalisation makes α a balance
-    of *influence*, not raw scale."""
+    """For α>0, the first blended call seeds the EMA to each term's own
+    value, so both normalised terms equal 1.0 and the blend is
+    (1-α)·1 + α·1 = 1.0 regardless of α. Confirms the magnitude
+    normalisation makes α a balance of *influence*, not raw scale."""
     yp, yt = _mk()
     loss, _ = _loss(_Dummy(loss_balance=alpha), yp, yt)
     assert torch.allclose(loss, torch.tensor(1.0), atol=1e-5)
 
 
 def test_blend_alpha_extremes_track_their_own_term():
-    """After the EMA has moved, α=0 must equal interval/ema_i and α=1 must
-    equal daily/ema_d — i.e. the far ends are pure interval / pure cumulative."""
-    # Seed EMA with one batch, then evaluate a different batch.
+    """α=0 returns the raw interval loss (no EMA); α=1, once the EMA has
+    moved, equals daily/ema_d — the far ends are pure interval / pure
+    cumulative."""
     obj0 = _Dummy(loss_balance=0.0)
     obj1 = _Dummy(loss_balance=1.0)
     yp_seed, yt_seed = _mk(seed=1)
     _loss(obj0, yp_seed, yt_seed)
-    _loss(obj1, yp_seed, yt_seed)
+    _loss(obj1, yp_seed, yt_seed)  # seeds obj1's EMA
 
     yp, yt = _mk(seed=2)
     loss0, _ = _loss(obj0, yp, yt)
@@ -82,7 +93,8 @@ def test_blend_alpha_extremes_track_their_own_term():
     interval = torch.nn.functional.mse_loss(yp, yt)
     H = yp.size(1)
     daily = (((yp.cumsum(1) - yt.cumsum(1)) ** 2).mean(dim=1) / float(H)).mean()
-    assert torch.allclose(loss0, interval / obj0._loss_ema["interval"], atol=1e-5)
+    assert torch.allclose(loss0, interval, atol=1e-6)  # raw interval at α=0
+    assert obj0._loss_ema is None
     assert torch.allclose(loss1, daily / obj1._loss_ema["daily"], atol=1e-5)
 
 
@@ -134,6 +146,30 @@ def test_blend_loss_is_differentiable():
     loss, _ = _loss(_Dummy(loss_balance=0.6), yp, yt)
     loss.backward()
     assert yp.grad is not None and torch.isfinite(yp.grad).all()
+
+
+def test_effective_loss_balance_resolution():
+    """The slider's displayed/used α (config.effective_loss_balance) is the
+    single source of truth: explicit value wins; else migrate from the
+    effective daily_loss_weight (incl. the PF9 non-negative auto-default);
+    else per-interval (0.0)."""
+    from ml_forecast_lab.config import ExperimentCfg
+
+    def cfg(**kw):
+        return ExperimentCfg(name="e", target_entity="sensor.x", **kw)
+
+    # Explicit slider value wins outright.
+    assert cfg(loss_balance=0.7).effective_loss_balance == pytest.approx(0.7)
+    # Signed target, nothing set → per-interval default.
+    assert cfg().effective_loss_balance == 0.0
+    # Explicit additive weight migrates λ→α=λ/(1+λ): 1.0 → 0.5.
+    assert cfg(daily_loss_weight=1.0).effective_loss_balance == pytest.approx(0.5)
+    # Non-negative target with no weight keeps PF9's λ=0.5 → α=1/3.
+    assert cfg(target_is_nonnegative=True).effective_loss_balance == pytest.approx(0.5 / 1.5)
+    # Cumulative source likewise inherits the PF9 default.
+    assert cfg(source_is_cumulative=True).effective_loss_balance == pytest.approx(0.5 / 1.5)
+    # Explicit loss_balance overrides any daily_loss_weight.
+    assert cfg(daily_loss_weight=1.0, loss_balance=0.0).effective_loss_balance == 0.0
 
 
 def test_end_to_end_neural_fit_uses_blend_path():

@@ -413,19 +413,15 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
             # migrated) — silently skip rather than break the whole run.
             pass
 
-    # Interval↔cumulative loss balance (v2.40). Cross-cutting training-time
-    # attribute read by ForecastModel._composite_horizon_loss; set directly
-    # on the instance rather than via each backend's set_params whitelist.
-    # None → legacy additive daily_loss_weight path (above). Reset the
-    # per-term EMA so every training run normalises from its own scale.
+    # Interval↔cumulative loss balance (v2.40). Single slider control:
+    # loss_balance is ALWAYS resolved to a float (explicit slider value,
+    # else migrated from the effective daily_loss_weight incl. the PF9
+    # non-negative default), so training uses the EMA convex-blend path —
+    # which is byte-identical to legacy interval-only at α=0 (the default).
+    # Set directly on the instance (not via per-backend set_params
+    # whitelists); reset the per-term EMA so each run normalises afresh.
     if 'loss_balance' not in overrides:
-        alpha = getattr(exp_cfg, 'loss_balance', None)
-        if alpha is not None:
-            try:
-                alpha = float(alpha)
-            except (TypeError, ValueError):
-                alpha = None
-        model.loss_balance = alpha
+        model.loss_balance = exp_cfg.effective_loss_balance
         model._loss_ema = None
 
 

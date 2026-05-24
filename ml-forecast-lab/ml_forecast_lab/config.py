@@ -640,6 +640,30 @@ class ExperimentCfg:
     forecasting — turns the problem into predicting cloud-cover-driven attenuation
     rather than raw generation."""
 
+    @property
+    def effective_loss_balance(self) -> float:
+        """Resolved interval↔cumulative blend α in [0, 1] actually used for
+        neural training, and the value the Settings slider displays.
+
+        Resolution order (single source of truth for UI and trainer):
+
+        1. Explicit ``loss_balance`` (the user moved the slider) wins.
+        2. Otherwise migrate from the *effective* additive
+           ``daily_loss_weight`` via ``α = λ / (1 + λ)`` — including the
+           non-negative / cumulative auto-default of ``λ = 0.5`` (the PF9
+           behaviour that keeps PV-style forecasts from flat-collapsing),
+           so consolidating to the slider doesn't silently drop cumulative
+           pressure from existing experiments. λ=0.5 → α≈0.33, λ=1 → α=0.5.
+        3. Per-interval (0.0) when nothing requests cumulative pressure
+           (signed targets with no weight) — the default.
+        """
+        if self.loss_balance is not None:
+            return min(1.0, max(0.0, float(self.loss_balance)))
+        lam = float(self.daily_loss_weight)
+        if lam <= 0.0 and (self.source_is_cumulative or self.target_is_nonnegative):
+            lam = 0.5
+        return lam / (1.0 + lam) if lam > 0.0 else 0.0
+
     def __post_init__(self) -> None:
         """Validate configuration."""
         valid_modes = {'lab', 'production'}

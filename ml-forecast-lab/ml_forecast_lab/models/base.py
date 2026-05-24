@@ -906,9 +906,12 @@ class ForecastModel(ABC):
         # whichever term is intrinsically larger (the cumulative term is
         # typically 10-100× the interval term in raw magnitude).
         alpha = float(min(1.0, max(0.0, alpha)))
-        if not has_daily:
-            # Single-horizon output: no cumulative trajectory exists, so the
-            # blend collapses to interval loss regardless of α.
+        if not has_daily or alpha <= 0.0:
+            # No cumulative trajectory (single-horizon) OR pure per-interval
+            # (α=0, the default): return the raw interval loss — byte-for-byte
+            # identical to the legacy interval-only path, so defaulting every
+            # neural experiment to α=0 changes nothing. The EMA rescale only
+            # kicks in once the user dials in some cumulative weight.
             return interval_loss, interval_per_sample
 
         daily_loss = ForecastModel._cumulative_trajectory_loss(

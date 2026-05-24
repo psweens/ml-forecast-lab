@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.40.1
+
+Consolidates the v2.40.0 loss controls to a **single always-on slider**.
+
+The standalone "Daily cumulative loss" weight box and the "Enable balance
+slider" checkbox are gone — the per-interval ⟷ cumulative slider is now the
+one neural loss control, always active, defaulting to **per-interval (α=0)**.
+At α=0 the loss is byte-for-byte the legacy interval-only loss (no EMA
+rescale), so the default changes nothing.
+
+Existing settings are migrated, not dropped: `config.effective_loss_balance`
+(now the single source of truth for both the slider and the trainer) maps any
+`daily_loss_weight` λ to α=λ/(1+λ), **including the non-negative / cumulative
+auto-default of λ=0.5** (the PF9 behaviour that keeps PV-style forecasts from
+flat-collapsing) → α≈0.33. So a PV/tank experiment that relied on the implicit
+cumulative nudge keeps it; a signed target with no weight defaults to pure
+per-interval. `daily_loss_weight` remains readable from YAML (and the API) for
+back-compat but is no longer surfaced in the UI; an explicit slider value
+always wins over it.
+
+Tests: `test_loss_balance.py` updated for the α=0 raw-interval short-circuit
+and a new `effective_loss_balance` resolution test (explicit wins / λ
+migration / PF9 non-negative default / per-interval default).
+
 ## 2.40.0
 
 New feature: a **per-interval ⟷ cumulative loss-balance slider** for neural
