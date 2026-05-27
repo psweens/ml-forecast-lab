@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.40.4
+
+Fixes neural models (LSTM, CNN, TiDE) appearing to stop short of the tree
+models (LightGBM, CatBoost) on the holdout chart — most visible on the Daily
+Cumulative view with a large `future_periods`.
+
+Neural backends predict the holdout via sliding windows, so the last
+`max_horizon - 1` (= `future_periods - 1`) points have no `h=1` window and
+were left blank — e.g. with `future_periods=96` at 10-min that's ~16 h of
+the neural lines missing from the right of every day, while tree models
+(which `predict()` per point) cover the whole holdout. Not a model-quality
+difference — a charting artifact of how multi-horizon neural models are
+scored on the holdout.
+
+Those tail points *were* predicted: the last formed window's `h=2..H` outputs
+land exactly on them (at the shortest horizon available for each). The new
+`_holdout_display_from_windows()` helper fills the tail from there, so neural
+lines now span the full holdout — essential for the Daily Cumulative view
+whose per-day sum needs every point. Display-only; leaderboard metrics
+(from the CV folds) are unchanged.
+
+Tests: 5 new cases in `test_holdout_display.py` (tail fill from last window,
+no-tail when lengths match, 1-D fallback, single-horizon NaN tail, partial
+fill guard).
+
 ## 2.40.3
 
 Fixes the live Training progress reading past 100% (e.g. **"9/5 models
