@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.40.5
+
+**Bugfix: cumulative targets undercounted (~halved) because demand across
+recorder gaps was discarded.** This was the real cause behind "the actual is
+plotted at half" and every model under-forecasting a daily-reset demand
+sensor.
+
+HA's recorder stores only state *changes* (`minimal_response`), so a
+daily-reset counter like `sensor.mixergy_demand_today` has **no rows during
+quiet periods** (overnight, between draw-offs). The draw-off that *ends* a
+quiet period then spans more than 1.5 sample intervals — and
+`cumulative_to_interval` was **dropping that increment to NaN** (the
+sum-resample then counts NaN as 0), silently discarding real demand. For hot
+water the biggest draw (the morning shower after the overnight reset) is
+exactly such a post-gap increment, so the daily total came out ~half. Because
+the *training target* was halved, every model — tree and neural — under-
+predicted by the same amount, and the holdout "Actual" plotted at half while
+the raw sensor showed the true total.
+
+Dropping a gap is right for an *interval* sensor (a gap = missing data) but
+wrong for a *cumulative* one (a gap where the value rose = real accumulated
+demand). The conversion now **keeps the gap increment**, attributed to the
+row where the change was recorded — i.e. when the draw actually happened —
+so the daily total is preserved exactly. (The log line changes from
+"dropping to NaN…" to "keeping the accumulated delta…".)
+
+After updating, **retrain**: the holdout "Daily Cumulative" Actual should rise
+to its true level and the forecasts should follow. Only then is the
+loss-balance slider a meaningful fine-tune rather than fighting halved data.
+
+Tests: new `test_quiet_period_gap_demand_is_preserved` in
+`test_preprocessing.py` (a sparse change-only day with a 7-hour quiet gap must
+re-sum to the full daily total, not half).
+
 ## 2.40.4
 
 Fixes neural models (LSTM, CNN, TiDE) appearing to stop short of the tree

@@ -139,19 +139,34 @@ def cumulative_to_interval(
     # Handle negative differences (after reset handling)
     diffs_adj[diffs_adj < 0] = 0
 
-    # Drop the accumulated-over-gap rows to NaN so downstream processing
-    # treats them as missing rather than as a single under-scaled bucket
-    # or a synthetic spike. The previous clip(lower=1.0) + division
-    # spread a multi-interval delta across one row whose neighbours were
-    # imputed zero, systematically under-reporting demand during outages.
+    # Multi-interval gaps — for a CUMULATIVE source, the value rising across
+    # a gap is REAL demand that accumulated while the recorder logged no
+    # rows. HA's recorder uses minimal_response (stores only state CHANGES),
+    # so quiet periods — overnight, between hot-water draw-offs — leave gaps
+    # with no rows; the draw-off that ends a quiet period then spans >1.5
+    # intervals. The previous behaviour DROPPED that delta to NaN, and the
+    # downstream sum-resample counts NaN as 0 — silently discarding the
+    # demand and undercounting the daily total. For a daily-reset counter
+    # like ``sensor.x_demand_today`` the post-quiet draw (e.g. the morning
+    # shower after the overnight reset) carries much of the day, so dropping
+    # it roughly halved the total.
+    #
+    # We now KEEP the full delta, attributed to the row where the change was
+    # recorded — i.e. when the draw actually happened. That preserves the
+    # daily total exactly, and is a better attribution than spreading it
+    # across the quiet period, when no demand occurred. A genuine multi-hour
+    # recorder OUTAGE puts the whole gap's demand in one bucket; the
+    # downstream outlier clip handles any pathological spike. The
+    # ``multi_interval_gap`` mask is still used above to EXEMPT these rows
+    # from the per-row spike cap so a legitimate large draw isn't clamped to
+    # ``max_increment``.
     if multi_interval_gap.any():
         logger.info(
             'cumulative_to_interval: %d row(s) span >1.5 intervals; '
-            'dropping to NaN so the gap is treated as missing rather than '
-            'a single inflated bucket.',
+            'keeping the accumulated delta (real demand recorded after a '
+            'quiet period) so the daily total is preserved.',
             int(multi_interval_gap.sum()),
         )
-        diffs_adj[multi_interval_gap] = np.nan
 
     # Ensure no NaNs at start (no diff for the first observation)
     diffs_adj.iloc[0] = 0
