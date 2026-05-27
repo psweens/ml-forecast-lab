@@ -362,6 +362,42 @@ def _resolve_daily_loss_weight(exp_cfg) -> float:
     return 0.5 if is_nonneg else 0.0
 
 
+def _holdout_display_from_windows(y_p: 'np.ndarray', target_len: int) -> 'np.ndarray':
+    """Build a full-length per-point holdout display series from a windowed
+    multi-horizon prediction array.
+
+    Neural backends predict the holdout via sliding windows: ``y_p`` is
+    ``(n_windows, H)``, and the ``h=1`` column gives a 1-step prediction for
+    the first ``n_windows`` holdout points. The trailing ``H-1`` points have
+    no ``h=1`` window (the window would need future rows past the end of the
+    slice), so a naive ``y_p[:, 0]`` stops ``max_horizon-1`` points short —
+    very visible when ``future_periods`` is large (e.g. 96 ⇒ ~16 h gap),
+    where tree models that ``predict()`` per point cover the whole holdout.
+
+    Those tail points *were* predicted: the LAST formed window's
+    ``h=2..H`` outputs land exactly on them (and at the shortest horizon
+    available for each). Filling from there lets neural models span the full
+    holdout — essential for the daily-cumulative view whose per-day sum needs
+    every point. Display-only (does not affect leaderboard metrics, which
+    come from the CV folds).
+    """
+    out = np.full(target_len, np.nan, dtype=np.float32)
+    y_p = np.asarray(y_p)
+    if y_p.ndim == 1:
+        n = min(y_p.shape[0], target_len)
+        out[:n] = y_p[:n]
+        return out
+    n = min(y_p.shape[0], target_len)
+    out[:n] = y_p[:n, 0]
+    tail_len = target_len - n
+    if tail_len > 0 and y_p.shape[0] >= 1 and y_p.shape[1] > 1:
+        last = y_p[-1]  # the last window's full h=1..H forecast
+        avail = min(tail_len, last.shape[0] - 1)
+        if avail > 0:
+            out[n:n + avail] = last[1:1 + avail]
+    return out
+
+
 def _apply_loss_balance(model, exp_cfg, overrides=None) -> None:
     """Apply the resolved interval↔cumulative blend (α) to a neural model.
 
@@ -3236,40 +3272,18 @@ class MLForecastLabApp:
                             future_features_df=ho_future_features_df,
                         )
                         y_p = m.predict_sequence(seq_X_ho)
-                        if y_p.ndim == 2:
-                            y_p_display = y_p[:, 0].astype(np.float32)
-                        else:
-                            y_p_display = y_p.astype(np.float32)
                         _y_holdout_display = holdout_part[target_col].values.astype(np.float32)
-                        # Align to the FIRST n_samples holdout points.
-                        # ``create_sliding_windows`` indexes window i to
-                        # predict at ``combined_holdout.index[i + window_size]``;
-                        # with combined_holdout = train_tail[-window_size:] +
-                        # holdout_part, those map to ``holdout_part[0..n_samples)``.
-                        # The previous v2.38.4-and-earlier code took [-n:],
-                        # which was correct only while max_horizon was 1
-                        # (n_samples == len(holdout_part)). With the v2.38.5
-                        # fix using full horizon_steps, n_samples =
-                        # len(holdout_part) - max_horizon + 1, so the last
-                        # max_horizon-1 holdout points have no window — the
-                        # predictions cover the head of the slice, not the tail.
-                        #
-                        # v2.39.3: keep the chart spanning the full holdout
-                        # window by padding the prediction array with NaN
-                        # for the trailing positions that have no window.
-                        # The actuals stay intact so the user sees the
-                        # truncation visually (gap at the right edge of
-                        # the chart) rather than the chart silently ending
-                        # ``max_horizon-1`` points early.
-                        if len(y_p_display) != len(_y_holdout_display):
-                            n = min(len(y_p_display), len(_y_holdout_display))
-                            target_len = len(_y_holdout_display)
-                            padded = np.full(target_len, np.nan, dtype=np.float32)
-                            padded[:n] = y_p_display[:n]
-                            y_p_display = padded
-                            _holdout_ts = holdout_timestamps
-                        else:
-                            _holdout_ts = holdout_timestamps
+                        # Assemble a full-length display series: h=1 column for
+                        # the points that have a window, plus the last window's
+                        # h=2..H outputs for the trailing max_horizon-1 points
+                        # that don't (so neural lines span the whole holdout
+                        # instead of stopping ~future_periods points short —
+                        # the LSTM/CNN "not as far along as LightGBM" artifact).
+                        # Display-only; leaderboard metrics come from CV folds.
+                        y_p_display = _holdout_display_from_windows(
+                            y_p, len(_y_holdout_display),
+                        )
+                        _holdout_ts = holdout_timestamps
                     else:
                         y_p = m.predict(X_holdout)
                         # For chart display: use first horizon (shortest-term)

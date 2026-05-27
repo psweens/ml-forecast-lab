@@ -150,3 +150,48 @@ class TrainingEventBus:
         """Clear event history when a new pipeline run starts."""
         with self._lock:
             self._history.pop(experiment_name, None)
+
+
+def summarise_history(events: List[TrainingEvent]) -> Dict[str, Any]:
+    """Collapse an experiment's event history into a live-progress summary.
+
+    Completions are counted ONLY within the most recent ``pipeline_start``
+    window (the counter resets on every ``pipeline_start``) and clamped to
+    the declared total. This is what stops the progress from reading past
+    the total — e.g. ``9/5`` / ``180%`` — when stale or replayed events from
+    an earlier run linger in the same history, or a re-run lands on the same
+    stream.
+    """
+    import re
+
+    current_model = ""
+    completed = 0
+    total = 0
+    fold = total_folds = epoch = total_epochs = 0
+    for ev in events:
+        if ev.event_type == "pipeline_start":
+            m = re.search(r"(\d+) model", ev.message or "")
+            total = int(m.group(1)) if m else 0
+            completed = 0          # only the latest run's completions count
+            current_model = ""
+        elif ev.event_type == "model_start":
+            current_model = ev.model_name
+        elif ev.event_type == "model_end":
+            completed += 1
+        elif ev.event_type == "epoch":
+            fold = ev.fold
+            total_folds = ev.total_folds
+            epoch = ev.epoch
+            total_epochs = ev.total_epochs
+    if total:
+        completed = min(completed, total)   # never report past the total
+    return {
+        "current_model": current_model,
+        "completed_models": completed,
+        "total_models": total,
+        "progress_pct": min(100, round(completed / total * 100)) if total else 0,
+        "fold": fold,
+        "total_folds": total_folds,
+        "epoch": epoch,
+        "total_epochs": total_epochs,
+    }

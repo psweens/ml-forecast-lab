@@ -1,5 +1,86 @@
 # Changelog
 
+## 2.40.5
+
+**Bugfix: cumulative targets undercounted (~halved) because demand across
+recorder gaps was discarded.** This was the real cause behind "the actual is
+plotted at half" and every model under-forecasting a daily-reset demand
+sensor.
+
+HA's recorder stores only state *changes* (`minimal_response`), so a
+daily-reset counter like `sensor.mixergy_demand_today` has **no rows during
+quiet periods** (overnight, between draw-offs). The draw-off that *ends* a
+quiet period then spans more than 1.5 sample intervals — and
+`cumulative_to_interval` was **dropping that increment to NaN** (the
+sum-resample then counts NaN as 0), silently discarding real demand. For hot
+water the biggest draw (the morning shower after the overnight reset) is
+exactly such a post-gap increment, so the daily total came out ~half. Because
+the *training target* was halved, every model — tree and neural — under-
+predicted by the same amount, and the holdout "Actual" plotted at half while
+the raw sensor showed the true total.
+
+Dropping a gap is right for an *interval* sensor (a gap = missing data) but
+wrong for a *cumulative* one (a gap where the value rose = real accumulated
+demand). The conversion now **keeps the gap increment**, attributed to the
+row where the change was recorded — i.e. when the draw actually happened —
+so the daily total is preserved exactly. (The log line changes from
+"dropping to NaN…" to "keeping the accumulated delta…".)
+
+After updating, **retrain**: the holdout "Daily Cumulative" Actual should rise
+to its true level and the forecasts should follow. Only then is the
+loss-balance slider a meaningful fine-tune rather than fighting halved data.
+
+Tests: new `test_quiet_period_gap_demand_is_preserved` in
+`test_preprocessing.py` (a sparse change-only day with a 7-hour quiet gap must
+re-sum to the full daily total, not half).
+
+## 2.40.4
+
+Fixes neural models (LSTM, CNN, TiDE) appearing to stop short of the tree
+models (LightGBM, CatBoost) on the holdout chart — most visible on the Daily
+Cumulative view with a large `future_periods`.
+
+Neural backends predict the holdout via sliding windows, so the last
+`max_horizon - 1` (= `future_periods - 1`) points have no `h=1` window and
+were left blank — e.g. with `future_periods=96` at 10-min that's ~16 h of
+the neural lines missing from the right of every day, while tree models
+(which `predict()` per point) cover the whole holdout. Not a model-quality
+difference — a charting artifact of how multi-horizon neural models are
+scored on the holdout.
+
+Those tail points *were* predicted: the last formed window's `h=2..H` outputs
+land exactly on them (at the shortest horizon available for each). The new
+`_holdout_display_from_windows()` helper fills the tail from there, so neural
+lines now span the full holdout — essential for the Daily Cumulative view
+whose per-day sum needs every point. Display-only; leaderboard metrics
+(from the CV folds) are unchanged.
+
+Tests: 5 new cases in `test_holdout_display.py` (tail fill from last window,
+no-tail when lengths match, 1-D fallback, single-horizon NaN tail, partial
+fill guard).
+
+## 2.40.3
+
+Fixes the live Training progress reading past 100% (e.g. **"9/5 models
+complete — 180%"**).
+
+The progress counters (the live Training tab JS, and the two server-side
+readers behind the dashboard card / page restore) incremented
+`completed_models` on every `model_end` event but **never reset it on
+`pipeline_start`**. So when one open SSE stream saw more than one run — a
+re-run, a scheduled benchmark, or replayed history on reconnect — the count
+accumulated across runs (a finished 5-model run + 4 of the next ⇒ 9/5).
+
+Now the completion counter **resets at each `pipeline_start`** (only the
+latest run's completions count) and is **clamped to the declared total**, so
+it can never read past the total or exceed 100% even if a stray `model_end`
+slips through. The two duplicated server-side readers were consolidated into
+a single tested `training_events.summarise_history()` helper to stop them
+drifting apart again.
+
+Tests: 5 new cases in `test_training_progress.py` (single run, stale-prior-run
+no-inflate, clamp-to-total, current-model/epoch tracking, empty history).
+
 ## 2.40.2
 
 **Bugfix: the loss-balance slider was a no-op on the paths that produce

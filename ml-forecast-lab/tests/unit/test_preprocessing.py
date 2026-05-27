@@ -38,6 +38,31 @@ class TestCumulativeToInterval:
         with pytest.raises(TypeError):
             cumulative_to_interval(s, interval_minutes=30)
 
+    def test_quiet_period_gap_demand_is_preserved(self):
+        """v2.40.5 regression: HA's recorder stores only state changes, so a
+        daily-reset demand counter has NO rows during quiet periods (overnight,
+        between draw-offs). The draw-off that ends a quiet period spans >1.5
+        intervals — its increment must be KEPT (real demand), not dropped, or
+        the daily total under-counts (it used to ~halve)."""
+        # Sparse, change-only cumulative for one day at a 10-min interval:
+        #   06:00 reset to 0, a morning draw at 06:00->06:10 (5%),
+        #   then a 7-hour quiet gap (no rows), then an evening draw to 45%.
+        idx = pd.DatetimeIndex([
+            "2026-05-01 06:00", "2026-05-01 06:10",   # morning draw: 0 -> 5
+            "2026-05-01 13:10", "2026-05-01 13:20",   # evening draw after 7h gap
+        ])
+        cumulative = pd.Series([0.0, 5.0, 40.0, 45.0], index=idx)
+        result = cumulative_to_interval(
+            cumulative, interval_minutes=10, reset_daily=True,
+            max_increment=100,
+        )
+        # Daily total of the increments must equal the day's cumulative peak
+        # (45), NOT half of it. The 13:10 row spans a 6h50m gap (>1.5 intervals)
+        # and carries 35 units of real demand — it must be kept.
+        assert result.sum() == pytest.approx(45.0), (
+            f"gap-spanning demand was lost; got total {result.sum()} vs 45"
+        )
+
     def test_max_increment_caps_spikes(self):
         idx = pd.date_range("2024-01-01", periods=5, freq="30min")
         s = pd.Series([0, 1, 2, 102, 103], index=idx)  # Spike at position 3
