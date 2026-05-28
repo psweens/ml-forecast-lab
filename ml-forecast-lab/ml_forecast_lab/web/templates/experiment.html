@@ -45,7 +45,7 @@
             <span id="btn-run-text">{% if is_running %}Running...{% else %}Run Pipeline{% endif %}</span>
         </button>
         {% if experiment.best_model %}
-            {% set _publish_model = experiment.selected_model or experiment.best_model %}
+            {% set _publish_model = experiment.selected_model or production_model or experiment.best_model %}
             {% if experiment.mode == 'production' %}
         <button class="btn btn-success" disabled title="Publishing forecasts with {{ _publish_model | model_display }}">
             Publishing {{ _publish_model | model_display }}
@@ -819,7 +819,7 @@
                 </tr>
             </thead>
             <tbody>
-                {% set sel = experiment.selected_model or best_model %}
+                {% set sel = experiment.selected_model or production_model or best_model %}
                 {% for model in models %}
                 <tr class="{% if model.name == sel %}best-model{% endif %}" id="model-row-{{ model.name }}">
                     <td style="text-align:center;">
@@ -1161,7 +1161,7 @@
         <div>
             <label class="field-label" style="display:block;margin-bottom:0.3rem;">Model</label>
             <select id="tuning-model" class="setting-input" style="padding:0.4rem 0.6rem;font-size:0.9rem;min-width:180px;">
-                {% set sel_model = experiment.selected_model or best_model %}
+                {% set sel_model = experiment.selected_model or production_model or best_model %}
                 {% for m in exp_models_enabled %}
                 <option value="{{ m }}" {% if m == sel_model %}selected{% endif %}>{{ m | model_display }}{% if m == sel_model %} (selected){% endif %}</option>
                 {% endfor %}
@@ -1372,7 +1372,7 @@
     <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin-bottom:1.5rem;">
         <div>
             <label class="field-label" style="display:block;margin-bottom:0.3rem;">Model</label>
-            {% set sel_model = experiment.selected_model or best_model %}
+            {% set sel_model = experiment.selected_model or production_model or best_model %}
             <select id="covariate-analysis-model" class="setting-input" style="padding:0.4rem 0.6rem;font-size:0.9rem;min-width:180px;">
                 {% for model in models %}
                 <option value="{{ model.name }}" {% if model.name == sel_model %}selected{% endif %}>{{ model.name | model_display }}{% if model.name == sel_model %} (selected){% endif %}</option>
@@ -5736,7 +5736,7 @@ window.showTab = function(el) {
     // silently overwrite the experiment configuration.
     window.applyCovariateBest = function(name, btn) {
         var origLabel = btn ? btn.textContent : '';
-        var prodModel = {{ (experiment.selected_model or experiment.best_model or '') | tojson }};
+        var prodModel = {{ (experiment.selected_model or production_model or experiment.best_model or '') | tojson }};
         var msg = 'Apply the winning covariate set'
             + (prodModel ? ' for ' + prodModel : '')
             + ' and start a retrain?\n\n'

@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.40.6
+
+**Bugfix: experiment page showed the wrong "production model" name after a
+new benchmark.** The model labelled as "production" in the UI — including
+the green *Publishing X* button on the experiment header, the highlighted
+row on the Per-Interval Accuracy leaderboard, and the default-selected
+model in the Tuning / Covariate Analysis dropdowns — could disagree with
+the model that inference actually deployed.
+
+Two fallback chains had quietly diverged:
+
+- **UI** rendered `selected_model or best_model` (`experiment.html:48,
+  822, 1164, 1375, 5739`).
+- **Inference / production retrain** used `production_model or
+  best_model_name` (`main.py:3475–3482`, `4005`, `4140`).
+
+The two are NOT equivalent. After a *Promote* writes `production_model: Y`
+to `mlfl.yaml` and a later benchmark crowns a different winner `Z`, the
+in-memory `best_model` rolls forward to `Z`, `selected_model` stays
+`None`, and the UI displays `Z` while the deployed forecast keeps running
+`Y`. Users saw "the production model always seems to be set to the best
+model but not necessarily the one which is actually used in production".
+
+The fix injects the YAML's `production_model` into the experiment page
+template context and inserts it as the middle term in every fallback:
+`selected_model or production_model or best_model`. The five template
+sites now resolve to the same model as the inference path. An explicit
+`selected_model` (set by clicking *Select* on the Results tab) still
+takes precedence, so user picks aren't overridden.
+
+Regression covered by a new smoke test
+(`tests/smoke/test_production_model_resolution.py`): three cases hit the
+HTTP route, parse the rendered HTML's `prodModel` JS variable and the
+*Publishing X* button label, and assert they match what inference would
+deploy in each fallback case.
+
 ## 2.40.5
 
 **Bugfix: cumulative targets undercounted (~halved) because demand across
