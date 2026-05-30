@@ -1361,6 +1361,13 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "best_model": benchmark_result.best_model_name
                 if benchmark_result
                 else None,
+                # The model the inference path actually runs (mlfl.yaml
+                # ``production_model``). Templates fall back through this
+                # before ``best_model`` so the UI matches what's deployed
+                # — see main.py:3475 for the inference resolution order.
+                "production_model": exp_config.production_model
+                if exp_config
+                else None,
                 "covariate_analysis": covariate_analysis,
                 "units": units,
                 "models_json": [m.model_dump() for m in (benchmark_result.models if benchmark_result else [])],
