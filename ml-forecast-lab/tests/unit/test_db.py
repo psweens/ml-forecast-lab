@@ -471,6 +471,94 @@ class TestForecastAccuracyDailyCumulativeMode:
         assert by_lead[90] == pytest.approx(3.0, abs=1e-9)
         assert by_lead[120] == pytest.approx(4.0, abs=1e-9)
 
+    def test_daily_cumulative_day_offset_hours_shifts_bucket(self, tmp_db):
+        """v2.40.10 regression: ``day_offset_hours`` must shift the
+        day-bucketing key so the cumulative sensor's local-midnight
+        reset is respected.
+
+        Setup: a BST-style sensor (HA-local = UTC+1). The actual
+        ``_today`` counter sits at 30 throughout the late evening, then
+        resets to 0 at LOCAL midnight = 23:00 UTC.
+
+        Forecast issued at 21:00 UTC = 22:00 local, predicting forward
+        through 23:30 UTC (= 00:30 next local day):
+          - Without offset (UTC bucketing): "last same-day" target =
+            23:30 UTC. Actual at 23:30 UTC reads 0 (post-reset). The
+            End-of-day card thinks the daily total was 0, badly off.
+          - With ``day_offset_hours=1.0``: target_day for 23:30 UTC is
+            "next local day". Only 22:00 and 22:30 UTC are same-day-as-
+            issuance. The "last same-day" target is then 22:30 UTC,
+            where actual = 30 (pre-reset) — the correct daily total.
+        """
+        from datetime import datetime as _dt, timedelta as _td
+
+        db = HistoryDB(tmp_db)
+        db.ensure_forecast_log_table()
+        table = db.safe_table_name("sensor.demand_today")
+
+        # Anchor recently so max_age_days=30 covers it. Pick a base
+        # date and snap to 21:00 UTC.
+        base = (_dt.utcnow() - _td(days=2)).replace(
+            hour=21, minute=0, second=0, microsecond=0,
+        )
+        # Actuals at 21:00, 21:30, 22:00, 22:30 UTC = 30
+        # Reset at 23:00 UTC (local midnight in UTC+1)
+        # Actuals at 23:00, 23:30 UTC = 0 (post-reset, no new draws yet)
+        grid_times = [base + _td(minutes=30 * i) for i in range(6)]
+        actual_vals = [30.0, 30.0, 30.0, 30.0, 0.0, 0.0]
+        actuals = pd.DataFrame({
+            "ds": [t.strftime("%Y-%m-%dT%H:%M:%S") for t in grid_times],
+            "value": actual_vals,
+        })
+        db.store_history(table, actuals)
+
+        # Forecast: zero per-interval demand (sensor was idle); predicts
+        # the cumulative will stay at 30 same-local-day, then drop to 0
+        # after reset.
+        db.log_forecast(
+            experiment="demand",
+            issued_at=grid_times[0],
+            targets=grid_times[1:],
+            predictions=[0.0, 0.0, 0.0, 0.0, 0.0],
+            model_name="m1",
+            model_version="v1",
+        )
+
+        # Without offset (UTC bucketing): the "last same-day" target is
+        # 23:30 UTC (in same UTC date as 21:00). Actual there is 0
+        # (post-reset). So the avg actual day-total reads ~0.
+        result_utc = db.get_forecast_accuracy(
+            experiment="demand", actuals_table=table,
+            max_age_days=30, interval_minutes=30,
+            evaluation_mode="daily_cumulative",
+        )
+        eod_utc = result_utc.get("end_of_day", {})
+        assert eod_utc.get("sample_count", 0) > 0
+        # UTC bucketing: avg actual is the post-reset value → near 0.
+        # (This documents the broken pre-fix behaviour.)
+        assert eod_utc["mean_actual"] == pytest.approx(0.0, abs=1e-9), (
+            f"Expected UTC bucketing to read post-reset 0; got "
+            f"{eod_utc['mean_actual']}"
+        )
+
+        # With offset = +1.0 hours: the local day "rolls over" at 23:00
+        # UTC. Targets at 23:00 and 23:30 UTC are in the NEXT local
+        # day, so the "last same-day" target is 22:30 UTC. Actual at
+        # 22:30 = 30 — the correct daily total.
+        result_local = db.get_forecast_accuracy(
+            experiment="demand", actuals_table=table,
+            max_age_days=30, interval_minutes=30,
+            evaluation_mode="daily_cumulative",
+            day_offset_hours=1.0,
+        )
+        eod_local = result_local.get("end_of_day", {})
+        assert eod_local.get("sample_count", 0) > 0
+        assert eod_local["mean_actual"] == pytest.approx(30.0, abs=1e-9), (
+            f"With day_offset_hours=1.0 the last same-day target should "
+            f"be 22:30 UTC (pre-reset, value=30), but mean_actual "
+            f"reads {eod_local['mean_actual']}."
+        )
+
     def test_daily_cumulative_cross_midnight_resets_seed(self, tmp_db):
         """A forecast issued late on day D predicting targets into day
         D+1 must reset the cumulative seed to 0 at the midnight

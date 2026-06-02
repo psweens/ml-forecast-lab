@@ -4148,18 +4148,61 @@ window.showTab = function(el) {
                     // Plain-English headline. Uses % of typical actual
                     // so the user can read it without knowing the
                     // sensor's scale.
+                    // v2.40.10: the ±X% framing blows up when the avg
+                    // actual is near zero (mae/actual diverges). When
+                    // the ratio is huge or the actual is too small to
+                    // normalise meaningfully, fall back to absolute-
+                    // units framing — predicted Y vs actual Z, off by
+                    // W. The verdict word follows the absolute error
+                    // relative to the typical-day-total scale instead
+                    // of the per-cycle actual.
                     var sentEl = document.getElementById('eod-sentence');
                     var actual = eod.mean_actual;
+                    var predicted = eod.mean_predicted;
                     var maeAbs = eod.mae;
+                    var typicalScale = (data.typical_interval_demand || 0);
                     var pctErr = (actual && actual > 0)
                         ? (maeAbs / actual * 100) : null;
-                    if (pctErr !== null && isFinite(pctErr)) {
+                    var pctTypical = (typicalScale > 0)
+                        ? (maeAbs / typicalScale * 100) : null;
+                    var unitsLabel = EXP_UNITS ? (' ' + EXP_UNITS) : '';
+                    function _fmtNum(v) {
+                        return (v === null || v === undefined || !isFinite(v))
+                            ? '—' : v.toFixed(2);
+                    }
+                    if (pctErr !== null && isFinite(pctErr) && pctErr < 100
+                            && actual >= 0.05 * (typicalScale || actual)) {
+                        // Standard case: %-of-actual is informative.
                         var verdict = pctErr < 5 ? 'tracking the daily total closely'
                                     : pctErr < 15 ? 'in the right ballpark'
                                     : 'noticeably off the daily total';
                         sentEl.innerHTML = 'Forecasts land within <strong>±'
                             + pctErr.toFixed(1) + '%</strong> of the actual daily total on average — <em>'
                             + verdict + '</em>.';
+                    } else if (maeAbs !== null && isFinite(maeAbs)) {
+                        // Near-zero or huge-ratio case: fall back to
+                        // absolute units, optionally annotated with
+                        // %-of-typical-scale for orientation.
+                        var verdictAbs;
+                        if (pctTypical !== null && isFinite(pctTypical)) {
+                            verdictAbs = pctTypical < 5 ? 'tracking the daily total closely'
+                                       : pctTypical < 15 ? 'in the right ballpark'
+                                       : 'noticeably off the typical daily total';
+                        } else {
+                            verdictAbs = 'see absolute error';
+                        }
+                        var html = 'Forecasts are off by <strong>±'
+                            + _fmtNum(maeAbs) + unitsLabel + '</strong> on average'
+                            + ' (predicted <strong>' + _fmtNum(predicted) + unitsLabel + '</strong>'
+                            + ' vs actual <strong>' + _fmtNum(actual) + unitsLabel + '</strong>)';
+                        if (pctTypical !== null && isFinite(pctTypical)) {
+                            html += ' — that\'s <strong>±' + pctTypical.toFixed(1)
+                                  + '%</strong> of a typical daily total — <em>' + verdictAbs + '</em>';
+                        } else {
+                            html += ' — <em>' + verdictAbs + '</em>';
+                        }
+                        html += '.';
+                        sentEl.innerHTML = html;
                     } else {
                         sentEl.textContent = '';
                     }
