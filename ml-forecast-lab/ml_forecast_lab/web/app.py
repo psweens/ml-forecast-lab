@@ -2518,7 +2518,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # reflects the sensor's shape through the day rather than model
         # skill. UI can override via ?mode=raw.
         mode_param = request.query_params.get("mode")
-        if mode_param in ("raw", "increment"):
+        if mode_param in ("raw", "increment", "daily_cumulative"):
             evaluation_mode = mode_param
         else:
             evaluation_mode = "increment" if exp_cfg.source_is_cumulative else "raw"
@@ -2531,6 +2531,15 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # ?mode=raw URL would still hit this branch.
         if evaluation_mode == "raw" and exp_cfg.source_is_cumulative:
             evaluation_mode = "increment"
+        # v2.40.9: daily_cumulative mode is only meaningful for
+        # cumulative-source sensors (it reads the seed from actuals
+        # at issued_at and cumsums per-interval predictions to compare
+        # against the cumulative actual). For non-cumulative sensors,
+        # fall back to the default per-interval mode rather than
+        # produce nonsense.
+        if (evaluation_mode == "daily_cumulative"
+                and not exp_cfg.source_is_cumulative):
+            evaluation_mode = "raw"
         # Default filter: current champion + its latest training tag. UI
         # can escape via ?model=all or ?version=all. See
         # _resolve_model_filter for the full contract.

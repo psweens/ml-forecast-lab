@@ -309,3 +309,233 @@ class TestForecastAccuracyIncrementMode:
             assert rev["first_forecast_mae"] == pytest.approx(0.0, abs=1e-9)
             assert rev["latest_forecast_mae"] == pytest.approx(0.0, abs=1e-9)
 
+
+class TestForecastAccuracyDailyCumulativeMode:
+    """v2.40.9: daily_cumulative evaluation mode for daily-reset
+    cumulative sensors.
+
+    Question the mode answers: "how close is the forecast's predicted
+    cumulative reading at target_dt to the actual cumulative reading at
+    target_dt?" — i.e. accuracy of the running daily total rather than
+    accuracy of each per-interval delta.
+
+    For each forecast row the predicted_cumulative at target_dt is:
+
+        seed + Σ (per-interval predictions within target_dt's local day,
+                  from the first target onward, up to and including
+                  target_dt)
+
+    where ``seed = actual_cumulative_at(issued_at)`` when target_dt is
+    in the SAME local day as issued_at, otherwise ``seed = 0`` (the
+    midnight reset makes the prior day's accumulation irrelevant).
+
+    Compared against ``actual_cumulative_at(target_dt)`` — which for a
+    daily-reset sensor is the raw ``_today`` reading at that moment.
+    """
+
+    def _seed_same_day_perfect_forecast(self, db):
+        """One forecast issuance entirely within a single day.
+
+        Cumulative actuals at hourly bins:
+          09:00 = 5, 09:30 = 8, 10:00 = 12, 10:30 = 14, 11:00 = 18
+
+        Forecast issued at 09:00 (cumulative reading = 5), predicting
+        the next four per-interval deltas perfectly: [3, 4, 2, 4].
+
+        Predicted cumulatives = seed + cumsum = 5 + [3, 7, 9, 13]
+                              = [8, 12, 14, 18]
+        Actual cumulatives    = [8, 12, 14, 18]
+        → MAE = 0 at every lead.
+        """
+        from datetime import datetime as _dt, timedelta as _td
+
+        db.ensure_forecast_log_table()
+        table = db.safe_table_name("sensor.demand_today")
+
+        # Use a recent calendar day so max_age_days=30 covers it.
+        base_day = (_dt.utcnow() - _td(days=2)).replace(
+            hour=9, minute=0, second=0, microsecond=0,
+        )
+        grid_times = [base_day + _td(minutes=30 * i) for i in range(5)]
+
+        actuals = pd.DataFrame({
+            "ds": [t.strftime("%Y-%m-%dT%H:%M:%S") for t in grid_times],
+            "value": [5.0, 8.0, 12.0, 14.0, 18.0],
+        })
+        db.store_history(table, actuals)
+
+        issued = grid_times[0]
+        targets = grid_times[1:]
+        predictions = [3.0, 4.0, 2.0, 4.0]
+        db.log_forecast(
+            experiment="demand",
+            issued_at=issued,
+            targets=targets,
+            predictions=predictions,
+            model_name="m1",
+            model_version="v1",
+        )
+        return table
+
+    def test_daily_cumulative_perfect_forecast_scores_zero(self, tmp_db):
+        """Perfect cumulative-source forecast must score MAE ≈ 0 in
+        daily_cumulative mode — the running-total prediction matches
+        the running-total actual at every lead."""
+        db = HistoryDB(tmp_db)
+        table = self._seed_same_day_perfect_forecast(db)
+
+        result = db.get_forecast_accuracy(
+            experiment="demand",
+            actuals_table=table,
+            max_age_days=30,
+            interval_minutes=30,
+            evaluation_mode="daily_cumulative",
+        )
+
+        curve = result.get("lead_time_curve", {})
+        maes = curve.get("mae") or []
+        ns = curve.get("sample_count") or []
+        assert maes, f"Empty lead_time_curve; got: {curve}"
+        total_n = sum(ns)
+        assert total_n >= 4, (
+            f"Expected ≥ 4 matched rows for 4 perfect predictions, "
+            f"got {total_n}."
+        )
+        weighted_mae = sum(m * n for m, n in zip(maes, ns)) / total_n
+        assert weighted_mae == pytest.approx(0.0, abs=1e-9), (
+            f"Perfect daily-cumulative forecast scored MAE={weighted_mae} "
+            f"(expected 0). Predicted cumulative does not match actual "
+            f"cumulative at the target."
+        )
+
+    def test_daily_cumulative_off_by_one_per_interval_accumulates(self, tmp_db):
+        """A model that over-predicts each interval delta by 1 unit
+        should produce a cumulative error that grows linearly with lead
+        — at lead k the cumulative error is k * (per-interval error).
+
+        Locks in: cumulative-space errors integrate per-interval errors,
+        so the chart slopes upward and the headline MAE on lead 30 is
+        very different from MAE at end-of-day. This is intentional —
+        cumulative is a DIFFERENT metric, not strictly comparable to
+        per-interval MAE.
+        """
+        from datetime import datetime as _dt, timedelta as _td
+
+        db = HistoryDB(tmp_db)
+        db.ensure_forecast_log_table()
+        table = db.safe_table_name("sensor.demand_today")
+
+        base = (_dt.utcnow() - _td(days=2)).replace(
+            hour=9, minute=0, second=0, microsecond=0,
+        )
+        grid_times = [base + _td(minutes=30 * i) for i in range(5)]
+        # Actual cumulative: 0, 2, 4, 6, 8 (constant +2/bin)
+        actuals_vals = [0.0, 2.0, 4.0, 6.0, 8.0]
+        actuals = pd.DataFrame({
+            "ds": [t.strftime("%Y-%m-%dT%H:%M:%S") for t in grid_times],
+            "value": actuals_vals,
+        })
+        db.store_history(table, actuals)
+
+        # Model predicts +3/bin (off by +1 each). Seed=0 at issuance.
+        # Predicted cumulatives at the four targets:
+        #   lead 30: 0 + 3 = 3   (actual=2, err=1)
+        #   lead 60: 0 + 6 = 6   (actual=4, err=2)
+        #   lead 90: 0 + 9 = 9   (actual=6, err=3)
+        #   lead120: 0 + 12 = 12 (actual=8, err=4)
+        db.log_forecast(
+            experiment="demand",
+            issued_at=grid_times[0],
+            targets=grid_times[1:],
+            predictions=[3.0, 3.0, 3.0, 3.0],
+            model_name="m1",
+            model_version="v1",
+        )
+
+        result = db.get_forecast_accuracy(
+            experiment="demand",
+            actuals_table=table,
+            max_age_days=30,
+            interval_minutes=30,
+            evaluation_mode="daily_cumulative",
+        )
+        curve = result["lead_time_curve"]
+        leads = curve["lead_minutes"]
+        maes = curve["mae"]
+        # Each lead bucket should hold one row.
+        assert curve["sample_count"] == [1, 1, 1, 1]
+        # Errors grow linearly with lead.
+        by_lead = dict(zip(leads, maes))
+        assert by_lead[30] == pytest.approx(1.0, abs=1e-9)
+        assert by_lead[60] == pytest.approx(2.0, abs=1e-9)
+        assert by_lead[90] == pytest.approx(3.0, abs=1e-9)
+        assert by_lead[120] == pytest.approx(4.0, abs=1e-9)
+
+    def test_daily_cumulative_cross_midnight_resets_seed(self, tmp_db):
+        """A forecast issued late on day D predicting targets into day
+        D+1 must reset the cumulative seed to 0 at the midnight
+        boundary — the daily-reset sensor restarts from zero, so the
+        prior day's cumulation must NOT carry over.
+        """
+        from datetime import datetime as _dt, timedelta as _td
+
+        db = HistoryDB(tmp_db)
+        db.ensure_forecast_log_table()
+        table = db.safe_table_name("sensor.demand_today")
+
+        # Build two grid days with a clean midnight boundary. The
+        # day-D end:    22:30 = 30, 23:00 = 32, 23:30 = 33
+        # day-D+1:      00:00 = 0,  00:30 = 4,  01:00 = 7
+        # (D+1 actuals reset to 0 at midnight then accumulate.)
+        d0 = (_dt.utcnow() - _td(days=2)).replace(
+            hour=22, minute=30, second=0, microsecond=0,
+        )
+        grid_d0 = [d0 + _td(minutes=30 * i) for i in range(3)]   # 22:30, 23:00, 23:30
+        grid_d1 = [d0 + _td(minutes=30 * (i + 3)) for i in range(3)]  # 00:00, 00:30, 01:00
+        all_times = grid_d0 + grid_d1
+        all_vals = [30.0, 32.0, 33.0, 0.0, 4.0, 7.0]
+        actuals = pd.DataFrame({
+            "ds": [t.strftime("%Y-%m-%dT%H:%M:%S") for t in all_times],
+            "value": all_vals,
+        })
+        db.store_history(table, actuals)
+
+        # Forecast issued at 22:30 (seed = 30) predicting all 5 forward
+        # deltas perfectly:
+        #   23:00 same day  → cum = 30 + 2 = 32
+        #   23:30 same day  → cum = 30 + 3 = 33
+        #   00:00 new day   → seed resets to 0, cum = 0 + 0 = 0  (delta=0 at midnight)
+        #   00:30 new day   → cum = 0 + 4 = 4
+        #   01:00 new day   → cum = 0 + 7 = 7
+        # Actual deltas: 2, 1, -33 (reset; SQL adjacency guard nulls),
+        #                4, 3. The midnight reset row is dropped by the
+        #                actuals adjacency guard (>= 0 filter).
+        deltas = [2.0, 1.0, 0.0, 4.0, 3.0]
+        db.log_forecast(
+            experiment="demand",
+            issued_at=grid_d0[0],
+            targets=all_times[1:],
+            predictions=deltas,
+            model_name="m1",
+            model_version="v1",
+        )
+
+        result = db.get_forecast_accuracy(
+            experiment="demand",
+            actuals_table=table,
+            max_age_days=30,
+            interval_minutes=30,
+            evaluation_mode="daily_cumulative",
+        )
+        curve = result["lead_time_curve"]
+        maes = curve["mae"]
+        ns = curve["sample_count"]
+        assert maes, "Empty lead_time_curve on cross-midnight forecast"
+        total_n = sum(ns)
+        weighted_mae = sum(m * n for m, n in zip(maes, ns)) / total_n
+        assert weighted_mae == pytest.approx(0.0, abs=1e-9), (
+            f"Cross-midnight forecast scored MAE={weighted_mae}; expected "
+            f"0. The seed likely failed to reset at the midnight "
+            f"boundary, so day-D+1 cumulatives carried day-D's offset."
+        )
+

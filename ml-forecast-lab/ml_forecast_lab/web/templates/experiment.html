@@ -1624,18 +1624,26 @@
             </select>
             <span class="info-tip">?<span class="tip-text">Time range used by every chart and verdict on this tab. Shorter windows reflect recent behaviour (a freshly-promoted model, an environmental change); longer windows give more samples but mix older cohorts in.</span></span>
         </div>
-        <!-- Evaluation mode indicator — cumulative sensors only.
-             v2.40.7: the prior "Cumulative value" (raw mode) toggle was
-             removed because the comparison was meaningless — predicted
-             is logged as a per-interval delta (main.py:5068) while raw
-             actuals are the cumulative reading, so MAE collapsed to
-             roughly the cumulative level rather than model error. The
-             remaining badge documents what the chart actually evaluates
-             without offering a broken alternative. -->
+        <!-- Evaluation mode toggle — cumulative sensors only.
+             v2.40.9: re-introduced a real "Daily cumulative" option
+             alongside the per-interval one. The previous "Cumulative
+             value" (raw mode) toggle was removed in v2.40.7 because it
+             compared per-interval delta predictions against raw
+             cumulative actuals — different spaces, MAE collapsed to
+             roughly the cumulative level. The new "Daily cumulative"
+             option does it properly: seeds the cumulative at issued_at
+             with the actual reading, cumsums the per-interval
+             predictions within each day (resetting at midnight), and
+             compares against the raw cumulative actual — both sides in
+             the same space, answering "how close is the predicted
+             day-so-far to actual day-so-far". -->
         <div class="acc-control" id="accuracy-mode-wrapper" style="display:none;">
             <label>Errors shown as:</label>
-            <span id="accuracy-mode-badge" style="display:inline-block;padding:0.35rem 0.75rem;background:var(--accent-secondary);color:#fff;border:1px solid var(--border);border-radius:6px;font-size:0.85rem;">Per-interval demand</span>
-            <span class="info-tip">?<span class="tip-text">Cumulative sensors reset at midnight, so raw-value errors would mostly reflect the shape of the day — 23:30 errors look big just because the number is big. The chart instead evaluates <code>value[t] − value[t−1]</code>, so errors at 03:00 and 18:00 are directly comparable.</span></span>
+            <div class="toggle-group" style="display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+                <button type="button" id="accuracy-mode-increment" class="toggle-btn active" onclick="setAccuracyMode('increment')" style="padding:0.35rem 0.75rem;background:var(--accent-secondary);color:#fff;border:none;cursor:pointer;font-size:0.85rem;">Per-interval demand</button>
+                <button type="button" id="accuracy-mode-daily-cumulative" class="toggle-btn" onclick="setAccuracyMode('daily_cumulative')" style="padding:0.35rem 0.75rem;background:transparent;color:var(--text-secondary);border:none;cursor:pointer;font-size:0.85rem;">Daily cumulative</button>
+            </div>
+            <span class="info-tip">?<span class="tip-text"><b>Per-interval demand</b>: evaluates <code>value[t] − value[t−1]</code> — each bin's predicted demand vs actual demand for that bin. Comparable across times of day. <b>Daily cumulative</b>: cumsums per-interval predictions within each day (anchored to the actual reading at issuance, resetting at midnight) and compares against the raw cumulative actual — i.e. accuracy of the running daily total. Errors integrate over the horizon, so the lead-time chart slopes upward; the "End-of-day" tile shows the single most useful number for daily-total forecasting.</span></span>
         </div>
         <div class="acc-control" id="acc-tz-wrapper">
             <label for="accuracy-tz">Times in:</label>
@@ -1705,6 +1713,40 @@
     <!-- LAYER 2 — DRIVERS                                             -->
     <!-- ============================================================ -->
     <div id="drivers-section">
+
+        <!-- End-of-day total — daily_cumulative mode only.
+             v2.40.9: the single most useful number for a user whose
+             goal is end-of-day forecasting (e.g. a hot-water tank or
+             daily energy total). Compares predicted day-so-far at the
+             latest target within today's date against the actual
+             cumulative reading at that target. -->
+        <div id="accuracy-eod-card" class="settings-group" style="display:none;">
+            <h3 class="settings-group-title">
+                End-of-day total — predicted vs actual
+                <span class="info-tip">?<span class="tip-text">For each forecast cycle that covered the issuance day, compares the predicted cumulative at the LAST same-day target against the actual cumulative reading at that target. This is "how close did your forecast come to the day's running total?" — the headline number for a daily-total forecaster.</span></span>
+            </h3>
+            <p class="rev-sentence" id="eod-sentence">—</p>
+            <div class="rev-tiles">
+                <div>
+                    <div class="tile-label">Avg predicted day-total <span id="eod-units-1"></span></div>
+                    <div class="tile-value" id="eod-predicted">—</div>
+                </div>
+                <div>
+                    <div class="tile-label">Avg actual day-total <span id="eod-units-2"></span></div>
+                    <div class="tile-value" id="eod-actual">—</div>
+                </div>
+                <div>
+                    <div class="tile-label">Avg error <span id="eod-units-3"></span></div>
+                    <div class="tile-value" id="eod-mae">—</div>
+                    <div class="tile-sub" id="eod-bias">bias —</div>
+                </div>
+                <div>
+                    <div class="tile-label">Based on</div>
+                    <div class="tile-value" id="eod-samples">—</div>
+                    <div class="tile-sub">forecast cycles</div>
+                </div>
+            </div>
+        </div>
 
         <!-- Does re-forecasting help? -->
         <div id="accuracy-revision-card" class="settings-group" style="display:none;">
@@ -3906,8 +3948,21 @@ window.showTab = function(el) {
                 hovertemplate: 'Bias %{y:.3f} (+ over-predicts, − under-predicts)<extra></extra>',
             });
         }
-        var yTitle = 'Error'
-            + (EXP_UNITS ? (accuracyMode === 'increment' ? ' (' + EXP_UNITS + ' per bin)' : ' (' + EXP_UNITS + ')') : '');
+        // v2.40.9: y-axis label per mode. Increment = per-bin demand
+        // units. Daily cumulative = same units but accumulated within
+        // the day, so we annotate as "running total". Raw is the
+        // legacy fallthrough.
+        var yUnitsSuffix = '';
+        if (EXP_UNITS) {
+            if (accuracyMode === 'increment') {
+                yUnitsSuffix = ' (' + EXP_UNITS + ' per bin)';
+            } else if (accuracyMode === 'daily_cumulative') {
+                yUnitsSuffix = ' (' + EXP_UNITS + ', running daily total)';
+            } else {
+                yUnitsSuffix = ' (' + EXP_UNITS + ')';
+            }
+        }
+        var yTitle = 'Error' + yUnitsSuffix;
         var layout = {
             xaxis: { title: 'Lead time (hours)', color: '#b0b0b0', gridcolor: '#2d3561' },
             yaxis: {
@@ -4028,7 +4083,9 @@ window.showTab = function(el) {
                 revCard.style.display = 'block';
                 document.getElementById('rev-first-mae').textContent = _fmtUnits(rev.first_forecast_mae, 3);
                 document.getElementById('rev-last-mae').textContent = _fmtUnits(rev.latest_forecast_mae, 3);
-                var modeLabel = accuracyMode === 'increment' ? 'per-interval demand' : 'raw value';
+                var modeLabel = accuracyMode === 'increment' ? 'per-interval demand'
+                              : accuracyMode === 'daily_cumulative' ? 'running daily total'
+                              : 'raw value';
                 document.getElementById('rev-units-1').textContent = '(' + modeLabel + ')';
                 document.getElementById('rev-units-2').textContent = '(' + modeLabel + ')';
                 function fmtBias(v) {
@@ -4061,6 +4118,56 @@ window.showTab = function(el) {
                 revCard.style.display = 'none';
             }
 
+            // v2.40.9: End-of-day total tile — only meaningful in
+            // daily_cumulative mode. Shows mean predicted day-total vs
+            // mean actual day-total across cycles in the window, with
+            // MAE in real units and a signed bias.
+            var eod = data.end_of_day;
+            var eodCard = document.getElementById('accuracy-eod-card');
+            if (eodCard) {
+                if (accuracyMode === 'daily_cumulative' && eod && eod.sample_count > 0) {
+                    eodCard.style.display = 'block';
+                    document.getElementById('eod-predicted').textContent = _fmtUnits(eod.mean_predicted, 2);
+                    document.getElementById('eod-actual').textContent = _fmtUnits(eod.mean_actual, 2);
+                    document.getElementById('eod-mae').textContent = _fmtUnits(eod.mae, 2);
+                    var unitsSuffix = EXP_UNITS ? '(' + EXP_UNITS + ')' : '';
+                    document.getElementById('eod-units-1').textContent = unitsSuffix;
+                    document.getElementById('eod-units-2').textContent = unitsSuffix;
+                    document.getElementById('eod-units-3').textContent = unitsSuffix;
+                    // Bias: predicted − actual; + over, − under.
+                    var b = eod.me;
+                    if (b === null || b === undefined) {
+                        document.getElementById('eod-bias').textContent = 'bias —';
+                    } else {
+                        var sign = b > 0 ? '+' : '';
+                        var word = b > 0 ? ' (over)' : b < 0 ? ' (under)' : '';
+                        document.getElementById('eod-bias').textContent =
+                            'bias ' + sign + b.toFixed(2) + word;
+                    }
+                    document.getElementById('eod-samples').textContent = eod.sample_count.toLocaleString();
+                    // Plain-English headline. Uses % of typical actual
+                    // so the user can read it without knowing the
+                    // sensor's scale.
+                    var sentEl = document.getElementById('eod-sentence');
+                    var actual = eod.mean_actual;
+                    var maeAbs = eod.mae;
+                    var pctErr = (actual && actual > 0)
+                        ? (maeAbs / actual * 100) : null;
+                    if (pctErr !== null && isFinite(pctErr)) {
+                        var verdict = pctErr < 5 ? 'tracking the daily total closely'
+                                    : pctErr < 15 ? 'in the right ballpark'
+                                    : 'noticeably off the daily total';
+                        sentEl.innerHTML = 'Forecasts land within <strong>±'
+                            + pctErr.toFixed(1) + '%</strong> of the actual daily total on average — <em>'
+                            + verdict + '</em>.';
+                    } else {
+                        sentEl.textContent = '';
+                    }
+                } else {
+                    eodCard.style.display = 'none';
+                }
+            }
+
             // Stats footer
             document.getElementById('accuracy-stats').style.display = 'block';
             document.getElementById('accuracy-total-logged').textContent = (data.total_logged || 0).toLocaleString();
@@ -4083,6 +4190,8 @@ window.showTab = function(el) {
     function _renderAccuracyEmpty(data) {
         document.getElementById('verdict-card').style.display = 'none';
         document.getElementById('accuracy-revision-card').style.display = 'none';
+        var eodCard = document.getElementById('accuracy-eod-card');
+        if (eodCard) eodCard.style.display = 'none';
         document.getElementById('accuracy-empty').style.display = 'block';
         _setCardLoading('accuracy-lead-chart', false);
         // Clear the lead-time chart container so it doesn't linger
@@ -4116,16 +4225,26 @@ window.showTab = function(el) {
         }
     }
 
-    // v2.40.7: the raw-mode toggle was removed (raw mode was meaningless
-    // for cumulative sensors — see #2 in the v2.40.7 audit). The setter
-    // is retained as a no-op stub so any external caller (cached URLs,
-    // userscript, addon update mid-session) doesn't blow up. For
-    // cumulative sensors only 'increment' is honoured; 'raw' is
-    // discarded silently. Non-cumulative sensors never expose a toggle
-    // and stay on the default mode.
+    // v2.40.9: two-way toggle. 'increment' (per-interval delta MAE)
+    // and 'daily_cumulative' (running-total MAE with seed from actuals
+    // at issuance). Raw mode is still accepted as a silent alias for
+    // 'increment' because cumulative sensors are the only ones that
+    // ever expose the toggle, and raw on a cumulative sensor is the
+    // bug 2.40.7 fixed.
     window.setAccuracyMode = function(mode) {
-        if (mode !== 'increment') return;
-        accuracyMode = 'increment';
+        if (mode === 'raw') mode = 'increment';
+        if (mode !== 'increment' && mode !== 'daily_cumulative') return;
+        accuracyMode = mode;
+        var incBtn = document.getElementById('accuracy-mode-increment');
+        var cumBtn = document.getElementById('accuracy-mode-daily-cumulative');
+        function apply(btn, active) {
+            if (!btn) return;
+            btn.classList.toggle('active', active);
+            btn.style.background = active ? 'var(--accent-secondary)' : 'transparent';
+            btn.style.color = active ? '#fff' : 'var(--text-secondary)';
+        }
+        apply(incBtn, mode === 'increment');
+        apply(cumBtn, mode === 'daily_cumulative');
         loadForecastAccuracy();
     };
 
