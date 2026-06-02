@@ -83,13 +83,23 @@ class TestForecastCoverage:
         """Seed forecast_log + actuals to give two distinct hour-of-day
         buckets — hour 13 under-covered (50%) and hour 19 over-covered
         (99%). For nominal=0.8, |dev(hour13)|=0.30 and
-        |dev(hour19)|=0.19 — hour 13 should win 'worst' by |deviation|."""
+        |dev(hour19)|=0.19 — hour 13 should win 'worst' by |deviation|.
+
+        v2.40.7: anchor all timestamps to ``now − 35 days`` rather than
+        a hard-coded 2026-04-01 so the 30-day seed always lands inside
+        ``max_age_days=60``. The old form drifted out of the window as
+        wall-clock advanced past the fixture date.
+        """
         from datetime import datetime as _dt, timedelta as _td
 
         db.ensure_forecast_log_table()
         table = db.safe_table_name("sensor.pv_power")
+        # Floor to midnight so the hour-of-day buckets line up cleanly.
+        anchor = (_dt.utcnow() - _td(days=35)).replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        )
         # 30 days of synthetic actuals at 30-min freq.
-        ds = pd.date_range("2026-04-01", periods=30 * 48, freq="30min", tz="UTC")
+        ds = pd.date_range(anchor, periods=30 * 48, freq="30min", tz="UTC")
         actuals = pd.DataFrame({
             "ds": [t.strftime("%Y-%m-%dT%H:%M:%S") for t in ds],
             "value": [10.0] * len(ds),
@@ -100,11 +110,11 @@ class TestForecastCoverage:
         # issued at the same instant for simplicity. Construct upper/
         # lower bounds so the actual (10.0) falls inside the requested
         # fraction of the time.
-        issued = _dt(2026, 4, 1)
+        issued = anchor
         for hour, frac in [(13, in_band_frac_hour13), (19, in_band_frac_hour19)]:
             targets, preds, ups, lows = [], [], [], []
             for day in range(30):
-                target = _dt(2026, 4, 1) + _td(days=day, hours=hour)
+                target = anchor + _td(days=day, hours=hour)
                 in_band = (day / 30) < frac
                 # Centre on the actual; either tight (in-band) or
                 # off-centre (out-of-band)
