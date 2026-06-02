@@ -1,5 +1,78 @@
 # Changelog
 
+## 2.40.9
+
+**Feature: a real "Daily cumulative" accuracy view for daily-reset
+cumulative sensors.** The v2.40.7 audit removed the old "Cumulative
+value" toggle because the comparison was meaningless — per-interval
+delta predictions vs raw cumulative actuals, different spaces, MAE ≈
+the cumulative level. That removal lost a view some users genuinely
+wanted: "how close did my forecast come to the actual end-of-day
+total?". This release brings it back, done properly.
+
+For each forecast row, the predicted cumulative at ``target_dt`` is
+
+    predicted_cumulative = seed
+                          + Σ (per-interval predictions within
+                               target_dt's local day, in chronological
+                               order up to and including target_dt)
+
+where ``seed = actual_cumulative_at(issued_at)`` when target_dt is in
+the same local day as issued_at, and ``0`` otherwise (so the midnight
+reset on the underlying counter is respected — the prior day's
+accumulation does not carry over). Compared against the raw cumulative
+actual at target_dt — for a daily-reset sensor that reading IS the
+demand-so-far on that day, so both sides live in the same space.
+
+Implementation:
+
+- New ``evaluation_mode="daily_cumulative"`` on
+  ``HistoryDB.get_forecast_accuracy``. Dispatches to
+  ``_get_forecast_accuracy_daily_cumulative_locked`` which uses a
+  window function to cumsum predictions per (issued_at, target_day),
+  joins the seed from ``actuals_grid`` at the floored issuance time,
+  and joins the actual at target_dt.
+- ``/experiment/{name}/forecast-accuracy`` accepts ``?mode=daily_cumulative``;
+  defensively coerces to ``raw`` if the sensor is not cumulative.
+- The Forecast Accuracy header now exposes a real two-button toggle
+  for cumulative sensors: **Per-interval demand** | **Daily
+  cumulative**.
+- New **End-of-day total** card (daily_cumulative mode only) shows
+  average predicted vs actual daily totals, signed bias, the average
+  error in real units, and a plain-English headline ("Forecasts land
+  within ±X% of the actual daily total on average").
+- ``typical_interval_demand`` in daily_cumulative mode is the mean of
+  daily maximums (typical end-of-day total) so the verdict-card's
+  ``nmae`` normalises against a meaningful scale rather than the
+  per-interval ~0.5 kWh used by increment mode.
+- Y-axis label on the lead-time chart adapts: "Error (kWh per bin)"
+  for increment, "Error (kWh, running daily total)" for daily
+  cumulative.
+
+What to expect that ISN'T "the model got better":
+
+- Daily-cumulative MAE numbers will be larger than per-interval MAE
+  in the same units. Cumulative integrates per-interval errors, so a
+  0.05 kWh/bin error over 16 hours lands ~1.6 kWh off at end of day.
+- The lead-time chart slopes upward with lead time because errors
+  accumulate. A flat curve would actually mean per-bin error shrinks
+  with lead — rare.
+- Forecasts issued earlier in the day have larger end-of-day errors
+  than forecasts issued late afternoon (more forecasted-rest-of-day,
+  less observed-so-far). Physical, not model badness.
+
+Per-cohort decomposition and revision_improvement in daily-cumulative
+space are deferred to a follow-up. Day-bucketing uses UTC midnight for
+now — accurate for most deployments, ≤1h off at day boundaries for
+TZ-shifted ones (passing ``day_offset_hours`` through the endpoint
+mirrors the stability function and is the natural follow-up).
+
+Regression: three new tests in ``TestForecastAccuracyDailyCumulativeMode``
+lock in (a) perfect same-day forecast → MAE=0, (b) +1/bin
+over-prediction → cumulative error grows linearly with lead, and
+(c) cross-midnight forecast correctly resets the seed at the day
+boundary.
+
 ## 2.40.8
 
 **Bugfix: raised the Forecast Accuracy fetch timeout 20 s → 60 s.**

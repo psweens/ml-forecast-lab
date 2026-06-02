@@ -504,6 +504,11 @@ class HistoryDB:
         # issues writes on the same connection. RLock so nested helpers
         # that also lock don't deadlock.
         with self._lock:
+            if evaluation_mode == "daily_cumulative":
+                return self._get_forecast_accuracy_daily_cumulative_locked(
+                    experiment, actuals_table, max_age_days,
+                    interval_minutes, model_name, model_version,
+                )
             return self._get_forecast_accuracy_locked(
                 experiment, actuals_table, max_age_days, interval_minutes,
                 evaluation_mode, model_name, model_version,
@@ -951,6 +956,332 @@ class HistoryDB:
                 "from": stats_row[1] if stats_row else None,
                 "to": stats_row[2] if stats_row else None,
             },
+        }
+
+    def _get_forecast_accuracy_daily_cumulative_locked(
+        self,
+        experiment: str,
+        actuals_table: str,
+        max_age_days: int = 30,
+        interval_minutes: int = 30,
+        model_name: Optional[str] = None,
+        model_version: Optional[str] = None,
+    ) -> dict:
+        """Lead-time accuracy in **daily-cumulative space** for daily-
+        reset cumulative sensors.
+
+        For each (issued_at, target_dt, predicted) row we compute the
+        ``predicted_cumulative`` at target_dt:
+
+            predicted_cumulative = seed
+                                  + Σ (per-interval predictions within
+                                       target_dt's local day, in
+                                       chronological order up to and
+                                       including this target_dt)
+
+        where ``seed`` is the actual cumulative reading at issued_at
+        when target_dt lands in the SAME local day as issued_at, and
+        0 otherwise (because the daily-reset sensor restarts at
+        midnight, so the prior day's accumulation is irrelevant).
+
+        This is then compared against the raw cumulative actual at
+        target_dt — for a daily-reset sensor that reading IS the
+        demand-so-far on that day. Errors integrate per-interval
+        errors, so the lead-time MAE curve typically grows with lead.
+        That's expected: this metric answers "how close is the
+        predicted day-so-far to actual day-so-far", not "how close is
+        each per-interval delta".
+
+        ``forecast_log.predicted`` is logged as per-interval delta for
+        cumulative sensors (see main.py:5068 and the comment in
+        ``_get_forecast_accuracy_locked``); this function relies on
+        that invariant.
+        """
+        from datetime import datetime, timedelta
+        cursor = self.conn.cursor()
+        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        cutoff_str = (
+            datetime.utcnow() - timedelta(days=max_age_days)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        interval_sec = max(60, int(interval_minutes) * 60)
+        bucket_min = max(1, int(interval_minutes))
+
+        _filter_clauses = []
+        _filter_params: list = []
+        if model_name:
+            _filter_clauses.append("model_name = ?")
+            _filter_params.append(model_name)
+        if model_version:
+            _filter_clauses.append("model_version = ?")
+            _filter_params.append(model_version)
+        model_filter_sql = (
+            " AND " + " AND ".join(_filter_clauses)
+        ) if _filter_clauses else ""
+        model_filter_param = tuple(_filter_params)
+
+        # Day bucketing: SUBSTR(target_dt, 1, 10) yields YYYY-MM-DD
+        # under whatever timezone the timestamps were stored in. The
+        # production write path stores UTC timestamps (see
+        # log_forecast at db.py:366-374), so this bucketing aligns
+        # with UTC midnight. For HA sensors that reset on LOCAL
+        # midnight, a TZ-shifted bucket is more accurate but requires
+        # an extra param (day_offset_hours) — the stability function
+        # plumbs that through; the accuracy endpoint does not yet.
+        # Tracked as a follow-up; UTC bucketing is correct for the
+        # 80% of deployments that run in UTC or close to it, and only
+        # off by ≤1h at day boundaries elsewhere.
+        sql = f"""
+            WITH actuals_grid AS (
+                SELECT
+                    strftime('%Y-%m-%d %H:%M:%S',
+                        (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                        'unixepoch'
+                    ) AS grid_dt,
+                    AVG(value) AS value
+                FROM {actuals_table}
+                WHERE SUBSTR(ds, 1, 19) >= ?
+                GROUP BY grid_dt
+            ),
+            forecast_base AS (
+                SELECT
+                    fl.experiment, fl.model_name, fl.model_version,
+                    fl.issued_at, fl.target_dt, fl.lead_minutes,
+                    fl.predicted,
+                    strftime('%Y-%m-%d %H:%M:%S',
+                        (CAST(strftime('%s', SUBSTR(fl.issued_at, 1, 19)) AS INTEGER) / ?) * ?,
+                        'unixepoch'
+                    ) AS issued_grid,
+                    SUBSTR(fl.issued_at, 1, 10) AS issued_day,
+                    SUBSTR(fl.target_dt, 1, 10) AS target_day
+                FROM forecast_log fl
+                WHERE fl.experiment = ?
+                  AND fl.target_dt <= ?
+                  AND fl.issued_at >= ?
+                  {model_filter_sql}
+            ),
+            forecast_seeded AS (
+                SELECT
+                    fb.*,
+                    CASE WHEN fb.target_day = fb.issued_day
+                         THEN COALESCE(seed_a.value, 0)
+                         ELSE 0
+                    END AS seed_value
+                FROM forecast_base fb
+                LEFT JOIN actuals_grid seed_a
+                    ON seed_a.grid_dt = fb.issued_grid
+            ),
+            forecast_cum AS (
+                SELECT
+                    fs.*,
+                    fs.seed_value + SUM(predicted) OVER (
+                        PARTITION BY experiment, model_name, model_version,
+                                     issued_at, target_day
+                        ORDER BY target_dt
+                    ) AS predicted_cumulative
+                FROM forecast_seeded fs
+            )
+            SELECT
+                CAST((fc.lead_minutes / ?) * ? AS INTEGER) AS lead_bucket,
+                AVG(ABS(fc.predicted_cumulative - ag.value)) AS mae,
+                SQRT(AVG((fc.predicted_cumulative - ag.value)
+                       * (fc.predicted_cumulative - ag.value))) AS rmse,
+                AVG(fc.predicted_cumulative - ag.value) AS me,
+                COUNT(*) AS n
+            FROM forecast_cum fc
+            INNER JOIN actuals_grid ag ON ag.grid_dt = fc.target_dt
+            WHERE ag.value IS NOT NULL AND ag.value >= 0
+            GROUP BY lead_bucket
+            ORDER BY lead_bucket
+        """
+
+        # Param order matches CTE order:
+        #  actuals_grid: (interval_sec, interval_sec, cutoff_str)
+        #  forecast_base seed grid: (interval_sec, interval_sec)
+        #  forecast_base WHERE: (experiment, now_str, cutoff_str,
+        #                        *model_filter_param)
+        #  outer SELECT: (bucket_min, bucket_min)
+        params = (
+            interval_sec, interval_sec, cutoff_str,
+            interval_sec, interval_sec,
+            experiment, now_str, cutoff_str, *model_filter_param,
+            bucket_min, bucket_min,
+        )
+        try:
+            cursor.execute(sql, params)
+            lead_rows = cursor.fetchall()
+        except sqlite3.Error as e:
+            logger.error(
+                f"Daily-cumulative accuracy query failed: {e}",
+                exc_info=True,
+            )
+            return {"error": str(e)}
+
+        lead_time_curve = {
+            "lead_minutes": [r[0] for r in lead_rows],
+            "mae": [round(r[1], 4) for r in lead_rows],
+            "rmse": [round(r[2], 4) for r in lead_rows],
+            "me": [round(r[3], 4) for r in lead_rows],
+            "sample_count": [r[4] for r in lead_rows],
+        }
+
+        # End-of-day headline: for each (issued_at, target_day) where
+        # target_day == issued_day, take the LAST target's predicted
+        # cumulative vs the actual cumulative at that target. That's
+        # "the forecast's predicted day-so-far at the latest target it
+        # made for today" — the most meaningful single number for a
+        # daily-total forecaster.
+        end_of_day = {"sample_count": 0}
+        try:
+            cursor.execute(
+                f"""
+                WITH actuals_grid AS (
+                    SELECT
+                        strftime('%Y-%m-%d %H:%M:%S',
+                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                            'unixepoch'
+                        ) AS grid_dt,
+                        AVG(value) AS value
+                    FROM {actuals_table}
+                    WHERE SUBSTR(ds, 1, 19) >= ?
+                    GROUP BY grid_dt
+                ),
+                forecast_base AS (
+                    SELECT
+                        fl.experiment, fl.model_name, fl.model_version,
+                        fl.issued_at, fl.target_dt, fl.lead_minutes,
+                        fl.predicted,
+                        strftime('%Y-%m-%d %H:%M:%S',
+                            (CAST(strftime('%s', SUBSTR(fl.issued_at, 1, 19)) AS INTEGER) / ?) * ?,
+                            'unixepoch'
+                        ) AS issued_grid,
+                        SUBSTR(fl.issued_at, 1, 10) AS issued_day,
+                        SUBSTR(fl.target_dt, 1, 10) AS target_day
+                    FROM forecast_log fl
+                    WHERE fl.experiment = ?
+                      AND fl.target_dt <= ?
+                      AND fl.issued_at >= ?
+                      AND SUBSTR(fl.target_dt, 1, 10)
+                          = SUBSTR(fl.issued_at, 1, 10)
+                      {model_filter_sql}
+                ),
+                forecast_seeded AS (
+                    SELECT fb.*,
+                        COALESCE(seed_a.value, 0) AS seed_value
+                    FROM forecast_base fb
+                    LEFT JOIN actuals_grid seed_a
+                        ON seed_a.grid_dt = fb.issued_grid
+                ),
+                forecast_cum AS (
+                    SELECT fs.*,
+                        fs.seed_value + SUM(predicted) OVER (
+                            PARTITION BY experiment, model_name, model_version,
+                                         issued_at, target_day
+                            ORDER BY target_dt
+                        ) AS predicted_cumulative
+                    FROM forecast_seeded fs
+                ),
+                last_target_per_issuance AS (
+                    SELECT issued_at, target_day,
+                           MAX(target_dt) AS last_target_dt
+                    FROM forecast_cum
+                    GROUP BY issued_at, target_day
+                )
+                SELECT
+                    AVG(ABS(fc.predicted_cumulative - ag.value)) AS mae,
+                    AVG(fc.predicted_cumulative - ag.value) AS me,
+                    AVG(fc.predicted_cumulative) AS mean_predicted,
+                    AVG(ag.value) AS mean_actual,
+                    COUNT(*) AS n
+                FROM forecast_cum fc
+                INNER JOIN last_target_per_issuance lt
+                    ON lt.issued_at = fc.issued_at
+                   AND lt.target_day = fc.target_day
+                   AND lt.last_target_dt = fc.target_dt
+                INNER JOIN actuals_grid ag ON ag.grid_dt = fc.target_dt
+                WHERE ag.value IS NOT NULL AND ag.value >= 0
+                """,
+                params[:-2],  # outer query has no lead_bucket binding
+            )
+            row = cursor.fetchone()
+            if row and row[4]:
+                end_of_day = {
+                    "mae": round(row[0], 4),
+                    "me": round(row[1], 4),
+                    "mean_predicted": round(row[2], 4),
+                    "mean_actual": round(row[3], 4),
+                    "sample_count": int(row[4]),
+                }
+        except sqlite3.Error as e:
+            logger.warning(f"End-of-day headline query failed: {e}")
+
+        # typical_interval_demand: in daily-cumulative mode we report
+        # the typical magnitude of the END-OF-DAY actual so the
+        # verdict-card's nmae normalises against a meaningful scale
+        # (e.g. ~50 kWh, not the per-interval ~0.5 kWh used by
+        # increment mode).
+        typical = 0.0
+        try:
+            cursor.execute(
+                f"""
+                WITH actuals_grid AS (
+                    SELECT
+                        strftime('%Y-%m-%d %H:%M:%S',
+                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                            'unixepoch'
+                        ) AS grid_dt,
+                        SUBSTR(ds, 1, 10) AS day,
+                        AVG(value) AS value
+                    FROM {actuals_table}
+                    WHERE SUBSTR(ds, 1, 19) >= ?
+                    GROUP BY grid_dt
+                ),
+                daily_max AS (
+                    SELECT day, MAX(value) AS day_max
+                    FROM actuals_grid
+                    WHERE value IS NOT NULL AND value >= 0
+                    GROUP BY day
+                )
+                SELECT AVG(day_max) FROM daily_max
+                """,
+                (interval_sec, interval_sec, cutoff_str),
+            )
+            t = cursor.fetchone()
+            typical = float(t[0]) if t and t[0] is not None else 0.0
+        except sqlite3.Error as e:
+            logger.warning(f"typical_interval_demand query failed: {e}")
+
+        # Stats / window range for the header.
+        total_logged = 0
+        date_from = date_to = None
+        try:
+            cursor.execute(
+                """
+                SELECT COUNT(*), MIN(issued_at), MAX(issued_at)
+                FROM forecast_log
+                WHERE experiment = ?
+                  AND issued_at >= ?
+                """,
+                (experiment, cutoff_str),
+            )
+            row = cursor.fetchone()
+            if row:
+                total_logged = int(row[0])
+                date_from, date_to = row[1], row[2]
+        except sqlite3.Error:
+            pass
+
+        return {
+            "evaluation_mode": "daily_cumulative",
+            "lead_time_curve": lead_time_curve,
+            "cohorts": [],  # per-cohort breakdown deferred to a follow-up
+            "revision_improvement": {},
+            "typical_interval_demand": typical,
+            "end_of_day": end_of_day,
+            "total_logged": total_logged,
+            "actuals_matched": sum(lead_time_curve["sample_count"]),
+            "model_name": model_name,
+            "model_version": model_version,
+            "date_range": {"from": date_from, "to": date_to},
         }
 
     @_locked
