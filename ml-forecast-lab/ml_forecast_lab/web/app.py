@@ -2522,6 +2522,15 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             evaluation_mode = mode_param
         else:
             evaluation_mode = "increment" if exp_cfg.source_is_cumulative else "raw"
+        # v2.40.7: defensively coerce raw → increment for cumulative
+        # sensors. Raw mode compared per-interval predictions (the only
+        # thing forecast_log stores) against raw cumulative actuals — a
+        # space mismatch that produced MAE ≈ the cumulative level
+        # rather than model error. The UI no longer offers the raw
+        # toggle for these experiments, but a bookmarked or cached
+        # ?mode=raw URL would still hit this branch.
+        if evaluation_mode == "raw" and exp_cfg.source_is_cumulative:
+            evaluation_mode = "increment"
         # Default filter: current champion + its latest training tag. UI
         # can escape via ?model=all or ?version=all. See
         # _resolve_model_filter for the full contract.

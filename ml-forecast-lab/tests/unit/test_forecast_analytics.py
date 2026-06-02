@@ -126,22 +126,29 @@ class TestAccuracyLeadTime:
         # Perfect forecast → zero MAE at every lead.
         assert all(m == 0 for m in ltc["mae"])
 
-    def test_increment_mode_drops_first_target_per_cycle(self, db, actuals_monotonic):
-        # Within each issuance the LAG at the first target is NULL, so
-        # increment mode cannot evaluate lead=30 (the first bucket).
+    def test_increment_mode_covers_first_target_per_cycle(self, db, actuals_monotonic):
+        """v2.40.7: predicted is already a per-interval delta (logged
+        from y_pred at main.py:5068), so the forecast CTE is a
+        passthrough in increment mode — every target's forecast value
+        is evaluable, including the FIRST target in each cycle. The
+        previous behaviour second-differenced the forecast and silently
+        dropped the first bucket; that was the bug, not a feature.
+        """
         issued = datetime(2024, 6, 15, 8, 0)
         targets = _targets_30min(issued, 4)
-        preds = [17.0, 18.0, 19.0, 20.0]  # match seeded actuals
+        # Predict the per-interval delta directly — the seeded actuals
+        # are monotonic (+1/bin), so the perfect prediction is 1.0/bin.
+        preds = [1.0, 1.0, 1.0, 1.0]
         _log_cycle(db, "exp", issued, targets, preds)
         r = db.get_forecast_accuracy(
             "exp", actuals_monotonic, max_age_days=GENEROUS_WINDOW,
             evaluation_mode="increment", model_name="lgb",
         )
         ltc = r["lead_time_curve"]
-        # First lead bucket should be absent; later buckets present.
-        assert 30 not in ltc["lead_minutes"]
-        assert 60 in ltc["lead_minutes"]
-        # Predictions match actual deltas exactly (constant 1.0) so MAE ≈ 0.
+        # Every lead bucket must be present — the first target is no
+        # longer dropped by a spurious LAG-on-forecast.
+        assert ltc["lead_minutes"] == [30, 60, 90, 120]
+        # Perfect delta predictions → zero MAE at every lead.
         assert all(m < 1e-6 for m in ltc["mae"])
 
     def test_increment_mode_nulls_delta_on_actuals_gap(self, db, actuals_with_gap):
@@ -150,23 +157,22 @@ class TestAccuracyLeadTime:
         spans 4 intervals. Without the adjacency guard, that bin's
         "delta" = value[06:00] − value[03:30] = 5, compared against a
         forecast's per-bin delta of 1 → MAE of 4 at that lead bucket.
-        The guard nulls the row out; MAE stays ~0.
+        The guard nulls the actuals row out so it never joins, and MAE
+        on the surviving buckets stays ~0.
         """
         issued = datetime(2024, 6, 16, 3, 0)
-        # Predict per-interval demand = 1.0 (matches the seeded monotonic
-        # increments when no gap is in play). Horizon spans the gap.
+        # Predict the per-interval delta directly = 1.0 (matches the
+        # seeded monotonic increments). Horizon spans the gap.
         targets = _targets_30min(issued, 8)
-        preds = [float(i) for i in range(
-            targets[0].hour * 2 + targets[0].minute // 30 + 48,  # absolute offset
-            targets[0].hour * 2 + targets[0].minute // 30 + 48 + 8,
-        )]
+        preds = [1.0] * 8
         _log_cycle(db, "exp", issued, targets, preds)
         r = db.get_forecast_accuracy(
             "exp", actuals_with_gap, max_age_days=GENEROUS_WINDOW,
             evaluation_mode="increment", model_name="lgb",
         )
         ltc = r["lead_time_curve"]
-        # Any non-zero MAE would mean a gap-spanning delta leaked through.
+        # Any non-zero MAE would mean a gap-spanning delta leaked through
+        # the actuals adjacency guard.
         for m in ltc["mae"]:
             assert m < 1e-6, f"Gap-spanning delta leaked into MAE: {ltc['mae']}"
 

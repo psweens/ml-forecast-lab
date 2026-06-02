@@ -1,5 +1,102 @@
 # Changelog
 
+## 2.40.7
+
+**Forecast Accuracy tab — eight bugs found by audit and fixed.** The
+recurring failure mode in this tab is mixing *per-interval delta* space
+with *cumulative* space for cumulative-source sensors (the same class
+of bug as the v2.40.5 halved-demand fix). The lead audit finding is a
+silent wrong-numbers-by-default bug on the very view a hot-water /
+energy demand user lands on first; the rest range from a misleading
+button label to a runaway loading shimmer.
+
+### 1. CRITICAL — lead-time accuracy double-differenced the forecast
+
+For cumulative sensors, `forecast_log.predicted` is logged from
+`y_pred` (`main.py:5068`), which is the model's **per-interval delta**
+output (the HA cumulative sensor is built downstream by cumsumming
+`y_pred` at `main.py:5194-5208` and is never logged). Increment mode
+— the default at `app.py:2524` — applied a *second* LAG diff to
+`predicted` while the actuals took a *first* LAG diff of the raw
+cumulative. The forecast ended up as a second-difference compared
+against a first-difference actual: different spaces.
+
+Concretely: a *perfect* model on cumulative actuals 10 → 12 → 15 → 16
+logs predictions [2, 3, 1]. Increment mode computed `predicted −
+LAG(predicted)` = [NULL, 1, −2], then the `fv.value >= 0` filter
+dropped the −2, and the surviving row scored MAE = 2 (predicted=1 vs
+actual=3). MAE collapsed to roughly the typical demand for any model.
+
+The fix mirrors what the trajectory function (`db.py:1040-1053, 1084`)
+already does correctly: diff the actual, pass `predicted` through
+unchanged. Blast radius covers the lead-time MAE/RMSE/bias curve, the
+per-cohort decomposition, the `nmae` ratio fed to the verdict's
+accuracy chip, and the revision-improvement tile — all of which reused
+the same `forecast_vals` CTE. Regression locked in by a unit test that
+seeds a perfect cumulative-source prediction and asserts MAE = 0.
+
+### 2. Raw mode for cumulative sensors removed
+
+Raw mode compared per-interval delta predictions against `AVG(raw
+cumulative)` actuals — MAE ≈ the cumulative level rather than model
+error. The "Cumulative value" toggle button is removed from the
+header; the remaining badge documents what the chart is evaluating.
+The backend defensively coerces `?mode=raw` → `?mode=increment` for
+cumulative sensors so a bookmarked URL still works.
+
+### 3. "× Show all cohorts" served champion only
+
+The clear-filter button stripped every cohort param from the URL, but
+the backend's `_resolve_model_filter` (`app.py:768-783`) defaults to
+the champion when no param is present. So the button labelled "× Show
+all cohorts" actually narrowed the view to the champion's latest
+weights — the opposite of its name. Fix: the button now emits
+`?model=all&version=all`, the documented "every cohort" signal.
+
+### 4. "Computing…" shimmer could hang indefinitely
+
+`accuracyFetch()` retried once on failure but had no timeout — a
+stalled request (e.g. SQLite RLock contention during a publish-cycle
+write) left the `chart-loading` CSS class on the chart forever,
+rendering the "Computing…" shimmer indefinitely (style.css:1057).
+Fix: wrap each fetch with a 20-second `AbortController` timeout so a
+stall surfaces as a recoverable error through the existing `.catch`
+path. The cohort-button fix above may itself shrink the query enough
+to avoid the stall; this is belt-and-braces.
+
+### 5/6. Verdict stability chip + headline switched to daily-total for cumulative sensors
+
+The Layer 1 verdict chip and the plain-English headline sentence both
+read `median_step_cv_pct` by default — a coefficient of variation of
+per-interval predictions across cycles. For a zero-inflated demand
+sensor where most intervals have mean ≈ 0.02 with std ≈ 0.05, CV
+legitimately runs into the hundreds of percent. The guard at
+`db.py:2128` only caught `|mean| < 1e-9`; the realistic small-but-
+nonzero-mean regime passed through, and the headline rendered "±X% —
+noticeably unstable" with confidence. The daily-total CV is computed
+correctly (cohort-aware, local-midnight bucketed, full-coverage
+gated) and is the trustworthy stability number for these sensors.
+
+For cumulative experiments the chip and the leading clause of the
+headline sentence now prefer the daily CV; the per-interval number is
+demoted to a secondary clause with an honest caveat about why it's
+noisy. Falls back to per-interval if daily isn't available yet.
+
+### 7. Bias sign convention spelled out in the UI
+
+Bias is `predicted − actual` throughout (`db.py:680, 837`), so `+`
+means over-prediction and `−` under-prediction. The chart legend now
+says `Bias (+ over / − under)`; hovertext says `… (+ over-predicts, −
+under-predicts)`; the revision tile annotates the value with `(over)`
+or `(under)`. No sign was ever wrong; the convention was just never
+documented in the UI.
+
+### 8. Removed redundant `@_locked` on `get_retrain_events`
+
+`db.py:2382-2383` had the decorator applied twice. Harmless because
+the underlying `RLock` is re-entrant, but redundant. Cosmetic
+cleanup.
+
 ## 2.40.6
 
 **Bugfix: experiment page showed the wrong "production model" name after a

@@ -1624,14 +1624,18 @@
             </select>
             <span class="info-tip">?<span class="tip-text">Time range used by every chart and verdict on this tab. Shorter windows reflect recent behaviour (a freshly-promoted model, an environmental change); longer windows give more samples but mix older cohorts in.</span></span>
         </div>
-        <!-- Evaluation mode toggle — cumulative sensors only -->
+        <!-- Evaluation mode indicator — cumulative sensors only.
+             v2.40.7: the prior "Cumulative value" (raw mode) toggle was
+             removed because the comparison was meaningless — predicted
+             is logged as a per-interval delta (main.py:5068) while raw
+             actuals are the cumulative reading, so MAE collapsed to
+             roughly the cumulative level rather than model error. The
+             remaining badge documents what the chart actually evaluates
+             without offering a broken alternative. -->
         <div class="acc-control" id="accuracy-mode-wrapper" style="display:none;">
-            <label>Evaluate as:</label>
-            <div class="toggle-group" style="display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
-                <button type="button" id="accuracy-mode-increment" class="toggle-btn active" onclick="setAccuracyMode('increment')" style="padding:0.35rem 0.75rem;background:var(--accent-secondary);color:#fff;border:none;cursor:pointer;font-size:0.85rem;">Per-interval demand</button>
-                <button type="button" id="accuracy-mode-raw" class="toggle-btn" onclick="setAccuracyMode('raw')" style="padding:0.35rem 0.75rem;background:transparent;color:var(--text-secondary);border:none;cursor:pointer;font-size:0.85rem;">Cumulative value</button>
-            </div>
-            <span class="info-tip">?<span class="tip-text">Cumulative sensors reset at midnight, so raw-value errors mostly reflect the shape of the day — 23:30 errors look big just because the number is big. Per-interval demand evaluates <code>value[t] − value[t−1]</code>, so errors at 03:00 and 18:00 are directly comparable. Recommended for this sensor.</span></span>
+            <label>Errors shown as:</label>
+            <span id="accuracy-mode-badge" style="display:inline-block;padding:0.35rem 0.75rem;background:var(--accent-secondary);color:#fff;border:1px solid var(--border);border-radius:6px;font-size:0.85rem;">Per-interval demand</span>
+            <span class="info-tip">?<span class="tip-text">Cumulative sensors reset at midnight, so raw-value errors would mostly reflect the shape of the day — 23:30 errors look big just because the number is big. The chart instead evaluates <code>value[t] − value[t−1]</code>, so errors at 03:00 and 18:00 are directly comparable.</span></span>
         </div>
         <div class="acc-control" id="acc-tz-wrapper">
             <label for="accuracy-tz">Times in:</label>
@@ -3103,11 +3107,36 @@ window.showTab = function(el) {
         if (e.persisted) window.accuracyFetchInvalidate();
     });
 
-    function _doFetchOnce(url) {
-        return fetch(url).then(function(r) {
-            if (!r.ok) throw new Error('HTTP ' + r.status);
-            return r.json();
-        });
+    // v2.40.7: wrap fetch with an AbortController timeout so a stalled
+    // request (e.g. SQLite RLock contention during a publish-cycle
+    // write) rejects rather than hanging forever — without this the
+    // chart sits on the "Computing…" shimmer indefinitely because the
+    // .then/.catch never fires. 20 s is well above the slowest healthy
+    // accuracy-tab query and short enough to surface the issue while
+    // the user is still looking.
+    var ACCURACY_FETCH_TIMEOUT_MS = 20000;
+    function _doFetchOnce(url, timeoutMs) {
+        timeoutMs = timeoutMs || ACCURACY_FETCH_TIMEOUT_MS;
+        var controller = (typeof AbortController !== 'undefined')
+            ? new AbortController() : null;
+        var timer = setTimeout(function() {
+            if (controller) controller.abort();
+        }, timeoutMs);
+        var opts = controller ? { signal: controller.signal } : undefined;
+        return fetch(url, opts)
+            .then(function(r) {
+                clearTimeout(timer);
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .catch(function(err) {
+                clearTimeout(timer);
+                if (err && err.name === 'AbortError') {
+                    throw new Error('request timed out after '
+                        + Math.round(timeoutMs / 1000) + 's');
+                }
+                throw err;
+            });
     }
     window.accuracyFetch = function(url, opts) {
         opts = opts || {};
@@ -3333,7 +3362,15 @@ window.showTab = function(el) {
                     // "show all cohorts". The standalone "× Show all"
                     // pill below still works, but most users click the
                     // chip again expecting deselect (toggle UX).
-                    _applyChipFilter(null, null);
+                    // v2.40.7: pass 'all' explicitly so the URL carries
+                    // ?model=all&version=all. Without it the URL drops
+                    // both params and the backend's _resolve_model_filter
+                    // (app.py:768-783) falls through to its default
+                    // (the champion + champion's latest version) rather
+                    // than serving an all-cohort response — i.e. the
+                    // button labelled "× Show all cohorts" was actually
+                    // narrowing the view to the champion.
+                    _applyChipFilter('all', 'all');
                 } else {
                     _applyChipFilter(ev.model_name, ev.model_version);
                 }
@@ -3679,21 +3716,37 @@ window.showTab = function(el) {
         // regardless; only this chip + sentence follows the knob.
         var stabStatus = 'unknown';
         var stabCv = null;
-        var focus = EXP_STABILITY_FOCUS === 'daily_total' ? 'daily_total' : 'per_moment';
+        // v2.40.7: for cumulative sensors prefer the daily-total CV
+        // unless the user has explicitly overridden the chip's focus.
+        // The per-moment CV is a coefficient of variation of per-
+        // interval predictions, which explodes for zero-inflated demand
+        // (mean ≈ 0.02, std ≈ 0.05 → CV ≈ 250 %) — legitimately huge
+        // and physically meaningless yet rendered with a confident
+        // verdict. Daily-total CV is the trustworthy stability number
+        // for these sensors and is computed correctly server-side.
+        var preferDaily = (EXP_STABILITY_FOCUS === 'daily_total')
+            || EXP_SOURCE_CUMULATIVE;
+        var focus = preferDaily ? 'daily_total' : 'per_moment';
         var stabLabel = 'Run-to-run swing';
         var stabSubLabel = 'of predicted value';
         var stabNoData = 'need ≥2 cycles per moment';
         if (s && s.summary) {
-            if (focus === 'daily_total' &&
-                isFinite(s.summary.median_daily_cv_pct) &&
-                s.daily_totals && s.daily_totals.length > 0) {
+            var dailyOk = isFinite(s.summary.median_daily_cv_pct)
+                && s.daily_totals && s.daily_totals.length > 0;
+            var stepOk = isFinite(s.summary.median_step_cv_pct)
+                && s.summary.steps_analysed > 0;
+            if (focus === 'daily_total' && dailyOk) {
                 stabCv = s.summary.median_daily_cv_pct;
                 stabLabel = 'Daily-total swing';
                 stabSubLabel = 'of daily total';
                 stabNoData = 'need ≥2 full-coverage cycles per day';
-            } else if (focus === 'per_moment' &&
-                isFinite(s.summary.median_step_cv_pct) &&
-                s.summary.steps_analysed > 0) {
+            } else if (focus === 'daily_total' && !dailyOk && stepOk) {
+                // Cumulative sensor that hasn't accumulated a full day
+                // of cycles yet — fall back to step CV with an honest
+                // label rather than reporting "no data".
+                stabCv = s.summary.median_step_cv_pct;
+                stabSubLabel = 'of predicted value (per-interval)';
+            } else if (focus === 'per_moment' && stepOk) {
                 stabCv = s.summary.median_step_cv_pct;
             }
         }
@@ -3838,11 +3891,14 @@ window.showTab = function(el) {
                 hovertemplate: 'RMSE %{y:.3f}<extra></extra>',
             });
             traces.push({
-                x: xHours, y: ltc.me, name: 'Bias (all cohorts)',
+                // v2.40.7: sign convention is predicted − actual
+                // throughout (db.py:680, 837). + means the model
+                // over-predicted on average; − means under-predicted.
+                x: xHours, y: ltc.me, name: 'Bias (+ over / − under)',
                 type: 'scatter', mode: 'lines+markers',
                 line: { color: '#facc15', width: 2, dash: 'dash' },
                 marker: { size: 4 },
-                hovertemplate: 'Bias %{y:.3f}<extra></extra>',
+                hovertemplate: 'Bias %{y:.3f} (+ over-predicts, − under-predicts)<extra></extra>',
             });
         }
         var yTitle = 'Error'
@@ -3971,8 +4027,12 @@ window.showTab = function(el) {
                 document.getElementById('rev-units-1').textContent = '(' + modeLabel + ')';
                 document.getElementById('rev-units-2').textContent = '(' + modeLabel + ')';
                 function fmtBias(v) {
+                    // v2.40.7: bias = predicted − actual.
+                    // + = over-predicting, − = under-predicting.
                     if (v === null || v === undefined) return 'bias —';
-                    return 'bias ' + (v >= 0 ? '+' : '') + v.toFixed(3);
+                    var sign = v > 0 ? '+' : '';
+                    var hint = v > 0 ? ' (over)' : v < 0 ? ' (under)' : '';
+                    return 'bias ' + sign + v.toFixed(3) + hint;
                 }
                 document.getElementById('rev-first-me').textContent = fmtBias(rev.first_forecast_me);
                 document.getElementById('rev-last-me').textContent = fmtBias(rev.latest_forecast_me);
@@ -4051,18 +4111,16 @@ window.showTab = function(el) {
         }
     }
 
+    // v2.40.7: the raw-mode toggle was removed (raw mode was meaningless
+    // for cumulative sensors — see #2 in the v2.40.7 audit). The setter
+    // is retained as a no-op stub so any external caller (cached URLs,
+    // userscript, addon update mid-session) doesn't blow up. For
+    // cumulative sensors only 'increment' is honoured; 'raw' is
+    // discarded silently. Non-cumulative sensors never expose a toggle
+    // and stay on the default mode.
     window.setAccuracyMode = function(mode) {
-        if (mode !== 'raw' && mode !== 'increment') return;
-        accuracyMode = mode;
-        var incBtn = document.getElementById('accuracy-mode-increment');
-        var rawBtn = document.getElementById('accuracy-mode-raw');
-        function apply(btn, active) {
-            btn.classList.toggle('active', active);
-            btn.style.background = active ? 'var(--accent-secondary)' : 'transparent';
-            btn.style.color = active ? '#fff' : 'var(--text-secondary)';
-        }
-        apply(incBtn, mode === 'increment');
-        apply(rawBtn, mode === 'raw');
+        if (mode !== 'increment') return;
+        accuracyMode = 'increment';
         loadForecastAccuracy();
     };
 
@@ -4792,21 +4850,51 @@ window.showTab = function(el) {
 
             // Plain-English one-liner — the whole point of the card for
             // a non-DS reader. "Typical run-to-run spread is ±X%…"
+            //
+            // v2.40.7: for cumulative sensors lead with the daily-total
+            // CV when it's available — the per-interval CV is unstable
+            // and physically meaningless on zero-inflated demand
+            // (mean→0 inflates std/mean). The per-interval line is
+            // demoted to a secondary clause and labelled honestly so the
+            // user can still see it.
             var sentence = document.getElementById('stab-plain-sentence');
             if (sentence) {
-                if (!isFinite(stepCv)) {
+                var haveStep = isFinite(stepCv);
+                var haveDaily = (dailyCv !== null && isFinite(dailyCv));
+                if (!haveStep && !haveDaily) {
                     sentence.textContent = 'Not enough cycles to measure run-to-run disagreement yet.';
-                } else {
-                    var verdict = stepCv < 10 ? 'consistent'
-                                : stepCv < 25 ? 'a little jittery'
-                                : 'noticeably unstable';
-                    var parts = ['Forecasts for the same future moment typically disagree by <strong>±'
-                        + stepCv.toFixed(1) + '%</strong> between runs — <em>' + verdict + '</em>.'];
-                    if (dailyCv !== null && isFinite(dailyCv)) {
-                        parts.push(' Daily totals move by <strong>±' + dailyCv.toFixed(1)
-                            + '%</strong> run-over-run.');
+                } else if (EXP_SOURCE_CUMULATIVE && haveDaily) {
+                    var dVerdict = dailyCv < 5 ? 'consistent'
+                                 : dailyCv < 15 ? 'a little jittery'
+                                 : 'noticeably unstable';
+                    var dParts = ['Daily totals move by <strong>±'
+                        + dailyCv.toFixed(1) + '%</strong> run-over-run — <em>'
+                        + dVerdict + '</em>.'];
+                    if (haveStep) {
+                        dParts.push(' Per-interval forecasts disagree by '
+                            + '<strong>±' + stepCv.toFixed(1)
+                            + '%</strong> — that number is inherently noisy '
+                            + 'when most intervals have near-zero demand, so '
+                            + 'trust the daily figure.');
                     }
-                    sentence.innerHTML = parts.join('');
+                    sentence.innerHTML = dParts.join('');
+                } else if (haveStep) {
+                    var sVerdict = stepCv < 10 ? 'consistent'
+                                 : stepCv < 25 ? 'a little jittery'
+                                 : 'noticeably unstable';
+                    var sParts = ['Forecasts for the same future moment '
+                        + 'typically disagree by <strong>±' + stepCv.toFixed(1)
+                        + '%</strong> between runs — <em>' + sVerdict
+                        + '</em>.'];
+                    if (haveDaily) {
+                        sParts.push(' Daily totals move by <strong>±'
+                            + dailyCv.toFixed(1) + '%</strong> run-over-run.');
+                    }
+                    sentence.innerHTML = sParts.join('');
+                } else {
+                    // Daily-only without step — rare but possible.
+                    sentence.innerHTML = 'Daily totals move by <strong>±'
+                        + dailyCv.toFixed(1) + '%</strong> run-over-run.';
                 }
             }
 
