@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.40.8
+
+**Bugfix: raised the Forecast Accuracy fetch timeout 20 s → 60 s.**
+The 20 s ceiling introduced in 2.40.7 was the right safety net (it
+converted indefinite "Computing…" into a recoverable error) but too
+tight in practice: the tab fires four concurrent fetches that
+serialize through ``HistoryDB._lock``, so on a populated multi-cohort
+DB the last queued fetch could land 30–50 s after the first one
+started and trigger the abort even though every query was healthy.
+60 s gives the queue room to drain without disguising a true hang.
+
+A proper concurrency fix (per-request DB connections so reads don't
+serialize) is a larger change tracked separately; raising the timeout
+unblocks the tab today.
+
 ## 2.40.7
 
 **Forecast Accuracy tab — eight bugs found by audit and fixed.** The

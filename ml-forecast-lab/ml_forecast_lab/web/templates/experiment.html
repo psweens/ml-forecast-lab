@@ -3111,10 +3111,15 @@ window.showTab = function(el) {
     // request (e.g. SQLite RLock contention during a publish-cycle
     // write) rejects rather than hanging forever — without this the
     // chart sits on the "Computing…" shimmer indefinitely because the
-    // .then/.catch never fires. 20 s is well above the slowest healthy
-    // accuracy-tab query and short enough to surface the issue while
-    // the user is still looking.
-    var ACCURACY_FETCH_TIMEOUT_MS = 20000;
+    // .then/.catch never fires.
+    //
+    // v2.40.8: raised 20 s → 60 s. On a populated multi-cohort DB,
+    // the Forecast Accuracy tab fires four concurrent fetches into
+    // analytics queries that serialize through HistoryDB._lock; with
+    // a slow per-query ceiling of ~15 s on a Pi 5 the last queued
+    // fetch can land 50+ s after the first one started. 20 s was
+    // tight enough that healthy queries were being cancelled.
+    var ACCURACY_FETCH_TIMEOUT_MS = 60000;
     function _doFetchOnce(url, timeoutMs) {
         timeoutMs = timeoutMs || ACCURACY_FETCH_TIMEOUT_MS;
         var controller = (typeof AbortController !== 'undefined')
