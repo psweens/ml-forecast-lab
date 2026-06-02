@@ -554,21 +554,34 @@ class HistoryDB:
         model_filter_param = tuple(_filter_params)
 
         # Build value-extraction CTEs according to mode. In "raw" mode we
-        # just pass the stored value through; in "increment" mode we take
-        # LAG-based diffs so error reflects per-interval demand rather
-        # than cumulative shape. The same actuals_grid CTE feeds both.
+        # just pass the stored value through; in "increment" mode we
+        # convert the *actuals* (raw cumulative readings) into per-
+        # interval deltas via LAG so the join lands in delta space.
+        #
+        # The *forecast* side is ALREADY in delta space for cumulative
+        # sensors — `forecast_log.predicted` is written from y_pred,
+        # which is the model's per-interval delta output (see
+        # main.py:5068; the HA cumulative sensor is built downstream by
+        # cumsumming y_pred and is never logged). So the forecast CTE
+        # must PASS predicted through unchanged in BOTH modes. The
+        # trajectory function (db.py:1040-1053, 1084) gets this right;
+        # this function used to take a second LAG diff on the forecast,
+        # producing a 2nd-difference compared against a 1st-difference
+        # actual — a perfect model then scored MAE ≈ typical demand and
+        # the subsequent `fv.value >= 0` filter silently dropped any row
+        # where the 2nd difference went negative. v2.40.7 fix.
         #
         # Midnight resets on daily-cumulative sensors produce a large
-        # negative increment (e.g. 0 - 85 = -85). Increment mode filters
-        # `value >= 0` at the join to drop those rows; this is only safe
-        # because the mode is gated on source_is_cumulative upstream.
+        # negative actuals increment (e.g. 0 - 85 = -85). Increment mode
+        # filters `av.value >= 0` to drop those rows; safe because the
+        # mode is gated on source_is_cumulative upstream.
         #
-        # We also null out the delta when the previous grid row is not
-        # exactly one interval earlier — otherwise an HA outage causes
-        # e.g. a 2-hour span to be treated as a single-interval demand,
-        # inflating MAE with data-availability artefacts rather than
-        # model error. The adjacency check compares unix-epoch seconds
-        # of the stringified grid_dt.
+        # We also null out the actuals delta when the previous grid row
+        # is not exactly one interval earlier — otherwise an HA outage
+        # causes e.g. a 2-hour span to be treated as a single-interval
+        # demand, inflating MAE with data-availability artefacts rather
+        # than model error. The adjacency check compares unix-epoch
+        # seconds of the stringified grid_dt.
         if increment:
             actuals_vals_cte = (
                 "actuals_vals AS ("
@@ -583,33 +596,26 @@ class HistoryDB:
                 "  FROM actuals_grid"
                 ")"
             )
-            # v2.34.0: forecast_vals carries model_version so the
-            # per-cohort lead-time query below can GROUP BY it. The
-            # LAG window still PARTITIONs by issued_at, which is
-            # naturally within one (model_name, model_version)
-            # cohort — adding model_version to the partition would
-            # be redundant.
+            # Forecast passthrough — predicted is already a per-interval
+            # delta when source_is_cumulative (the only case where
+            # increment mode is offered).
             forecast_vals_cte = (
                 "forecast_vals AS ("
                 "  SELECT experiment, model_name, model_version,"
                 "         issued_at, target_dt, lead_minutes,"
-                "    CASE"
-                "      WHEN CAST(strftime('%s', target_dt) AS INTEGER)"
-                "           - CAST(strftime('%s', LAG(target_dt) OVER ("
-                "               PARTITION BY issued_at ORDER BY target_dt)) AS INTEGER)"
-                "           = ?"
-                "      THEN predicted - LAG(predicted) OVER ("
-                "          PARTITION BY issued_at ORDER BY target_dt)"
-                "      ELSE NULL"
-                "    END AS value"
+                "         predicted AS value"
                 "  FROM forecast_log"
                 "  WHERE experiment = ? AND target_dt <= ? AND issued_at >= ?"
                 f"  {model_filter_sql}"
                 ")"
             )
+            # Only actuals can be NULL (adjacency guard) or negative
+            # (midnight reset). Forecasts are passthrough so neither
+            # check applies on the fv side — applying ≥0 to the forecast
+            # was the silent half of the previous bug, hiding rows where
+            # the spurious 2nd difference went negative.
             mode_filter = (
-                "AND fv.value IS NOT NULL AND av.value IS NOT NULL"
-                "  AND fv.value >= 0 AND av.value >= 0"
+                "AND av.value IS NOT NULL AND av.value >= 0"
             )
         else:
             actuals_vals_cte = (
@@ -628,18 +634,16 @@ class HistoryDB:
             mode_filter = ""
 
         # Parameter prefixes for the value-extraction CTEs. Increment
-        # mode takes an adjacency interval for each LAG (actuals and
-        # forecasts); raw mode takes neither.
+        # mode takes an adjacency interval for the actuals LAG; raw
+        # mode takes none. The forecast CTE is passthrough in both
+        # modes so it never consumes an interval param.
         if increment:
             actuals_vals_params = (interval_sec,)
-            forecast_vals_params = (
-                interval_sec, experiment, now_str, cutoff_str, *model_filter_param,
-            )
         else:
             actuals_vals_params = ()
-            forecast_vals_params = (
-                experiment, now_str, cutoff_str, *model_filter_param,
-            )
+        forecast_vals_params = (
+            experiment, now_str, cutoff_str, *model_filter_param,
+        )
 
         # actuals_grid scan bound: the INNER JOIN only matches grid_dt to
         # forecast target_dt, and target_dt >= issued_at >= cutoff_str
@@ -2375,7 +2379,6 @@ class HistoryDB:
             },
         }
 
-    @_locked
     @_locked
     def get_retrain_events(
         self,
