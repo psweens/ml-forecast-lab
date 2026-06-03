@@ -301,6 +301,11 @@ class FITSModel(ForecastModel):
         criterion = _loss_map.get(self.loss_fn, nn.MSELoss)(reduction='none')
 
         best_val_loss = float("inf")
+        # v2.40.12: best_val_loss tracks raw val_loss (for the
+        # checkpoint); best_val_loss_smoothed + val_loss_ema drive the
+        # stop decision via _step_early_stop (min_delta + EMA).
+        best_val_loss_smoothed = float("inf")
+        val_loss_ema: Optional[float] = None
         best_state = None
         patience_counter = 0
 
@@ -342,12 +347,21 @@ class FITSModel(ForecastModel):
                 patience_counter=patience_counter, patience_limit=self.patience,
                 best_val_loss=best_val_loss)
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            # Best-model checkpoint + early stopping
+            # (v2.40.12: shared helper applies min_delta +
+            # EMA-smoothed stop decision).
+            es = self._step_early_stop(
+                val_loss, best_val_loss, best_val_loss_smoothed,
+                val_loss_ema, patience_counter,
+                min_delta=getattr(self, 'min_delta', 1e-3),
+                ema_alpha=getattr(self, 'ema_alpha', 0.3),
+            )
+            val_loss_ema = es['val_loss_ema']
+            best_val_loss = es['best_val_loss']
+            best_val_loss_smoothed = es['best_val_loss_smoothed']
+            patience_counter = es['patience_counter']
+            if es['checkpoint_best']:
                 best_state = deepcopy(self._model.state_dict())
-                patience_counter = 0
-            else:
-                patience_counter += 1
             if patience_counter >= self.patience:
                 logger.info(f"Early stopping at epoch {epoch + 1}")
                 break

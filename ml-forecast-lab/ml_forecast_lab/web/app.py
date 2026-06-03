@@ -3935,6 +3935,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             # Convex interval↔cumulative blend in [0,1]. null → off (legacy
             # daily_loss_weight path); 0 = pure interval, 1 = pure cumulative.
             "loss_balance": lambda v: float(v) if 0.0 <= float(v) <= 1.0 else None,
+            # v2.40.12: per-experiment early-stopping patience. null →
+            # each backend uses its constructor default (20 neural, 50
+            # tree). Set 1..500 to override uniformly.
+            "patience": lambda v: int(v) if 1 <= int(v) <= 500 else None,
             "max_increment": lambda v: float(v) if float(v) > 0 else None,
             "conformal_coverage": lambda v: float(v) if 0.5 <= float(v) <= 0.99 else None,
             "country": lambda v: (str(v).strip().upper() or None) if v else None,
@@ -3951,7 +3955,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         }
 
         # Fields where None/null means "use global default" (valid, not an error)
-        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country", "loss_balance"}
+        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country", "loss_balance", "patience"}
 
         updates = {}
         for field, validator in editable.items():

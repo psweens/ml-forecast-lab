@@ -398,6 +398,26 @@ def _holdout_display_from_windows(y_p: 'np.ndarray', target_len: int) -> 'np.nda
     return out
 
 
+def _apply_patience(model, exp_cfg, overrides=None) -> None:
+    """v2.40.12: apply the per-experiment ``patience`` Setting to a model.
+
+    Honours every backend that exposes ``self.patience`` (every neural
+    backend, plus LightGBM / XGBoost / CatBoost after the v2.40.12 fix).
+    Skipped when the user already pinned ``patience`` via per-model
+    ``overrides`` / ``model_params``, and skipped when the experiment
+    setting is ``None`` (which means "use the backend's constructor
+    default" — 20 for neural, 50 for tree).
+    """
+    if overrides and 'patience' in overrides:
+        return
+    p = getattr(exp_cfg, 'patience', None)
+    if p is None:
+        return
+    if not hasattr(model, 'patience'):
+        return
+    model.patience = int(p)
+
+
 def _apply_loss_balance(model, exp_cfg, overrides=None) -> None:
     """Apply the resolved interval↔cumulative blend (α) to a neural model.
 
@@ -474,6 +494,7 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
     # Interval↔cumulative loss balance — centralised in one helper so every
     # training path applies it identically (see _apply_loss_balance).
     _apply_loss_balance(model, exp_cfg, overrides)
+    _apply_patience(model, exp_cfg, overrides)
 
 
 class MLForecastLabApp:
@@ -2756,6 +2777,7 @@ class MLForecastLabApp:
                         and 'daily_loss_weight' not in overrides):
                     m.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
                 _apply_loss_balance(m, exp_cfg, overrides)
+                _apply_patience(m, exp_cfg, overrides)
                 if (m.is_neural and hasattr(m, 'optimiser')
                         and 'optimiser' not in overrides):
                     m.set_params(optimiser=exp_cfg.optimiser)
@@ -3115,6 +3137,7 @@ class MLForecastLabApp:
                             and 'daily_loss_weight' not in overrides):
                         m.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
                     _apply_loss_balance(m, exp_cfg, overrides)
+                    _apply_patience(m, exp_cfg, overrides)
                     if (m.is_neural and hasattr(m, 'optimiser')
                             and 'optimiser' not in overrides):
                         m.set_params(optimiser=exp_cfg.optimiser)
@@ -3496,6 +3519,7 @@ class MLForecastLabApp:
                 and 'daily_loss_weight' not in overrides):
             model.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
         _apply_loss_balance(model, exp_cfg, overrides)
+        _apply_patience(model, exp_cfg, overrides)
         if (model.is_neural and hasattr(model, 'optimiser')
                 and 'optimiser' not in overrides):
             model.set_params(optimiser=exp_cfg.optimiser)
@@ -4157,6 +4181,7 @@ class MLForecastLabApp:
                 and 'daily_loss_weight' not in overrides):
             model.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
         _apply_loss_balance(model, exp_cfg, overrides)
+        _apply_patience(model, exp_cfg, overrides)
         if (model.is_neural and hasattr(model, 'optimiser')
                 and 'optimiser' not in overrides):
             model.set_params(optimiser=exp_cfg.optimiser)

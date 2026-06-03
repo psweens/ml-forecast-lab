@@ -60,6 +60,7 @@ class CatBoostModel(ForecastModel):
         loss_fn: str = 'huber',
         tweedie_variance_power: float = 1.5,
         huber_delta: float = 1.0,
+        patience: int = 50,
     ) -> None:
         super().__init__()
         if not CATBOOST_AVAILABLE:
@@ -81,6 +82,8 @@ class CatBoostModel(ForecastModel):
         self.loss_fn = loss_fn
         self.tweedie_variance_power = tweedie_variance_power
         self.huber_delta = huber_delta
+        # v2.40.12: previously hardcoded at the training site.
+        self.patience = patience
 
         self.model: Optional[CatBoostRegressor] = None
         self.feature_names_: Optional[list] = None
@@ -162,10 +165,14 @@ class CatBoostModel(ForecastModel):
         val_pool = Pool(X_val, label=y_val,
                         feature_names=self.feature_names_)
 
+        # v2.40.12: patience_limit reads self.patience (was hardcoded
+        # 50); min_delta margin prevents micro-improvements from
+        # resetting patience.
         epoch_callback = kwargs.get("epoch_callback")
         best_val_loss = float('inf')
         patience_counter = 0
-        patience_limit = 50
+        patience_limit = int(self.patience)
+        min_delta = float(getattr(self, 'min_delta', 1e-3))
 
         cat_callbacks = []
         _outer = self
@@ -179,7 +186,8 @@ class CatBoostModel(ForecastModel):
                     rmse_vals = val_metrics.get("RMSE", [])
                     val_loss = rmse_vals[-1] if rmse_vals else None
                     if val_loss is not None:
-                        if val_loss < best_val_loss:
+                        # v2.40.12: min_delta margin.
+                        if val_loss < best_val_loss * (1.0 - min_delta):
                             best_val_loss = val_loss
                             patience_counter = 0
                         else:
