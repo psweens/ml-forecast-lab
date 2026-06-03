@@ -55,6 +55,7 @@ class XGBoostModel(ForecastModel):
         verbose: int = 0,
         loss_fn: str = 'huber',
         tweedie_variance_power: float = 1.5,
+        patience: int = 50,
     ):
         """
         Initialise XGBoost forecasting model.
@@ -98,6 +99,8 @@ class XGBoostModel(ForecastModel):
         self.verbose = verbose
         self.loss_fn = loss_fn
         self.tweedie_variance_power = tweedie_variance_power
+        # v2.40.12: previously hardcoded at the training site.
+        self.patience = patience
 
         self.model: Optional[xgb.XGBRegressor] = None
         self.feature_names_: Optional[list] = None
@@ -171,10 +174,14 @@ class XGBoostModel(ForecastModel):
             w_train = sample_weight
 
         # Build per-round callback for live training progress
+        # v2.40.12: patience_limit reads self.patience (was hardcoded
+        # 50 here); min_delta margin prevents micro-improvements from
+        # resetting patience.
         epoch_callback = kwargs.get("epoch_callback")
         best_val_loss = float('inf')
         patience_counter = 0
-        patience_limit = 50
+        patience_limit = int(self.patience)
+        min_delta = float(getattr(self, 'min_delta', 1e-3))
 
         xgb_callbacks = []
         _outer = self  # capture for inner class
@@ -192,7 +199,8 @@ class XGBoostModel(ForecastModel):
                             break
                         break
                     if val_loss is not None:
-                        if val_loss < best_val_loss:
+                        # v2.40.12: min_delta margin.
+                        if val_loss < best_val_loss * (1.0 - min_delta):
                             best_val_loss = val_loss
                             patience_counter = 0
                         else:

@@ -56,6 +56,7 @@ class LightGBMModel(ForecastModel):
         verbose: int = -1,
         loss_fn: str = 'huber',
         tweedie_variance_power: float = 1.5,
+        patience: int = 50,
     ):
         """
         Initialise LightGBM forecasting model.
@@ -102,6 +103,10 @@ class LightGBMModel(ForecastModel):
         self.verbose = verbose
         self.loss_fn = loss_fn
         self.tweedie_variance_power = tweedie_variance_power
+        # v2.40.12: previously hardcoded to 50 at the training site.
+        # Now configurable per-instance and via the per-experiment
+        # `patience` Setting (main.py:_apply_patience).
+        self.patience = patience
 
         self.model: Optional[lgb.Booster] = None
         self.feature_names_: Optional[list] = None
@@ -219,10 +224,13 @@ class LightGBMModel(ForecastModel):
             params["tweedie_variance_power"] = float(self.tweedie_variance_power)
 
         # Train with early stopping
+        # v2.40.12: patience_limit now respects self.patience (was
+        # hardcoded 50 in pre-fix code, ignoring the constructor param).
         epoch_callback = kwargs.get("epoch_callback")
         best_val_loss = float('inf')
         patience_counter = 0
-        patience_limit = 50
+        patience_limit = int(self.patience)
+        min_delta = float(getattr(self, 'min_delta', 1e-3))
 
         def _epoch_cb(env):
             """Custom LightGBM callback to emit per-round metrics."""
@@ -230,8 +238,13 @@ class LightGBMModel(ForecastModel):
             if not env.evaluation_result_list:
                 return
             # evaluation_result_list is [(ds_name, metric_name, value, higher_is_better)]
+            # v2.40.12: min_delta margin so micro-improvements don't
+            # reset patience. EMA smoothing is skipped on tree backends
+            # since the actual stopping decision is owned by
+            # lgb.early_stopping below; this callback is just for
+            # progress reporting.
             val_loss = env.evaluation_result_list[0][2]
-            if val_loss < best_val_loss:
+            if val_loss < best_val_loss * (1.0 - min_delta):
                 best_val_loss = val_loss
                 patience_counter = 0
             else:

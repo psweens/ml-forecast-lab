@@ -1,5 +1,69 @@
 # Changelog
 
+## 2.40.12
+
+**Early stopping: four related improvements.** All neural backends
+plus LightGBM / XGBoost / CatBoost now share a uniform, smarter early-
+stopping policy, and a single per-experiment **Patience** Setting
+overrides the backend default.
+
+### 1. `min_delta` margin on the improvement check
+
+The strict `val_loss < best_val_loss` comparison reset patience on any
+micro-improvement — a 0.0001 win on a noisy 2.0 loss reset the
+20-epoch patience counter, occasionally letting training run hours
+past where it should have stopped. The new check is
+
+    val_loss < best_val_loss * (1 - min_delta)
+
+with `min_delta = 1e-3` (0.1 % relative improvement) as the default.
+Backwards-compatible: `min_delta=0` recovers the pre-fix path.
+
+### 2. EMA-smoothed val_loss for the stop decision
+
+Raw val_loss is jittery epoch-to-epoch — one unlucky batch can reset
+the best, one lucky batch can extend training pointlessly. The
+*stop decision* now compares an EMA of val_loss (α=0.3, ~3-4 epoch
+effective window) against an EMA-based best, while the *best-model
+checkpoint* keeps tracking raw val_loss so the saved weights are
+still the truly best ones seen. `ema_alpha=1.0` recovers the
+no-smoothing legacy path.
+
+Both refinements ship as a shared helper on the base class —
+`ForecastModel._step_early_stop` — and every neural backend
+(17 of them: LSTM, GRU, CNN, NHITS, N-BEATS, TiDE, TSMixer,
+TimeMixer, TimesNet, NLinear, DLinear, FITS, PatchTST, iTransformer,
+Crossformer, TFT, SparseTSF) was mechanically refactored to use it.
+Behaviour change is uniform across the model registry.
+
+### 3. LightGBM ignored `self.patience` (hardcoded `50`)
+
+Real bug: `lightgbm_backend.py:225` hardcoded `patience_limit = 50`
+regardless of the constructor `patience` param — which didn't even
+exist on the LightGBM backend until now. Pulled `patience` into the
+constructor, fed it to both the per-round progress callback and the
+library's `lgb.early_stopping(stopping_rounds=…)` call. Same fix
+applied to XGBoost and CatBoost (also hardcoded `50`). All three tree
+backends now respect the param uniformly and honour the per-
+experiment Patience Setting.
+
+### 4. Per-experiment **Patience** Setting
+
+New entry in the Training section of Settings — an integer that
+overrides every backend's default uniformly across the experiment, so
+"neural runs cut off at 20, LightGBM at 50" stops being an apples-to-
+oranges artefact. Leave empty for backend defaults (20 neural, 50
+tree); set to an integer (1–500) to pin uniformly. Plumbed via a new
+`_apply_patience` helper in `main.py`, called from every training-
+setup site (benchmark CV, holdout, production retrain, tuning) so it
+applies wherever a model is built — same surface as
+`_apply_loss_balance` (v2.40.2).
+
+Regression: 12 new tests pin the helper semantics — `min_delta`
+threshold, EMA-vs-checkpoint independence, legacy-behaviour recovery
+when both refinements are disabled, per-experiment Setting respecting
+per-model overrides, and the cross-backend Setting unification.
+
 ## 2.40.11
 
 **UI polish: disambiguate the Accuracy chip + MAE tile.** The verdict

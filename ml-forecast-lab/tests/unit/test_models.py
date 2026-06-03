@@ -373,3 +373,217 @@ class TestResolveOutputActivation:
         # Explicit choice wins over the auto rule, even if log_transform is on.
         cfg = self._cfg(log_transform=True, output_activation='linear')
         assert _resolve_output_activation(cfg, 'nlinear') == 'linear'
+
+
+
+class TestEarlyStopStep:
+    """v2.40.12: ``ForecastModel._step_early_stop`` is the shared
+    helper every backend uses for early-stopping bookkeeping. The
+    refinements over the pre-v2.40.12 strict-``<`` comparison are:
+
+    1. ``min_delta`` margin — improvements smaller than 0.1 % (default)
+       don't reset patience. Stops the "lucky tiny epoch" from
+       extending training pointlessly past a real plateau.
+    2. EMA-smoothed val_loss for the STOP decision — one noisy epoch
+       doesn't reset patience and one lucky one doesn't extend it. The
+       checkpoint still tracks the raw val_loss so the saved weights
+       are the truly best ones.
+
+    These tests pin both refinements.
+    """
+
+    def _step(self, **kw):
+        from ml_forecast_lab.models.base import ForecastModel
+        return ForecastModel._step_early_stop(**kw)
+
+    def test_first_epoch_seeds_ema_and_resets_patience(self):
+        out = self._step(
+            val_loss=2.0,
+            best_val_loss=float("inf"),
+            best_val_loss_smoothed=float("inf"),
+            val_loss_ema=None,
+            patience_counter=99,
+        )
+        # First epoch: ema seeded to val_loss; raw + smoothed both
+        # become "best"; patience resets.
+        assert out["val_loss_ema"] == 2.0
+        assert out["best_val_loss"] == 2.0
+        assert out["best_val_loss_smoothed"] == 2.0
+        assert out["patience_counter"] == 0
+        assert out["checkpoint_best"] is True
+
+    def test_tiny_improvement_below_min_delta_does_not_reset_patience(self):
+        # Best smoothed is 2.0. A new val_loss producing smoothed
+        # 1.99999 is technically less but only by 0.0005 % — below the
+        # 0.1 % min_delta threshold. Patience must NOT reset.
+        out = self._step(
+            val_loss=1.99999, best_val_loss=2.0,
+            best_val_loss_smoothed=2.0,
+            val_loss_ema=1.99999,
+            patience_counter=5,
+            min_delta=1e-3,
+            ema_alpha=1.0,  # no smoothing to keep maths trivial
+        )
+        assert out["patience_counter"] == 6, (
+            "Tiny improvement (<min_delta) should NOT reset patience"
+        )
+        # Raw best still updates so the checkpoint catches it
+        assert out["best_val_loss"] == 1.99999
+        assert out["checkpoint_best"] is True
+        # Smoothed best stays put
+        assert out["best_val_loss_smoothed"] == 2.0
+
+    def test_real_improvement_above_min_delta_resets_patience(self):
+        # 0.5 % improvement, comfortably above min_delta=0.1 %.
+        out = self._step(
+            val_loss=1.99, best_val_loss=2.0,
+            best_val_loss_smoothed=2.0,
+            val_loss_ema=1.99,
+            patience_counter=5,
+            min_delta=1e-3,
+            ema_alpha=1.0,
+        )
+        assert out["patience_counter"] == 0
+        assert out["best_val_loss"] == 1.99
+        assert out["best_val_loss_smoothed"] == 1.99
+
+    def test_no_improvement_increments_patience(self):
+        out = self._step(
+            val_loss=2.5, best_val_loss=2.0,
+            best_val_loss_smoothed=2.0,
+            val_loss_ema=2.5,
+            patience_counter=3,
+            min_delta=1e-3,
+            ema_alpha=1.0,
+        )
+        assert out["patience_counter"] == 4
+        # Raw best unchanged (2.5 > 2.0)
+        assert out["best_val_loss"] == 2.0
+        assert out["checkpoint_best"] is False
+        assert out["best_val_loss_smoothed"] == 2.0
+
+    def test_ema_smooths_a_single_spike(self):
+        # A one-epoch spike (2.0 → 5.0) with smoothing α=0.3 produces
+        # EMA ≈ 0.3*5 + 0.7*2 = 2.9. Best raw checkpoint NOT updated
+        # (5.0 > 2.0). Patience increments because smoothed didn't beat
+        # best_smoothed (2.0).
+        out = self._step(
+            val_loss=5.0, best_val_loss=2.0,
+            best_val_loss_smoothed=2.0,
+            val_loss_ema=2.0,
+            patience_counter=0,
+            min_delta=1e-3,
+            ema_alpha=0.3,
+        )
+        assert abs(out["val_loss_ema"] - 2.9) < 1e-9
+        assert out["checkpoint_best"] is False
+        assert out["patience_counter"] == 1
+
+    def test_ema_lets_modest_noise_through_genuine_trend(self):
+        # Noisy-but-trending-down path: 1.8 / 1.9 / 1.6 / 1.7 / 1.4 / 1.5
+        # (mean step −0.06, alternating ±0.15 noise). With α=0.3 the EMA
+        # descends monotonically. With the pre-v2.40.12 strict-``<``
+        # comparison this path would have left patience accumulating on
+        # every up-tick (1.9 > 1.8, 1.7 > 1.6, 1.5 > 1.4) — final
+        # patience ≥ 1. With EMA + min_delta, patience stays at 0.
+        ema = None
+        best_raw = float("inf")
+        best_smoothed = float("inf")
+        patience = 0
+        path = [1.8, 1.9, 1.6, 1.7, 1.4, 1.5]
+        for v in path:
+            out = self._step(
+                val_loss=v, best_val_loss=best_raw,
+                best_val_loss_smoothed=best_smoothed,
+                val_loss_ema=ema,
+                patience_counter=patience,
+                min_delta=1e-3, ema_alpha=0.3,
+            )
+            ema = out["val_loss_ema"]
+            best_raw = out["best_val_loss"]
+            best_smoothed = out["best_val_loss_smoothed"]
+            patience = out["patience_counter"]
+        assert patience == 0, (
+            f"EMA should rescue a noisy-but-genuinely-trending-down "
+            f"path; got patience={patience} on path {path}"
+        )
+
+    def test_ema_alpha_one_recovers_legacy_behaviour(self):
+        # α=1.0 means no smoothing: val_loss_ema == val_loss. Combined
+        # with min_delta=0 this is the pre-v2.40.12 strict-``<`` path.
+        out = self._step(
+            val_loss=2.0001,
+            best_val_loss=2.0, best_val_loss_smoothed=2.0,
+            val_loss_ema=2.0,
+            patience_counter=4,
+            min_delta=0.0, ema_alpha=1.0,
+        )
+        # 2.0001 > 2.0 (no improvement, strict <)
+        assert out["patience_counter"] == 5
+        assert out["best_val_loss_smoothed"] == 2.0
+
+
+class TestApplyPatience:
+    """v2.40.12: ``_apply_patience`` plumbs the per-experiment Setting
+    onto a backend's ``self.patience`` attribute, mirroring the
+    ``_apply_loss_balance`` pattern. Called from every training-setup
+    site (benchmark CV, holdout, production retrain, tuning) so
+    backend default asymmetries (20 neural vs 50 tree) collapse to
+    one uniform value when the user sets it."""
+
+    def _make_cfg(self, patience=None):
+        from types import SimpleNamespace
+        return SimpleNamespace(patience=patience)
+
+    def _make_model(self, patience=20):
+        from types import SimpleNamespace
+        return SimpleNamespace(patience=patience)
+
+    def test_none_setting_leaves_backend_default(self):
+        from ml_forecast_lab.main import _apply_patience
+        cfg = self._make_cfg(patience=None)
+        model = self._make_model(patience=20)
+        _apply_patience(model, cfg)
+        assert model.patience == 20, (
+            "When the experiment Setting is None, the backend default "
+            "must be preserved (was about to be overwritten to None)."
+        )
+
+    def test_explicit_setting_overrides_backend_default(self):
+        from ml_forecast_lab.main import _apply_patience
+        cfg = self._make_cfg(patience=35)
+        model = self._make_model(patience=20)  # neural default
+        _apply_patience(model, cfg)
+        assert model.patience == 35
+
+    def test_per_model_override_wins_over_experiment_setting(self):
+        from ml_forecast_lab.main import _apply_patience
+        cfg = self._make_cfg(patience=35)
+        model = self._make_model(patience=20)
+        _apply_patience(model, cfg, overrides={'patience': 99})
+        # When the caller already pinned patience via overrides, the
+        # experiment-level Setting must NOT clobber it.
+        assert model.patience == 20
+
+    def test_skipped_silently_on_backend_without_patience_attr(self):
+        from ml_forecast_lab.main import _apply_patience
+        from types import SimpleNamespace
+        cfg = self._make_cfg(patience=35)
+        # E.g. a hypothetical backend that doesn't do early stopping.
+        model = SimpleNamespace()
+        _apply_patience(model, cfg)
+        # Must not raise, must not set a phantom attribute.
+        assert not hasattr(model, 'patience')
+
+    def test_uniform_across_neural_and_tree_defaults(self):
+        """The whole point of the Setting: set it once, every backend
+        in the experiment uses the same value regardless of its own
+        constructor default (20 for neural, 50 for tree)."""
+        from ml_forecast_lab.main import _apply_patience
+        cfg = self._make_cfg(patience=40)
+        neural = self._make_model(patience=20)
+        tree = self._make_model(patience=50)
+        _apply_patience(neural, cfg)
+        _apply_patience(tree, cfg)
+        assert neural.patience == 40
+        assert tree.patience == 40

@@ -558,6 +558,24 @@ class ExperimentCfg:
     delivery, schedule change). Pre-audit default was ``7``, which
     silently down-weighted older training rows by ~75%."""
 
+    patience: Optional[int] = None
+    """v2.40.12: per-experiment early-stopping patience (epochs / boosting
+    rounds with no smoothed-val-loss improvement before training stops).
+
+    ``None`` (default) means each backend uses its own constructor default
+    (20 for every neural backend; 50 for LightGBM / XGBoost / CatBoost in
+    the legacy pre-v2.40.12 code). Setting an integer here overrides the
+    backend default uniformly across every neural and tree model in this
+    experiment, so you get consistent stopping behaviour rather than the
+    "neural runs cut off at 20, LightGBM at 50" asymmetry.
+
+    Set higher (e.g. 60) to give the model more rope when val_loss is
+    noisy; set lower (e.g. 10) for faster iteration on small experiments.
+    Set very high (≥ epochs) to effectively disable early stopping — but
+    note that disabling almost always hurts generalisation; the EMA-
+    smoothed stop decision in v2.40.12 should already absorb most val-
+    loss noise so the cases where disabling helps are rare."""
+
     conformal_coverage: float = 0.8
     """Nominal coverage for the conformal prediction interval published with
     every forecast. Default 0.8 (80%) — the band that catches the actual

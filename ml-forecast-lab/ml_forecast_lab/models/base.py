@@ -793,6 +793,91 @@ class ForecastModel(ABC):
             f"Unknown optimiser: {name!r} (expected 'adamw' or 'adam')"
         )
 
+    @staticmethod
+    def _step_early_stop(
+        val_loss: float,
+        best_val_loss: float,
+        best_val_loss_smoothed: float,
+        val_loss_ema: Optional[float],
+        patience_counter: int,
+        *,
+        min_delta: float = 1e-3,
+        ema_alpha: float = 0.3,
+    ) -> dict:
+        """One-epoch early-stop bookkeeping with two refinements:
+
+        1. ``min_delta``: improvements smaller than this relative
+           fraction (default 0.1 %) don't reset the patience counter.
+           Without this, the previous strict ``val_loss < best_val_loss``
+           reset patience on micro-improvements, occasionally letting
+           training run hours past where it should have stopped.
+
+        2. ``ema_alpha``: the *stop decision* compares an EMA of
+           val_loss (default α=0.3, ~3-4 epoch effective window) rather
+           than the raw single-epoch value, so one noisy epoch doesn't
+           reset patience and one lucky epoch doesn't extend training.
+           The *best-model checkpoint* still tracks the raw val_loss so
+           the weights returned to inference are the truly best ones.
+
+        The two refinements are independent and can be disabled by
+        ``min_delta=0`` / ``ema_alpha=1.0`` respectively — the latter
+        recovers the pre-v2.40.12 behaviour byte-for-byte.
+
+        Parameters
+        ----------
+        val_loss : float
+            This epoch's raw val_loss.
+        best_val_loss : float
+            Best raw val_loss observed so far (drives the checkpoint).
+        best_val_loss_smoothed : float
+            Best EMA-smoothed val_loss observed so far (drives the
+            stop decision).
+        val_loss_ema : float or None
+            Running EMA of val_loss. ``None`` on the first epoch — the
+            helper seeds it with ``val_loss``.
+        patience_counter : int
+            Current patience counter.
+        min_delta : float
+            Minimum relative improvement required to reset patience.
+            ``smoothed < best_smoothed * (1 - min_delta)``.
+        ema_alpha : float
+            EMA weight on the newest val_loss (1.0 = no smoothing).
+
+        Returns
+        -------
+        dict
+            ``val_loss_ema`` : updated EMA
+            ``best_val_loss`` : updated raw best
+            ``best_val_loss_smoothed`` : updated smoothed best
+            ``patience_counter`` : 0 if improved (smoothed), else +1
+            ``checkpoint_best`` : True if the raw val_loss is a new best
+        """
+        new_ema = (
+            val_loss if val_loss_ema is None
+            else ema_alpha * val_loss + (1.0 - ema_alpha) * val_loss_ema
+        )
+        is_new_raw_best = val_loss < best_val_loss
+        new_best = val_loss if is_new_raw_best else best_val_loss
+
+        # Stop decision: compare smoothed vs smoothed-best, with the
+        # min_delta margin. The very first epoch (val_loss_ema was None)
+        # always counts as an improvement so patience starts at 0.
+        threshold = best_val_loss_smoothed * (1.0 - min_delta)
+        if val_loss_ema is None or new_ema < threshold:
+            new_best_smoothed = new_ema
+            new_patience = 0
+        else:
+            new_best_smoothed = best_val_loss_smoothed
+            new_patience = patience_counter + 1
+
+        return {
+            "val_loss_ema": new_ema,
+            "best_val_loss": new_best,
+            "best_val_loss_smoothed": new_best_smoothed,
+            "patience_counter": new_patience,
+            "checkpoint_best": is_new_raw_best,
+        }
+
     def _composite_horizon_loss(
         self,
         y_pred: "torch.Tensor",

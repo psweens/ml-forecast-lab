@@ -350,6 +350,13 @@
                        value="{{ exp_config.conformal_coverage if exp_config else 0.8 }}"
                        onchange="saveSettingsField(this)">
             </div>
+            <div class="exp-field">
+                <label class="field-label">Early-stop patience <span class="info-tip">?<span class="tip-text">Epochs (neural) or boosting rounds (tree) with no smoothed-val-loss improvement before training stops. <b>Leave empty</b> to use each backend's default (20 neural, 50 tree). Set to an integer to override uniformly across every model in this experiment — useful when "neural runs cut off at 20, LightGBM at 50" makes results hard to compare. v2.40.12 added an EMA-smoothed stop decision so single noisy epochs don't reset patience; a 0.1% min_delta margin so micro-improvements don't either. Set very high (≥ epochs) to effectively disable early stopping — but disabling almost always hurts generalisation; consider raising rather than disabling.</span></span></label>
+                <input type="number" class="setting-input" data-field="patience" min="1" max="500" step="1"
+                       value="{{ exp_config.patience if exp_config and exp_config.patience is not none else '' }}"
+                       placeholder="Backend default"
+                       onchange="saveSettingsField(this)">
+            </div>
             <div class="exp-field" style="grid-column:1/-1;">
                 <label class="field-label">Loss balance: per-interval ⟷ cumulative (neural)
                     <span class="info-tip">?<span class="tip-text">Blends the two neural training objectives on a single scale. <b>Per-interval</b> (left, 0.0 — the default) optimises each step's value, best when 30-min timing matters. <b>Cumulative</b> (right, 1.0) optimises the running daily total at every horizon step, which pins the end-of-day total — best when only the daily figure matters (e.g. a hot-water tank's daily demand). Each term is normalised by a moving average of its own magnitude, so the slider position is the true balance of influence, not just a nominal weight. Neural models only; tree models ignore it.</span></span>
