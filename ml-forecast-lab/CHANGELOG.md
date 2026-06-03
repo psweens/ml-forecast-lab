@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.40.11
+
+**UI polish: disambiguate the Accuracy chip + MAE tile.** The verdict
+chip used to render `Accuracy · Good · 4% of typical`, which most
+users read as "the model is 4% accurate" — a non-sensical
+interpretation since the 4 % is the *normalised error* (MAE ÷ typical
+interval demand), not an accuracy score. Now reads:
+
+    Accuracy · Good · off by 2.30 % (4% of typical)
+
+The `off by …` phrasing makes it unambiguous that the headline number
+is an *error magnitude in the sensor's own units*, and the
+parenthesised ratio is the dimensionless quantity that drives the
+Good/Fair/Poor rating. The MAE tile subtitle gains the same
+clarification (`= 4% of typical demand`) and the info-tip now spells
+out the rating thresholds (Good < 15 %, Fair < 30 %).
+
+No code-path / metric semantic change — purely labelling.
+
 ## 2.40.10
 
 **Three Forecast-Accuracy / dashboard polish fixes following v2.40.9.**
