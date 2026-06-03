@@ -192,6 +192,7 @@ class CatBoostModel(ForecastModel):
                             patience_counter = 0
                         else:
                             patience_counter += 1
+                        # v2.40.13: cap displayed counter at limit.
                         _outer._emit_epoch(epoch_callback,
                             model_name=_outer.name,
                             epoch=info.iteration + 1,
@@ -199,7 +200,7 @@ class CatBoostModel(ForecastModel):
                             train_loss=val_loss,
                             val_loss=val_loss,
                             lr=_outer.learning_rate,
-                            patience_counter=patience_counter,
+                            patience_counter=min(patience_counter, patience_limit),
                             patience_limit=patience_limit,
                             best_val_loss=best_val_loss)
                     return True  # continue training
@@ -208,7 +209,12 @@ class CatBoostModel(ForecastModel):
         self.model.fit(
             train_pool,
             eval_set=val_pool,
-            early_stopping_rounds=50,
+            # v2.40.13: was hardcoded 50 — only the Python progress
+            # callback was fixed in v2.40.12. The LIBRARY's early-stop
+            # param wasn't, so CatBoost trained past the v2.40.12
+            # patience and the Python counter went past patience_limit
+            # in the UI.
+            early_stopping_rounds=patience_limit,
             use_best_model=True,
             verbose=False,
             callbacks=cat_callbacks if cat_callbacks else None,
