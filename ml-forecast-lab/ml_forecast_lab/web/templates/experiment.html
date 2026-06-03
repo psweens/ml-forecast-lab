@@ -1685,7 +1685,7 @@
             <div class="vnum">
                 <div class="vnum-label">
                     Typical next-step error
-                    <span class="info-tip">?<span class="tip-text">Mean absolute error at the shortest lead time — averaged over the published forecast points closest to "now". This is the cleanest measure of how the model actually does on near-term decisions; bigger lead times accumulate more horizon error and aren't comparable. Units match your sensor's units. Smaller is better.</span></span>
+                    <span class="info-tip">?<span class="tip-text">Mean absolute error at the shortest lead time — averaged over the published forecast points closest to "now". This is the cleanest measure of how the model actually does on near-term decisions; bigger lead times accumulate more horizon error and aren't comparable. <b>Units match your sensor's units</b> (the headline number above). Smaller is better. The "<i>= X% of typical demand</i>" line below is the same error expressed as a fraction of how much demand typically happens per interval — that ratio is what the <b>Accuracy</b> chip's Good/Fair/Poor rating is based on (Good &lt; 15%, Fair &lt; 30%).</span></span>
                 </div>
                 <div class="vnum-value" id="v-mae">—</div>
                 <div class="vnum-sub" id="v-mae-sub">—</div>
@@ -3675,14 +3675,29 @@ window.showTab = function(el) {
         var nmae = (headlineMae != null && typical && typical > 1e-9)
             ? (headlineMae / typical) : null;
         var accStatus = coldStart ? 'unknown' : _classify('nmae', nmae);
-        var accDetail = nmae != null ? (nmae * 100).toFixed(0) + '% of typical'
-                        : (coldStart ? 'not enough data' : 'no baseline');
+        // v2.40.11: previously "Accuracy · Good · 4% of typical" — read
+        // ambiguously as "accuracy is 4%". Both the chip and the tile
+        // now name the quantity explicitly: the headline number is the
+        // RAW per-interval MAE (in sensor units), and the parenthesised
+        // ratio is MAE ÷ typical_interval_demand, the thing that drives
+        // the Good/Fair/Poor colour. Distinguishing "off by 2.3 %" from
+        // "4 % of typical" stops the chip reading as a single accuracy
+        // figure.
+        var accDetail;
+        if (nmae != null && headlineMae != null) {
+            accDetail = 'off by ' + _fmtUnits(headlineMae, 2)
+                      + ' (' + (nmae * 100).toFixed(0) + '% of typical)';
+        } else if (headlineMae != null) {
+            accDetail = 'off by ' + _fmtUnits(headlineMae, 2);
+        } else {
+            accDetail = coldStart ? 'not enough data' : 'no baseline';
+        }
         _applyChip('chip-accuracy', accStatus, accDetail);
         document.getElementById('v-mae').textContent = _fmtUnits(headlineMae, 3);
         var maeSub = document.getElementById('v-mae-sub');
         if (headlineMae != null) {
             var parts = [];
-            if (nmae != null) parts.push((nmae * 100).toFixed(0) + '% of typical');
+            if (nmae != null) parts.push('= ' + (nmae * 100).toFixed(0) + '% of typical demand');
             if (nextStepN) parts.push('n=' + nextStepN);
             if (coldStart) parts.push('cold-start estimate');
             maeSub.textContent = parts.join(' · ') || '—';
