@@ -30,7 +30,17 @@
         {% if exp.best_model and exp.name not in running_experiments %}
         <div class="card-field">
             <span class="field-label">{% if exp.mode == 'production' %}Production model{% else %}Best model{% endif %}</span>
-            <span class="field-value color-accent font-bold">{{ exp.best_model | model_display }}</span>
+            {# v2.40.10: mirror the inference fallback (main.py:3475-3482)
+               so the dashboard label matches the model that's actually
+               deployed. Without ``production_model_by_exp`` in the
+               middle, a Promote that pinned model Y in mlfl.yaml was
+               eclipsed by a later benchmark winner Z. Same bug as
+               PR #66 — fixed for experiment.html there, missed here. #}
+            <span class="field-value color-accent font-bold">{{ (
+                exp.selected_model
+                or production_model_by_exp.get(exp.name)
+                or exp.best_model
+            ) | model_display }}</span>
         </div>
         {% endif %}
 

@@ -463,6 +463,7 @@ class HistoryDB:
         evaluation_mode: str = "raw",
         model_name: Optional[str] = None,
         model_version: Optional[str] = None,
+        day_offset_hours: Optional[float] = None,
     ) -> dict:
         """
         Compute forecast accuracy by lead time.
@@ -508,6 +509,7 @@ class HistoryDB:
                 return self._get_forecast_accuracy_daily_cumulative_locked(
                     experiment, actuals_table, max_age_days,
                     interval_minutes, model_name, model_version,
+                    day_offset_hours=day_offset_hours,
                 )
             return self._get_forecast_accuracy_locked(
                 experiment, actuals_table, max_age_days, interval_minutes,
@@ -966,6 +968,7 @@ class HistoryDB:
         interval_minutes: int = 30,
         model_name: Optional[str] = None,
         model_version: Optional[str] = None,
+        day_offset_hours: Optional[float] = None,
     ) -> dict:
         """Lead-time accuracy in **daily-cumulative space** for daily-
         reset cumulative sensors.
@@ -1019,17 +1022,38 @@ class HistoryDB:
         ) if _filter_clauses else ""
         model_filter_param = tuple(_filter_params)
 
-        # Day bucketing: SUBSTR(target_dt, 1, 10) yields YYYY-MM-DD
-        # under whatever timezone the timestamps were stored in. The
-        # production write path stores UTC timestamps (see
-        # log_forecast at db.py:366-374), so this bucketing aligns
-        # with UTC midnight. For HA sensors that reset on LOCAL
-        # midnight, a TZ-shifted bucket is more accurate but requires
-        # an extra param (day_offset_hours) — the stability function
-        # plumbs that through; the accuracy endpoint does not yet.
-        # Tracked as a follow-up; UTC bucketing is correct for the
-        # 80% of deployments that run in UTC or close to it, and only
-        # off by ≤1h at day boundaries elsewhere.
+        # v2.40.10: TZ-aware day bucketing. Forecasts are stored in
+        # UTC, but HA's daily-reset sensors (sensor.<x>_today) reset
+        # at LOCAL midnight. A UTC ``SUBSTR(target_dt, 1, 10)`` lumps
+        # all of a UTC day into one bucket, but for a viewer in BST
+        # (UTC+1) the "last same-UTC-day target" sits at 23:30 UTC =
+        # 00:30 local — right after the local-midnight reset — so the
+        # actual_cumulative reading at that target is back near zero
+        # and the End-of-day card reads ~0% actual every cycle.
+        # ``day_offset_hours`` shifts the day-bucketing key so it
+        # follows local midnight instead. Mirrors what the stability
+        # function does at db.py:2169-2180.
+        off = float(day_offset_hours or 0.0)
+        off_seconds = int(off * 3600)
+        if off_seconds == 0:
+            target_day_expr = "SUBSTR(fl.target_dt, 1, 10)"
+            issued_day_expr = "SUBSTR(fl.issued_at, 1, 10)"
+        else:
+            # ``off_seconds`` is a Python int derived from a numeric
+            # endpoint param — safe to interpolate directly. Inlining
+            # it (rather than bind-param) avoids shuffling extra
+            # placeholders into two separate queries with different day-
+            # expression counts.
+            target_day_expr = (
+                "strftime('%Y-%m-%d', "
+                f"CAST(strftime('%s', fl.target_dt) AS INTEGER) + {off_seconds}, "
+                "'unixepoch')"
+            )
+            issued_day_expr = (
+                "strftime('%Y-%m-%d', "
+                f"CAST(strftime('%s', fl.issued_at) AS INTEGER) + {off_seconds}, "
+                "'unixepoch')"
+            )
         sql = f"""
             WITH actuals_grid AS (
                 SELECT
@@ -1051,8 +1075,8 @@ class HistoryDB:
                         (CAST(strftime('%s', SUBSTR(fl.issued_at, 1, 19)) AS INTEGER) / ?) * ?,
                         'unixepoch'
                     ) AS issued_grid,
-                    SUBSTR(fl.issued_at, 1, 10) AS issued_day,
-                    SUBSTR(fl.target_dt, 1, 10) AS target_day
+                    {issued_day_expr} AS issued_day,
+                    {target_day_expr} AS target_day
                 FROM forecast_log fl
                 WHERE fl.experiment = ?
                   AND fl.target_dt <= ?
@@ -1094,7 +1118,9 @@ class HistoryDB:
             ORDER BY lead_bucket
         """
 
-        # Param order matches CTE order:
+        # Param order matches CTE order. Day-bucketing offset (if any)
+        # is inlined into target_day_expr / issued_day_expr above, so
+        # no day params here.
         #  actuals_grid: (interval_sec, interval_sec, cutoff_str)
         #  forecast_base seed grid: (interval_sec, interval_sec)
         #  forecast_base WHERE: (experiment, now_str, cutoff_str,
@@ -1154,14 +1180,13 @@ class HistoryDB:
                             (CAST(strftime('%s', SUBSTR(fl.issued_at, 1, 19)) AS INTEGER) / ?) * ?,
                             'unixepoch'
                         ) AS issued_grid,
-                        SUBSTR(fl.issued_at, 1, 10) AS issued_day,
-                        SUBSTR(fl.target_dt, 1, 10) AS target_day
+                        {issued_day_expr} AS issued_day,
+                        {target_day_expr} AS target_day
                     FROM forecast_log fl
                     WHERE fl.experiment = ?
                       AND fl.target_dt <= ?
                       AND fl.issued_at >= ?
-                      AND SUBSTR(fl.target_dt, 1, 10)
-                          = SUBSTR(fl.issued_at, 1, 10)
+                      AND {target_day_expr} = {issued_day_expr}
                       {model_filter_sql}
                 ),
                 forecast_seeded AS (

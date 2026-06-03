@@ -1,5 +1,62 @@
 # Changelog
 
+## 2.40.10
+
+**Three Forecast-Accuracy / dashboard polish fixes following v2.40.9.**
+
+### 1. Dashboard card "Production model" shows the wrong model
+
+PR #66 fixed the wrong-model display on the experiment page but
+missed the same bug in `_dashboard_card.html` (a separate template).
+Same root cause: the card rendered `exp.best_model` (latest
+leaderboard winner) with no fallback through `exp.production_model`
+(the YAML-pinned value the inference path actually uses), so after a
+Promote+rerun cycle the dashboard label disagreed with the deployed
+model. Fix: pass `production_model_by_exp` from YAML into the
+dashboard context and use the full `selected_model or production_model
+or best_model` chain — mirroring the experiment-page fix.
+
+### 2. End-of-day total headline ±X% blew up when avg actual was near zero
+
+The v2.40.9 plain-English headline rendered `mae / actual × 100`
+unconditionally. For sensors where the avg actual is small (zero-
+inflated demand, or the TZ bug in #3 below pinning the actual near
+zero), the ratio could read "±3655.4% of the actual daily total" —
+mathematically correct, narratively useless. The headline now falls
+back to absolute-units framing (`"Forecasts are off by ±X kWh on
+average — predicted Y vs actual Z — that's ±W% of a typical daily
+total"`) when the per-cycle %-of-actual exceeds 100 % or the actual
+is < 5 % of the typical scale.
+
+### 3. Daily-cumulative SQL bucketed by UTC midnight instead of HA-local midnight (root cause of the ±3655% above)
+
+For a deployment in BST (UTC+1), the v2.40.9 daily_cumulative query
+defined "same day" using UTC date. The "last same-day target" then
+landed at 23:30 UTC = 00:30 local — *right after* the local-midnight
+reset of `sensor.<x>_today` — and the End-of-day card read the
+post-reset value of ~0 every cycle. Plumbed `day_offset_hours`
+through the accuracy endpoint and inlined the offset into the
+`target_day` / `issued_day` SQL expressions (mirroring the stability
+function at `db.py:2169-2180`). Bucketing now follows local midnight
+on TZ-shifted deployments; UTC deployments unchanged.
+
+Regression: a new
+`test_daily_cumulative_day_offset_hours_shifts_bucket` seeds an
+ATypical-BST scenario (counter at 30 through 22:30 UTC, reset to 0 at
+23:00 UTC) and asserts that with `day_offset_hours=1.0` the End-of-
+day "actual" reads 30 (pre-reset), not 0 (post-reset).
+
+### Known follow-up (not in this release)
+
+The "× Show all cohorts" button still times out for the
+daily_cumulative mode on populated multi-cohort DBs. The 60 s fetch
+budget is being eaten by the heavier window-function SQL serializing
+through `HistoryDB._lock` against the other 3 accuracy-tab queries.
+Two real fixes possible: per-request read connections (so WAL can
+serve multiple readers in parallel) or query optimization (combining
+the 3 daily_cumulative sub-queries, narrowing the actuals_grid scan).
+Tracked separately — neither is a one-line change.
+
 ## 2.40.9
 
 **Feature: a real "Daily cumulative" accuracy view for daily-reset

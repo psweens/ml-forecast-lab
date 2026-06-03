@@ -1012,6 +1012,25 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             if history:
                 training_summaries[exp_name] = summarise_history(history)
 
+        # v2.40.10: dashboard cards need ``production_model`` (the YAML
+        # pinned value) to render the correct deployed-model label —
+        # without it, the card falls back to ``best_model`` (the latest
+        # leaderboard winner) and disagrees with what the inference
+        # path actually runs. Same bug class as PR #66 for the
+        # experiment page; this is the dashboard-template fix.
+        production_model_by_exp: Dict[str, Optional[str]] = {}
+        try:
+            from ml_forecast_lab.config import load_config as _lc
+            cfg_path = _find_config_path()
+            if cfg_path and cfg_path.exists():
+                cfg = _lc(cfg_path)
+                for exp in cfg.experiments:
+                    production_model_by_exp[exp.name] = exp.production_model
+        except Exception as e:
+            logger.debug(
+                f"Could not load production_model map for dashboard: {e}"
+            )
+
         return {
             "request": request,
             "base_path": _get_base_path(request),
@@ -1029,6 +1048,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 item["name"]: i + 1
                 for i, item in enumerate(app.state.appstate.training_queue)
             },
+            "production_model_by_exp": production_model_by_exp,
         }
 
     @app.get("/", response_class=Response)
@@ -2612,6 +2632,30 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 model_name = None
                 model_version = None
 
+        # v2.40.10: compute UTC→HA-local hour offset so the
+        # daily_cumulative bucketing aligns with the physical
+        # ``_today`` sensor reset at HA local midnight (mirrors the
+        # stability endpoint at app.py:3120-3134). Without this, BST
+        # / other-TZ deployments had the "last same-day target" land
+        # right after local midnight reset, making the avg actual
+        # day-total read near zero. Only daily_cumulative uses it; the
+        # other modes ignore the param.
+        day_offset_hours: Optional[float] = None
+        if evaluation_mode == "daily_cumulative":
+            tz_name = app.state.appstate.ha_time_zone
+            if tz_name:
+                try:
+                    from zoneinfo import ZoneInfo
+                    from datetime import datetime as _dt, timezone as _tz
+                    now_utc = _dt.now(_tz.utc)
+                    _offset = now_utc.astimezone(ZoneInfo(tz_name)).utcoffset()
+                    if _offset is not None:
+                        day_offset_hours = _offset.total_seconds() / 3600.0
+                except Exception as e:
+                    logger.debug(
+                        f"Could not compute day offset for {tz_name}: {e}"
+                    )
+
         result = await asyncio.to_thread(
             db.get_forecast_accuracy,
             name, actuals_table, days,
@@ -2619,6 +2663,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             evaluation_mode,
             model_name,
             model_version,
+            day_offset_hours,
         )
         result["model_name"] = model_name
         result["model_version"] = model_version
