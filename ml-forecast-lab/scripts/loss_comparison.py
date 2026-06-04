@@ -177,6 +177,10 @@ def main() -> int:
                          "or 'relu' allow true zero).")
     ap.add_argument("--gamma-shape", type=float, default=1.6,
                     help="Synthetic draw skew; lower = heavier right tail.")
+    ap.add_argument("--losses", type=str, default="huber,mse",
+                    help="Comma-separated loss functions to compare.")
+    ap.add_argument("--alphas", type=str, default="0.0,0.5",
+                    help="Comma-separated loss_balance α values to sweep.")
     args = ap.parse_args()
 
     per_day = 24 * 60 // args.interval_min
@@ -207,10 +211,9 @@ def main() -> int:
     X, y = build_windows(series, window, horizon)
     folds = walk_forward(X, y, n_folds=args.folds)
 
-    configs = [
-        ("huber", 0.0), ("huber", 0.5),
-        ("mse", 0.0), ("mse", 0.5),
-    ]
+    loss_list = [s.strip() for s in args.losses.split(",") if s.strip()]
+    alpha_list = [float(s) for s in args.alphas.split(",") if s.strip()]
+    configs = [(lf, a) for lf in loss_list for a in alpha_list]
     print(f"\nData: {source}")
     if skew_note:
         print(f"      {skew_note}")
@@ -233,19 +236,30 @@ def main() -> int:
               f"{r['daily_mae']:>10.2f} {r['daily_bias']:>+11.2f} "
               f"{r['daily_pct']:>7.1f}%")
 
-    # Headline takeaways, computed not asserted.
+    # Headline takeaways, computed not asserted. Robust to whatever
+    # --losses / --alphas grid was actually run.
     print("\nReadout:")
-    h0 = results[("huber", 0.0)]
-    m0 = results[("mse", 0.0)]
-    print(f"  • Huber α=0 per-interval bias {h0['interval_bias']:+.3f} "
-          f"→ daily bias {h0['daily_bias']:+.1f} "
-          f"({h0['daily_pct']:.0f}% daily MAE)")
-    print(f"  • MSE   α=0 per-interval bias {m0['interval_bias']:+.3f} "
-          f"→ daily bias {m0['daily_bias']:+.1f} "
-          f"({m0['daily_pct']:.0f}% daily MAE)")
+    # Per-interval bias drives the daily total; surface the lowest-
+    # |bias| config and the best daily-MAE config (often the same).
+    least_bias = min(results.items(), key=lambda kv: abs(kv[1]["interval_bias"]))
+    print(f"  • Lowest per-interval |bias|: {least_bias[0][0]} "
+          f"α={least_bias[0][1]} → bias {least_bias[1]['interval_bias']:+.3f} "
+          f"× {horizon} = daily bias {least_bias[1]['daily_bias']:+.1f}")
     best = min(results.items(), key=lambda kv: kv[1]["daily_mae"])
     print(f"  • Best daily MAE: {best[0][0]} α={best[0][1]} "
           f"→ {best[1]['daily_mae']:.2f} ({best[1]['daily_pct']:.0f}%)")
+    # If α was swept, report whether any cumulative weight beat α=0.
+    alphas_run = sorted({a for (_, a) in results})
+    if 0.0 in alphas_run and len(alphas_run) > 1:
+        for lf in sorted({lf for (lf, _) in results}):
+            base = results.get((lf, 0.0))
+            if base is None:
+                continue
+            better = [a for a in alphas_run if a > 0.0
+                      and results[(lf, a)]["daily_mae"] < base["daily_mae"]]
+            verdict = (f"α={better} beat α=0" if better
+                       else "no α>0 beat pure per-interval (α=0)")
+            print(f"  • {lf}: {verdict}")
     return 0
 
 
