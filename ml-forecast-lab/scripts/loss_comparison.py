@@ -118,9 +118,26 @@ def evaluate(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 
 
 def run_config(loss_fn: str, alpha: float, folds, window, horizon,
-               epochs: int, activation: str = "softplus") -> dict:
+               epochs: int, activation: str = "softplus",
+               log_shift=None, smearing: bool = False) -> dict:
     """Train NLinear under (loss_fn, α) on each walk-forward fold and
-    average the held-out metrics."""
+    average the held-out metrics.
+
+    When ``log_shift`` is not None the folds are assumed to be in
+    ``log(y + shift)`` space (as the production pipeline trains when
+    log_transform is on). Predictions are inverted to the original
+    scale before scoring — which is where the retransformation
+    (Jensen) bias appears:
+
+        ŷ = exp(ẑ) − shift            (uncorrected — biased LOW)
+        ŷ = smear · exp(ẑ) − shift    (Duan's smearing — unbiased)
+
+    ``smear = mean_i exp(z_i − ẑ_i)`` over TRAINING-set log-space
+    residuals (≥ 1 by Jensen, so it scales predictions up by exactly
+    the amount the convex back-transform shrinks them). This mirrors
+    ``invert_log_transform`` in preprocessing.py, which currently does
+    the uncorrected form.
+    """
     from ml_forecast_lab.models.nlinear_backend import NLinearModel
 
     accum: list = []
@@ -139,11 +156,33 @@ def run_config(loss_fn: str, alpha: float, folds, window, horizon,
         x_flat = np.zeros((len(ytr), window), dtype=np.float32)
         model.fit(x_flat, ytr, sequence_data=Xtr)
         pred = model.predict_sequence(Xte)
-        accum.append(evaluate(yte, pred))
+        yte_eval = yte
+        if log_shift is not None:
+            smear = 1.0
+            if smearing:
+                tr_pred = model.predict_sequence(Xtr)
+                resid = ytr - tr_pred                      # log-space residuals
+                smear = float(np.mean(np.exp(resid)))
+            pred = smear * np.exp(pred) - log_shift        # invert to orig scale
+            yte_eval = np.exp(yte) - log_shift
+        accum.append(evaluate(yte_eval, pred))
 
     # Average across folds.
     keys = accum[0].keys()
     return {k: float(np.mean([a[k] for a in accum])) for k in keys}
+
+
+def seasonal_naive_daily_mae(series: np.ndarray, per_day: int,
+                             season_days: int = 7) -> float:
+    """Daily-total MAE of 'same day-of-week last week' — the baseline
+    the ML models must beat on the cumulative metric. Computed on the
+    raw series (no windows needed)."""
+    n_days = len(series) // per_day
+    if n_days <= season_days:
+        return float("nan")
+    daily = series[:n_days * per_day].reshape(n_days, per_day).sum(axis=1)
+    err = np.abs(daily[season_days:] - daily[:-season_days])
+    return float(np.mean(err))
 
 
 def walk_forward(X, y, n_folds=3, min_train_frac=0.5):
@@ -181,11 +220,18 @@ def main() -> int:
                     help="Comma-separated loss functions to compare.")
     ap.add_argument("--alphas", type=str, default="0.0,0.5",
                     help="Comma-separated loss_balance α values to sweep.")
+    ap.add_argument("--log-transform", action="store_true",
+                    help="Train in log(y+1) space and invert predictions "
+                         "(mirrors the production log_transform setting).")
+    ap.add_argument("--smearing", action="store_true",
+                    help="Apply Duan's smearing correction on the log "
+                         "inverse (only meaningful with --log-transform).")
     args = ap.parse_args()
 
     per_day = 24 * 60 // args.interval_min
     horizon = per_day            # predict one full day → sum = daily total
     window = per_day * 3         # 3 days of history
+    LOG_SHIFT = 1.0              # log1p-style: log(y + 1)
 
     if args.csv:
         import pandas as pd
@@ -208,19 +254,37 @@ def main() -> int:
                      f"{'right-skewed' if mean > med * 1.1 else 'symmetric'}); "
                      f"zero-inflation={100 * (1 - len(nz) / len(series)):.0f}%")
 
-    X, y = build_windows(series, window, horizon)
+    # Seasonal-naive daily-total MAE — the baseline the ML models must
+    # beat on the cumulative metric. Computed on the ORIGINAL scale.
+    naive_daily = seasonal_naive_daily_mae(series, per_day)
+
+    # Build windows. When --log-transform, train in log(y+shift) space
+    # (run_config inverts predictions back before scoring).
+    log_shift = None
+    series_model = series
+    if args.log_transform:
+        series_model = np.log(series + LOG_SHIFT).astype(np.float32)
+        log_shift = LOG_SHIFT
+    X, y = build_windows(series_model, window, horizon)
     folds = walk_forward(X, y, n_folds=args.folds)
+    mean_daily = float(np.mean(
+        build_windows(series, window, horizon)[1].sum(axis=1)))
 
     loss_list = [s.strip() for s in args.losses.split(",") if s.strip()]
     alpha_list = [float(s) for s in args.alphas.split(",") if s.strip()]
     configs = [(lf, a) for lf in loss_list for a in alpha_list]
+    log_note = ("OFF" if not args.log_transform
+                else ("ON + smearing" if args.smearing else "ON (uncorrected)"))
     print(f"\nData: {source}")
     if skew_note:
         print(f"      {skew_note}")
     print(f"Windows: N={len(X)}, window={window}, horizon={horizon} "
           f"(=1 day), folds={args.folds}, epochs={args.epochs}, "
-          f"activation={args.activation}")
-    print(f"Mean actual daily total ≈ {float(np.mean(y.sum(axis=1))):.1f}\n")
+          f"activation={args.activation}, log_transform={log_note}")
+    print(f"Mean actual daily total ≈ {mean_daily:.1f}  |  "
+          f"Seasonal-naive daily MAE = {naive_daily:.2f} "
+          f"({naive_daily / max(mean_daily, 1e-9) * 100:.0f}%)  "
+          f"← models must beat this\n")
 
     header = (f"{'loss':>6} {'α':>4} | {'int MAE':>8} {'int bias':>9} | "
               f"{'daily MAE':>10} {'daily bias':>11} {'daily %':>8}")
@@ -229,7 +293,8 @@ def main() -> int:
     results = {}
     for loss_fn, alpha in configs:
         r = run_config(loss_fn, alpha, folds, window, horizon, args.epochs,
-                       activation=args.activation)
+                       activation=args.activation,
+                       log_shift=log_shift, smearing=args.smearing)
         results[(loss_fn, alpha)] = r
         print(f"{loss_fn:>6} {alpha:>4.1f} | "
               f"{r['interval_mae']:>8.3f} {r['interval_bias']:>+9.3f} | "
@@ -246,8 +311,11 @@ def main() -> int:
           f"α={least_bias[0][1]} → bias {least_bias[1]['interval_bias']:+.3f} "
           f"× {horizon} = daily bias {least_bias[1]['daily_bias']:+.1f}")
     best = min(results.items(), key=lambda kv: kv[1]["daily_mae"])
+    beats = best[1]["daily_mae"] < naive_daily
     print(f"  • Best daily MAE: {best[0][0]} α={best[0][1]} "
-          f"→ {best[1]['daily_mae']:.2f} ({best[1]['daily_pct']:.0f}%)")
+          f"→ {best[1]['daily_mae']:.2f} ({best[1]['daily_pct']:.0f}%)  "
+          f"vs seasonal-naive {naive_daily:.2f} → "
+          f"{'BEATS naive' if beats else 'LOSES to naive'}")
     # If α was swept, report whether any cumulative weight beat α=0.
     alphas_run = sorted({a for (_, a) in results})
     if 0.0 in alphas_run and len(alphas_run) > 1:
