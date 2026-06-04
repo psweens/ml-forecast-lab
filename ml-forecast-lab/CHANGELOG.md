@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.40.13
+
+**Bugfix: tree-backend patience counter could exceed the limit in the
+Results tab.** The v2.40.12 fix only updated the *Python progress
+callback* on the tree backends — the **library's** early-stopping
+param (the thing that actually decides when to stop training) was
+still hardcoded:
+
+- XGBoost: `XGBRegressor(early_stopping_rounds=50, …)`
+- CatBoost: `model.fit(early_stopping_rounds=50, …)`
+- LightGBM: `lgb.early_stopping(stopping_rounds=patience_limit, …)`
+  — patience_limit was correct, but `min_delta` was NOT passed, so
+  the library used its strict-`<` improvement check while the Python
+  callback used `< best * (1 - min_delta)`. They diverged on
+  improvements smaller than `min_delta`: the library reset its
+  counter (improvement seen), the Python counter kept incrementing
+  (no improvement under the new threshold).
+
+Net effect: the library kept training past where the Python callback
+thought it had stopped, and the UI's patience display in the Results
+tab showed values like `22/20` because the Python counter kept ticking
+while the library was still going.
+
+Three-part fix:
+
+1. XGBoost and CatBoost now pass `self.patience` to the library's
+   `early_stopping_rounds` (instead of hardcoded 50). Both libraries
+   now respect the per-experiment Patience Setting end-to-end.
+2. LightGBM now passes `min_delta` to `lgb.early_stopping` so the
+   library's stop decision uses the same improvement threshold as
+   the Python progress callback.
+3. Display safety: every tree backend's emit caps the displayed
+   `patience_counter` at `patience_limit` (`min(counter, limit)`).
+   Even if the library and the callback ever drift again, the UI
+   shows a sane value.
+
 ## 2.40.12
 
 **Early stopping: four related improvements.** All neural backends

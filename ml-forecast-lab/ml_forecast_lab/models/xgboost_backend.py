@@ -205,6 +205,11 @@ class XGBoostModel(ForecastModel):
                             patience_counter = 0
                         else:
                             patience_counter += 1
+                        # v2.40.13: cap the displayed counter at
+                        # patience_limit so the UI never shows
+                        # patience > limit if the library and the
+                        # callback ever drift on the improvement
+                        # check.
                         _outer._emit_epoch(epoch_callback,
                             model_name=_outer.name,
                             epoch=epoch + 1,
@@ -212,7 +217,7 @@ class XGBoostModel(ForecastModel):
                             train_loss=val_loss,
                             val_loss=val_loss,
                             lr=_outer.learning_rate,
-                            patience_counter=patience_counter,
+                            patience_counter=min(patience_counter, patience_limit),
                             patience_limit=patience_limit,
                             best_val_loss=best_val_loss)
                     return False  # Don't stop training
@@ -237,7 +242,14 @@ class XGBoostModel(ForecastModel):
             tree_method=self.tree_method,
             verbosity=self.verbose,
             random_state=42,
-            early_stopping_rounds=50,
+            # v2.40.13: was hardcoded 50 — only the Python progress
+            # callback's patience_limit was fixed in v2.40.12. The
+            # LIBRARY's early-stop param wasn't, so XGBoost trained
+            # past the v2.40.12 patience and the Python counter went
+            # past patience_limit in the UI (it kept incrementing on
+            # no-improvement rounds the library was still running).
+            # Now reads self.patience uniformly.
+            early_stopping_rounds=patience_limit,
             objective=objective,
             callbacks=xgb_callbacks if xgb_callbacks else None,
         )

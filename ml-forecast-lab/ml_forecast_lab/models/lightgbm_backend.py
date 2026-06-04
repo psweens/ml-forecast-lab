@@ -249,6 +249,11 @@ class LightGBMModel(ForecastModel):
                 patience_counter = 0
             else:
                 patience_counter += 1
+            # v2.40.13: cap the displayed counter at the limit so the
+            # UI never shows "22/20". The library decides when to
+            # actually stop; the Python counter here is purely for
+            # display and shouldn't claim to exceed the limit even if
+            # they ever drift.
             self._emit_epoch(epoch_callback,
                 model_name=self.name,
                 epoch=env.iteration + 1,
@@ -256,12 +261,23 @@ class LightGBMModel(ForecastModel):
                 train_loss=val_loss,  # LightGBM doesn't expose train loss easily
                 val_loss=val_loss,
                 lr=self.learning_rate,
-                patience_counter=patience_counter,
+                patience_counter=min(patience_counter, patience_limit),
                 patience_limit=patience_limit,
                 best_val_loss=best_val_loss)
 
         callbacks = [
-            lgb.early_stopping(stopping_rounds=patience_limit),
+            # v2.40.13: pass min_delta so the LIBRARY's stop decision
+            # uses the same improvement-threshold as the Python
+            # progress callback above. Without this, a tiny < min_delta
+            # improvement made the Python counter increment (no-
+            # improvement view) while the library reset its own
+            # counter — visible in the UI as patience_counter
+            # exceeding patience_limit because the library kept
+            # training past the Python view's "stop now" point.
+            lgb.early_stopping(
+                stopping_rounds=patience_limit,
+                min_delta=min_delta,
+            ),
             lgb.log_evaluation(period=0),
             _epoch_cb,
         ]
