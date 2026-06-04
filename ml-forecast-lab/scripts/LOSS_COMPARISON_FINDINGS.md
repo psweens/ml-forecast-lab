@@ -80,8 +80,47 @@ distribution. Flagged for a closer look at
 `ForecastModel._cumulative_trajectory_loss` before trusting the
 loss-balance slider on sparse demand sensors.
 
+## Result 4 — log_transform's retransformation bias is the daily-total killer
+
+This is the one that explains the real-world "wins per-interval, loses
+the daily total to Seasonal Naive" leaderboard. Three runs, MSE +
+linear, identical except log handling (`--log-transform`, `--smearing`):
+
+| config | per-interval MAE | per-interval bias | daily bias | daily MAE | vs naive 7.88 |
+|---|---|---|---|---|---|
+| no log | 0.518 | −0.018 | −0.85 | 6.89 | **beats** |
+| log, uncorrected | **0.393** | −0.122 | **−5.84** | 8.06 | **loses** |
+| log + smearing | 0.475 | +0.001 | +0.05 | 6.91 | **beats** |
+
+Mechanism — classic retransformation (Jensen) bias. You train on
+`log(y+1)`; the model predicts the centre of the log-space
+distribution; `invert_log_transform` does the uncorrected
+`exp(ẑ) − 1`. Because `exp` is convex, `exp(E[log y]) < E[y]` — the
+back-transform under-predicts the mean by ~`exp(σ²/2)`. That bias is
+small per interval (the log-space fit is actually the *best* of the
+three — log helps the model learn the shape) but it **accumulates**
+into a −5.84 daily bias = **48 % systematic under-prediction of the
+daily total** on a mean of 12.1. No loss change touches it: the bias
+is born in the back-transform, downstream of the loss.
+
+Duan's smearing estimator fixes it: multiply the inverse by
+`smear = mean_i exp(z_i − ẑ_i)` over the training-set log-space
+residuals (≥ 1 by Jensen, exactly the factor the convex transform
+shrinks by). Daily bias → +0.05, and the model beats naive again
+while keeping most of log's per-interval benefit.
+
+`invert_log_transform` (preprocessing.py) currently does the
+uncorrected form. A production smearing correction needs the smear
+factor computed at train time (log-space residuals), stored with the
+model, and applied at inference. Helps **every** log-transformed
+cumulative experiment, not just demand.
+
 ## Practical takeaways for a daily-total demand forecaster
 
+0. **If log_transform is ON, it's probably your biggest daily-total
+   bias source** (Result 4) — a ~48 % systematic under-shoot from the
+   uncorrected back-transform. Either turn it off, or (better) add a
+   smearing correction so you keep the per-interval benefit.
 1. **Loss = MSE**, not Huber — unbiased per-interval → unbiased total.
 2. **Output activation = linear (or relu)**, not softplus — let the
    model predict true zeros; the softplus floor is the biggest single
