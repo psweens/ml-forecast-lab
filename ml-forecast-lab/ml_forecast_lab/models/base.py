@@ -878,6 +878,23 @@ class ForecastModel(ABC):
             "checkpoint_best": is_new_raw_best,
         }
 
+    # v2.40.14: composite-horizon loss collapsed to interval-only.
+    # Old per-interval + cumulative-trajectory blend (legacy additive
+    # ``L = L_interval + λ·L_daily`` and the convex EMA-normalised
+    # ``L = (1-α)·L_interval/ema_i + α·L_daily/ema_d``) is gone after
+    # the loss-comparison harness measured the cumulative term as a
+    # net hurt in BOTH sparse-demand AND smooth-cumulative regimes,
+    # with a structural gradient asymmetry (early horizon steps get H×
+    # more cumsum-error terms than late ones → systematic
+    # under-prediction at early horizon, exactly the failure mode the
+    # term was supposed to fix). The α-cliff was the visible symptom;
+    # the per-interval-bias jump on smooth-cumulative (-0.24 → -0.69 at
+    # α=0.1) was the direct measurement of the gradient asymmetry.
+    # Faster EMA decay softened but did not remove the cliff →
+    # mechanism is in the loss, not the normaliser. See
+    # ``scripts/LOSS_COMPARISON_FINDINGS.md`` for the full evidence
+    # stack. Signature kept (``daily_weight`` ignored) so all 17
+    # neural backends keep calling without per-backend edits.
     def _composite_horizon_loss(
         self,
         y_pred: "torch.Tensor",
@@ -886,171 +903,23 @@ class ForecastModel(ABC):
         w_batch: Optional["torch.Tensor"],
         daily_weight: float,
     ) -> Tuple["torch.Tensor", "torch.Tensor"]:
+        """v2.40.14: per-interval loss only. The blended-with-cumulative
+        path was removed (see method-block comment above for evidence
+        + mechanism). ``daily_weight`` and ``self.loss_balance`` /
+        ``self._loss_ema`` are ignored if set.
+
+        Returns ``(scalar_loss, pre-reduction interval-loss tensor)`` —
+        same signature backends and training-loop loggers already
+        consume, so no per-backend changes are needed.
         """
-        Interval loss combined with a cumulative-trajectory loss.
-
-        Two combination modes, selected by ``self.loss_balance`` (α):
-
-        - α is None (default) → **legacy additive**: ``L = L_interval +
-          λ·L_daily`` with ``λ = daily_weight``. Byte-for-byte the
-          pre-v2.40 behaviour.
-        - α in [0, 1] → **convex blend with EMA normalisation**:
-          ``L = (1-α)·L_interval/ema_i + α·L_daily/ema_d``. α=0 is pure
-          per-interval, α=1 pure cumulative-trajectory. Dividing each term
-          by a detached EMA of itself makes α the real fraction of gradient
-          influence (the two terms differ 10-100× in raw scale). ``λ`` is
-          ignored in this mode.
-
-        The cumulative-trajectory term penalises the error in the predicted
-        cumulative curve at every horizon step:
-
-            L_daily = mean_h  criterion( cumsum(ŷ)[h],  cumsum(y)[h] )  /  H
-
-        Unlike a simple endpoint or mean-over-horizons constraint, this term
-        constrains the SHAPE of the cumulative trajectory across the entire
-        horizon. For a cumulative-origin target like
-        ``sensor.energy_today`` (a monotonic cumulative that resets at
-        midnight), this is what the user actually evaluates against —
-        per-interval predictions that regress to the mean still produce a
-        straight-line cumulative ramp that badly misses the actual stepped
-        curve. The trajectory loss penalises that drift directly at every
-        intermediate horizon.
-
-        The same ``criterion`` (MSE / MAE / Huber from ``loss_fn``) is
-        applied to both the interval and cumulative terms. ``criterion``
-        must be instantiated with ``reduction='none'``.
-
-        Normalisation note
-        ------------------
-        The per-horizon cumulative loss is averaged over H and then divided
-        by H. Under unbiased noise this keeps the daily term on the same
-        order as the interval term; under systematic bias it grows by
-        roughly H/3× for MSE (less for MAE/Huber), providing strong
-        bias-correction pressure — which is exactly the failure mode the
-        trajectory loss is designed to fix. λ is therefore intuitively
-        "how much extra pressure to apply to cumulative-shape matching",
-        with 0.5 being a reasonable default when the toggle is on.
-
-        Returns
-        -------
-        (loss, interval_per_sample)
-            ``loss`` is the scalar to call ``.backward()`` on.
-            ``interval_per_sample`` is the pre-reduction interval-loss
-            tensor so callers can log the same ``epoch_loss`` quantity as
-            before — keeping train-loss curves comparable across
-            daily_weight values.
-
-        Notes
-        -----
-        - When ``daily_weight == 0`` (the default), behaviour is identical
-          to the pre-composite interval-only loss — no extra compute, no
-          behavioural difference.
-        - For single-horizon outputs (1-D or horizon dim == 1), the daily
-          term is silently skipped — cumsum of a single value equals the
-          value itself, so the term would be redundant with the interval
-          term.
-
-        History
-        -------
-        v2.18.0: replaced the previous mean-over-horizons constraint
-        (``criterion(mean_h(ŷ), mean_h(y))``) with this trajectory-matching
-        formulation. Experiments on cumulative-origin targets (daily-reset
-        energy demand) showed the mean-only constraint was too weak to
-        measurably affect training — the mean is approximately matched by
-        any unbiased model, regardless of curve shape.
-        """
-        # Interval term — always computed; also returned (pre-reduction) so
-        # callers log the same interval-loss curve regardless of the blend.
         interval_per_sample = criterion(y_pred, y_true)
         if w_batch is not None:
-            interval_loss = ForecastModel._weighted_mean_loss(
-                interval_per_sample, w_batch
+            loss = ForecastModel._weighted_mean_loss(
+                interval_per_sample, w_batch,
             )
         else:
-            interval_loss = interval_per_sample.mean()
-
-        has_daily = y_pred.dim() == 2 and y_pred.size(1) > 1
-        alpha = getattr(self, "loss_balance", None)
-
-        # --- Legacy additive path (loss_balance unset) ------------------
-        # Exact pre-v2.40 behaviour: L = L_interval + λ·L_daily. Preserved
-        # byte-for-byte so experiments that never touch the balance slider
-        # are unchanged.
-        if alpha is None:
-            loss = interval_loss
-            if daily_weight > 0.0 and has_daily:
-                loss = loss + daily_weight * ForecastModel._cumulative_trajectory_loss(
-                    y_pred, y_true, criterion, w_batch,
-                )
-            return loss, interval_per_sample
-
-        # --- Convex-blend path (balance slider set) ---------------------
-        #   L = (1-α)·L_interval/scale_i + α·L_daily/scale_d
-        # Each scale is a detached EMA of that term, so α is the true
-        # fraction of gradient influence rather than being dominated by
-        # whichever term is intrinsically larger (the cumulative term is
-        # typically 10-100× the interval term in raw magnitude).
-        alpha = float(min(1.0, max(0.0, alpha)))
-        if not has_daily or alpha <= 0.0:
-            # No cumulative trajectory (single-horizon) OR pure per-interval
-            # (α=0, the default): return the raw interval loss — byte-for-byte
-            # identical to the legacy interval-only path, so defaulting every
-            # neural experiment to α=0 changes nothing. The EMA rescale only
-            # kicks in once the user dials in some cumulative weight.
-            return interval_loss, interval_per_sample
-
-        daily_loss = ForecastModel._cumulative_trajectory_loss(
-            y_pred, y_true, criterion, w_batch,
-        )
-
-        ema = getattr(self, "_loss_ema", None)
-        i_val = max(float(interval_loss.detach()), 1e-8)
-        d_val = max(float(daily_loss.detach()), 1e-8)
-        if ema is None:
-            ema = {"interval": i_val, "daily": d_val}
-        elif interval_loss.requires_grad:
-            # Update only during training. The validation pass runs under
-            # ``torch.no_grad()`` (so the loss has no grad), and updating the
-            # normaliser from the val distribution would make val-loss drift
-            # and corrupt early-stopping comparisons across epochs.
-            beta = 0.99
-            ema["interval"] = beta * ema["interval"] + (1.0 - beta) * i_val
-            ema["daily"] = beta * ema["daily"] + (1.0 - beta) * d_val
-        self._loss_ema = ema
-
-        loss = (
-            (1.0 - alpha) * (interval_loss / ema["interval"])
-            + alpha * (daily_loss / ema["daily"])
-        )
+            loss = interval_per_sample.mean()
         return loss, interval_per_sample
-
-    @staticmethod
-    def _cumulative_trajectory_loss(
-        y_pred: "torch.Tensor",
-        y_true: "torch.Tensor",
-        criterion: "nn.Module",
-        w_batch: Optional["torch.Tensor"],
-    ) -> "torch.Tensor":
-        """Cumulative-trajectory loss: criterion on cumsum(ŷ) vs cumsum(y)
-        at every horizon step, averaged over H and divided by H.
-
-        Constrains the SHAPE of the cumulative curve across the whole
-        horizon (not just the endpoint), and because the last step is the
-        end-of-horizon total, minimising it also pins the daily total — the
-        right objective for cumulative-origin targets like
-        ``sensor.energy_today``. Shared by both the legacy additive path
-        and the convex-blend path. Caller guarantees a multi-horizon
-        ``y_pred`` (dim==2, size(1)>1). ``criterion`` must be
-        ``reduction='none'``.
-        """
-        H = y_pred.size(1)
-        yp_cum = y_pred.cumsum(dim=1)
-        yt_cum = y_true.cumsum(dim=1)
-        cum_per_step = criterion(yp_cum, yt_cum)  # (batch, H)
-        cum_per_sample = cum_per_step.mean(dim=1) / float(H)  # (batch,)
-        if w_batch is not None:
-            return ForecastModel._weighted_mean_loss(cum_per_sample, w_batch)
-        return cum_per_sample.mean()
 
     def _validate_fitted(self) -> None:
         """

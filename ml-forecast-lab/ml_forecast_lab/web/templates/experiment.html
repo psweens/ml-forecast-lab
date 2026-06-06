@@ -357,20 +357,17 @@
                        placeholder="Backend default"
                        onchange="saveSettingsField(this)">
             </div>
-            <div class="exp-field" style="grid-column:1/-1;">
-                <label class="field-label">Loss balance: per-interval ⟷ cumulative (neural)
-                    <span class="info-tip">?<span class="tip-text">Blends the two neural training objectives on a single scale. <b>Per-interval</b> (left, 0.0 — the default) optimises each step's value, best when 30-min timing matters. <b>Cumulative</b> (right, 1.0) optimises the running daily total at every horizon step, which pins the end-of-day total — best when only the daily figure matters (e.g. a hot-water tank's daily demand). Each term is normalised by a moving average of its own magnitude, so the slider position is the true balance of influence, not just a nominal weight. Neural models only; tree models ignore it.</span></span>
-                </label>
-                <div style="display:flex;align-items:center;gap:0.75rem;">
-                    <span style="font-size:0.8rem;color:var(--text-secondary);min-width:5.5rem;">Per-interval</span>
-                    <input type="range" id="loss-balance-slider" min="0" max="1" step="0.05" style="flex:1;cursor:pointer;"
-                           value="{{ "%.2f"|format(exp_config.effective_loss_balance) if exp_config else "0.00" }}"
-                           oninput="document.getElementById('loss-balance-val').textContent = parseFloat(this.value).toFixed(2);"
-                           onchange="saveLossBalance()">
-                    <span style="font-size:0.8rem;color:var(--text-secondary);min-width:4.5rem;text-align:right;">Cumulative</span>
-                    <span id="loss-balance-val" class="metric-value" style="min-width:2.5rem;text-align:right;">{{ "%.2f"|format(exp_config.effective_loss_balance) if exp_config else "0.00" }}</span>
-                </div>
-            </div>
+            {# v2.40.14: loss-balance slider removed.
+               Empirical evidence + gradient analysis showed the
+               cumulative-trajectory term it controlled was a cliff
+               (any α > 0 → 50-95% daily-MAE degradation) on both
+               sparse-demand AND smooth-cumulative regimes. Faster EMA
+               decay softened but did not remove it; the mechanism
+               is structural to ``_cumulative_trajectory_loss``. See
+               scripts/LOSS_COMPARISON_FINDINGS.md. The path it
+               controlled is gone (``_composite_horizon_loss`` now
+               returns interval-only). YAML field tolerated as no-op
+               for backwards-compat. #}
         </div>
     </div>
 
@@ -429,6 +426,7 @@
                them as ``partial``. Only emit the future-side data
                attributes when the role actually uses them. #}
             <div class="covariate-row" data-entity="{{ cov.entity }}"
+                 data-role="{{ cov.role }}"
                  data-future-attribute="{% if cov.role in ('future', 'both') %}{{ cov.future_attribute or '' }}{% endif %}"
                  data-future-value-key="{% if cov.role in ('future', 'both') %}{{ cov.future_value_key or '' }}{% endif %}">
                 <span class="cov-entity">{{ cov.entity }}</span>
@@ -447,7 +445,7 @@
                 {% endif %}
                 {% if cov.scale is not none %}<span class="cov-meta">scale: {{ cov.scale }}</span>{% endif %}
                 {% if cov.is_binary %}<span class="cov-meta">binary</span>{% endif %}
-                <button class="cov-remove-btn" onclick="removeCovariate('{{ cov.entity }}')" title="Remove">&times;</button>
+                <button class="cov-remove-btn" onclick="removeCovariate(this)" title="Remove">&times;</button>
                 <span class="cov-validate-msg" hidden></span>
             </div>
             {% endfor %}
@@ -2347,22 +2345,10 @@ window.showTab = function(el) {
         });
     };
 
-    // Loss-balance slider: the single neural interval↔cumulative control.
-    // Always active; persists `loss_balance` (0..1) on release.
-    window.saveLossBalance = function() {
-        var slider = document.getElementById('loss-balance-slider');
-        if (!slider) return;
-        var data = { experiment: EXP_NAME, loss_balance: parseFloat(slider.value) };
-        fetch(BASE + '/api/experiment-settings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-        }).then(function(r) { return r.json(); }).then(function(result) {
-            if (!result.success) {
-                mlfl.toast('Save failed: ' + (result.error || 'unknown error'), 'error');
-            }
-        }).catch(function(err) { mlfl.toast('Save failed: ' + err, 'error'); });
-    };
+    // v2.40.14: saveLossBalance() and the slider were removed (see
+    // CHANGELOG + scripts/LOSS_COMPARISON_FINDINGS.md). Stub retained
+    // as a defensive no-op in case any older cached UI calls it.
+    window.saveLossBalance = function() { /* no-op (v2.40.14) */ };
 
     window.saveSettingsToggle = function(el, field) {
         var data = { experiment: EXP_NAME };
@@ -2697,6 +2683,7 @@ window.showTab = function(el) {
                 var row = document.createElement('div');
                 row.className = 'covariate-row';
                 row.setAttribute('data-entity', entity);
+                row.setAttribute('data-role', body.role || '');
                 row.setAttribute('data-future-attribute', body.future_attribute || '');
                 row.setAttribute('data-future-value-key', body.future_value_key || '');
                 // Match the Jinja-rendered row layout so the new row
@@ -2720,7 +2707,7 @@ window.showTab = function(el) {
                     futureMeta +
                     (body.scale !== undefined ? '<span class="cov-meta">scale: ' + body.scale + '</span>' : '') +
                     (body.is_binary ? '<span class="cov-meta">binary</span>' : '') +
-                    '<button class="cov-remove-btn" onclick="removeCovariate(\'' + entity + '\')" title="Remove">&times;</button>' +
+                    '<button class="cov-remove-btn" onclick="removeCovariate(this)" title="Remove">&times;</button>' +
                     '<span class="cov-validate-msg" hidden></span>';
                 list.appendChild(row);
                 // v2.38.7: kick off a data-availability check for the
@@ -2738,17 +2725,49 @@ window.showTab = function(el) {
         .catch(function(err) { mlfl.toast('Error: ' + err, 'error'); });
     };
 
-    window.removeCovariate = function(entity) {
+    window.removeCovariate = function(btnOrEntity) {
+        // v2.40.14: take the button element so we can read the row's
+        // full disambiguator tuple (entity, role, future_attribute,
+        // future_value_key). The backend's remove_experiment_covariate
+        // refuses to remove when an entity is configured multiple times
+        // without disambiguators — common with weather.* entities that
+        // expose temperature/precipitation/uv_index as separate rows.
+        // Pre-v2.40.14 the button only sent the entity string and the
+        // UI silently failed with "Covariate not found". Legacy string
+        // form kept as a fallback for any caller that hasn't updated.
+        var row, entity, role, futureAttr, futureKey;
+        if (typeof btnOrEntity === 'string') {
+            entity = btnOrEntity;
+            row = document.querySelector(
+                '#covariate-list .covariate-row[data-entity="' + entity + '"]');
+        } else {
+            row = btnOrEntity && btnOrEntity.closest
+                ? btnOrEntity.closest('.covariate-row') : null;
+            entity = row ? row.getAttribute('data-entity') : null;
+        }
+        if (!entity) {
+            mlfl.toast('Failed: missing entity', 'error');
+            return;
+        }
+        if (row) {
+            role = row.getAttribute('data-role') || null;
+            futureAttr = row.getAttribute('data-future-attribute') || null;
+            futureKey = row.getAttribute('data-future-value-key') || null;
+        }
+        var payload = { entity_id: entity };
+        if (role) payload.role = role;
+        if (futureAttr) payload.future_attribute = futureAttr;
+        if (futureKey) payload.future_value_key = futureKey;
+
         fetch(BASE + '/experiment/' + EXP_NAME + '/remove-covariate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ entity_id: entity })
+            body: JSON.stringify(payload)
         })
         .then(function(r) { return r.json(); })
         .then(function(result) {
             if (result.success) {
                 mlfl.toast('Covariate removed', 'success');
-                var row = document.querySelector('#covariate-list .covariate-row[data-entity="' + entity + '"]');
                 if (row) row.remove();
                 if (!document.querySelectorAll('#covariate-list .covariate-row').length) {
                     var list = document.getElementById('covariate-list');

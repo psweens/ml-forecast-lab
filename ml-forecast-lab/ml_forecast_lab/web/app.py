@@ -1783,6 +1783,12 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         entity_id = body.get("entity_id")
         if not entity_id:
             return JSONResponse(content={"success": False, "error": "entity_id required"})
+        # v2.40.14: accept disambiguators so multi-row entities can be
+        # removed individually. ``remove_experiment_covariate`` refuses
+        # without them when the entity is configured > 1 time.
+        role = body.get("role") or None
+        future_attribute = body.get("future_attribute") or None
+        future_value_key = body.get("future_value_key") or None
 
         from ml_forecast_lab.config import remove_experiment_covariate
         config_path = _find_config_path()
@@ -1790,7 +1796,12 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"success": False, "error": "Config file not found"})
 
         try:
-            removed = remove_experiment_covariate(config_path, name, entity_id)
+            removed = remove_experiment_covariate(
+                config_path, name, entity_id,
+                role=role,
+                future_attribute=future_attribute,
+                future_value_key=future_value_key,
+            )
             if removed:
                 logger.info(f"Removed covariate {entity_id} from {name}")
                 return JSONResponse(content={"success": True, "entity_id": entity_id})
@@ -3932,8 +3943,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             # (e.g. from hand-edited YAML) pass through clamped to ≥ 0 so sophisticated
             # users can still override the default λ without UI churn.
             "daily_loss_weight": lambda v: max(0.0, float(v)),
-            # Convex interval↔cumulative blend in [0,1]. null → off (legacy
-            # daily_loss_weight path); 0 = pure interval, 1 = pure cumulative.
+            # v2.40.14: loss_balance setter retained so older clients
+            # can still POST without 4xx; value is stored on the YAML
+            # but no longer affects training (the cumulative-loss path
+            # was removed — see CHANGELOG + LOSS_COMPARISON_FINDINGS).
             "loss_balance": lambda v: float(v) if 0.0 <= float(v) <= 1.0 else None,
             # v2.40.12: per-experiment early-stopping patience. null →
             # each backend uses its constructor default (20 neural, 50
