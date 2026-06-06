@@ -80,6 +80,58 @@ distribution. Flagged for a closer look at
 `ForecastModel._cumulative_trajectory_loss` before trusting the
 loss-balance slider on sparse demand sensors.
 
+### Result 3 follow-up — cliff replicates on a smooth-cumulative target
+
+To test whether the α-cliff was an artefact of the zero-inflated /
+sparse-demand regime or a deeper problem with the slider, the same MSE
++ linear α sweep was run on a **smooth-cumulative** profile
+(PV-energy-like: 0% zero-inflation, mean/median = 1.06× → nearly
+symmetric, smooth diurnal envelope). This is the regime where the
+cumulative-trajectory term is *intended* to help: the running cumsum
+is well-conditioned and not dominated by sparse spikes.
+
+| α | daily MAE % (sparse-demand) | daily MAE % (smooth-cumulative) |
+|---|---|---|
+| 0.0 | 54 % | 27 % |
+| 0.1 | 86 % | **94 %** |
+| 0.2 | 88 % | **95 %** |
+| 0.3 | 89 % | **94 %** |
+| 0.5 | 90 % | **93 %** |
+| 0.8 | 88 % | 71 % |
+| 1.0 | 77 % | 67 % |
+
+**Same cliff, larger absolute hurt.** The slider degrades the
+daily-total on a smooth-cumulative target *worse* than on
+sparse-demand. So the criticism in Result 3 isn't regime-specific —
+the cumulative blend as currently implemented hurts in both the
+sparse-spiky regime and its mathematical opposite. That broadens the
+case for either removing the slider or finding what's actually wrong
+with the implementation (next).
+
+### Suspected mechanism — EMA seeding on the random-init first batch
+
+Reading `_composite_horizon_loss` (`base.py:1006-1019`) with the cliff
+in hand: the EMA normalisers `(ema['interval'], ema['daily'])` are
+seeded on the **first training batch's** loss values, and decayed
+with β=0.99 (~100-batch memory). On a random-init model, batch-1
+losses are wildly off — especially the cumulative-trajectory loss,
+which grows in magnitude with the running total. The slider then
+spends its first ~100 batches with mis-scaled denominators, which is
+exactly when the model is establishing its bias regime.
+
+Crucially, **α=0 short-circuits this path entirely** (line 994-1000)
+— the harness measures the EMA path only when α>0. That's consistent
+with the "instant cliff" shape: the discontinuity at α=0 isn't a
+property of the cumulative loss, it's a property of "engaging the
+EMA-normalised blend at all," and the EMA may be giving the early
+training the wrong gradient scale.
+
+Open question for removal vs. fix: if dropping β from 0.99 to ~0.9
+(~10-batch forget rather than 100) removes the cliff, the slider has
+a fixable bug rather than a fundamental flaw; if the cliff survives,
+removal is justified. The harness now exposes `--ema-beta` for
+exactly this test — runs landing.
+
 ## Result 4 — log_transform's retransformation bias is the daily-total killer
 
 This is the one that explains the real-world "wins per-interval, loses

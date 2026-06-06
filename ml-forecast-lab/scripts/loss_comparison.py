@@ -286,7 +286,42 @@ def main() -> int:
     ap.add_argument("--smearing", action="store_true",
                     help="Apply Duan's smearing correction on the log "
                          "inverse (only meaningful with --log-transform).")
+    ap.add_argument("--ema-beta", type=float, default=None,
+                    help="Override the loss_balance EMA decay (default "
+                         "production value: 0.99 → ~100-batch memory). "
+                         "Set 0.9 to forget the random-init seed in ~10 "
+                         "batches — tests whether the alpha-cliff is "
+                         "caused by EMA seeding on a bad first batch.")
     args = ap.parse_args()
+
+    # Monkey-patch the production EMA decay if requested — surgical, scoped
+    # to this run only.
+    if args.ema_beta is not None:
+        import ml_forecast_lab.models.base as _base
+        _orig = _base.ForecastModel._composite_horizon_loss
+        _new_beta = float(args.ema_beta)
+        # The production code hard-codes ``beta = 0.99`` mid-function;
+        # rewrite it textually in the bytecode-bound source is messy, so
+        # the cleanest way is a small wrapper that pre-warms the EMA from a
+        # short burn-in pass before training begins. But the minimal
+        # surgical change is to replace the function entirely with a copy
+        # whose only difference is ``beta = args.ema_beta`` — which we do
+        # by source-rewrite + exec on the module's namespace.
+        import inspect, textwrap, re
+        src = textwrap.dedent(inspect.getsource(_orig))
+        src = re.sub(r"\bbeta\s*=\s*0\.99\b",
+                     f"beta = {_new_beta}", src, count=1)
+        # The source includes ``@staticmethod`` only via the class; the
+        # function as captured is the underlying callable. Re-exec under
+        # the module's globals so it sees ForecastModel, etc.
+        ns: dict = {}
+        # Strip the leading "    def" indent (already dedented above) and
+        # any leading decorators.
+        src = re.sub(r"^\s*@\w+.*\n", "", src, count=0, flags=re.MULTILINE)
+        exec(src, _base.__dict__, ns)
+        _base.ForecastModel._composite_horizon_loss = ns["_composite_horizon_loss"]
+        print(f"[harness] EMA beta override → {_new_beta} "
+              f"(production: 0.99)")
 
     per_day = 24 * 60 // args.interval_min
     horizon = per_day            # predict one full day → sum = daily total
