@@ -76,6 +76,58 @@ def synth_demand(
     return np.clip(demand, 0.0, None)
 
 
+def synth_smooth_cumulative(
+    days: int = 90, interval_min: int = 30, seed: int = 7,
+) -> np.ndarray:
+    """Smooth-cumulative per-interval demand — PV-energy-like.
+
+    A diurnal sinusoidal demand profile (bell curve across the day,
+    floored at a baseline) with weekly seasonality + mild AR(1) noise.
+    NO zero-inflation, NO heavy skew — every interval has a non-zero
+    demand and the cumulation across the horizon is a smooth monotone
+    ramp rather than a stepped curve dominated by sparse events.
+
+    This is the regime where ``loss_balance``'s cumulative-trajectory
+    term is *intended* to help: the running cumsum is well-conditioned
+    (the gradient at each step couples to a smooth running total, not
+    a near-degenerate spiky one), and the EMA-normalised blend should
+    let the user trade per-interval shape against running-total
+    accuracy. If the slider still hurts here, the criticism in
+    Result 3 generalises beyond sparse-demand and the slider should be
+    removed; if it helps here, the slider should be kept but gated to
+    targets that look like this distribution.
+    """
+    rng = np.random.default_rng(seed)
+    per_day = 24 * 60 // interval_min
+    n = days * per_day
+    hours = (np.arange(n) % per_day) * (interval_min / 60.0)
+    # Smooth diurnal envelope — broad afternoon peak, ~baseline overnight.
+    diurnal = 0.5 + 1.0 * np.exp(-0.5 * ((hours - 13.0) / 4.5) ** 2)
+    # Weekly variation: weekdays vs weekends.
+    dows = (np.arange(n) // per_day) % 7
+    weekly = np.where(dows >= 5, 0.85, 1.0)
+    base = (diurnal * weekly).astype(np.float32)
+    # Mild AR(1) multiplicative noise — smooth, no spikes.
+    eps = rng.normal(0.0, 0.07, n).astype(np.float32)
+    ar = np.empty(n, dtype=np.float32)
+    ar[0] = eps[0]
+    for t in range(1, n):
+        ar[t] = 0.6 * ar[t - 1] + eps[t]
+    series = base * (1.0 + ar)
+    return np.clip(series, 0.05, None)         # always positive baseline
+
+
+def _series_for_profile(profile: str, days: int, interval_min: int,
+                        seed: int, gamma_shape: float) -> np.ndarray:
+    if profile == "sparse-demand":
+        return synth_demand(days=days, interval_min=interval_min,
+                            seed=seed, gamma_shape=gamma_shape)
+    if profile == "smooth-cumulative":
+        return synth_smooth_cumulative(days=days,
+                                       interval_min=interval_min, seed=seed)
+    raise ValueError(f"unknown profile: {profile!r}")
+
+
 def build_windows(series: np.ndarray, window: int, horizon: int):
     """Sliding windows: X (N, window, 1) past demand → y (N, horizon)
     next-day per-interval demand. With horizon = one day, each y-row is
@@ -216,6 +268,14 @@ def main() -> int:
                          "or 'relu' allow true zero).")
     ap.add_argument("--gamma-shape", type=float, default=1.6,
                     help="Synthetic draw skew; lower = heavier right tail.")
+    ap.add_argument("--profile", type=str, default="sparse-demand",
+                    choices=("sparse-demand", "smooth-cumulative"),
+                    help="Synthetic target profile. 'sparse-demand' = the "
+                         "original zero-inflated Mixergy-like demand. "
+                         "'smooth-cumulative' = PV-energy-like diurnal "
+                         "envelope, no zero-inflation — the regime where "
+                         "loss_balance's cumulative term is *intended* "
+                         "to help. Ignored with --csv.")
     ap.add_argument("--losses", type=str, default="huber,mse",
                     help="Comma-separated loss functions to compare.")
     ap.add_argument("--alphas", type=str, default="0.0,0.5",
@@ -239,10 +299,16 @@ def main() -> int:
         series = df[args.value_col].to_numpy(dtype=np.float32)
         source = f"{args.csv} ({len(series)} rows)"
     else:
-        series = synth_demand(days=args.days, interval_min=args.interval_min,
-                              seed=args.seed, gamma_shape=args.gamma_shape)
-        source = (f"synthetic Mixergy-like demand, {args.days}d @ "
-                  f"{args.interval_min}min, gamma_shape={args.gamma_shape}")
+        series = _series_for_profile(args.profile, args.days,
+                                     args.interval_min, args.seed,
+                                     args.gamma_shape)
+        if args.profile == "sparse-demand":
+            source = (f"synthetic Mixergy-like demand, {args.days}d @ "
+                      f"{args.interval_min}min, gamma_shape={args.gamma_shape}")
+        else:
+            source = (f"synthetic PV/energy-like smooth-cumulative, "
+                      f"{args.days}d @ {args.interval_min}min "
+                      f"(no zero-inflation)")
 
     # Distribution sanity — the whole argument rests on right-skew.
     nz = series[series > 1e-6]
