@@ -62,6 +62,21 @@ normalisation (recovers symmetric per-step gradient magnitude).
 Either would be a fresh design conversation, not a tweak of the
 removed implementation.
 
+**PV integration tests updated.** The `_FakeExpCfg` mock in
+`tests/integration/test_pv_forecast_pipeline.py` previously set
+`daily_loss_weight = 0.25` to exercise the legacy additive
+cumulative-loss path. That path is gone in v2.40.14, and real
+production experiments ran with `loss_balance = 0` (the slider's
+default) which already short-circuited to pure interval loss
+before reaching the cumulative term. The mock now sets
+`daily_loss_weight = 0.0` to match what actual experiments saw —
+so the tests now exercise the genuine production code path. If
+any test still flags a real issue post-update it will be
+addressed (`test_pv_forecast_user_tuned_high_learning_rate` is
+the most likely candidate for removal — its whole purpose was
+testing the cumulative-loss safety net at aggressive LRs, which
+is a deliberately-removed capability).
+
 ---
 
 **Bugfix: `×` on a covariate row failed with `Failed: Covariate not
