@@ -130,7 +130,67 @@ Open question for removal vs. fix: if dropping β from 0.99 to ~0.9
 (~10-batch forget rather than 100) removes the cliff, the slider has
 a fixable bug rather than a fundamental flaw; if the cliff survives,
 removal is justified. The harness now exposes `--ema-beta` for
-exactly this test — runs landing.
+exactly this test.
+
+### β=0.9 test result — slider has two compounding problems, one fixable, one structural
+
+| profile | α=0 daily bias | α=0.5 daily bias (β=0.99) | α=0.5 daily bias (β=0.9) |
+|---|---|---|---|
+| sparse-demand | −1.0 | −10.2 | **−6.9** (softened ~30%) |
+| smooth-cumulative | −11.5 | −41.3 | **−33.9** (softened ~20%) |
+
+EMA seeding *is* part of the problem (faster decay → less hurt) but
+isn't the dominant cause. The α=0 vs α>0 cliff survives β=0.9 in
+both profiles, and α=0 still wins by a large margin.
+
+Sitting with the cumulative-trajectory loss's gradient, the
+structural issue is visible:
+
+    ∂L_cum/∂ŷ_k = (2/H) · Σ_{h ≥ k} (cumsum(ŷ)_h − cumsum(y)_h)
+
+Step k=0 has H terms summed into its gradient; step k=H−1 has 1.
+When the running cumsum runs ahead of actuals — easy on a noisy fit
+— every term contributes positive gradient → push ŷ_k down. **Early
+horizon steps are pushed down disproportionately**, so the model
+learns to systematically under-predict early in the day to keep the
+cumsum from running ahead. That's the per-interval bias we measured:
+on smooth-cumulative, per-interval bias went from −0.24 (α=0) to
+−0.69 (α=0.1) — predicting *less* when cumulative pressure engages,
+exactly as the gradient analysis predicts.
+
+**This is asymmetry baked into the loss, not the normaliser.** It
+can't be fixed by knob-tuning. It would require redesigning the
+cumulative term — e.g. comparing horizon-endpoint cumsum only (loses
+the shape constraint), or weighting the cumulative gradient inversely
+by per-step contribution count (recovers symmetry but loses the
+running-total integration that motivates the term).
+
+### Recommendation: remove the `loss_balance` slider
+
+Evidence stack:
+
+1. Hurts the daily total on **sparse-demand** (Result 3, original).
+2. Hurts the daily total on **smooth-cumulative** — the regime where
+   it was supposed to help.
+3. Cliff shape (any α>0 → flat plateau of ~50-95% daily MAE
+   degradation), not a smooth tradeoff. UX-wise it isn't a slider,
+   it's an off/on switch into a degraded regime.
+4. β=0.9 (~10-batch EMA memory) softens by ~25% but does NOT remove
+   the cliff → EMA seeding is a contributing bug, not the cause.
+5. Gradient analysis identifies a structural asymmetry (early-step
+   gradients dominated by horizon-tail cumulative errors → systematic
+   under-prediction early in horizon) that explains the measured
+   per-interval bias and cannot be fixed without redesigning the
+   loss.
+
+Replacement ideas for a future PR (out of scope here):
+- Endpoint-only cumulative loss (`criterion(sum(ŷ), sum(y))`) — loses
+  shape control but symmetric.
+- Telescoping gradient normaliser (divide cumulative gradient at step
+  k by (H−k)) — recovers symmetric per-step gradient magnitude.
+- Drop the slider entirely and rely on per-interval bias control
+  (Result 2: MSE + linear gets the daily total unbiased anyway).
+
 
 ## Result 4 — log_transform's retransformation bias is the daily-total killer
 
