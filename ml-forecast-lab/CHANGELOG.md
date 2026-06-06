@@ -1,5 +1,84 @@
 # Changelog
 
+## 2.40.14
+
+**Removed the per-interval ↔ cumulative loss-balance slider and the
+underlying cumulative-trajectory loss path.** The slider was
+measured to hurt the daily total in BOTH sparse-demand AND
+smooth-cumulative regimes (the regime where it was supposed to
+help). Evidence is recorded in `scripts/LOSS_COMPARISON_FINDINGS.md`:
+
+- Same cliff shape on both target distributions — any α > 0 produces
+  50–95 % daily-MAE degradation, flat across the α ∈ [0.1, 1.0]
+  range, with α = 0 winning every grid point.
+- Faster EMA decay (β = 0.9 vs the production 0.99) softened the
+  cliff by ~25 % but did not remove it → the EMA seeding is a
+  contributing bug, not the cause.
+- Gradient analysis identifies the root cause as a structural
+  asymmetry in `_cumulative_trajectory_loss`: early horizon steps
+  have H × more cumsum-error terms summed into their gradient than
+  late ones → the loss systematically biases the model toward
+  under-prediction at early horizon, which is precisely the failure
+  mode the cumulative term was supposed to fix. Cannot be fixed by
+  knob-tuning.
+
+Real-world confirmation: turning `log_transform` OFF on the Mixergy
+experiment (separate finding — uncorrected `exp()` retransformation
+bias) made the CNN beat Seasonal Naive on the daily-cumulative
+metric, **with `loss_balance = 0`** (the default). The cumulative-
+loss slider was never the lever.
+
+Removed:
+
+- `ForecastModel._cumulative_trajectory_loss` — gone.
+- The convex-blend path (EMA-normalised `L = (1-α)·L_interval/ema_i
+  + α·L_daily/ema_d`) in `ForecastModel._composite_horizon_loss`.
+- The legacy additive path (`L = L_interval + λ·L_daily`) in the
+  same function — uses the same broken `_cumulative_trajectory_loss`.
+- The Settings UI slider + `saveLossBalance` POST.
+- `ExperimentCfg.effective_loss_balance` resolution logic (now just
+  returns 0).
+- The 5-site `_apply_loss_balance` wiring (kept as a defensive no-op
+  stub).
+
+Retained for backwards compatibility (YAML loads, old checkpoints):
+
+- The `daily_loss_weight` and `loss_balance` YAML fields on
+  `ExperimentCfg` — silently ignored if set.
+- The `daily_weight` arg on `_composite_horizon_loss` (callers
+  unchanged; value discarded).
+- The `effective_loss_balance` property (returns `0.0`).
+
+`_composite_horizon_loss` now returns a pure per-interval loss for
+every neural backend — same signature, same per-sample tensor for
+loggers. 10 new tests in `test_loss_balance.py` pin the post-removal
+behaviour (loss equals raw interval loss, `daily_weight` ignored,
+`loss_balance` attribute ignored, `_apply_loss_balance` stub).
+
+Future cumulative-objective work — out of scope for this PR — is
+noted in the findings doc: endpoint-only cumulative loss
+(symmetric but loses shape control) or telescoping gradient
+normalisation (recovers symmetric per-step gradient magnitude).
+Either would be a fresh design conversation, not a tweak of the
+removed implementation.
+
+---
+
+**Bugfix: `×` on a covariate row failed with `Failed: Covariate not
+found` when the same entity was configured multiple times** (e.g. one
+`weather.<station>` entity with three rows for `temperature`,
+`precipitation`, `uv_index`). The backend's
+`remove_experiment_covariate` was already designed to accept
+disambiguators (`role`, `future_attribute`, `future_value_key`) since
+v2.39.3, but the UI button only sent the entity string. The backend
+saw multiple matches, refused, and surfaced the `Covariate not found`
+toast. The frontend now reads the full disambiguator tuple from the
+row's `data-*` attributes and posts it — single-row entities still
+work via the legacy short-payload path, multi-row entities now resolve
+the correct row. Two new smoke tests
+(`tests/smoke/test_remove_covariate_disambiguation.py`) lock the
+contract.
+
 ## 2.40.13
 
 **Bugfix: tree-backend patience counter could exceed the limit in the

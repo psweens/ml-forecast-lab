@@ -501,15 +501,27 @@ class ExperimentCfg:
     by tree models."""
 
     daily_loss_weight: float = 0.0
-    """Weight λ for the cumulative-trajectory loss term added to the per-interval
-    loss during neural training. 0.0 disables (interval loss only — default).
+    """v2.40.14 DEPRECATED — kept on the model only so existing YAML
+    configs continue to load. The underlying cumulative-trajectory loss
+    term was removed (see CHANGELOG): measured to hurt the daily total
+    in both sparse-demand and smooth-cumulative regimes, with a
+    structural gradient asymmetry that systematically biased the model
+    toward under-prediction at early horizon steps. Setting this field
+    no longer affects training.
 
-    The daily term penalises error in the cumulative forecast curve at every
-    horizon step (not just the endpoint), so the SHAPE of the predicted
-    cumulative trajectory must match the actual cumulative trajectory. With
-    ``future_periods=48`` and ``interval_minutes=30`` this is the 24 h
-    daily-cumulative curve, directly aligned with what users evaluate on
-    cumulative-origin targets such as ``sensor.energy_today`` or daily
+    Historical description below for context; ignore for new experiments.
+
+    Original: Weight λ for the cumulative-trajectory loss term added
+    to the per-interval loss during neural training. 0.0 disables
+    (interval loss only — default).
+
+    The daily term penalised error in the cumulative forecast curve at
+    every horizon step (not just the endpoint), so the SHAPE of the
+    predicted cumulative trajectory had to match the actual cumulative
+    trajectory. With ``future_periods=48`` and ``interval_minutes=30``
+    this is the 24 h daily-cumulative curve, directly aligned with
+    what users evaluate on cumulative-origin targets such as
+    ``sensor.energy_today`` or daily
     energy-usage sensors.
 
     History: v2.16 used a mean-over-horizons constraint (just the endpoint).
@@ -519,34 +531,20 @@ class ExperimentCfg:
     unbiased model, regardless of the curve shape.
 
     Applied to torch neural backends only; silently ignored by tree models.
-    Typical useful range: 0.1–1.0 (stronger under MSE than MAE due to loss
-    geometry).
 
-    Superseded by ``loss_balance`` when that is set."""
+    v2.40.14: SETTING THIS FIELD HAS NO EFFECT. Retained on the model
+    only so existing YAML configs load without error."""
 
     loss_balance: Optional[float] = None
-    """Convex blend between per-interval and cumulative-trajectory loss for
-    neural backends, in [0, 1]. ``None`` (default) keeps the legacy additive
-    behaviour driven by ``daily_loss_weight`` — zero change for existing
-    experiments. When set:
-
-        L = (1 - α)·L_interval + α·L_cumulative
-
-    where α is this value: ``0.0`` = pure per-interval loss, ``1.0`` = pure
-    cumulative-trajectory loss (matches the predicted cumulative curve at
-    every horizon step, which also pins the end-of-day total). Use the
-    cumulative end for targets where only the daily total matters (e.g. a
-    Mixergy hot-water tank's daily demand).
-
-    Magnitude handling: each term is divided by a detached exponential
-    moving average of itself before blending, so α is the true fraction of
-    gradient influence rather than being swamped by whichever term is
-    intrinsically larger — the cumulative term is typically 10-100× the
-    per-interval term in raw magnitude, so a naive blend would make even
-    α=0.3 behave like "almost all cumulative".
-
-    Supersedes ``daily_loss_weight`` when set. Neural backends only; tree
-    models ignore it."""
+    """v2.40.14 DEPRECATED — kept on the model only so existing YAML
+    configs continue to load. The convex-blend cumulative-loss path
+    was removed (see CHANGELOG): the harness measured the slider as a
+    cliff (any α>0 → 50-95% daily-MAE degradation, flat across the
+    α∈[0.1, 1.0] range) on BOTH sparse-demand and smooth-cumulative
+    targets, with the same gradient-asymmetry mechanism identified in
+    ``_cumulative_trajectory_loss``. Faster EMA decay softened the
+    cliff but did not remove it. Setting this field no longer affects
+    training."""
 
     recency_half_life_days: float = 0.0
     """Half-life for exponential recency weighting in days. ``0`` (default,
@@ -660,27 +658,12 @@ class ExperimentCfg:
 
     @property
     def effective_loss_balance(self) -> float:
-        """Resolved interval↔cumulative blend α in [0, 1] actually used for
-        neural training, and the value the Settings slider displays.
+        """v2.40.14: always 0.0 — the cumulative loss path is gone.
 
-        Resolution order (single source of truth for UI and trainer):
-
-        1. Explicit ``loss_balance`` (the user moved the slider) wins.
-        2. Otherwise migrate from the *effective* additive
-           ``daily_loss_weight`` via ``α = λ / (1 + λ)`` — including the
-           non-negative / cumulative auto-default of ``λ = 0.5`` (the PF9
-           behaviour that keeps PV-style forecasts from flat-collapsing),
-           so consolidating to the slider doesn't silently drop cumulative
-           pressure from existing experiments. λ=0.5 → α≈0.33, λ=1 → α=0.5.
-        3. Per-interval (0.0) when nothing requests cumulative pressure
-           (signed targets with no weight) — the default.
+        Retained as a property so any caller / template that still
+        references it gets a safe value rather than an AttributeError.
         """
-        if self.loss_balance is not None:
-            return min(1.0, max(0.0, float(self.loss_balance)))
-        lam = float(self.daily_loss_weight)
-        if lam <= 0.0 and (self.source_is_cumulative or self.target_is_nonnegative):
-            lam = 0.5
-        return lam / (1.0 + lam) if lam > 0.0 else 0.0
+        return 0.0
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -731,6 +714,9 @@ class ExperimentCfg:
             raise ValueError(
                 f'recency_half_life_days must be >= 0, got {self.recency_half_life_days}'
             )
+        # v2.40.14: daily_loss_weight and loss_balance kept on the model
+        # for YAML backwards-compat but are no-ops. Bounds validation
+        # retained so a typo still surfaces at load.
         if self.daily_loss_weight < 0:
             raise ValueError(
                 f'daily_loss_weight must be >= 0, got {self.daily_loss_weight}'

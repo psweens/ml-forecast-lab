@@ -419,25 +419,19 @@ def _apply_patience(model, exp_cfg, overrides=None) -> None:
 
 
 def _apply_loss_balance(model, exp_cfg, overrides=None) -> None:
-    """Apply the resolved interval↔cumulative blend (α) to a neural model.
-
-    Centralised so EVERY training path — benchmark CV, production retrain,
-    holdout refits, tuning, covariate analysis — sets it identically.
-    The lack of one choke point is exactly what made the slider a no-op on
-    the primary paths in v2.40.0-2.40.1: each path set ``daily_loss_weight``
-    by hand and forgot ``loss_balance``, so the production / benchmark models
-    never received it (v2.40.2 fix).
-
-    No-op for tree backends; skipped when the caller already pinned
-    ``loss_balance`` via ``overrides`` / ``model_params``. Resets the
-    per-term EMA so each fresh run normalises from its own scale.
-    """
+    """v2.40.14: no-op stub. The cumulative-loss path was removed (see
+    ``ForecastModel._composite_horizon_loss`` and CHANGELOG). The five
+    historical call sites in this file still call it so YAML
+    backwards-compat keeps working; the function pins
+    ``model.loss_balance = 0`` and ``model._loss_ema = None`` only as
+    defensive housekeeping in case a model object carries stale
+    attributes from a checkpoint."""
     if not getattr(model, 'is_neural', False):
         return
-    if overrides and 'loss_balance' in overrides:
-        return
-    model.loss_balance = exp_cfg.effective_loss_balance
-    model._loss_ema = None
+    if hasattr(model, 'loss_balance'):
+        model.loss_balance = 0.0
+    if hasattr(model, '_loss_ema'):
+        model._loss_ema = None
 
 
 def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
