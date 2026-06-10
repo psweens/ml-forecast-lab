@@ -290,16 +290,20 @@ def test_pf4_nhits_past_only_input():
     assert out.shape == (1, 24)
 
 
-def test_pf8_output_activation_resolves_softplus_for_nonneg_target():
-    """PF8 (corrected): output_activation='auto' resolves to 'softplus'
-    when target_is_nonnegative or source_is_cumulative is set.
+def test_output_activation_resolves_linear_for_nonneg_target():
+    """v2.41.0: output_activation='auto' resolves to 'linear' for ALL
+    non-LSTM neural backends, including cumulative / non-negative
+    targets.
 
-    The initial v2.37 PF8 picked 'relu' here; in production that caused
-    a dying-ReLU collapse on extended-window NLinear with the PF2
-    anchor add-back (forecast went to literal 0). Softplus has
-    non-zero gradient everywhere, immune to the collapse, and its
-    +log(2)≈0.69 physical-space floor is negligible for any target
-    whose peak is >> 1 unit.
+    History: v2.37 PF8 picked 'relu' (dying-ReLU collapse), v2.37.1
+    switched to 'softplus' (non-zero gradient everywhere). Empirically
+    softplus only slowed the same death: with daily_loss_weight=0 —
+    every real deployment — the zero-valued half of a PV/demand target
+    keeps pushing the pre-activation down until float32 softplus
+    saturates to exactly 0 and gradients vanish
+    (tests/integration/test_pv_forecast_pipeline.py pins the collapse).
+    Non-negativity is now enforced by the publish-time clamp; an
+    explicit ``output_activation: softplus`` is still honoured.
     """
     from dataclasses import dataclass
     from ml_forecast_lab.main import _resolve_output_activation
@@ -313,16 +317,15 @@ def test_pf8_output_activation_resolves_softplus_for_nonneg_target():
     # Default (signed) → linear.
     assert _resolve_output_activation(_Fake(), "nlinear") == "linear"
 
-    # source_is_cumulative → softplus (matches the pre-v2.37 default).
+    # source_is_cumulative → linear (publish clamp owns non-negativity).
     assert _resolve_output_activation(
         _Fake(source_is_cumulative=True), "nlinear"
-    ) == "softplus"
+    ) == "linear"
 
-    # target_is_nonnegative → softplus (the PF8 v2.37 addition for
-    # non-cumulative non-negative targets like PV power).
+    # target_is_nonnegative → linear (same).
     assert _resolve_output_activation(
         _Fake(target_is_nonnegative=True), "nlinear"
-    ) == "softplus"
+    ) == "linear"
 
     # LSTM always picks zscore regardless.
     assert _resolve_output_activation(
@@ -471,31 +474,31 @@ def test_pf8_pf9_resolve_together_for_source_is_cumulative():
         source_is_cumulative: bool = True
         target_is_nonnegative: bool = False
 
-    # PF8 (corrected): cumulative → softplus (non-LSTM neural backends).
-    # Restored from the pre-v2.37 default after the initial PF8 ReLU
-    # pick caused a dying-ReLU collapse on extended-window NLinear.
-    assert _resolve_output_activation(_Cfg(), "nlinear") == "softplus"
-    assert _resolve_output_activation(_Cfg(), "dlinear") == "softplus"
-    assert _resolve_output_activation(_Cfg(), "nbeats") == "softplus"
+    # v2.41.0: cumulative → linear (publish-time clamp owns the
+    # non-negativity contract; the softplus auto-pick collapsed to flat
+    # zero with the production daily_loss_weight=0 — see
+    # _resolve_output_activation's history note).
+    assert _resolve_output_activation(_Cfg(), "nlinear") == "linear"
+    assert _resolve_output_activation(_Cfg(), "dlinear") == "linear"
+    assert _resolve_output_activation(_Cfg(), "nbeats") == "linear"
     # LSTM still picks zscore (its specialised default)
     assert _resolve_output_activation(_Cfg(), "lstm") == "zscore"
     # PF9: cumulative → daily_loss_weight = 0.5
     assert _resolve_daily_loss_weight(_Cfg()) == 0.5
 
 
-def test_pf10_nonneg_target_resolves_softplus_regardless_of_log_transform():
-    """PF10 (corrected): when target_is_nonnegative or source_is_cumulative
-    is set, auto resolves to 'softplus' regardless of log_transform.
+def test_auto_activation_resolves_linear_regardless_of_log_transform():
+    """v2.41.0: 'auto' resolves to 'linear' for every non-LSTM neural
+    backend, regardless of log_transform / target_is_nonnegative /
+    source_is_cumulative.
 
-    Originally PF10 made log_transform=True flip the resolver from
-    'relu' to 'softplus'. After reverting PF8 (relu was the wrong
-    default — it caused the user's flat-zero collapse), softplus is
-    the auto choice for ALL non-negative cases. log_transform no
-    longer changes the picked activation.
-
-    log_transform=True alone (signed target) still resolves to
-    'linear' — only target_is_nonnegative or source_is_cumulative
-    move the picker.
+    History: PF10 originally made log_transform flip 'relu' → 'softplus';
+    v2.37.1 made softplus the pick for all non-negative cases. With the
+    cumulative-loss term inactive (daily_loss_weight=0 — every real
+    deployment) softplus saturates to exactly 0 in float32 on
+    zero-heavy targets and the forecast collapses flat (pinned by
+    tests/integration/test_pv_forecast_pipeline.py). Non-negativity is
+    now enforced at the publish boundary instead.
     """
     from dataclasses import dataclass
     from ml_forecast_lab.main import _resolve_output_activation
@@ -507,20 +510,20 @@ def test_pf10_nonneg_target_resolves_softplus_regardless_of_log_transform():
         target_is_nonnegative: bool = False
         log_transform: bool = False
 
-    # target_is_nonnegative alone → softplus
+    # target_is_nonnegative alone → linear
     assert _resolve_output_activation(
         _Fake(target_is_nonnegative=True), "nlinear"
-    ) == "softplus"
+    ) == "linear"
 
-    # target_is_nonnegative + log_transform → still softplus (no flip)
+    # target_is_nonnegative + log_transform → linear
     assert _resolve_output_activation(
         _Fake(target_is_nonnegative=True, log_transform=True), "nlinear"
-    ) == "softplus"
+    ) == "linear"
 
-    # source_is_cumulative + log_transform → softplus
+    # source_is_cumulative + log_transform → linear
     assert _resolve_output_activation(
         _Fake(source_is_cumulative=True, log_transform=True), "nlinear"
-    ) == "softplus"
+    ) == "linear"
 
     # log_transform alone (signed target) → linear (unchanged)
     assert _resolve_output_activation(

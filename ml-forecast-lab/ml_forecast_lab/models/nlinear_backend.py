@@ -59,7 +59,8 @@ class _NLinearNet(nn.Module):
     def __init__(self, seq_len: int, n_channels: int, n_horizons: int = 1,
                  output_activation: str = 'linear', sigmoid_scale: float = 1.0,
                  use_revin: bool = True, target_channel: int = 0,
-                 past_window_size: Optional[int] = None):
+                 past_window_size: Optional[int] = None,
+                 seasonal_init_period: Optional[int] = None):
         super().__init__()
         self.use_revin = use_revin
         # RevIN composes with NLinear's last-value subtraction without
@@ -89,6 +90,34 @@ class _NLinearNet(nn.Module):
             flat = (self.past_window_size * n_channels
                     + future_len * (n_channels - 1))
         self.linear = nn.Linear(flat, n_horizons)
+        # Seasonal-naive initialisation (v2.41.0). Start the head AT the
+        # seasonal-naive solution — horizon h reads the target value at
+        # "same time yesterday" with weight 1 — instead of random noise
+        # around the anchor. Training then only has to learn corrections
+        # on top of an already-sensible forecast. Without this, pure
+        # per-interval loss needs many more epochs than the production
+        # epoch budget to grow the daily amplitude from scratch, which
+        # surfaced as the flat / strongly-under-peaked forecasts pinned
+        # by tests/integration/test_pv_forecast_pipeline.py once the
+        # (removed) cumulative-loss term stopped accelerating amplitude
+        # convergence. Horizons beyond one period wrap to the same
+        # time-of-day slot; horizons whose yesterday-slot falls outside
+        # the past window keep the zero init (= flat-anchor persistence,
+        # NLinear's natural baseline). Composes with RevIN + the anchor
+        # subtract/re-add: at init the output is exactly the
+        # denormalised yesterday value.
+        if seasonal_init_period and seasonal_init_period >= 2:
+            period = int(seasonal_init_period)
+            with torch.no_grad():
+                self.linear.weight.zero_()
+                self.linear.bias.zero_()
+                for h_idx in range(n_horizons):
+                    q = (h_idx % period) + 1  # 1-based step within the day
+                    p = self.past_window_size - 1 - period + q
+                    if 0 <= p < self.past_window_size:
+                        self.linear.weight[
+                            h_idx, p * n_channels + target_channel
+                        ] = 1.0
         self.activation = _build_activation(output_activation, scale=sigmoid_scale)
 
     def _head_input(self, x: "torch.Tensor") -> "torch.Tensor":
@@ -185,6 +214,10 @@ class NLinearModel(ForecastModel):
         # Set per-fit from kwargs; round-tripped in save/load. None means
         # legacy single-window path.
         self._past_window_size: Optional[int] = None
+        # Steps-per-day inferred at fit time for the seasonal-naive head
+        # init. Not persisted: load() restores trained weights over the
+        # init, so the value only matters for a fresh fit.
+        self._seasonal_period: Optional[int] = None
 
     @property
     def name(self) -> str:
@@ -216,7 +249,53 @@ class NLinearModel(ForecastModel):
             use_revin=self.use_revin,
             target_channel=self.target_channel,
             past_window_size=self._past_window_size,
+            seasonal_init_period=self._seasonal_period,
         )
+
+    @staticmethod
+    def _infer_seasonal_period(X_seq: np.ndarray,
+                               channel_names: Optional[list]) -> Optional[int]:
+        """Infer steps-per-day from the deterministic hour_sin/hour_cos
+        channels of the first training window.
+
+        The sliding-window builder always appends these when
+        ``add_temporal=True``. The hour angle is quantised to whole hours
+        (``2π·hour/24``), so consecutive sub-hourly rows can share an
+        angle — the per-row delta is 0 within an hour and 2π/24 at each
+        hour boundary. Counting boundary crossings across the window
+        therefore recovers steps-per-hour (rows per crossing) without the
+        backend needing ``interval_minutes``: 30-min data shows ~half the
+        rows crossing, 60-min data every row, 15-min data a quarter.
+        Returns None when the temporal channels are absent or the window
+        spans no hour boundary — the caller then skips the seasonal-naive
+        init and keeps the zero/flat-anchor behaviour.
+        """
+        if not channel_names:
+            return None
+        try:
+            sin_idx = channel_names.index('hour_sin')
+            cos_idx = channel_names.index('hour_cos')
+        except ValueError:
+            return None
+        if X_seq.shape[0] < 1 or X_seq.shape[1] < 3:
+            return None
+        theta = np.arctan2(
+            X_seq[0, :, sin_idx].astype(np.float64),
+            X_seq[0, :, cos_idx].astype(np.float64),
+        )
+        deltas = np.mod(np.diff(theta), 2 * np.pi)
+        crossings = int(np.count_nonzero(deltas > 1e-6))
+        if crossings < 1:
+            return None
+        steps_per_hour = int(round(len(deltas) / crossings))
+        if steps_per_hour < 1:
+            return None
+        period = 24 * steps_per_hour
+        # 15-min..1-hour sampling — anything outside is either sub-minute
+        # data (init pointless) or coarser-than-hourly (mapping undefined).
+        if not 4 <= period <= 288:
+            return None
+        return period
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray,
             **kwargs: Any) -> Dict[str, Any]:
@@ -243,6 +322,12 @@ class NLinearModel(ForecastModel):
         # legacy single-window path; the _Net falls back to its v2.36
         # behaviour in that case.
         self._past_window_size = kwargs.get("past_window_size")
+        # Steps-per-day for the seasonal-naive head init, recovered from
+        # the temporal channels so no extra plumbing is needed from the
+        # caller. None disables the init (see _NLinearNet).
+        self._seasonal_period = self._infer_seasonal_period(
+            X_seq, kwargs.get("channel_names"),
+        )
 
         if not self.use_revin:
             self._channel_mean = X_seq.mean(axis=(0, 1))

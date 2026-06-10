@@ -342,10 +342,15 @@ class TestResolveOutputActivation:
             self._cfg(log_transform=True), 'lstm'
         ) == 'zscore'
 
-    def test_cumulative_source_picks_softplus(self):
+    def test_cumulative_source_picks_linear(self):
+        """v2.41.0: 'auto' resolves to 'linear' even for cumulative /
+        non-negative targets. The softplus auto-pick collapsed to flat
+        zero once the cumulative-loss term stopped masking it (see
+        tests/integration/test_pv_forecast_pipeline.py); non-negativity
+        is now enforced by the publish-time clamp instead."""
         from ml_forecast_lab.main import _resolve_output_activation
         cfg = self._cfg(source_is_cumulative=True)
-        assert _resolve_output_activation(cfg, 'nlinear') == 'softplus'
+        assert _resolve_output_activation(cfg, 'nlinear') == 'linear'
 
     def test_log_transform_alone_picks_linear(self):
         """``log_transform=True`` alone does NOT trigger softplus — that's an

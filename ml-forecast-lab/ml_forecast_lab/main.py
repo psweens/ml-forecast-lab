@@ -36,33 +36,28 @@ def _resolve_output_activation(exp_cfg, model_name: str = '') -> str:
       z-score normalisation with linear head, denormalised at inference;
       conditions gradients across widely-varying target scales and is the
       best general default for recurrent backends)
-    - Other neural, ``source_is_cumulative=True`` OR
-      ``target_is_nonnegative=True``                  → ``'softplus'``
-      (non-negative, smooth gradient near zero — ideal for energy /
-      rainfall / counts that reset to zero overnight, or instantaneous
-      non-negative targets like PV power. Softplus has a non-zero
-      gradient everywhere, which immunises against the "dying ReLU"
-      collapse where a high LR or aggressive anchor delta drives the
-      linear head into all-negative pre-activations and freezes the
-      model at a literal-zero forecast for the entire horizon.)
-    - Other neural, default                           → ``'linear'`` (unbounded
-      signed output suitable for temperature, net grid flow, deltas)
+    - Other neural                                    → ``'linear'``
+      (unbounded output; non-negativity for cumulative / non-negative
+      targets is enforced by the publish-time clamp instead — see the
+      ``target_is_nonnegative`` clip in ``_forecast_with_cached`` /
+      ``_run_production_inference``)
 
-    The ``target_is_nonnegative`` branch is the v2.37 PF8 addition for
-    users with non-cumulative non-negative targets (PV power in W,
-    irradiance, instantaneous demand). It resolves to softplus on the
-    same rationale as cumulative — a non-negative-by-construction
-    activation with non-zero gradient everywhere is robust to the
-    anchor/RevIN/log_transform interactions that the v2.37 PF1-PF7
-    extended-window path introduces.
-
-    History: the initial v2.37 PF8 picked ``'relu'`` here on the theory
-    that softplus's +log(2)≈0.69 floor would bias small-magnitude
-    cumulative kWh intervals high. In production this caused the
-    user-reported flat-zero forecast (dying-ReLU on the extended-window
-    NLinear with the PF2 anchor add-back), and the test
-    ``test_cumulative_source_picks_softplus`` had been pinning the
-    correct (softplus) behaviour all along.
+    History: v2.37 PF8 originally picked ``'relu'`` for non-negative
+    targets, which produced the user-reported flat-zero forecast via
+    dying-ReLU; v2.37.1 switched to ``'softplus'`` on the theory that
+    its non-zero gradient everywhere immunises against the collapse.
+    Empirically it does not: with the (since-removed) cumulative-loss
+    term inactive — which is every real deployment, since
+    ``daily_loss_weight`` defaulted to 0 — the zero-valued half of a
+    PV/demand target keeps pushing the pre-activation down until
+    float32 softplus saturates to exactly 0 with a vanishing gradient,
+    and the daytime signal can no longer recover. The integration suite
+    (``tests/integration/test_pv_forecast_pipeline.py``) pins this:
+    softplus collapses flat, a linear head trains cleanly. v2.41.0
+    therefore resolves 'auto' to 'linear' and moves the non-negativity
+    guarantee to the publish boundary, where a clamp costs nothing and
+    cannot interfere with optimisation. Users can still pin
+    ``output_activation: softplus`` explicitly.
     """
     act = getattr(exp_cfg, 'output_activation', 'auto')
     if act == 'auto':
@@ -72,11 +67,7 @@ def _resolve_output_activation(exp_cfg, model_name: str = '') -> str:
         # targets ranging from small fractions to large cumulative values.
         if model_name == 'lstm':
             return 'zscore'
-        is_nonneg = (
-            getattr(exp_cfg, 'source_is_cumulative', False)
-            or getattr(exp_cfg, 'target_is_nonnegative', False)
-        )
-        return 'softplus' if is_nonneg else 'linear'
+        return 'linear'
     return act
 
 
@@ -3904,6 +3895,14 @@ class MLForecastLabApp:
             y_pred = np.expm1(y_pred).astype(np.float32)
             y_pred = np.maximum(y_pred, 0.0)
 
+        # Publish-boundary non-negativity clamp — same rationale as in
+        # _forecast_with_cached (v2.41.0 linear-head change).
+        if (
+            getattr(exp_cfg, 'target_is_nonnegative', False)
+            or getattr(exp_cfg, 'source_is_cumulative', False)
+        ):
+            y_pred = np.maximum(y_pred, 0.0).astype(np.float32)
+
         logger.info(
             f"Forecast curve: {len(y_pred)} points over "
             f"{future_periods * exp_cfg.interval_minutes / 60:.0f}h, "
@@ -5988,6 +5987,17 @@ class MLForecastLabApp:
         if exp_cfg.log_transform:
             y_pred = np.expm1(y_pred).astype(np.float32)
             y_pred = np.maximum(y_pred, 0.0)
+
+        # Publish-boundary non-negativity clamp (v2.41.0). With 'auto'
+        # output_activation now resolving to a linear head, physically
+        # non-negative targets can emit small negative dips; clamping
+        # here keeps the published sensors physical without putting a
+        # saturating activation back into the optimisation path.
+        if (
+            getattr(exp_cfg, 'target_is_nonnegative', False)
+            or getattr(exp_cfg, 'source_is_cumulative', False)
+        ):
+            y_pred = np.maximum(y_pred, 0.0).astype(np.float32)
 
         logger.info(
             f"  Forecast {exp_cfg.name}: {len(y_pred)} points, "
