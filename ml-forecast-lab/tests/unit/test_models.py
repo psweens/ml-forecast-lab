@@ -967,3 +967,38 @@ class TestTTM:
         model = TTMModel()
         with pytest.raises(ValueError):
             model.set_params(output_activation="softplus")
+
+
+class TestFoundationLazyImports:
+    def test_backend_modules_do_not_import_heavy_stack(self):
+        """Startup-RAM contract: the registry imports every backend module
+        at app startup, so the foundation backends must NOT pull chronos /
+        tsfm_public / transformers in at module-import time (the stack
+        holds ~300 MB RSS on top of torch). Heavy imports belong in
+        _load_pipeline / _load_model — first actual use only. Run in a
+        subprocess because sibling tests may already have imported the
+        heavy stack into this process."""
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        pkg_root = Path(__file__).resolve().parents[2]
+        code = (
+            "import sys;"
+            "import ml_forecast_lab.models.chronos_bolt_backend;"
+            "import ml_forecast_lab.models.ttm_backend;"
+            "leaked = [m for m in ('chronos', 'tsfm_public', 'transformers')"
+            " if m in sys.modules];"
+            "print('leaked:', leaked);"
+            "sys.exit(1 if leaked else 0)"
+        )
+        env = dict(os.environ, PYTHONPATH=str(pkg_root))
+        res = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, env=env, timeout=120,
+        )
+        assert res.returncode == 0, (
+            f"heavy stack imported at module import: "
+            f"{res.stdout} {res.stderr[-300:]}"
+        )

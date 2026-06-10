@@ -27,10 +27,10 @@ skipped at registration time when the package is missing (same pattern
 as catboost / statsforecast).
 """
 
+import importlib.util
 import logging
 import pickle
 import time
-import warnings
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
@@ -40,17 +40,13 @@ from .base import ForecastModel
 
 logger = logging.getLogger(__name__)
 
-try:
-    from chronos import BaseChronosPipeline
-    CHRONOS_AVAILABLE = True
-except ImportError:
-    CHRONOS_AVAILABLE = False
-    BaseChronosPipeline = None  # type: ignore[assignment]
-    warnings.warn(
-        "chronos-forecasting is not installed. ChronosBoltModel will not be "
-        "functional. Install it with: pip install chronos-forecasting",
-        ImportWarning,
-    )
+# Availability is probed with find_spec rather than an actual import:
+# importing `chronos` drags the whole transformers stack into memory
+# (~300 MB settled RSS on top of torch), and this module is imported at
+# app startup by the registry even when the user never enables the
+# backend. The heavy import is deferred to _load_pipeline(), i.e. the
+# first actual fit/predict.
+CHRONOS_AVAILABLE = importlib.util.find_spec("chronos") is not None
 
 
 class ChronosBoltModel(ForecastModel):
@@ -129,6 +125,7 @@ class ChronosBoltModel(ForecastModel):
         key = (model_name, device)
         if key not in cls._PIPELINE_CACHE:
             import torch
+            from chronos import BaseChronosPipeline  # deferred heavy import
             logger.info(f"Loading Chronos pipeline {model_name!r} on {device}...")
             t0 = time.time()
             cls._PIPELINE_CACHE[key] = BaseChronosPipeline.from_pretrained(

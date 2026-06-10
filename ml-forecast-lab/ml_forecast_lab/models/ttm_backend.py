@@ -30,10 +30,10 @@ at registration time when the package is missing (same pattern as
 catboost / statsforecast).
 """
 
+import importlib.util
 import logging
 import pickle
 import time
-import warnings
 from copy import deepcopy
 from typing import Any, Dict, Optional
 
@@ -43,22 +43,26 @@ from .base import ForecastModel
 
 logger = logging.getLogger(__name__)
 
-try:
-    # get_model moved to the package root in newer granite-tsfm releases;
-    # the toolkit path is the long-standing import. Try both.
+# Availability is probed with find_spec rather than an actual import:
+# importing `tsfm_public` drags the whole transformers stack into memory
+# (~300 MB settled RSS on top of torch), and this module is imported at
+# app startup by the registry even when the user never enables the
+# backend. The heavy import is deferred to _load_model(), i.e. the first
+# actual fit/predict.
+TSFM_AVAILABLE = importlib.util.find_spec("tsfm_public") is not None
+
+
+def _resolve_get_model():
+    """Deferred import of granite-tsfm's get_model helper.
+
+    get_model moved to the package root in newer granite-tsfm releases;
+    the toolkit path is the long-standing import. Try both.
+    """
     try:
-        from tsfm_public import get_model as _ttm_get_model
+        from tsfm_public import get_model
     except ImportError:
-        from tsfm_public.toolkit.get_model import get_model as _ttm_get_model
-    TSFM_AVAILABLE = True
-except ImportError:
-    TSFM_AVAILABLE = False
-    _ttm_get_model = None  # type: ignore[assignment]
-    warnings.warn(
-        "granite-tsfm is not installed. TTMModel will not be functional. "
-        "Install it with: pip install granite-tsfm",
-        ImportWarning,
-    )
+        from tsfm_public.toolkit.get_model import get_model
+    return get_model
 
 
 class TTMModel(ForecastModel):
@@ -135,6 +139,7 @@ class TTMModel(ForecastModel):
         """
         key = (model_path, context_length, prediction_length)
         if key not in cls._MODEL_CACHE:
+            _ttm_get_model = _resolve_get_model()  # deferred heavy import
             logger.info(
                 f"Loading TTM checkpoint {model_path!r} "
                 f"(context={context_length}, pred={prediction_length})..."

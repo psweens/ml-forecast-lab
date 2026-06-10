@@ -55,6 +55,17 @@ Operational notes for the foundation backends:
   remain available.
 - Loaded weights are cached per process, so CV folds and retrain
   cycles don't re-read them from disk.
+- **Startup RAM is unchanged.** The transformers stack behind the two
+  foundation backends holds ~300 MB RSS once imported, so the backend
+  modules probe availability with `find_spec` and defer the heavy
+  import to first actual use. With foundation backends disabled the
+  app's memory profile is identical to 2.40.x (regression-tested in a
+  subprocess). Enabling one costs ~300 MB (transformers import,
+  process-lifetime) + the weights themselves (~36 MB fp32 for
+  `chronos-bolt-tiny`, ~4-20 MB for TTM). Image size grows ~310 MB on
+  aarch64/amd64 (transformers 119 MB + pyarrow 153 MB via
+  granite-tsfm's `datasets` dependency + tooling); armv7 is excluded
+  and unchanged.
 
 Also in this release:
 
