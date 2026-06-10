@@ -195,48 +195,60 @@ async def main():
         await app.run()
 
     except ImportError as e:
-        logger.error(f"Failed to import main application: {e}", exc_info=True)
-        logger.info("Running in stub mode with basic HTTP server...")
-        await stub_server()
+        # Do NOT pretend to be healthy here. The stub exists so the
+        # container keeps serving HTTP (HA's watchdog would otherwise
+        # restart-loop it faster than a user can read the log), but a
+        # broken install must be loudly visible — before v2.41.0 the
+        # stub reported status=healthy and the only symptom was sensors
+        # quietly going stale (audit F12).
+        logger.critical(
+            f"Failed to import main application — the add-on is NOT "
+            f"functional. Forecasting, training and the web UI are all "
+            f"disabled. Root cause: {e}",
+            exc_info=True,
+        )
+        await stub_server(import_error=str(e))
 
 
-async def stub_server():
+async def stub_server(import_error: str = ""):
     """
-    Stub HTTP server for initial development and testing.
-    Provides a basic endpoint for health checks.
+    Degraded-mode HTTP server, reached only when the real application
+    failed to import. Reports 500/degraded on every endpoint so HA
+    watchdogs and users see the failure instead of a healthy-looking
+    add-on that silently does nothing (audit F12).
     """
     from fastapi import FastAPI
+    from fastapi.responses import JSONResponse
     from uvicorn import Config, Server
 
     from ml_forecast_lab import __version__ as APP_VERSION
 
     app = FastAPI(
-        title="ML Forecast Lab",
-        description="Multi-model ML forecasting system",
+        title="ML Forecast Lab (DEGRADED)",
+        description="Multi-model ML forecasting system — import failure",
         version=APP_VERSION,
     )
 
+    payload = {
+        "status": "degraded",
+        "service": "ml-forecast-lab",
+        "version": APP_VERSION,
+        "error": (
+            "The main application failed to import; forecasting, "
+            "training and the web UI are disabled. Check the add-on "
+            f"log for the traceback. Import error: {import_error}"
+        ),
+    }
+
     @app.get("/health")
     async def health():
-        """Health check endpoint."""
-        return {
-            "status": "healthy",
-            "service": "ml-forecast-lab",
-            "version": APP_VERSION,
-        }
+        """Health check endpoint — degraded, not healthy."""
+        return JSONResponse(content=payload, status_code=500)
 
     @app.get("/")
     async def root():
         """Root endpoint."""
-        return {
-            "name": "ML Forecast Lab",
-            "version": APP_VERSION,
-            "description": "Multi-model ML forecasting and benchmarking system",
-            "endpoints": {
-                "health": "/health",
-                "api": "/api",
-            },
-        }
+        return JSONResponse(content=payload, status_code=500)
 
     config = Config(
         app=app,

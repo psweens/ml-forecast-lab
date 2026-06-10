@@ -43,7 +43,6 @@ PROMOTED_XGBOOST_YAML = textwrap.dedent(
         publish_prefix: "mlfl_"
         publish_name: "smoke_demand"
         units: "%"
-        output_units: "%"
         country: "GB"
     """
 )

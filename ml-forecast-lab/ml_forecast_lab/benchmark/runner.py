@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from ml_forecast_lab.models.base import ForecastModel
+from ml_forecast_lab.models.base import ForecastModel, TrainingCancelled
 
 from .metrics import MetricRegistry, get_metric_registry
 
@@ -345,6 +345,7 @@ class BenchmarkRunner:
         fold_indices: List[Tuple[np.ndarray, np.ndarray]],
         epoch_callback: Any = None,
         precomputed_sequences: dict = None,
+        cancel_event: Any = None,
     ) -> ModelResult:
         """
         Run a single model across all CV folds.
@@ -366,7 +367,27 @@ class BenchmarkRunner:
         model_result = ModelResult(model_name=model.name)
         n_folds = len(fold_indices)
 
+        # Wrap the caller's epoch callback so a set cancel_event raises
+        # TrainingCancelled from inside the backend's epoch loop —
+        # _emit_epoch re-raises it and fit() unwinds at the next epoch
+        # boundary. This is the only way to stop an executor thread
+        # that asyncio.Task.cancel() cannot reach (audit F10).
+        if cancel_event is not None:
+            _user_cb = epoch_callback
+
+            def epoch_callback(**cb_data):  # noqa: F811 — deliberate shadow
+                if cancel_event.is_set():
+                    raise TrainingCancelled(
+                        f'{model.name}: cancelled via stop-training'
+                    )
+                if _user_cb is not None:
+                    _user_cb(**cb_data)
+
         for fold_idx, (train_idx, test_idx) in enumerate(fold_indices):
+            if cancel_event is not None and cancel_event.is_set():
+                raise TrainingCancelled(
+                    f'{model.name}: cancelled before fold {fold_idx + 1}'
+                )
             fold_start_time = time.time()
             logger.info(
                 f'  [fold {fold_idx + 1}/{n_folds}] {model.name}: '
@@ -419,7 +440,10 @@ class BenchmarkRunner:
 
             # Generate time-decay sample weights (exponential recency weighting)
             n_train_samples = len(y_train)
-            half_life_days = self.experiment_cfg.get('recency_half_life_days', 7.0)
+            # Fallback matches the ExperimentCfg default (0.0 = disabled);
+            # a 7.0 fallback here silently enabled recency weighting for
+            # any caller building a partial cfg dict (audit F18).
+            half_life_days = self.experiment_cfg.get('recency_half_life_days', 0.0)
             if half_life_days > 0:
                 interval_min = self.experiment_cfg.get('interval_minutes', 30)
                 half_life = max(1, half_life_days * (24 * 60 / interval_min))
@@ -516,6 +540,10 @@ class BenchmarkRunner:
                           sample_weight=sample_weights,
                           epoch_callback=fold_cb,
                           **sequence_kwargs)
+            except TrainingCancelled:
+                # Not a model failure — propagate so the orchestrator
+                # stops the whole run instead of moving to the next fold.
+                raise
             except Exception as e:
                 logger.error(
                     f'Model training failed for model={model.name} fold={fold_idx + 1}/{len(fold_indices)}: {e}',

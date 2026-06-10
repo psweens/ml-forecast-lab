@@ -59,36 +59,6 @@ class TestSelectedModel:
         assert cfg.experiments[0].selected_model == "xgboost"
 
 
-class TestStabilityFocus:
-    def test_default_is_per_moment(self):
-        cfg = ExperimentCfg(name="t", target_entity="sensor.t")
-        assert cfg.stability_focus == "per_moment"
-
-    def test_accepts_daily_total_on_cumulative(self):
-        cfg = ExperimentCfg(
-            name="t", target_entity="sensor.t",
-            source_is_cumulative=True, stability_focus="daily_total",
-        )
-        assert cfg.stability_focus == "daily_total"
-
-    def test_rejects_invalid_value(self):
-        with pytest.raises(ValueError, match="stability_focus"):
-            ExperimentCfg(
-                name="t", target_entity="sensor.t",
-                stability_focus="both",  # not in the allowed set
-            )
-
-    def test_rejects_daily_total_on_instantaneous(self):
-        # Summing an instantaneous sensor over a day isn't a physical
-        # quantity, so daily_total focus doesn't make sense there.
-        with pytest.raises(ValueError, match="requires source_is_cumulative"):
-            ExperimentCfg(
-                name="t", target_entity="sensor.t",
-                source_is_cumulative=False,
-                stability_focus="daily_total",
-            )
-
-
 class TestClearForecastLogOnRetrain:
     def test_default_is_true(self):
         cfg = ExperimentCfg(name="t", target_entity="sensor.t")

@@ -56,7 +56,6 @@ MULTI_ROW_WEATHER_YAML = textwrap.dedent(
         publish_prefix: "mlfl_"
         publish_name: "smoke_demand"
         units: "C"
-        output_units: "C"
         country: "GB"
     """
 )

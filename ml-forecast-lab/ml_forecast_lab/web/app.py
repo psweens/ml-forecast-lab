@@ -1172,17 +1172,16 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         models_list = MODEL_CATALOG
 
-        # Load enabled models and overrides from config
-        models_enabled = []
+        # Load model overrides from config. (A models_enabled read —
+        # taken from the FIRST experiment only — used to live here too,
+        # but the template never referenced it; per-experiment toggles
+        # live on the experiment page. Removed in v2.41.0, audit F17.)
         model_overrides = {}
         config_path = _find_config_path()
         if config_path:
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
                     yaml_data = yaml.safe_load(f) or {}
-                exps = yaml_data.get("experiments", [])
-                if exps:
-                    models_enabled = exps[0].get("models_enabled", [])
                 model_overrides = yaml_data.get("model_overrides", {})
             except Exception:
                 pass
@@ -1196,7 +1195,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "active_page": "models",
                 "version": APP_VERSION,
                 "models": models_list,
-                "models_enabled": models_enabled,
                 "model_overrides": model_overrides,
                 "param_schema": MODEL_PARAM_SCHEMA,
             },
@@ -1326,7 +1324,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         exp_status = app.state.appstate.experiment_statuses[name]
         benchmark_result = app.state.appstate.benchmark_results.get(name)
-        forecast_data = app.state.appstate.forecast_data.get(name)
         lab_forecast = app.state.appstate.lab_forecast_data.get(name)
         feature_imps = app.state.appstate.feature_importances.get(name, [])
         covariate_analysis = app.state.appstate.covariate_analysis_results.get(name)
@@ -1334,17 +1331,12 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         # Embed training event history so the page can restore live
         # progress without a separate fetch (same pattern as training_page).
-        from ml_forecast_lab.training_events import TrainingEventBus, summarise_history
+        from ml_forecast_lab.training_events import TrainingEventBus
         embedded_history: Dict[str, list] = {}
         event_bus = TrainingEventBus.get_instance()
         exp_history = event_bus.get_history(name)
         if exp_history:
             embedded_history[name] = [ev.to_dict() for ev in exp_history]
-
-        # Build a lightweight training summary for the header bar
-        training_summary: Optional[Dict] = None
-        if is_running and exp_history:
-            training_summary = summarise_history(exp_history)
 
         # Get units, per-experiment models_enabled, and full config from config
         units = ""
@@ -1373,7 +1365,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "version": APP_VERSION,
                 "experiment": exp_status,
                 "benchmark_result": benchmark_result,
-                "forecast_data": forecast_data,
                 "lab_forecast": lab_forecast,
                 "feature_importances": feature_imps,
                 "is_running": is_running,
@@ -1392,7 +1383,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "units": units,
                 "models_json": [m.model_dump() for m in (benchmark_result.models if benchmark_result else [])],
                 "embedded_history": embedded_history,
-                "training_summary": training_summary,
                 "model_catalog": MODEL_CATALOG,
                 "exp_models_enabled": exp_models_enabled,
                 "exp_config": exp_config,

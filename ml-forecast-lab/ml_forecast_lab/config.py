@@ -290,9 +290,6 @@ class ExperimentCfg:
     )
     """Standard metrics to compute."""
 
-    custom_metrics: Optional[Dict[str, str]] = None
-    """Custom metrics as {name: 'Python expression'} using y_true, y_pred."""
-
     production_model: Optional[str] = None
     """Which model to use in production; if None, auto-select best by production_metric."""
 
@@ -321,9 +318,6 @@ class ExperimentCfg:
 
     units: str = ''
     """Units of the target variable (e.g. 'kWh', 'W', 'L')."""
-
-    output_units: Optional[str] = None
-    """Optional units for output; if different from input, a conversion is applied."""
 
     log_transform: bool = False
     """Whether to apply log transform to target before modelling."""
@@ -374,26 +368,6 @@ class ExperimentCfg:
     to dataset-level channel stats + the zscore denormalisation path, if you
     need published-parity with papers that explicitly disable RevIN."""
 
-    future_covariate_features: List[str] = field(default_factory=list)
-    """Feature names (as they appear in the engineered feature matrix) that
-    contain KNOWN-FUTURE values for each forecast horizon step.
-
-    Currently only consumed by the TiDE backend's temporal-decoder path
-    (Das et al. 2023): if this list is non-empty AND the runner supplies
-    a ``future_covariates`` array at fit time, TiDE routes the named
-    features through a feature-projection block and combines them with the
-    decoder state per horizon step via the paper's temporal decoder.
-
-    Typical contents for forecasting use cases:
-    - Calendar features: hour-of-day, day-of-week, day-of-year, holiday flag
-    - Externally-forecast weather: Solcast GHI (p10/p50/p90), Open-Meteo
-      temperature / cloud cover / wind
-    - Known-future schedule: EV charging plan, occupancy calendar
-
-    Do NOT include lags of the target, rolling stats, or any feature
-    derived from the true future value — the whole point is that these
-    values are knowable at forecast-issue time without peeking."""
-
     subtract: List[str] = field(default_factory=list)
     """DEPRECATED stub — prefer ``load_subtract`` with per-sensor config.
 
@@ -433,24 +407,6 @@ class ExperimentCfg:
     pattern. Clearing pre-retrain rows keeps the metric honest. Set to
     False if you want to preserve the full history for offline analysis
     and are willing to read the stability chart with that in mind."""
-
-    stability_focus: str = 'per_moment'
-    """Which stability metric drives the Forecast Accuracy verdict chip.
-
-    - ``per_moment`` (default): chip reads median cross-cycle CV of
-      predictions at the same target moment. Right when the downstream
-      consumer cares about *when* demand hits (HVAC setpoints, pre-heat
-      timing, battery dispatch).
-    - ``daily_total``: chip reads median cross-cycle CV of daily-total
-      predictions (cumulative sensors only). Right when the downstream
-      consumer only integrates over the day — e.g. a tank-heating
-      automation deciding how much energy to dispatch, EV daily charging
-      budget, solar-export daily planning. For those use cases a
-      ±50% per-moment swing may be fine as long as the daily total is
-      stable, so reporting per-moment "poor" gives the wrong verdict.
-
-    The Layer 3 accordion still shows both metrics regardless; only
-    the Layer 1 chip and headline follow this setting."""
 
     max_age: int = 365
     """Maximum days to keep in SQLite cache."""
@@ -677,18 +633,6 @@ class ExperimentCfg:
             raise ValueError(
                 f'cv_strategy must be one of {valid_cv}, got {self.cv_strategy!r}'
             )
-        valid_stability = {'per_moment', 'daily_total'}
-        if self.stability_focus not in valid_stability:
-            raise ValueError(
-                f'stability_focus must be one of {valid_stability}, '
-                f'got {self.stability_focus!r}'
-            )
-        if self.stability_focus == 'daily_total' and not self.source_is_cumulative:
-            # Daily-total CV isn't meaningful for instantaneous sensors —
-            # summing them over a day doesn't produce a physical quantity.
-            raise ValueError(
-                "stability_focus='daily_total' requires source_is_cumulative=True"
-            )
         if self.cv_folds < 2:
             raise ValueError(f'cv_folds must be >= 2, got {self.cv_folds}')
         if self.cv_folds > 20:
@@ -797,6 +741,19 @@ class AppConfig:
             logger.warning('No experiments configured')
 
 
+# Experiment-level YAML keys that older configs may carry but the code
+# no longer reads. load_config strips them (with a log line) and
+# rewrites the YAML so they don't linger as silent no-ops.
+_DEPRECATED_EXPERIMENT_FIELDS = (
+    'horizons_minutes',
+    'database',
+    'output_units',
+    'custom_metrics',
+    'stability_focus',
+    'future_covariate_features',
+)
+
+
 def load_config(config_path: Path | str) -> AppConfig:
     """
     Load application configuration from a YAML file.
@@ -882,18 +839,17 @@ def load_config(config_path: Path | str) -> AppConfig:
         exp_name_for_err = exp_data.get('name', '<unnamed>') if isinstance(exp_data, dict) else '?'
 
         try:
-            # Migration: silently remove deprecated fields
-            if 'horizons_minutes' in exp_data:
-                exp_data.pop('horizons_minutes')
-                _needs_migrate = True
-            # v2.33.1: `database` removed. Actuals are cached
-            # unconditionally now; the flag was a foot-gun (off → entire
-            # Forecast Accuracy view silently broken). Old yamls carrying
-            # either `database: true` or `database: false` are auto-cleaned
-            # below; the field is no longer consulted at runtime.
-            if 'database' in exp_data:
-                exp_data.pop('database')
-                _needs_migrate = True
+            # Migration: silently remove deprecated fields.
+            # 'database' removed in v2.33.1 (actuals always cached);
+            # 'output_units', 'custom_metrics', 'stability_focus' and
+            # 'future_covariate_features' removed in v2.41.0 — they were
+            # parsed (and 'output_units' even shipped in the example
+            # YAML) but consumed by nothing, silently absorbing
+            # misconfiguration (audit F11).
+            for _deprecated in _DEPRECATED_EXPERIMENT_FIELDS:
+                if _deprecated in exp_data:
+                    exp_data.pop(_deprecated)
+                    _needs_migrate = True
 
             # Parse covariates
             covariates_data = exp_data.pop('covariates', [])
@@ -988,7 +944,7 @@ def load_config(config_path: Path | str) -> AppConfig:
             removed: list = []
             for exp in raw.get('experiments', []):
                 if isinstance(exp, dict):
-                    for fld in ('horizons_minutes', 'database'):
+                    for fld in _DEPRECATED_EXPERIMENT_FIELDS:
                         if exp.pop(fld, None) is not None and fld not in removed:
                             removed.append(fld)
             atomic_yaml_write(config_path, raw)
