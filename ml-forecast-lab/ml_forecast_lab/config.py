@@ -456,52 +456,6 @@ class ExperimentCfg:
     is purely in how weight decay composes with the adaptive update. Ignored
     by tree models."""
 
-    daily_loss_weight: float = 0.0
-    """v2.40.14 DEPRECATED — kept on the model only so existing YAML
-    configs continue to load. The underlying cumulative-trajectory loss
-    term was removed (see CHANGELOG): measured to hurt the daily total
-    in both sparse-demand and smooth-cumulative regimes, with a
-    structural gradient asymmetry that systematically biased the model
-    toward under-prediction at early horizon steps. Setting this field
-    no longer affects training.
-
-    Historical description below for context; ignore for new experiments.
-
-    Original: Weight λ for the cumulative-trajectory loss term added
-    to the per-interval loss during neural training. 0.0 disables
-    (interval loss only — default).
-
-    The daily term penalised error in the cumulative forecast curve at
-    every horizon step (not just the endpoint), so the SHAPE of the
-    predicted cumulative trajectory had to match the actual cumulative
-    trajectory. With ``future_periods=48`` and ``interval_minutes=30``
-    this is the 24 h daily-cumulative curve, directly aligned with
-    what users evaluate on cumulative-origin targets such as
-    ``sensor.energy_today`` or daily
-    energy-usage sensors.
-
-    History: v2.16 used a mean-over-horizons constraint (just the endpoint).
-    v2.18 replaced it with the trajectory formulation above after experiments
-    on a daily-cumulative demand target showed the mean-only version was too
-    weak to affect training measurably — the mean is already matched by any
-    unbiased model, regardless of the curve shape.
-
-    Applied to torch neural backends only; silently ignored by tree models.
-
-    v2.40.14: SETTING THIS FIELD HAS NO EFFECT. Retained on the model
-    only so existing YAML configs load without error."""
-
-    loss_balance: Optional[float] = None
-    """v2.40.14 DEPRECATED — kept on the model only so existing YAML
-    configs continue to load. The convex-blend cumulative-loss path
-    was removed (see CHANGELOG): the harness measured the slider as a
-    cliff (any α>0 → 50-95% daily-MAE degradation, flat across the
-    α∈[0.1, 1.0] range) on BOTH sparse-demand and smooth-cumulative
-    targets, with the same gradient-asymmetry mechanism identified in
-    ``_cumulative_trajectory_loss``. Faster EMA decay softened the
-    cliff but did not remove it. Setting this field no longer affects
-    training."""
-
     recency_half_life_days: float = 0.0
     """Half-life for exponential recency weighting in days. ``0`` (default,
     post-audit) gives uniform sample weight — the right choice for the
@@ -612,15 +566,6 @@ class ExperimentCfg:
     forecasting — turns the problem into predicting cloud-cover-driven attenuation
     rather than raw generation."""
 
-    @property
-    def effective_loss_balance(self) -> float:
-        """v2.40.14: always 0.0 — the cumulative loss path is gone.
-
-        Retained as a property so any caller / template that still
-        references it gets a safe value rather than an AttributeError.
-        """
-        return 0.0
-
     def __post_init__(self) -> None:
         """Validate configuration."""
         valid_modes = {'lab', 'production'}
@@ -657,17 +602,6 @@ class ExperimentCfg:
         if self.recency_half_life_days < 0:
             raise ValueError(
                 f'recency_half_life_days must be >= 0, got {self.recency_half_life_days}'
-            )
-        # v2.40.14: daily_loss_weight and loss_balance kept on the model
-        # for YAML backwards-compat but are no-ops. Bounds validation
-        # retained so a typo still surfaces at load.
-        if self.daily_loss_weight < 0:
-            raise ValueError(
-                f'daily_loss_weight must be >= 0, got {self.daily_loss_weight}'
-            )
-        if self.loss_balance is not None and not (0.0 <= self.loss_balance <= 1.0):
-            raise ValueError(
-                f'loss_balance must be in [0, 1] or None, got {self.loss_balance}'
             )
         valid_optimisers = {'adam', 'adamw'}
         if self.optimiser not in valid_optimisers:
@@ -751,6 +685,11 @@ _DEPRECATED_EXPERIMENT_FIELDS = (
     'custom_metrics',
     'stability_focus',
     'future_covariate_features',
+    # v2.41.0: the cumulative-trajectory loss was removed in v2.40.14;
+    # these knobs were retained as silently-ignored no-ops. Now they
+    # are stripped from YAML on load like every other dead field.
+    'daily_loss_weight',
+    'loss_balance',
 )
 
 

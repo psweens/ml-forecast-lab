@@ -530,8 +530,7 @@ class TestEarlyStopStep:
 
 class TestApplyPatience:
     """v2.40.12: ``_apply_patience`` plumbs the per-experiment Setting
-    onto a backend's ``self.patience`` attribute, mirroring the
-    ``_apply_loss_balance`` pattern. Called from every training-setup
+    onto a backend's ``self.patience`` attribute. Called from every training-setup
     site (benchmark CV, holdout, production retrain, tuning) so
     backend default asymmetries (20 neural vs 50 tree) collapse to
     one uniform value when the user sets it."""

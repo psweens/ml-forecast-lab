@@ -79,14 +79,6 @@ class _FakeExpCfg:
         self.reset_daily = False
         self.log_transform = True
         self.output_activation = "auto"
-        # v2.40.14: was 0.25 to exercise the legacy additive cumulative-
-        # loss path (`L = L_interval + λ·L_cumulative`). That path was
-        # removed in v2.40.14 after the loss-comparison harness
-        # measured it as net-harmful for daily-total accuracy on both
-        # sparse-demand and smooth-cumulative regimes. Real production
-        # ran `loss_balance=0` which already short-circuited to pure
-        # interval — so `0.0` here matches what actual experiments saw.
-        self.daily_loss_weight = 0.0
         self.optimiser = "adam"
         self.loss_fn = "huber"
         self.interval_minutes = 30
@@ -163,8 +155,6 @@ def _train_extended_window_nlinear(
     # (conditional median) preserves the daily amplitude.
     if hasattr(model, 'loss_fn'):
         model.set_params(loss_fn=exp_cfg.loss_fn)
-    if hasattr(model, 'daily_loss_weight'):
-        model.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
     if hasattr(model, 'optimiser'):
         model.set_params(optimiser=exp_cfg.optimiser)
 

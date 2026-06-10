@@ -336,29 +336,6 @@ def _collect_train_future_covariates(
     return out
 
 
-def _resolve_daily_loss_weight(exp_cfg) -> float:
-    """
-    Resolve the effective ``daily_loss_weight`` for a neural model.
-
-    PF9 (v2.37): when the user leaves ``daily_loss_weight=0.0`` (the default)
-    but the target is non-negative (cumulative or explicitly flagged), apply
-    a moderate weight of 0.5 by default. The cumulative-trajectory loss term
-    is the most effective remaining lever against the residual amplitude
-    compression on linear-head backends after PF1+PF7 (see
-    ``docs/investigations/2026-05-neural-pv.md``).
-
-    An explicitly non-zero user value is honoured as-is.
-    """
-    user_value = float(getattr(exp_cfg, 'daily_loss_weight', 0.0))
-    if user_value > 0:
-        return user_value
-    is_nonneg = (
-        getattr(exp_cfg, 'source_is_cumulative', False)
-        or getattr(exp_cfg, 'target_is_nonnegative', False)
-    )
-    return 0.5 if is_nonneg else 0.0
-
-
 def _holdout_display_from_windows(y_p: 'np.ndarray', target_len: int) -> 'np.ndarray':
     """Build a full-length per-point holdout display series from a windowed
     multi-horizon prediction array.
@@ -415,34 +392,18 @@ def _apply_patience(model, exp_cfg, overrides=None) -> None:
     model.patience = int(p)
 
 
-def _apply_loss_balance(model, exp_cfg, overrides=None) -> None:
-    """v2.40.14: no-op stub. The cumulative-loss path was removed (see
-    ``ForecastModel._composite_horizon_loss`` and CHANGELOG). The five
-    historical call sites in this file still call it so YAML
-    backwards-compat keeps working; the function pins
-    ``model.loss_balance = 0`` and ``model._loss_ema = None`` only as
-    defensive housekeeping in case a model object carries stale
-    attributes from a checkpoint."""
-    if not getattr(model, 'is_neural', False):
-        return
-    if hasattr(model, 'loss_balance'):
-        model.loss_balance = 0.0
-    if hasattr(model, '_loss_ema'):
-        model._loss_ema = None
-
-
 def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
     """
     Propagate experiment-level neural training settings to a model.
 
-    Currently propagates ``loss_fn``, ``daily_loss_weight``, and
-    ``optimiser`` from ``exp_cfg`` so every code path that instantiates a
+    Currently propagates ``loss_fn`` and ``optimiser`` from ``exp_cfg``
+    so every code path that instantiates a
     neural model (benchmark CV, production training, Tuning trials,
     holdout refits, Covariate Analysis) honours the user's Settings
     selection — not just the main CV loop. Without this helper, secondary
     paths would silently train with the backend's default ``loss_fn='mse'``
-    / ``optimiser='adamw'`` / ``daily_loss_weight=0`` regardless of what
-    the user picked in Settings.
+    / ``optimiser='adamw'`` regardless of what the user picked in
+    Settings.
 
     Silently no-ops for tree backends (``hasattr`` guard).
     Skips any param already present in ``overrides`` so user-provided
@@ -462,15 +423,10 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
     if not getattr(model, 'is_neural', False):
         return
     overrides = overrides or {}
-    for attr in ('loss_fn', 'daily_loss_weight', 'optimiser'):
+    for attr in ('loss_fn', 'optimiser'):
         if attr in overrides:
             continue
-        # PF9: daily_loss_weight goes through the resolver so non-negative
-        # targets default to 0.5 even when the user hasn't explicitly set it.
-        if attr == 'daily_loss_weight':
-            value = _resolve_daily_loss_weight(exp_cfg)
-        else:
-            value = getattr(exp_cfg, attr, None)
+        value = getattr(exp_cfg, attr, None)
         if value is None:
             continue
         if not hasattr(model, attr):
@@ -482,9 +438,6 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
             # migrated) — silently skip rather than break the whole run.
             pass
 
-    # Interval↔cumulative loss balance — centralised in one helper so every
-    # training path applies it identically (see _apply_loss_balance).
-    _apply_loss_balance(model, exp_cfg, overrides)
     _apply_patience(model, exp_cfg, overrides)
 
 
@@ -2822,10 +2775,6 @@ class MLForecastLabApp:
                         # gracefully on a mixed-backend benchmark.
                         user_loss = 'huber'
                     m.set_params(loss_fn=user_loss)
-                if (m.is_neural and hasattr(m, 'daily_loss_weight')
-                        and 'daily_loss_weight' not in overrides):
-                    m.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
-                _apply_loss_balance(m, exp_cfg, overrides)
                 _apply_patience(m, exp_cfg, overrides)
                 if (m.is_neural and hasattr(m, 'optimiser')
                         and 'optimiser' not in overrides):
@@ -2930,6 +2879,50 @@ class MLForecastLabApp:
         cancel_ev = threading.Event()
         self._cancel_events[exp_cfg.name] = cancel_ev
 
+        # v2.41.0 (audit F8): build the SAME future-known feature frame
+        # production training uses (_retrain_and_cache) and pass it into
+        # every CV fold, so the leaderboard ranks the extended-window
+        # architecture that actually ships. Deterministic columns
+        # (temporal, solar) are exact; user future-covariates use
+        # in-sample observed values — identical to the production
+        # training side, and equally optimistic for every backend, so
+        # relative ranking is preserved. (Inference-side production uses
+        # HA forecasts for those channels; CV cannot, short of storing
+        # historical forecast snapshots.)
+        bench_future_features_df = None
+        try:
+            from ml_forecast_lab.features import compute_known_future_features
+            _engineered_bench = {
+                'hour_of_day', 'day_of_week', 'is_weekend', 'month',
+                'day_of_month', 'hour_sin', 'hour_cos', 'dow_sin',
+                'dow_cos', 'is_holiday',
+            }
+            _engineered_bench.update(
+                c for c in combined.columns if c.startswith('y_lag_')
+            )
+            _raw_cov_bench = [
+                c for c in combined.columns
+                if c not in _engineered_bench and c != 'target'
+            ]
+            _loc = await self._get_site_location()
+            _future_cov_bench = _collect_train_future_covariates(
+                combined, exp_cfg,
+            )
+            bench_future_features_df = compute_known_future_features(
+                combined.index,
+                add_temporal=True,
+                country=getattr(exp_cfg, 'country', None),
+                solar_lat_lon=_loc if _loc is not None else None,
+                include_sun_elevation='sun_elevation' in _raw_cov_bench,
+                include_clear_sky_ghi='clear_sky_ghi' in _raw_cov_bench,
+                future_covariate_values=_future_cov_bench or None,
+            )
+        except Exception as _e:
+            logger.warning(
+                f"  Benchmark future-feature build failed — CV falls "
+                f"back to past-only windows: {_e}"
+            )
+
         # Set up live training event bus
         event_bus = TrainingEventBus.get_instance()
         event_bus.clear_history(exp_cfg.name)
@@ -2983,6 +2976,7 @@ class MLForecastLabApp:
                     None, lambda: runner.run_single_model(
                         combined, model, fold_indices, epoch_callback=epoch_cb,
                         cancel_event=cancel_ev,
+                        future_features_df=bench_future_features_df,
                     )
                 )
             except TrainingCancelled:
@@ -2992,6 +2986,12 @@ class MLForecastLabApp:
                 )
                 break
             completed_models[model_name] = model_result
+            # Release the trained model — its metrics/predictions are
+            # captured in model_result, and the holdout chart re-fits
+            # fresh instances. Keeping every trained backend referenced
+            # until the run ends made peak RSS the SUM of all trained
+            # models on a 20+-model benchmark (audit F13).
+            models[model_name] = None
 
             event_bus.publish(TrainingEvent(
                 event_type="model_end",
@@ -3198,10 +3198,6 @@ class MLForecastLabApp:
                     overrides = self.config.model_overrides.get(m_name, {})
                     if m.is_neural and hasattr(m, 'loss_fn') and 'loss_fn' not in overrides:
                         m.set_params(loss_fn=exp_cfg.loss_fn)
-                    if (m.is_neural and hasattr(m, 'daily_loss_weight')
-                            and 'daily_loss_weight' not in overrides):
-                        m.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
-                    _apply_loss_balance(m, exp_cfg, overrides)
                     _apply_patience(m, exp_cfg, overrides)
                     if (m.is_neural and hasattr(m, 'optimiser')
                             and 'optimiser' not in overrides):
@@ -3580,10 +3576,6 @@ class MLForecastLabApp:
         overrides = self.config.model_overrides.get(prod_model_name, {})
         if model.is_neural and hasattr(model, 'loss_fn') and 'loss_fn' not in overrides:
             model.set_params(loss_fn=exp_cfg.loss_fn)
-        if (model.is_neural and hasattr(model, 'daily_loss_weight')
-                and 'daily_loss_weight' not in overrides):
-            model.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
-        _apply_loss_balance(model, exp_cfg, overrides)
         _apply_patience(model, exp_cfg, overrides)
         if (model.is_neural and hasattr(model, 'optimiser')
                 and 'optimiser' not in overrides):
@@ -4292,10 +4284,6 @@ class MLForecastLabApp:
             overrides.update(exp_params)
         if model.is_neural and hasattr(model, 'loss_fn') and 'loss_fn' not in overrides:
             model.set_params(loss_fn=exp_cfg.loss_fn)
-        if (model.is_neural and hasattr(model, 'daily_loss_weight')
-                and 'daily_loss_weight' not in overrides):
-            model.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
-        _apply_loss_balance(model, exp_cfg, overrides)
         _apply_patience(model, exp_cfg, overrides)
         if (model.is_neural and hasattr(model, 'optimiser')
                 and 'optimiser' not in overrides):
@@ -4424,14 +4412,13 @@ class MLForecastLabApp:
                 # "the LSTM forecast is still flat after the v2.37 upgrade"
                 # this log line is the first place to look: it confirms
                 # whether the past_window_size / extended_window /
-                # output_activation / daily_loss_weight values are what
+                # output_activation values are what
                 # the PF1-PF9 fixes expect.
                 logger.info(
                     f"  PF1-PF10 diagnostics for {prod_model_name}: "
                     f"past_window_size={seq_kwargs.get('past_window_size')}, "
                     f"extended_window={seq_kwargs.get('extended_window')}, "
                     f"output_activation={getattr(model, 'output_activation', '<n/a>')}, "
-                    f"daily_loss_weight={getattr(model, 'daily_loss_weight', '<n/a>')}, "
                     f"use_revin={getattr(model, 'use_revin', '<n/a>')}, "
                     f"learning_rate={getattr(model, 'learning_rate', getattr(model, 'lr', '<n/a>'))}, "
                     f"optimiser={getattr(exp_cfg, 'optimiser', '<n/a>')}, "
@@ -6966,7 +6953,7 @@ class MLForecastLabApp:
                     if 'output_activation' not in overrides:
                         _apply_output_activation(model, exp_cfg)
                     # Honour Settings-level neural params (loss_fn,
-                    # daily_loss_weight, optimiser) so covariate analysis
+                    # optimiser) so covariate analysis
                     # minimises the SAME objective as the main benchmark.
                     _apply_experiment_neural_params(model, exp_cfg, overrides=overrides)
 

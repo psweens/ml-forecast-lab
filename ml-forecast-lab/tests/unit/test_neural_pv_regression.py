@@ -384,36 +384,6 @@ def test_pf7_tsmixer_head_input_dim_drops_future_target_slots():
     assert net_legacy.head.in_features == seq_len * n_channels
 
 
-def test_pf9_daily_loss_weight_resolves_to_half_on_nonneg_target():
-    """PF9: daily_loss_weight defaults to 0.5 for non-negative neural
-    targets when the user leaves it at 0.0. Explicit non-zero is
-    honoured as-is. Signed targets stay at 0.0.
-    """
-    from dataclasses import dataclass
-    from ml_forecast_lab.main import _resolve_daily_loss_weight
-
-    @dataclass
-    class _Fake:
-        daily_loss_weight: float = 0.0
-        source_is_cumulative: bool = False
-        target_is_nonnegative: bool = False
-
-    # Signed default — stays 0 (no implicit weight).
-    assert _resolve_daily_loss_weight(_Fake()) == 0.0
-    # source_is_cumulative → 0.5
-    assert _resolve_daily_loss_weight(
-        _Fake(source_is_cumulative=True)
-    ) == 0.5
-    # target_is_nonnegative → 0.5
-    assert _resolve_daily_loss_weight(
-        _Fake(target_is_nonnegative=True)
-    ) == 0.5
-    # Explicit user value wins.
-    assert _resolve_daily_loss_weight(
-        _Fake(daily_loss_weight=1.5, target_is_nonnegative=True)
-    ) == 1.5
-
-
 def test_cumulative_daily_reset_dataset_invariants():
     """Sanity check that the cumulative-with-daily-reset synthetic data
     has the structure we test against (used by run_cumulative_check.py).
@@ -455,36 +425,25 @@ def test_cumulative_daily_reset_dataset_invariants():
         break  # one day is enough
 
 
-def test_pf8_pf9_resolve_together_for_source_is_cumulative():
-    """Cumulative-with-daily-reset is the canonical PF8/PF9 case.
-
-    ExperimentCfg.source_is_cumulative=True should trigger both PF8
-    (softplus) and PF9 (daily_loss_weight=0.5) defaults via the auto
-    resolvers.
-    """
+def test_activation_resolution_for_source_is_cumulative():
+    """Cumulative-with-daily-reset activation resolution (v2.41.0:
+    'linear' for non-LSTM backends — the publish-time clamp owns the
+    non-negativity contract. The PF9 daily_loss_weight resolver was
+    removed along with the cumulative-loss plumbing)."""
     from dataclasses import dataclass
-    from ml_forecast_lab.main import (
-        _resolve_output_activation, _resolve_daily_loss_weight,
-    )
+    from ml_forecast_lab.main import _resolve_output_activation
 
     @dataclass
     class _Cfg:
         output_activation: str = "auto"
-        daily_loss_weight: float = 0.0
         source_is_cumulative: bool = True
         target_is_nonnegative: bool = False
 
-    # v2.41.0: cumulative → linear (publish-time clamp owns the
-    # non-negativity contract; the softplus auto-pick collapsed to flat
-    # zero with the production daily_loss_weight=0 — see
-    # _resolve_output_activation's history note).
     assert _resolve_output_activation(_Cfg(), "nlinear") == "linear"
     assert _resolve_output_activation(_Cfg(), "dlinear") == "linear"
     assert _resolve_output_activation(_Cfg(), "nbeats") == "linear"
     # LSTM still picks zscore (its specialised default)
     assert _resolve_output_activation(_Cfg(), "lstm") == "zscore"
-    # PF9: cumulative → daily_loss_weight = 0.5
-    assert _resolve_daily_loss_weight(_Cfg()) == 0.5
 
 
 def test_auto_activation_resolves_linear_regardless_of_log_transform():

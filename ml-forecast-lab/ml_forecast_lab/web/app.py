@@ -3884,15 +3884,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "production_metric": lambda v: v if v in ("mae", "rmse", "mase", "seasonal_mase") else None,
             "loss_fn": lambda v: v if v in ("mse", "mae", "huber", "tweedie") else None,
             "optimiser": lambda v: v if v in ("adamw", "adam") else None,
-            # UI sends bool (toggle); we map true→0.5, false→0.0. Raw float values
-            # (e.g. from hand-edited YAML) pass through clamped to ≥ 0 so sophisticated
-            # users can still override the default λ without UI churn.
-            "daily_loss_weight": lambda v: max(0.0, float(v)),
-            # v2.40.14: loss_balance setter retained so older clients
-            # can still POST without 4xx; value is stored on the YAML
-            # but no longer affects training (the cumulative-loss path
-            # was removed — see CHANGELOG + LOSS_COMPARISON_FINDINGS).
-            "loss_balance": lambda v: float(v) if 0.0 <= float(v) <= 1.0 else None,
+            # v2.41.0: daily_loss_weight / loss_balance validators
+            # removed. The fields were inert since v2.40.14 but the API
+            # still accepted and persisted them to YAML — exactly the
+            # silent-misconfiguration pattern audit F11 flagged. POSTs
+            # carrying them now get the standard unknown-field error.
             # v2.40.12: per-experiment early-stopping patience. null →
             # each backend uses its constructor default (20 neural, 50
             # tree). Set 1..500 to override uniformly.
@@ -3913,7 +3909,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         }
 
         # Fields where None/null means "use global default" (valid, not an error)
-        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country", "loss_balance", "patience"}
+        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country", "patience"}
 
         updates = {}
         for field, validator in editable.items():
