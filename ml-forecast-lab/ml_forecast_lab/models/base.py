@@ -371,6 +371,20 @@ class ModelResult:
         )
 
 
+class TrainingCancelled(Exception):
+    """Cooperative training-cancellation signal (audit F10).
+
+    Training runs in executor threads, which ``asyncio.Task.cancel()``
+    cannot interrupt — before v2.41.0 the Stop button cancelled the
+    coroutine while the thread kept saturating the CPU until the fit
+    finished. Cancellation now flows through the epoch callback: the
+    caller's callback raises this when its cancel event is set,
+    ``_emit_epoch`` re-raises it (unlike ordinary callback errors,
+    which are swallowed), and it propagates out of ``fit`` to the
+    caller, stopping the thread at the next epoch boundary.
+    """
+
+
 class ForecastModel(ABC):
     """
     Abstract base class for all time-series forecast models.
@@ -689,10 +703,16 @@ class ForecastModel(ABC):
         pass
 
     def _emit_epoch(self, callback: Any, **data: Any) -> None:
-        """Invoke an epoch callback if provided, swallowing any errors."""
+        """Invoke an epoch callback if provided, swallowing any errors.
+
+        ``TrainingCancelled`` is the one exception allowed through —
+        it's the cooperative stop signal, not a callback bug.
+        """
         if callback is not None:
             try:
                 callback(**data)
+            except TrainingCancelled:
+                raise
             except Exception:
                 pass  # Never let callback errors break training
 

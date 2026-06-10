@@ -112,66 +112,42 @@ class TestCompositeHorizonLossPostRemoval:
         assert yp.grad is not None and torch.isfinite(yp.grad).all().item()
 
 
-class TestEffectiveLossBalanceProperty:
-    """``ExperimentCfg.effective_loss_balance`` is retained as a
-    property so any caller / template still referencing it gets ``0.0``
-    rather than an AttributeError."""
+class TestDeprecatedYamlKeysStripped:
+    """v2.41.0: daily_loss_weight / loss_balance are no longer fields on
+    ExperimentCfg. Old YAMLs carrying them load fine — load_config strips
+    the keys (with a log line) and rewrites the file, same migration path
+    as horizons_minutes / database / output_units."""
 
-    def _cfg(self, **overrides):
-        from ml_forecast_lab.config import ExperimentCfg
-        defaults = dict(
-            name="x", target_entity="sensor.x", mode="lab",
-            interval_minutes=30, days_history=14, max_age=30,
-            future_periods=48, source_is_cumulative=False,
-            metrics=["mae"], production_metric="mae",
-        )
-        defaults.update(overrides)
-        return ExperimentCfg(**defaults)
+    def test_old_yaml_with_dead_knobs_loads_and_migrates(self, tmp_path):
+        import yaml
+        from ml_forecast_lab.config import load_config
 
-    def test_unset_returns_zero(self):
-        cfg = self._cfg()
-        assert cfg.effective_loss_balance == 0.0
+        cfg_path = tmp_path / "mlfl.yaml"
+        cfg_path.write_text(yaml.dump({
+            "timezone": "UTC",
+            "experiments": [{
+                "name": "legacy",
+                "target_entity": "sensor.t",
+                "daily_loss_weight": 0.5,
+                "loss_balance": 0.3,
+            }],
+        }))
+        cfg = load_config(cfg_path)
+        assert len(cfg.experiments) == 1
+        exp = cfg.experiments[0]
+        assert not hasattr(exp, "daily_loss_weight")
+        assert not hasattr(exp, "loss_balance")
+        # the YAML itself was rewritten without the dead keys
+        raw = yaml.safe_load(cfg_path.read_text())
+        assert "daily_loss_weight" not in raw["experiments"][0]
+        assert "loss_balance" not in raw["experiments"][0]
 
-    def test_loss_balance_set_returns_zero(self):
-        cfg = self._cfg(loss_balance=0.7)
-        assert cfg.effective_loss_balance == 0.0
-
-    def test_legacy_daily_loss_weight_set_returns_zero(self):
-        cfg = self._cfg(daily_loss_weight=2.0)
-        assert cfg.effective_loss_balance == 0.0
-
-    def test_cumulative_source_no_longer_auto_engages(self):
-        """Pre-v2.40.14 the auto-default for cumulative / non-negative
-        targets was λ = 0.5 → α ≈ 0.33. Now it's just 0.0 — the slider
-        was the trigger and the slider is gone."""
-        cfg = self._cfg(source_is_cumulative=True)
-        assert cfg.effective_loss_balance == 0.0
-
-
-class TestApplyLossBalanceStub:
-    """``_apply_loss_balance`` is retained as a defensive no-op stub —
-    pins ``model.loss_balance = 0`` and clears any stale EMA, but does
-    nothing else. The 5 call sites in main.py still call it for
-    backwards-compat with old checkpoints."""
-
-    def test_pins_loss_balance_zero_on_neural(self):
-        from ml_forecast_lab.main import _apply_loss_balance
-        from types import SimpleNamespace
-        model = _make_model()
-        model.loss_balance = 0.8       # simulate a stale value
-        model._loss_ema = {"interval": 1.0, "daily": 1.0}
-        cfg = SimpleNamespace(
-            source_is_cumulative=False, target_is_nonnegative=False,
-            daily_loss_weight=0.0, loss_balance=None,
-            effective_loss_balance=0.0,
-        )
-        _apply_loss_balance(model, cfg)
-        assert model.loss_balance == 0.0
-        assert model._loss_ema is None
-
-    def test_noop_on_tree_model(self):
-        from ml_forecast_lab.main import _apply_loss_balance
-        from types import SimpleNamespace
-        tree = SimpleNamespace(is_neural=False)
-        cfg = SimpleNamespace(effective_loss_balance=0.0)
-        _apply_loss_balance(tree, cfg)   # must not raise
+    def test_settings_api_rejects_dead_knobs(self):
+        """The /api/experiment-settings validator map must no longer
+        accept the removed fields (they used to validate + persist while
+        affecting nothing — audit F11's silent-misconfiguration shape)."""
+        import inspect
+        from ml_forecast_lab.web import app as web_app
+        src = inspect.getsource(web_app)
+        assert '"daily_loss_weight": lambda' not in src
+        assert '"loss_balance": lambda' not in src

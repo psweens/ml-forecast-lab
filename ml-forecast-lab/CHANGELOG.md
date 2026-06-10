@@ -1,5 +1,106 @@
 # Changelog
 
+## 2.41.0
+
+Fix release for the findings of the full codebase audit
+(`AUDIT_REPORT.md` at the repo root — finding IDs below refer to it).
+
+**P0 (F1): flat-zero neural forecasts on production defaults, fixed and
+now CI-gated.** With `daily_loss_weight=0` — every real deployment —
+the softplus auto-activation saturates to exactly 0 in float32 on
+zero-heavy targets (night-time PV/demand): the zero-valued half of the
+target pushes pre-activations down until gradients vanish and the
+daytime signal cannot recover. The removed cumulative-loss term had
+masked this in the old test config only; the integration suite that
+pins the user-reported collapse failed 10/10 at v2.40.14 and was not
+part of CI.
+
+- `output_activation: auto` now resolves to `linear` for all non-LSTM
+  neural backends; non-negativity is enforced by a publish-boundary
+  clamp (`target_is_nonnegative` / `source_is_cumulative`) instead of
+  a saturating activation inside the optimisation path. An explicit
+  `softplus` is still honoured.
+- NLinear gains a **seasonal-naive head initialisation**: the linear
+  head starts at the "same time yesterday" solution (steps-per-day
+  inferred from the temporal channels), so training learns corrections
+  instead of growing the daily amplitude from random init within the
+  production epoch budget.
+- CI gains an `integration` job — `tests/integration/` replays the
+  exact production train → predict → publish path and now gates
+  merges. 13/13 pass (was 3/13).
+
+**P1 (F2): conformal bands now target their nominal coverage.** For a
+symmetric band built from absolute residuals, coverage equals the
+quantile level directly; the previous `(1 − α/2)` rule (correct only
+for signed-residual two-sided bands) made nominal-80% bands realise
+~90% coverage at ~1.5× the calibrated width. Bands recalibrate
+automatically on the next publish cycle; expect visibly narrower
+bands at the same nominal level.
+
+**P1 (F3/F4): analytics SQL was O(N_forecasts × N_actuals).** The
+actuals-grid aggregation is now materialised once per call into
+indexed TEMP tables (generalising the v2.39.3 coverage fix) instead of
+a WITH-clause CTE that SQLite re-scans per forecast_log row. Measured
+on one experiment-month of forecast_log: conformal quantiles 78 s →
+93 ms, `/forecast-accuracy` 240 s → 158 ms (the frontend aborts at
+60 s — the tab could never load at volume), trajectory 10 s → 16 ms.
+The conformal query is also bounded by the forecast cutoff (it
+previously scanned the full `max_age` actuals window) and runs off the
+event loop, as do `log_forecast`, the history cache reads/writes and
+the trajectory/evolution/stability/log-stats endpoints (F9).
+`/forecast-log-stats` no longer touches a raw cursor without the DB
+lock; `cleanup_forecast_log` gained the missing `@_locked`.
+
+**P2/P3 hardening:**
+
+- F5: age-based `forecast_log` retention (120 days; the UI's largest
+  window is 90) pruned per experiment on the retrain cadence — growth
+  was previously unbounded for a stable champion.
+- F7: tuning and covariate analysis now run under the global training
+  lock ("all code paths" is true again); tune-all acquires per model
+  so scheduled retrains can interleave.
+- F8: benchmark CV now trains/evaluates the SAME extended-window
+  (past + future-known features) architecture production deploys, so
+  the leaderboard ranks what actually ships. Neural CV scores will
+  shift accordingly.
+- F10: Stop-training actually stops the training thread: a
+  cooperative `TrainingCancelled` signal flows through the epoch
+  callback and is checked at fold/epoch boundaries. Previously only
+  the coroutine was cancelled and the executor thread kept the CPU
+  saturated until the fit finished.
+- F6: `log_transform` pins shift=1 (log1p) and clips negative inputs
+  with a loud warning — inversion sites are hard-coded `expm1`, so a
+  signed target would have published systematically-offset values.
+- F12: a failed import no longer degrades to a stub that reports
+  `healthy`; it now returns 500/degraded with the import error.
+- F14: the CV test-window bridge uses the rows immediately preceding
+  the test fold (the embargo only applies to training), eliminating a
+  time discontinuity inside every bridged window.
+- F15: the post-retrain forecast reserves the per-experiment forecast
+  slot — no more duplicate publish race with the scheduler.
+- F16: `model.bin` is written atomically (tmp + rename).
+- F13: trained models are released as each benchmark finishes instead
+  of all staying resident until the run ends.
+
+**Config cleanup (F11/F18 + the v2.40.14 follow-up):**
+
+- Removed dead `ExperimentCfg` fields that were parsed but read by
+  nothing: `output_units` (was even in the example YAML),
+  `custom_metrics`, `stability_focus`, `future_covariate_features`.
+- **Removed the inert `daily_loss_weight` / `loss_balance` plumbing**
+  end to end: config fields, the PF9 resolver, the no-op
+  `_apply_loss_balance` stub and its call sites, and the settings-API
+  validators that still accepted-and-persisted the values. Old YAMLs
+  carrying any of these keys are auto-migrated (stripped with a log
+  line, file rewritten) exactly like `horizons_minutes`/`database`.
+  Backend constructor params and the ignored `daily_weight` argument
+  of `_composite_horizon_loss` are retained so saved checkpoints load
+  unchanged.
+- `recency_half_life_days` fallback in the benchmark runner aligned
+  to the config default (0.0, disabled) — a partial cfg dict used to
+  silently enable 7-day recency weighting.
+
+
 ## 2.40.14
 
 **Removed the per-interval ↔ cumulative loss-balance slider and the

@@ -114,6 +114,5 @@ experiments:
     publish_prefix: "mlfl_"
     publish_name: "household_load"
     units: "W"
-    output_units: "W"
     country: ""                     # ISO-2 country code (GB, US, DE, …) for holidays; empty = no holiday feature
     log_transform: false
