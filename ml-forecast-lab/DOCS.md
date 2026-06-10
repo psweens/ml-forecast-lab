@@ -228,8 +228,12 @@ trades the formal coverage guarantee for zero retraining cost:
   `(forecast, actual)` pairs in `forecast_log`, capped at the most
   recent 14 days.
 - **Per-lead-bucket quantile.** For the requested `conformal_coverage`
-  level (default 0.8), we take the `(1 − α/2)`-th quantile (= 90th
-  percentile for 80% bands) of `|residual|` per lead bucket.
+  level (default 0.8), we take the `level`-th quantile (= 80th
+  percentile for 80% bands) of `|residual|` per lead bucket — for an
+  absolute-residual band, coverage equals the quantile level directly.
+  (Before v2.41.0 the `(1 − α/2)` signed-residual rule was applied to
+  `|residual|`, so nominal-80% bands realised ~90% coverage and were
+  ~1.5× wider than calibrated.)
 - **Cohort filtering.** Quantiles are filtered to the current
   `(model_name, model_version)` so the band width reflects the
   champion's actual behaviour, not a previous version's. If the

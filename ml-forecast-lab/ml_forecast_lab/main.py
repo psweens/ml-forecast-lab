@@ -1691,7 +1691,12 @@ class MLForecastLabApp:
         # cost is negligible (~72 KB / experiment for a 30-day window,
         # bounded by the cleanup call below).
         if self.history_db and table_name:
-            cached_df = self.history_db.get_history(table_name)
+            # Offloaded: the DB lock may be held by a long analytics
+            # read in a worker thread; waiting for it inline would
+            # block the whole event loop (audit F9).
+            cached_df = await asyncio.to_thread(
+                self.history_db.get_history, table_name,
+            )
             if not cached_df.empty:
                 # Rename 'y' back to 'value' for consistency
                 cached_df = cached_df.rename(columns={"y": "value"})
@@ -1749,13 +1754,17 @@ class MLForecastLabApp:
         # v2.33.1: unconditional — the `exp_cfg.database` gate was
         # removed (see the matching comment on the cache-read above).
         if self.history_db and table_name:
-            inserted = self.history_db.store_history(table_name, df)
+            inserted = await asyncio.to_thread(
+                self.history_db.store_history, table_name, df,
+            )
             if inserted > 0:
                 logger.info(f"  Cached {inserted} new records in SQLite")
 
             # Cleanup old records beyond max_age
             oldest = now - timedelta(days=exp_cfg.max_age)
-            self.history_db.cleanup(table_name, oldest)
+            await asyncio.to_thread(
+                self.history_db.cleanup, table_name, oldest,
+            )
 
         # --- Carry-forward when recorder has gone quiet -------------------
         # HA's recorder dedups identical state writes, so a sensor whose
@@ -4977,7 +4986,12 @@ class MLForecastLabApp:
                 # saw "some forecast sensors aren't updating".
                 cached = self._cached_models.get(exp_cfg.name) or {}
                 current_version = cached.get("model_version")
-                cq = self.history_db.get_conformal_quantiles(
+                # Offloaded: this query joins forecast_log against the
+                # actuals grid and scales with both; running it inline
+                # froze the event loop (web UI + scheduler) for the
+                # duration of every publish cycle (audit F3).
+                cq = await asyncio.to_thread(
+                    self.history_db.get_conformal_quantiles,
                     exp_cfg.name,
                     actuals_table,
                     level=target_level,
@@ -4990,7 +5004,8 @@ class MLForecastLabApp:
                     and (cq.get("fallback_quantile") is None
                          or cq.get("total_samples", 0) < 10)
                 ):
-                    cq_all = self.history_db.get_conformal_quantiles(
+                    cq_all = await asyncio.to_thread(
+                        self.history_db.get_conformal_quantiles,
                         exp_cfg.name,
                         actuals_table,
                         level=target_level,
@@ -5079,7 +5094,8 @@ class MLForecastLabApp:
                 # retrain cycles under the same model_name.
                 cached = self._cached_models.get(exp_cfg.name) or {}
                 model_version = cached.get("model_version")
-                n_logged = self.history_db.log_forecast(
+                n_logged = await asyncio.to_thread(
+                    self.history_db.log_forecast,
                     experiment=exp_cfg.name,
                     issued_at=issued_at,
                     targets=ds_future_aware.tolist(),

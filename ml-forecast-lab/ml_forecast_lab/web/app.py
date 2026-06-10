@@ -2755,9 +2755,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         try:
             level = float(getattr(exp_cfg, 'conformal_coverage', 0.8))
             # NEW-D1.2: scale `min_samples` with the requested coverage
-            # level. The conformal quantile at level=0.8 is the 90th
-            # percentile of absolute residuals; at level=0.95 it's the
-            # 97.5th. Higher percentiles need more samples for stable
+            # level. The conformal quantile at level=0.8 is the 80th
+            # percentile of absolute residuals (v2.41.0 — see
+            # get_conformal_quantiles); at level=0.95 it's the 95th.
+            # Higher percentiles need more samples for stable
             # estimates. Rule-of-thumb: max(10, ceil(10 / (1 - level)))
             # — at level=0.8 that's 50, at level=0.95 it's 200. The
             # floor of 10 keeps backwards compatibility for the
@@ -2834,61 +2835,19 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             default_version = getattr(exp_status, "model_version", None)
 
         try:
-            cur = db.conn.cursor()
-            # Per-cohort row counts + range, newest first.
-            cur.execute(
-                """
-                SELECT model_name,
-                       COALESCE(model_version, '(null)') AS mv,
-                       COUNT(*) AS n,
-                       MIN(issued_at) AS first_issued_at,
-                       MAX(issued_at) AS last_issued_at,
-                       MAX(target_dt) AS last_target_dt
-                FROM forecast_log
-                WHERE experiment = ?
-                GROUP BY model_name, model_version
-                ORDER BY last_issued_at DESC
-                """,
-                (name,),
+            # v2.41.0 (audit F4): queries moved into
+            # HistoryDB.get_forecast_log_stats — this handler used to
+            # run them on a raw cursor, on the event loop, without the
+            # DB lock.
+            stats = await asyncio.to_thread(
+                db.get_forecast_log_stats, name,
+                default_model, default_version,
             )
-            cohorts = [
-                {
-                    "model_name": r[0],
-                    "model_version": None if r[1] == "(null)" else r[1],
-                    "rows": int(r[2]),
-                    "first_issued_at": r[3],
-                    "last_issued_at": r[4],
-                    "last_target_dt": r[5],
-                }
-                for r in cur.fetchall()
+            cohorts = stats["cohorts"]
+            totals = stats["totals"]
+            targets_with_multi_issuances = stats[
+                "targets_with_multi_issuances"
             ]
-            # Total rows for the experiment — sanity check vs cohorts.
-            cur.execute(
-                "SELECT COUNT(*), MIN(issued_at), MAX(issued_at) "
-                "FROM forecast_log WHERE experiment = ?",
-                (name,),
-            )
-            total_row = cur.fetchone()
-            # For the current-champion cohort, count how many target_dts
-            # have ≥2 distinct issuances — if 0 or 1, the stability
-            # fallback will fire even though rows exist.
-            targets_with_multi_issuances = None
-            if default_model and default_version:
-                cur.execute(
-                    """
-                    SELECT COUNT(*) FROM (
-                        SELECT target_dt
-                        FROM forecast_log
-                        WHERE experiment = ?
-                          AND model_name = ?
-                          AND model_version = ?
-                        GROUP BY target_dt
-                        HAVING COUNT(DISTINCT issued_at) >= 2
-                    )
-                    """,
-                    (name, default_model, default_version),
-                )
-                targets_with_multi_issuances = int(cur.fetchone()[0])
         except Exception as e:
             logger.error(f"forecast-log-stats failed for {name}: {e}", exc_info=True)
             return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
@@ -2932,11 +2891,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "best_model": best_model,
                 "matches": default_model == best_model,
             },
-            "totals": {
-                "rows": int(total_row[0]) if total_row else 0,
-                "first_issued_at": total_row[1] if total_row else None,
-                "last_issued_at": total_row[2] if total_row else None,
-            },
+            "totals": totals,
             "targets_with_multi_issuances_under_default_filter": targets_with_multi_issuances,
             "cohorts": cohorts,
             "notes": notes,
@@ -2987,12 +2942,12 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 model_name=mn, model_version=mv,
             )
 
-        result = _fetch(model_name, model_version)
+        result = await asyncio.to_thread(_fetch, model_name, model_version)
         # Same fallback ladder as /forecast-accuracy:
         def _empty(res):
             return not res.get("available_targets")
         if _empty(result) and model_version and not version_param:
-            relaxed = _fetch(model_name, None)
+            relaxed = await asyncio.to_thread(_fetch, model_name, None)
             if not _empty(relaxed):
                 logger.info(
                     f"/forecast-trajectory fallback for {name}: no targets "
@@ -3008,7 +2963,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 }
                 model_version = None
         if _empty(result) and model_name and not model_param:
-            relaxed = _fetch(None, None)
+            relaxed = await asyncio.to_thread(_fetch, None, None)
             if not _empty(relaxed):
                 logger.info(
                     f"/forecast-trajectory fallback for {name}: no targets "
@@ -3079,7 +3034,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 source_is_cumulative=bool(exp_cfg.source_is_cumulative),
             )
 
-        result = _fetch(model_name, model_version)
+        result = await asyncio.to_thread(_fetch, model_name, model_version)
 
         # Empty if either there are no cycles at all, or every cycle's
         # targets are still in the future so the actuals query returns
@@ -3094,7 +3049,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return not actuals.get("values")
 
         if _empty(result) and model_version and not version_param:
-            relaxed = _fetch(model_name, None)
+            relaxed = await asyncio.to_thread(_fetch, model_name, None)
             if not _empty(relaxed):
                 logger.info(
                     f"/forecast-evolution fallback for {name}: no cycles "
@@ -3110,7 +3065,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 }
                 model_version = None
         if _empty(result) and model_name and not model_param:
-            relaxed = _fetch(None, None)
+            relaxed = await asyncio.to_thread(_fetch, None, None)
             if not _empty(relaxed):
                 logger.info(
                     f"/forecast-evolution fallback for {name}: no cycles "
@@ -3200,7 +3155,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 day_offset_hours=day_offset_hours,
             )
 
-        result = _fetch(model_name, model_version)
+        result = await asyncio.to_thread(_fetch, model_name, model_version)
         # v2.34.0: the version-widening + model-widening fallbacks
         # were removed. Stability is a per-cohort metric — pooling
         # cross-version cycles produces a number that doesn't reflect

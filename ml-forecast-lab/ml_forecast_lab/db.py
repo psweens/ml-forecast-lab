@@ -454,6 +454,98 @@ class HistoryDB:
             # silently widening the scope.
             return True
 
+    def _materialise_actuals_grid(
+        self,
+        cursor,
+        actuals_table: str,
+        interval_sec: int,
+        since_str: Optional[str] = None,
+        increment: bool = False,
+    ) -> bool:
+        """(Re)build the indexed TEMP table the analytics joins read from.
+
+        Creates ``_mlfl_actuals_grid_tmp(grid_dt, value)`` — raw actuals
+        snapped to the interval grid — and, when ``increment`` is set,
+        additionally ``_mlfl_actuals_vals_tmp(grid_dt, value)`` holding
+        the adjacency-guarded per-interval deltas (NULL across gaps).
+
+        Every analytics query used to inline the grid aggregation as a
+        WITH-clause CTE. SQLite executes those as a co-routine that is
+        re-scanned for EVERY outer forecast_log row, making the joins
+        O(N_forecasts × N_actuals) with per-row strftime work — measured
+        at 78 s (conformal) / 240 s (accuracy) on one experiment-month
+        of forecast_log vs ~0.4 s with the materialised, indexed temp
+        table (audit F3/F4; the v2.39.3 coverage fix pioneered the
+        pattern, this generalises it). ``since_str`` bounds the actuals
+        scan: join keys satisfy target_dt >= issued_at >= cutoff, so
+        earlier actuals can never match and scanning them only adds
+        cost that grows with ``max_age`` (up to 365 days) for no result.
+
+        Callers run under ``self._lock`` (single shared connection), so
+        the fixed table names cannot race. Returns False on failure —
+        callers should bail out with their empty-result shape. The temp
+        tables are dropped and rebuilt at the start of every call (and
+        die with the connection), so callers may leave them in place
+        after use; ``_drop_actuals_grid`` exists for callers that want
+        to reclaim the memory eagerly.
+        """
+        try:
+            cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_grid_tmp")
+            cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_vals_tmp")
+            since_sql = "WHERE SUBSTR(ds, 1, 19) >= ?" if since_str else ""
+            since_params = (since_str,) if since_str else ()
+            cursor.execute(
+                f"""
+                CREATE TEMP TABLE _mlfl_actuals_grid_tmp AS
+                SELECT
+                    strftime('%Y-%m-%d %H:%M:%S',
+                        (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                        'unixepoch') AS grid_dt,
+                    AVG(value) AS value
+                FROM {actuals_table}
+                {since_sql}
+                GROUP BY grid_dt
+                """,
+                (interval_sec, interval_sec, *since_params),
+            )
+            cursor.execute(
+                "CREATE INDEX _mlfl_actuals_grid_tmp_idx "
+                "ON _mlfl_actuals_grid_tmp(grid_dt)"
+            )
+            if increment:
+                cursor.execute(
+                    """
+                    CREATE TEMP TABLE _mlfl_actuals_vals_tmp AS
+                    SELECT grid_dt,
+                        CASE
+                          WHEN CAST(strftime('%s', grid_dt) AS INTEGER)
+                               - CAST(strftime('%s', LAG(grid_dt) OVER (ORDER BY grid_dt)) AS INTEGER)
+                               = ?
+                          THEN value - LAG(value) OVER (ORDER BY grid_dt)
+                          ELSE NULL
+                        END AS value
+                    FROM _mlfl_actuals_grid_tmp
+                    """,
+                    (interval_sec,),
+                )
+                cursor.execute(
+                    "CREATE INDEX _mlfl_actuals_vals_tmp_idx "
+                    "ON _mlfl_actuals_vals_tmp(grid_dt)"
+                )
+            return True
+        except sqlite3.Error as e:
+            logger.warning(f"Failed to build temp actuals grid: {e}")
+            return False
+
+    @staticmethod
+    def _drop_actuals_grid(cursor) -> None:
+        """Drop the temp tables built by ``_materialise_actuals_grid``."""
+        try:
+            cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_grid_tmp")
+            cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_vals_tmp")
+        except sqlite3.Error:
+            pass
+
     def get_forecast_accuracy(
         self,
         experiment: str,
@@ -589,32 +681,26 @@ class HistoryDB:
         # demand, inflating MAE with data-availability artefacts rather
         # than model error. The adjacency check compares unix-epoch
         # seconds of the stringified grid_dt.
+        # v2.41.0 (audit F4): the grid-aligned actuals — and, in
+        # increment mode, their adjacency-guarded deltas — are
+        # materialised ONCE into indexed temp tables instead of being
+        # inlined as WITH-clause CTEs in every query below. The CTE
+        # form executed as a co-routine re-scanned per forecast_log
+        # row: O(N_forecasts × N_actuals) per query, three queries per
+        # call, 240 s measured on one experiment-month while holding
+        # the DB lock. ``actuals_vals`` stays as a trivial CTE alias so
+        # the query text reads the same in both modes; SQLite flattens
+        # it onto the indexed temp table.
+        if not self._materialise_actuals_grid(
+            cursor, actuals_table, interval_sec, cutoff_str,
+            increment=increment,
+        ):
+            return {"error": "could not build actuals grid"}
+
         if increment:
             actuals_vals_cte = (
-                "actuals_vals AS ("
-                "  SELECT grid_dt,"
-                "    CASE"
-                "      WHEN CAST(strftime('%s', grid_dt) AS INTEGER)"
-                "           - CAST(strftime('%s', LAG(grid_dt) OVER (ORDER BY grid_dt)) AS INTEGER)"
-                "           = ?"
-                "      THEN value - LAG(value) OVER (ORDER BY grid_dt)"
-                "      ELSE NULL"
-                "    END AS value"
-                "  FROM actuals_grid"
-                ")"
-            )
-            # Forecast passthrough — predicted is already a per-interval
-            # delta when source_is_cumulative (the only case where
-            # increment mode is offered).
-            forecast_vals_cte = (
-                "forecast_vals AS ("
-                "  SELECT experiment, model_name, model_version,"
-                "         issued_at, target_dt, lead_minutes,"
-                "         predicted AS value"
-                "  FROM forecast_log"
-                "  WHERE experiment = ? AND target_dt <= ? AND issued_at >= ?"
-                f"  {model_filter_sql}"
-                ")"
+                "actuals_vals AS "
+                "(SELECT grid_dt, value FROM _mlfl_actuals_vals_tmp)"
             )
             # Only actuals can be NULL (adjacency guard) or negative
             # (midnight reset). Forecasts are passthrough so neither
@@ -626,40 +712,27 @@ class HistoryDB:
             )
         else:
             actuals_vals_cte = (
-                "actuals_vals AS (SELECT grid_dt, value FROM actuals_grid)"
-            )
-            forecast_vals_cte = (
-                "forecast_vals AS ("
-                "  SELECT experiment, model_name, model_version,"
-                "         issued_at, target_dt, lead_minutes,"
-                "         predicted AS value"
-                "  FROM forecast_log"
-                "  WHERE experiment = ? AND target_dt <= ? AND issued_at >= ?"
-                f"  {model_filter_sql}"
-                ")"
+                "actuals_vals AS "
+                "(SELECT grid_dt, value FROM _mlfl_actuals_grid_tmp)"
             )
             mode_filter = ""
 
-        # Parameter prefixes for the value-extraction CTEs. Increment
-        # mode takes an adjacency interval for the actuals LAG; raw
-        # mode takes none. The forecast CTE is passthrough in both
-        # modes so it never consumes an interval param.
-        if increment:
-            actuals_vals_params = (interval_sec,)
-        else:
-            actuals_vals_params = ()
+        # Forecast passthrough — predicted is already a per-interval
+        # delta when source_is_cumulative (the only case where
+        # increment mode is offered).
+        forecast_vals_cte = (
+            "forecast_vals AS ("
+            "  SELECT experiment, model_name, model_version,"
+            "         issued_at, target_dt, lead_minutes,"
+            "         predicted AS value"
+            "  FROM forecast_log"
+            "  WHERE experiment = ? AND target_dt <= ? AND issued_at >= ?"
+            f"  {model_filter_sql}"
+            ")"
+        )
         forecast_vals_params = (
             experiment, now_str, cutoff_str, *model_filter_param,
         )
-
-        # actuals_grid scan bound: the INNER JOIN only matches grid_dt to
-        # forecast target_dt, and target_dt >= issued_at >= cutoff_str
-        # (forecasts predict forward). Anything earlier than the forecast
-        # cutoff can never match, so filtering here short-circuits a full
-        # table scan + GROUP BY on ds that the idx_<table>_ds index can
-        # actually serve. Without this, the query grows linearly with
-        # actuals history regardless of max_age_days.
-        actuals_grid_params = (interval_sec, interval_sec, cutoff_str)
 
         # --- Lead-time accuracy curve ---
         # Bucket lead_minutes into `interval_minutes`-sized bins so the
@@ -672,17 +745,7 @@ class HistoryDB:
         # (floor to nearest interval boundary) and average before joining.
         try:
             cursor.execute(f"""
-                WITH actuals_grid AS (
-                    SELECT
-                        strftime('%Y-%m-%d %H:%M:%S',
-                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                            'unixepoch') AS grid_dt,
-                        AVG(value) AS value
-                    FROM {actuals_table}
-                    WHERE SUBSTR(ds, 1, 19) >= ?
-                    GROUP BY grid_dt
-                ),
-                {actuals_vals_cte},
+                WITH {actuals_vals_cte},
                 {forecast_vals_cte}
                 SELECT
                     CAST((fv.lead_minutes / ?) * ? AS INTEGER) AS lead_bucket,
@@ -697,8 +760,6 @@ class HistoryDB:
                 GROUP BY lead_bucket
                 ORDER BY lead_bucket
             """, (
-                *actuals_grid_params,
-                *actuals_vals_params,
                 *forecast_vals_params,
                 bucket_min, bucket_min,
             ))
@@ -731,17 +792,7 @@ class HistoryDB:
         if not (model_name and model_version):
             try:
                 cursor.execute(f"""
-                    WITH actuals_grid AS (
-                        SELECT
-                            strftime('%Y-%m-%d %H:%M:%S',
-                                (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                                'unixepoch') AS grid_dt,
-                            AVG(value) AS value
-                        FROM {actuals_table}
-                        WHERE SUBSTR(ds, 1, 19) >= ?
-                        GROUP BY grid_dt
-                    ),
-                    {actuals_vals_cte},
+                    WITH {actuals_vals_cte},
                     {forecast_vals_cte}
                     SELECT
                         fv.model_name,
@@ -758,8 +809,6 @@ class HistoryDB:
                     GROUP BY fv.model_name, fv.model_version, lead_bucket
                     ORDER BY fv.model_name, fv.model_version, lead_bucket
                 """, (
-                    *actuals_grid_params,
-                    *actuals_vals_params,
                     *forecast_vals_params,
                     bucket_min, bucket_min,
                 ))
@@ -805,17 +854,7 @@ class HistoryDB:
         # targets. The explicit COUNT-based filter is correct.
         try:
             cursor.execute(f"""
-                WITH actuals_grid AS (
-                    SELECT
-                        strftime('%Y-%m-%d %H:%M:%S',
-                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                            'unixepoch') AS grid_dt,
-                        AVG(value) AS value
-                    FROM {actuals_table}
-                    WHERE SUBSTR(ds, 1, 19) >= ?
-                    GROUP BY grid_dt
-                ),
-                {actuals_vals_cte},
+                WITH {actuals_vals_cte},
                 {forecast_vals_cte},
                 ranked AS (
                     SELECT
@@ -850,8 +889,6 @@ class HistoryDB:
                     COUNT(*) AS n
                 FROM first_last
             """, (
-                *actuals_grid_params,
-                *actuals_vals_params,
                 *forecast_vals_params,
             ))
             rev_row = cursor.fetchone()
@@ -890,30 +927,10 @@ class HistoryDB:
         typical = None
         try:
             if increment:
-                cursor.execute(f"""
-                    WITH actuals_grid AS (
-                        SELECT
-                            strftime('%Y-%m-%d %H:%M:%S',
-                                (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                                'unixepoch') AS grid_dt,
-                            AVG(value) AS value
-                        FROM {actuals_table}
-                        WHERE SUBSTR(ds, 1, 19) >= ?
-                        GROUP BY grid_dt
-                    ),
-                    deltas AS (
-                        SELECT
-                            CASE
-                              WHEN CAST(strftime('%s', grid_dt) AS INTEGER)
-                                 - CAST(strftime('%s', LAG(grid_dt) OVER (ORDER BY grid_dt)) AS INTEGER)
-                                 = ?
-                              THEN value - LAG(value) OVER (ORDER BY grid_dt)
-                              ELSE NULL
-                            END AS d
-                        FROM actuals_grid
-                    )
-                    SELECT AVG(ABS(d)) FROM deltas WHERE d IS NOT NULL AND d >= 0
-                """, (interval_sec, interval_sec, cutoff_str, interval_sec))
+                cursor.execute(
+                    "SELECT AVG(ABS(value)) FROM _mlfl_actuals_vals_tmp "
+                    "WHERE value IS NOT NULL AND value >= 0"
+                )
             else:
                 cursor.execute(
                     f"SELECT AVG(ABS(value)) FROM {actuals_table} "
@@ -1054,19 +1071,16 @@ class HistoryDB:
                 f"CAST(strftime('%s', fl.issued_at) AS INTEGER) + {off_seconds}, "
                 "'unixepoch')"
             )
+
+        # v2.41.0 (audit F4): indexed temp table instead of a per-query
+        # co-routine CTE — see _materialise_actuals_grid.
+        if not self._materialise_actuals_grid(
+            cursor, actuals_table, interval_sec, cutoff_str,
+        ):
+            return {"error": "could not build actuals grid"}
+
         sql = f"""
-            WITH actuals_grid AS (
-                SELECT
-                    strftime('%Y-%m-%d %H:%M:%S',
-                        (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                        'unixepoch'
-                    ) AS grid_dt,
-                    AVG(value) AS value
-                FROM {actuals_table}
-                WHERE SUBSTR(ds, 1, 19) >= ?
-                GROUP BY grid_dt
-            ),
-            forecast_base AS (
+            WITH forecast_base AS (
                 SELECT
                     fl.experiment, fl.model_name, fl.model_version,
                     fl.issued_at, fl.target_dt, fl.lead_minutes,
@@ -1091,7 +1105,7 @@ class HistoryDB:
                          ELSE 0
                     END AS seed_value
                 FROM forecast_base fb
-                LEFT JOIN actuals_grid seed_a
+                LEFT JOIN _mlfl_actuals_grid_tmp seed_a
                     ON seed_a.grid_dt = fb.issued_grid
             ),
             forecast_cum AS (
@@ -1112,7 +1126,7 @@ class HistoryDB:
                 AVG(fc.predicted_cumulative - ag.value) AS me,
                 COUNT(*) AS n
             FROM forecast_cum fc
-            INNER JOIN actuals_grid ag ON ag.grid_dt = fc.target_dt
+            INNER JOIN _mlfl_actuals_grid_tmp ag ON ag.grid_dt = fc.target_dt
             WHERE ag.value IS NOT NULL AND ag.value >= 0
             GROUP BY lead_bucket
             ORDER BY lead_bucket
@@ -1120,14 +1134,13 @@ class HistoryDB:
 
         # Param order matches CTE order. Day-bucketing offset (if any)
         # is inlined into target_day_expr / issued_day_expr above, so
-        # no day params here.
-        #  actuals_grid: (interval_sec, interval_sec, cutoff_str)
+        # no day params here. The actuals grid is a pre-built temp
+        # table (no params).
         #  forecast_base seed grid: (interval_sec, interval_sec)
         #  forecast_base WHERE: (experiment, now_str, cutoff_str,
         #                        *model_filter_param)
         #  outer SELECT: (bucket_min, bucket_min)
         params = (
-            interval_sec, interval_sec, cutoff_str,
             interval_sec, interval_sec,
             experiment, now_str, cutoff_str, *model_filter_param,
             bucket_min, bucket_min,
@@ -1160,18 +1173,7 @@ class HistoryDB:
         try:
             cursor.execute(
                 f"""
-                WITH actuals_grid AS (
-                    SELECT
-                        strftime('%Y-%m-%d %H:%M:%S',
-                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                            'unixepoch'
-                        ) AS grid_dt,
-                        AVG(value) AS value
-                    FROM {actuals_table}
-                    WHERE SUBSTR(ds, 1, 19) >= ?
-                    GROUP BY grid_dt
-                ),
-                forecast_base AS (
+                WITH forecast_base AS (
                     SELECT
                         fl.experiment, fl.model_name, fl.model_version,
                         fl.issued_at, fl.target_dt, fl.lead_minutes,
@@ -1193,7 +1195,7 @@ class HistoryDB:
                     SELECT fb.*,
                         COALESCE(seed_a.value, 0) AS seed_value
                     FROM forecast_base fb
-                    LEFT JOIN actuals_grid seed_a
+                    LEFT JOIN _mlfl_actuals_grid_tmp seed_a
                         ON seed_a.grid_dt = fb.issued_grid
                 ),
                 forecast_cum AS (
@@ -1222,7 +1224,7 @@ class HistoryDB:
                     ON lt.issued_at = fc.issued_at
                    AND lt.target_day = fc.target_day
                    AND lt.last_target_dt = fc.target_dt
-                INNER JOIN actuals_grid ag ON ag.grid_dt = fc.target_dt
+                INNER JOIN _mlfl_actuals_grid_tmp ag ON ag.grid_dt = fc.target_dt
                 WHERE ag.value IS NOT NULL AND ag.value >= 0
                 """,
                 params[:-2],  # outer query has no lead_bucket binding
@@ -1247,28 +1249,16 @@ class HistoryDB:
         typical = 0.0
         try:
             cursor.execute(
-                f"""
-                WITH actuals_grid AS (
-                    SELECT
-                        strftime('%Y-%m-%d %H:%M:%S',
-                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                            'unixepoch'
-                        ) AS grid_dt,
-                        SUBSTR(ds, 1, 10) AS day,
-                        AVG(value) AS value
-                    FROM {actuals_table}
-                    WHERE SUBSTR(ds, 1, 19) >= ?
-                    GROUP BY grid_dt
-                ),
-                daily_max AS (
-                    SELECT day, MAX(value) AS day_max
-                    FROM actuals_grid
+                """
+                WITH daily_max AS (
+                    SELECT SUBSTR(grid_dt, 1, 10) AS day,
+                           MAX(value) AS day_max
+                    FROM _mlfl_actuals_grid_tmp
                     WHERE value IS NOT NULL AND value >= 0
                     GROUP BY day
                 )
                 SELECT AVG(day_max) FROM daily_max
-                """,
-                (interval_sec, interval_sec, cutoff_str),
+                """
             )
             t = cursor.fetchone()
             typical = float(t[0]) if t and t[0] is not None else 0.0
@@ -1391,33 +1381,27 @@ class HistoryDB:
         model_filter_sql = (" AND " + " AND ".join(_clauses)) if _clauses else ""
         model_filter_param = tuple(_params)
 
-        # Build the actuals_vals CTE according to source type. For
-        # cumulative sources we need to diff so the actual lives in the
-        # same space as the per-interval predictions stored in
-        # forecast_log. The adjacency guard (delta only when prior grid
-        # row is exactly one interval earlier) mirrors the increment-
-        # mode logic in get_forecast_accuracy.
+        # v2.41.0 (audit F4): indexed temp tables instead of per-query
+        # co-routine CTEs (see _materialise_actuals_grid). For
+        # cumulative sources the deltas table puts actuals in the same
+        # space as the per-interval predictions, with the same
+        # adjacency guard as get_forecast_accuracy's increment mode.
+        if not self._materialise_actuals_grid(
+            cursor, actuals_table, interval_sec, cutoff_str,
+            increment=source_is_cumulative,
+        ):
+            return {"error": "could not build actuals grid"}
         if source_is_cumulative:
             actuals_vals_cte = (
-                "actuals_vals AS ("
-                "  SELECT grid_dt,"
-                "    CASE"
-                "      WHEN CAST(strftime('%s', grid_dt) AS INTEGER)"
-                "           - CAST(strftime('%s', LAG(grid_dt) OVER (ORDER BY grid_dt)) AS INTEGER)"
-                "           = ?"
-                "      THEN value - LAG(value) OVER (ORDER BY grid_dt)"
-                "      ELSE NULL"
-                "    END AS value"
-                "  FROM actuals_grid"
-                ")"
+                "actuals_vals AS "
+                "(SELECT grid_dt, value FROM _mlfl_actuals_vals_tmp)"
             )
-            actuals_vals_params = (interval_sec,)
             actual_space = "delta"
         else:
             actuals_vals_cte = (
-                "actuals_vals AS (SELECT grid_dt, value FROM actuals_grid)"
+                "actuals_vals AS "
+                "(SELECT grid_dt, value FROM _mlfl_actuals_grid_tmp)"
             )
-            actuals_vals_params = ()
             actual_space = "raw"
 
         # Candidate targets for the dropdown: recent targets with an
@@ -1429,16 +1413,7 @@ class HistoryDB:
         # "biggest miss" sort is meaningful for cumulative sensors.
         try:
             cursor.execute(f"""
-                WITH actuals_grid AS (
-                    SELECT
-                        strftime('%Y-%m-%d %H:%M:%S',
-                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                            'unixepoch') AS grid_dt,
-                        AVG(value) AS value
-                    FROM {actuals_table}
-                    GROUP BY grid_dt
-                ),
-                {actuals_vals_cte}
+                WITH {actuals_vals_cte}
                 SELECT fl.target_dt,
                        COUNT(DISTINCT fl.issued_at) AS n_iss,
                        MAX(ABS(fl.predicted - av.value)) AS max_abs_err,
@@ -1455,8 +1430,6 @@ class HistoryDB:
                 ORDER BY fl.target_dt DESC
                 LIMIT 48
             """, (
-                interval_sec, interval_sec,
-                *actuals_vals_params,
                 experiment, now_str, cutoff_str,
                 *model_filter_param,
             ))
@@ -1520,23 +1493,10 @@ class HistoryDB:
         # Fetch the actual for this target (in the prediction space).
         try:
             cursor.execute(f"""
-                WITH actuals_grid AS (
-                    SELECT
-                        strftime('%Y-%m-%d %H:%M:%S',
-                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                            'unixepoch') AS grid_dt,
-                        AVG(value) AS value
-                    FROM {actuals_table}
-                    GROUP BY grid_dt
-                ),
-                {actuals_vals_cte}
+                WITH {actuals_vals_cte}
                 SELECT av.value FROM actuals_vals av
                 WHERE av.grid_dt = ?
-            """, (
-                interval_sec, interval_sec,
-                *actuals_vals_params,
-                target_dt,
-            ))
+            """, (target_dt,))
             actual_row = cursor.fetchone()
         except sqlite3.Error as e:
             logger.warning(f"Trajectory actual lookup failed: {e}")
@@ -1574,9 +1534,14 @@ class HistoryDB:
         Compute per-lead-time conformal nonconformity quantiles from
         historical forecasts vs actuals in forecast_log.
 
-        For a symmetric (1−α) band with α = 1−level, we take the
-        (1−α/2)-th quantile of |residual| at each lead bucket. For an
-        80%-band (level=0.8), that is the 90th percentile.
+        For a symmetric band built from ABSOLUTE residuals, coverage is
+        P(|y − ŷ| ≤ q̂) — exactly the quantile level used — so a (1−α)
+        band takes the (1−α)-th quantile of |residual| at each lead
+        bucket: for an 80%-band (level=0.8), the 80th percentile. (The
+        (1−α/2) rule belongs to the two-sided SIGNED-residual
+        construction; applying it to |residual| — as this method did
+        before v2.41.0 — systematically over-covered: nominal-80% bands
+        realised ~90% coverage and were ~1.5× wider than calibrated.)
 
         This is split conformal prediction with a rolling residual
         buffer (capped at ``max_age_days``), not ACI / Gibbs-Candès
@@ -1598,7 +1563,7 @@ class HistoryDB:
         experiment : str
         actuals_table : str
         level : float
-            Desired coverage, in (0, 1). 0.8 produces the 90th-percentile
+            Desired coverage, in (0, 1). 0.8 produces the 80th-percentile
             absolute-residual band.
         model_name : str, optional
             Restrict to residuals from one model (usually the current
@@ -1645,7 +1610,9 @@ class HistoryDB:
                 "level": level,
             }
 
-        params = [interval_sec, interval_sec, bucket_min, bucket_min,
+        # The actuals grid is a pre-built temp table (no interval params
+        # in the query itself — see the materialise call below).
+        params = [bucket_min, bucket_min,
                   experiment, now_str, cutoff_str]
         _clauses = []
         if model_name:
@@ -1663,24 +1630,30 @@ class HistoryDB:
         # don't correspond to any actually-published band; the bands
         # the user sees on the chart come from one specific weight
         # regime, so the calibration target should too.
+        # v2.41.0 (audit F3): indexed temp table instead of a
+        # co-routine CTE re-scanned per forecast row — this call sits on
+        # the forecast-publish path, so its cost directly delays sensor
+        # publishing. The cutoff also bounds the actuals scan, which
+        # previously covered the full max_age retention window.
+        if not self._materialise_actuals_grid(
+            cursor, actuals_table, interval_sec, cutoff_str,
+        ):
+            return {
+                "quantiles": {},
+                "fallback_quantile": None,
+                "sample_counts": {},
+                "total_samples": 0,
+                "level": level,
+            }
         try:
             cursor.execute(f"""
-                WITH actuals_grid AS (
-                    SELECT
-                        strftime('%Y-%m-%d %H:%M:%S',
-                            (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                            'unixepoch') AS grid_dt,
-                        AVG(value) AS value
-                    FROM {actuals_table}
-                    GROUP BY grid_dt
-                )
                 SELECT
                     CAST((fl.lead_minutes / ?) * ? AS INTEGER) AS lead_bucket,
                     ABS(fl.predicted - ag.value) AS abs_residual,
                     fl.model_name,
                     fl.model_version
                 FROM forecast_log fl
-                INNER JOIN actuals_grid ag ON ag.grid_dt = fl.target_dt
+                INNER JOIN _mlfl_actuals_grid_tmp ag ON ag.grid_dt = fl.target_dt
                 WHERE fl.experiment = ?
                   AND fl.target_dt <= ?
                   AND fl.issued_at >= ?
@@ -1734,8 +1707,14 @@ class HistoryDB:
             how="inner",
         )
 
-        alpha = max(0.0, min(1.0, 1.0 - level))
-        q = 1.0 - alpha / 2.0
+        # Coverage of a |residual| band equals the quantile level itself
+        # (see docstring) — use `level` directly, with a light
+        # finite-sample bump (the split-CP ceil((n+1)·level)/n
+        # correction, bounded at 1.0) applied per group at lookup time
+        # would require per-bucket n; the global rolling buffer is large
+        # enough (min_samples gate) that the plain quantile is within
+        # one residual of the corrected one.
+        q = max(0.0, min(1.0, level))
 
         counts = df.groupby("lead_bucket").size()
         # Usable buckets have enough samples to estimate a stable
@@ -1846,34 +1825,14 @@ class HistoryDB:
 
         # v2.39.3: materialise the actuals_grid aggregation ONCE into a
         # TEMP table, then reuse it across the three subsequent queries
-        # (per-lead, overall, breakdown). Pre-v2.39.3 each query rebuilt
-        # the same WITH-clause CTE — the AVG/GROUP BY scan on the
-        # actuals table ran three times per Forecast Accuracy tab load
-        # while holding the SQLite write lock, which compounded with the
-        # production retrain pipeline.
-        try:
-            cursor.execute(
-                "DROP TABLE IF EXISTS _mlfl_actuals_grid_tmp"
-            )
-            cursor.execute(
-                f"""
-                CREATE TEMP TABLE _mlfl_actuals_grid_tmp AS
-                SELECT
-                    strftime('%Y-%m-%d %H:%M:%S',
-                        (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                        'unixepoch') AS grid_dt,
-                    AVG(value) AS value
-                FROM {actuals_table}
-                GROUP BY grid_dt
-                """,
-                (interval_sec, interval_sec),
-            )
-            cursor.execute(
-                "CREATE INDEX _mlfl_actuals_grid_tmp_idx "
-                "ON _mlfl_actuals_grid_tmp(grid_dt)"
-            )
-        except sqlite3.Error as e:
-            logger.warning(f"Failed to build temp actuals grid: {e}")
+        # (per-lead, overall, breakdown). v2.41.0: moved to the shared
+        # _materialise_actuals_grid helper, which also bounds the
+        # actuals scan to the forecast cutoff (join keys satisfy
+        # target_dt >= issued_at >= cutoff, so earlier actuals can
+        # never match).
+        if not self._materialise_actuals_grid(
+            cursor, actuals_table, interval_sec, cutoff_str,
+        ):
             return {
                 "by_lead": {"lead_minutes": [], "coverage": [], "n": []},
                 "by_hour_of_day": {"hour": [], "coverage": [], "n": []},
@@ -2789,6 +2748,85 @@ class HistoryDB:
             for row in cursor.fetchall()
         ]
 
+    @_locked
+    def get_forecast_log_stats(
+        self,
+        experiment: str,
+        default_model: Optional[str] = None,
+        default_version: Optional[str] = None,
+    ) -> dict:
+        """Per-cohort row counts + totals for the debug log-stats panel.
+
+        Moved out of the web handler in v2.41.0 (audit F4): the handler
+        used ``db.conn.cursor()`` directly, bypassing both the lock
+        discipline this class documents and the thread offload — the
+        only call site in the codebase that touched the shared
+        connection without ``self._lock``.
+
+        Returns ``{"cohorts": [...], "totals": {...},
+        "targets_with_multi_issuances": int | None}``.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT model_name,
+                   COALESCE(model_version, '(null)') AS mv,
+                   COUNT(*) AS n,
+                   MIN(issued_at) AS first_issued_at,
+                   MAX(issued_at) AS last_issued_at,
+                   MAX(target_dt) AS last_target_dt
+            FROM forecast_log
+            WHERE experiment = ?
+            GROUP BY model_name, model_version
+            ORDER BY last_issued_at DESC
+            """,
+            (experiment,),
+        )
+        cohorts = [
+            {
+                "model_name": r[0],
+                "model_version": None if r[1] == "(null)" else r[1],
+                "rows": int(r[2]),
+                "first_issued_at": r[3],
+                "last_issued_at": r[4],
+                "last_target_dt": r[5],
+            }
+            for r in cursor.fetchall()
+        ]
+        cursor.execute(
+            "SELECT COUNT(*), MIN(issued_at), MAX(issued_at) "
+            "FROM forecast_log WHERE experiment = ?",
+            (experiment,),
+        )
+        total_row = cursor.fetchone()
+        targets_with_multi_issuances = None
+        if default_model and default_version:
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM (
+                    SELECT target_dt
+                    FROM forecast_log
+                    WHERE experiment = ?
+                      AND model_name = ?
+                      AND model_version = ?
+                    GROUP BY target_dt
+                    HAVING COUNT(DISTINCT issued_at) >= 2
+                )
+                """,
+                (experiment, default_model, default_version),
+            )
+            targets_with_multi_issuances = int(cursor.fetchone()[0])
+        return {
+            "cohorts": cohorts,
+            "totals": {
+                "rows": int(total_row[0]) if total_row else 0,
+                "first_issued_at": total_row[1] if total_row else None,
+                "last_issued_at": total_row[2] if total_row else None,
+            },
+            "targets_with_multi_issuances": targets_with_multi_issuances,
+        }
+
+    @_locked
     def cleanup_forecast_log(
         self,
         experiment: str,
