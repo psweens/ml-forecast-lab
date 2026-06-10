@@ -745,10 +745,18 @@ class MLForecastLabApp:
                 ("crossformer", "crossformer_backend", "CrossformerModel"),
                 ("timesnet", "timesnet_backend", "TimesNetModel"),
                 ("tft", "tft_backend", "TFTModel"),
+                ("timexer", "timexer_backend", "TimeXerModel"),
+                ("moderntcn", "moderntcn_backend", "ModernTCNModel"),
                 ("seasonal_naive", "seasonal_naive_backend", "SeasonalNaiveModel"),
                 ("arima", "statsforecast_backend", "ARIMAModel"),
                 ("ets", "statsforecast_backend", "ETSModel"),
                 ("theta", "statsforecast_backend", "ThetaModel"),
+                # Zero-shot foundation models. Optional heavy deps
+                # (chronos-forecasting / granite-tsfm) — skipped cleanly
+                # here when the packages aren't installed, e.g. on armv7
+                # where the transformers stack has no wheels.
+                ("chronos_bolt", "chronos_bolt_backend", "ChronosBoltModel"),
+                ("ttm", "ttm_backend", "TTMModel"),
             ]
             for _name, _module, _cls_name in _optional_backends:
                 try:

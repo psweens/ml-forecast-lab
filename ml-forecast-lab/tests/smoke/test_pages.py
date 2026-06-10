@@ -31,7 +31,7 @@ def test_top_level_page_renders(client, path, expected_status, must_contain):
 
 
 def test_models_page_lists_all_backends(client):
-    """Models page must list all 24 backends from MODEL_CATALOG."""
+    """Models page must list all 28 backends from MODEL_CATALOG."""
     resp = client.get("/models")
     assert resp.status_code == 200
     body = resp.text
@@ -39,6 +39,8 @@ def test_models_page_lists_all_backends(client):
     expected_models = [
         "LightGBM", "XGBoost", "CatBoost",  # tree
         "LSTM", "CNN", "TFT", "PatchTST", "iTransformer", "TimeMixer",  # neural
+        "TimeXer", "ModernTCN",  # 2024 architectures
+        "Chronos-Bolt", "Granite TTM",  # zero-shot foundation
         "Seasonal Naive",  # baseline
         "ARIMA", "ETS", "Theta",  # statsforecast
     ]

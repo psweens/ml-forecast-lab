@@ -7,6 +7,13 @@ xgboost>=2.0.0,<3.0.0
 catboost>=1.2.0,<2.0.0
 torch>=2.0.0
 statsforecast>=1.7.0,<2.0.0
+# Zero-shot foundation-model backends (chronos_bolt, ttm). Excluded on
+# armv7: the transformers/tokenizers stack ships no 32-bit ARM wheels, and
+# a source build would push the addon build past any reasonable budget.
+# The backends degrade gracefully when the packages are missing — they're
+# simply not registered (same pattern as any optional backend).
+chronos-forecasting>=1.5.0,<3.0.0; platform_machine != "armv7l"
+granite-tsfm>=0.3.0,<1.0.0; platform_machine != "armv7l"
 holidays>=0.40,<1.0
 asteval>=1.0,<2.0
 fastapi>=0.100.0,<1.0.0

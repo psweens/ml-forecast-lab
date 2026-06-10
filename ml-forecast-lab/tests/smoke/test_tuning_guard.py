@@ -1,15 +1,18 @@
 """Tuning-guard contracts.
 
 The tuning endpoint must reject requests for models with no tunable
-hyperparameters (the classical auto-models — ARIMA, ETS, Theta, and the
-Seasonal Naive baseline) — otherwise Optuna spins on no-op trials and
-the UI looks hung. Locks the guard in.
+hyperparameters (the classical auto-models — ARIMA, ETS, Theta, the
+Seasonal Naive baseline — and the zero-shot foundation models —
+Chronos-Bolt, TTM — whose pretrained weights are frozen) — otherwise
+Optuna spins on no-op trials and the UI looks hung. Locks the guard in.
 """
 
 import pytest
 
 
-@pytest.mark.parametrize("model_name", ["arima", "ets", "theta", "seasonal_naive"])
+@pytest.mark.parametrize("model_name", [
+    "arima", "ets", "theta", "seasonal_naive", "chronos_bolt", "ttm",
+])
 def test_tuning_rejected_for_auto_models(client, seeded_experiment, model_name):
     """Models with all-non-tunable params get a clear 400, not a silent hang."""
     resp = client.post(
@@ -23,7 +26,9 @@ def test_tuning_rejected_for_auto_models(client, seeded_experiment, model_name):
     assert "no tunable" in body["error"].lower()
 
 
-@pytest.mark.parametrize("model_name", ["lightgbm", "xgboost", "lstm", "cnn"])
+@pytest.mark.parametrize("model_name", [
+    "lightgbm", "xgboost", "lstm", "cnn", "timexer", "moderntcn",
+])
 def test_tuning_accepts_models_with_tunable_params(
     client, seeded_experiment, app, model_name
 ):

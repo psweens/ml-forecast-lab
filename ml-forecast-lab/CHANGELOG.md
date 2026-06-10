@@ -1,5 +1,71 @@
 # Changelog
 
+## 2.41.0
+
+**Four new model backends — the catalogue grows from 24 to 28.** Two
+2024 supervised architectures and, for the first time, two pretrained
+zero-shot foundation models:
+
+- **`timexer`** — TimeXer (Wang et al. 2024, NeurIPS). The only
+  transformer in the catalogue designed explicitly around exogenous
+  variables: the target series becomes patch tokens plus a learnable
+  global token, each covariate becomes a variate token, and per-layer
+  cross-attention from the global token injects the covariate signal.
+  Natural fit for covariate-driven targets (solar ~ irradiance,
+  heating ~ outside temperature). Ships with the standard house kit:
+  RevIN with past-only stats, PF6-style past-only embedding in
+  extended-window mode, and the zero-init `future_aux_head` so
+  future-known covariates (Solcast, weather forecasts) are consumed
+  per-horizon — covered by the same aux-head regression tests as
+  N-BEATS / N-HiTS / iTransformer.
+- **`moderntcn`** — ModernTCN (Luo & Wang 2024, ICLR). Modernised
+  pure-convolution backbone: per-variable patchify stem, large-kernel
+  depthwise temporal convolution (with the paper's parallel
+  small-kernel branch), and grouped pointwise convolutions for
+  per-variable and cross-variable feature mixing. Transformer-class
+  accuracy at convolution cost — a good deal on a Pi.
+- **`chronos_bolt`** — Amazon Chronos-Bolt (Ansari et al. 2024),
+  zero-shot. No training on your data at all: `fit()` caches the
+  history tail and loads the pretrained weights; every forecast
+  conditions the frozen model on the window's recent history. Default
+  checkpoint `chronos-bolt-tiny` (9M params) runs comfortably on a
+  Pi 5 CPU. Produces sensible forecasts from day one — before any
+  supervised backend has enough history to train.
+- **`ttm`** — IBM Granite TTM / Tiny Time Mixer (Ekambaram et al.
+  2024, NeurIPS), zero-shot. The lightest published foundation model
+  (1–5M params). Same zero-shot contract as Chronos-Bolt; horizons
+  beyond the checkpoint's native prediction length are produced
+  autoregressively.
+
+Operational notes for the foundation backends:
+
+- They are **univariate** — covariate channels of the window are
+  ignored, exactly like the classical backends. In extended-window
+  mode they condition on the past block only (same contract as
+  `seasonal_naive`).
+- First ever use downloads pretrained weights from the Hugging Face
+  Hub (~5–30 MB, cached locally; offline afterwards). A failed
+  download fails that model's benchmark fit with a clear message
+  instead of stalling the run.
+- Tuning is rejected at the API layer (frozen weights — nothing to
+  tune), same guard as ARIMA/ETS/Theta/Seasonal Naive.
+- New optional dependencies `chronos-forecasting` and `granite-tsfm`
+  are excluded on `armv7` (no 32-bit ARM wheels for the transformers
+  stack); the two backends simply don't register there, all other 26
+  remain available.
+- Loaded weights are cached per process, so CV folds and retrain
+  cycles don't re-read them from disk.
+
+Also in this release:
+
+- MODEL_GUIDE rewritten for 28 backends, including a new
+  "brand-new sensor, no history yet" zero-shot starter set and
+  cold-start guidance in the decision flow.
+- Models page, parameter schemas, tuning guards, and phase-1B harness
+  wired for all four backends; 28 new unit tests (fit/predict
+  round-trips, save/load, RevIN stats, extended-window past-only
+  conditioning, TTM autoregressive extension, aux-head zero-init).
+
 ## 2.40.14
 
 **Removed the per-interval ↔ cumulative loss-balance slider and the
