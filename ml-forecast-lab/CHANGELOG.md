@@ -81,6 +81,14 @@ Also in this release:
   (replacing the old Tree-vs-everything split), so the zero-shot
   foundation models get a dedicated section that notes they don't train
   and ignore covariates.
+- **Fix: Seasonal Naive is shown again in the results tables.** When the
+  user hadn't explicitly enabled it, the force-run Seasonal Naive
+  baseline was stripped from the per-interval and daily-cumulative
+  results tables after ranking — leaving a gap in the rank sequence
+  (e.g. a leaderboard starting at #2). It now stays visible as the
+  reference baseline and keeps its contiguous rank; it remains excluded
+  only from the auto-promote decision, so the config is never silently
+  switched to a baseline the user didn't choose.
 
 ## 2.42.2
 

@@ -275,6 +275,31 @@ class TestMeanRankScoring:
         # CI should be wider than zero for both models (varying fold ranks)
         assert a_high > a_low, "Bootstrap CI must have non-zero width"
 
+    def test_baseline_included_in_rank_pool(self):
+        """A completed baseline (e.g. force-run seasonal_naive) must be ranked
+        alongside the others and take a contiguous integer rank — it is the
+        reference the leaderboard measures against, and hiding it would leave
+        a gap in the rank sequence. Regression guard for the results tables
+        dropping seasonal_naive."""
+        from ml_forecast_lab.benchmark.runner import ModelResult
+
+        cfg = _make_experiment_cfg(cv_folds=3)
+        runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+        good = ModelResult(model_name="good")
+        naive = ModelResult(model_name="seasonal_naive")
+        good.fold_metrics = [{"mae": 1.0, "rmse": 1.0}] * 3
+        naive.fold_metrics = [{"mae": 3.0, "rmse": 3.0}] * 3
+
+        means, ranks, cis, dnc = runner._compute_composite_ranks(
+            {"good": good, "seasonal_naive": naive},
+            metric_source="fold_metrics", bootstrap_iters=50,
+        )
+        assert dnc == []
+        # Baseline is ranked (not dropped) and ranks are contiguous 1..N.
+        assert ranks == {"good": 1, "seasonal_naive": 2}
+        assert sorted(ranks.values()) == [1, 2]
+
     def test_did_not_complete_excluded_from_rank(self):
         """A model that errored on at least one fold (empty {} entry)
         must NOT appear in the ranked pool — otherwise it takes a
