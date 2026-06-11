@@ -647,7 +647,17 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     # Template globals — available in every rendered template without
     # threading through each TemplateResponse context dict. Used by
     # base.html to cache-bust static assets on version bumps.
-    templates.env.globals["app_version"] = APP_VERSION
+    #
+    # When the process booted from a developer branch overlay, the version
+    # shown across the whole UI is annotated (e.g. "2.42.0 (dev: foo@1a2b3c4)")
+    # and a banner is rendered site-wide. Both are resolved once at startup
+    # because the overlay only changes via an add-on restart, so startup is
+    # exactly the right time to read it.
+    from ml_forecast_lab import dev_branch
+    templates.env.globals["app_version"] = dev_branch.version_label(APP_VERSION)
+    templates.env.globals["dev_overlay"] = (
+        dev_branch.active_status() if dev_branch.is_overlay_running() else None
+    )
 
     # Custom Jinja filters
     def _humanise_name(value: str) -> str:
@@ -3774,6 +3784,13 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception:
             pass
 
+        # Developer-mode branch overlay state (maintainer aid; default off).
+        # The card and its endpoints are inert unless developer_mode is on,
+        # so normal users never see this.
+        from ml_forecast_lab import dev_branch
+        developer_mode = dev_branch.developer_mode_enabled()
+        dev_installed = dev_branch.active_status() if developer_mode else None
+
         return templates.TemplateResponse(
             request=request,
             name="system.html",
@@ -3788,6 +3805,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "config_path": config_path_str,
                 "experiment_statuses": experiment_statuses,
                 "experiment_configs": experiment_configs,
+                "developer_mode": developer_mode,
+                "dev_installed": dev_installed,
+                "dev_running": dev_branch.is_overlay_running(),
+                "dev_repo": f"{dev_branch.REPO_OWNER}/{dev_branch.REPO_NAME}",
             },
         )
 
@@ -3838,6 +3859,161 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception as e:
             logger.error(f"Failed to save settings: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": _safe_error(e)})
+
+    # ===== Developer-mode branch overlay (maintainer aid; default off) =====
+    #
+    # These endpoints let a developer run an arbitrary branch of the app's
+    # own repository in place of the bundled release. They are gated behind
+    # the `developer_mode` add-on option: when it is off, every endpoint
+    # 404s and the System-tab card is not rendered, so the capability is
+    # invisible and inert for normal users. See ml_forecast_lab/dev_branch.py.
+
+    async def _restart_addon() -> bool:
+        """Ask the Supervisor to restart this add-on. Best-effort.
+
+        Returns True if the Supervisor accepted the request. Requires
+        `hassio_api: true` in config.yaml and the SUPERVISOR_TOKEN env var
+        (both present in the add-on runtime).
+        """
+        import aiohttp
+
+        token = os.environ.get("SUPERVISOR_TOKEN", "")
+        if not token:
+            logger.warning("No SUPERVISOR_TOKEN; cannot self-restart.")
+            return False
+        url = "http://supervisor/addons/self/restart"
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers,
+                                        timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status in (200, 201):
+                        return True
+                    logger.error(
+                        f"Supervisor restart returned {resp.status}: "
+                        f"{(await resp.text())[:200]}"
+                    )
+                    return False
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Supervisor restart request failed: {e}")
+            return False
+
+    def _require_dev_mode():
+        """Raise 404 unless developer_mode is enabled.
+
+        404 (not 403) so the endpoints are indistinguishable from
+        nonexistent when the option is off — nothing hints the capability
+        exists.
+        """
+        from ml_forecast_lab import dev_branch
+        if not dev_branch.developer_mode_enabled():
+            raise HTTPException(status_code=404, detail="Not found")
+
+    @app.post("/api/system/dev/install-branch")
+    async def dev_install_branch(request: Request):
+        """Fetch a branch of this repo and stage it as the boot overlay.
+
+        On success the add-on restarts itself; on the next boot the s6
+        script runs the overlaid branch instead of the bundled package.
+        """
+        _require_dev_mode()
+        from ml_forecast_lab import dev_branch
+
+        try:
+            data = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400,
+                                content={"success": False, "error": "Invalid JSON"})
+        branch = (data or {}).get("branch", "")
+        try:
+            branch = dev_branch.validate_branch(branch)
+        except dev_branch.DevBranchError as e:
+            return JSONResponse(status_code=400,
+                                content={"success": False, "error": str(e)})
+
+        import aiohttp
+
+        # Resolve the branch head SHA (best-effort; non-fatal for install).
+        sha = ""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    dev_branch.commit_api_url(branch),
+                    headers={"Accept": "application/vnd.github+json"},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status == 200:
+                        sha = (await resp.json()).get("sha", "") or ""
+                    elif resp.status == 404:
+                        return JSONResponse(
+                            status_code=404,
+                            content={"success": False,
+                                     "error": f"Branch {branch!r} not found in "
+                                              f"{dev_branch.REPO_OWNER}/{dev_branch.REPO_NAME}."},
+                        )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not resolve SHA for {branch!r}: {e}")
+
+        # Download the branch tarball.
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    dev_branch.tarball_url(branch),
+                    timeout=aiohttp.ClientTimeout(total=120),
+                ) as resp:
+                    if resp.status != 200:
+                        return JSONResponse(
+                            status_code=502,
+                            content={"success": False,
+                                     "error": f"Download failed (HTTP {resp.status}). "
+                                              f"Check the branch name and that the Pi "
+                                              f"has internet access."},
+                        )
+                    raw = await resp.read()
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(status_code=502,
+                                content={"success": False,
+                                         "error": f"Download failed: {_safe_error(e)}"})
+
+        try:
+            status = dev_branch.install_from_tarball_bytes(branch, raw, sha=sha)
+        except dev_branch.DevBranchError as e:
+            return JSONResponse(status_code=400,
+                                content={"success": False, "error": str(e)})
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Overlay install failed: {e}", exc_info=True)
+            return JSONResponse(status_code=500,
+                                content={"success": False, "error": _safe_error(e)})
+
+        restarting = await _restart_addon()
+        return JSONResponse(content={
+            "success": True,
+            "status": status,
+            "restarting": restarting,
+            "message": (
+                f"Installed {branch}@{status['sha_short'] or '?'}. "
+                + ("Restarting the add-on now…" if restarting else
+                   "Restart the add-on to run it (auto-restart unavailable).")
+            ),
+        })
+
+    @app.post("/api/system/dev/revert")
+    async def dev_revert(request: Request):
+        """Remove the overlay and restart back onto the bundled release."""
+        _require_dev_mode()
+        from ml_forecast_lab import dev_branch
+        existed = dev_branch.revert()
+        restarting = await _restart_addon() if existed else False
+        return JSONResponse(content={
+            "success": True,
+            "reverted": existed,
+            "restarting": restarting,
+            "message": (
+                ("Reverted to the bundled release. Restarting…" if restarting
+                 else "Reverted to the bundled release. Restart to apply.")
+                if existed else "No developer overlay was installed."
+            ),
+        })
 
     @app.post("/api/experiment-settings")
     async def save_experiment_settings(request: Request):

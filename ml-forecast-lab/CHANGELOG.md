@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.42.0
+
+**Developer mode: run a branch in place of the bundled release
+(maintainer aid, default off).** A new `developer_mode` add-on option
+(off by default) exposes a **Developer** card at the bottom of the
+System tab. A maintainer can type a branch name from
+`psweens/ml-forecast-lab`, and the app downloads that branch from
+GitHub, stages it as an overlay under `/data`, and restarts to run it in
+place of the version baked into the image — no image rebuild, no
+release.
+
+- **Invisible unless opted in.** With `developer_mode` off (the
+  default), the card is not rendered, its JavaScript is not emitted, and
+  the `/api/system/dev/*` endpoints return 404 — indistinguishable from
+  nonexistent. Nothing notifies a normal user that the capability is
+  there.
+- **The bundled image is never modified.** The overlay lives in
+  `/data/ml_forecast_lab/dev_src`; the s6 boot script prepends it to
+  `PYTHONPATH` only when `developer_mode` is on *and* an overlay is
+  installed. Reverting (one click) or turning `developer_mode` off
+  returns to the bundled code on the next restart.
+- **Always obvious when off-release.** While running an overlay, a
+  persistent "Developer build" banner shows on every page and the
+  version string is annotated everywhere, e.g.
+  `2.42.0 (dev: my-feature@1a2b3c4)`.
+- **Guard rails.** Source is locked to this repository (branch name
+  only, never a URL); branch names are charset-validated; tar members
+  are extracted with path-traversal protection. Requires `hassio_api`,
+  used solely to restart the add-on after install/revert.
+- **Limit.** A running container can't install new dependencies, so a
+  branch that only changes Python code works; one that adds a package
+  still needs a full image rebuild.
+
 ## 2.41.0
 
 Fix release for the findings of the full codebase audit

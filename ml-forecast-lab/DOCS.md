@@ -353,6 +353,24 @@ The SQLite database survives the experiment deletion — only the per-experiment
 
 Updates are delivered via the HA app store like any other app. Read the [CHANGELOG](CHANGELOG.md) before upgrading — the changelog calls out behaviour changes that require config edits.
 
+### Developer mode — running a branch (maintainers only)
+
+> **For app development only.** This runs unreleased code and is a remote-code-execution surface. Leave `developer_mode` **off** for normal use. It is off by default, and while off the feature is completely hidden — no card, no endpoints, no hint it exists.
+
+If you're developing the app and want to try a branch without rebuilding the image:
+
+1. Set `developer_mode: true` in the app **Configuration** tab and restart the app.
+2. A **Developer** card appears at the bottom of the **System** tab. Enter a branch name from `psweens/ml-forecast-lab` (e.g. `claude/my-feature`) and click **Fetch & run branch**.
+3. The app downloads that branch from GitHub, stages it as an overlay under `/data`, and restarts. On the next boot it runs the branch's code instead of the bundled release. A persistent **Developer build** banner and the annotated version string (`2.42.0 (dev: my-feature@1a2b3c4)`) confirm you're off-release.
+4. Click **Revert to bundled** (or just set `developer_mode: false`) to return to the shipped version on the next restart.
+
+Notes and limits:
+
+- Only branches of this repository can be run — you supply a branch name, never a URL.
+- The bundled image is never modified; the overlay lives in `/data` and is removed on revert.
+- First fetch needs internet access on the Pi. The branch must only change **Python code** — a running container can't install new system or Python *dependencies*, so a branch that adds a package needs a full image rebuild instead.
+- Requires the Supervisor API (`hassio_api`), used solely to restart the app after install/revert.
+
 ---
 
 ## Troubleshooting

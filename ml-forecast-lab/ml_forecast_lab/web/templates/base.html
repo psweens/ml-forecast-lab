@@ -30,6 +30,18 @@
     </nav>
 
     <main class="container">
+        {# Developer-mode overlay banner — rendered on every page only when
+           the running process booted from a branch overlay (set as a Jinja
+           global at startup). A constant reminder that this is not the
+           bundled release. #}
+        {% if dev_overlay %}
+        <div style="background:#7c2d12;color:#fed7aa;border:1px solid #ea580c;border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:0.9rem;">
+            ⚠️ <strong>Developer build</strong> — running branch
+            <code style="color:#fff;">{{ dev_overlay.branch }}</code>@<code style="color:#fff;">{{ dev_overlay.sha_short or '?' }}</code>
+            (installed {{ dev_overlay.fetched_at }}), not the bundled release.
+            Revert from the <a href="{{ base_path }}/system" style="color:#fed7aa;text-decoration:underline;">System</a> tab.
+        </div>
+        {% endif %}
         {% block content %}{% endblock %}
     </main>
 
