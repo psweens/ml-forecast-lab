@@ -115,6 +115,83 @@ def commit_api_url(branch: str) -> str:
     )
 
 
+def branches_api_url(page: int = 1, per_page: int = 100) -> str:
+    """GitHub API URL listing branches of this repo (one page)."""
+    return (
+        f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
+        f"/branches?per_page={per_page}&page={page}"
+    )
+
+
+def parse_branches(payload: Any) -> list[str]:
+    """Extract sorted branch names from a GitHub branches-API payload.
+
+    The default branch (``main``/``master``) is floated to the top; the
+    rest are alphabetical. Pure and side-effect-free so it can be unit
+    tested without touching the network.
+    """
+    names = []
+    if isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                names.append(item["name"])
+    names = sorted(set(names), key=str.lower)
+
+    def _key(name: str):
+        return (name not in ("main", "master"), name.lower())
+
+    return sorted(names, key=_key)
+
+
+async def list_repo_branches(token: Optional[str] = None) -> list[str]:
+    """Fetch all branch names for this repo from the GitHub API.
+
+    Paginates up to a sane cap (GitHub returns 100/page). ``token`` is an
+    optional GitHub token to raise the unauthenticated rate limit; the
+    add-on has none by default, which is fine for occasional dev use.
+    Raises :class:`DevBranchError` on any transport/HTTP failure so the
+    caller can surface a clean message.
+    """
+    import aiohttp
+
+    headers = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    names: list[str] = []
+    max_pages = 10  # 1000 branches — far more than this project will ever have
+    try:
+        async with aiohttp.ClientSession() as session:
+            for page in range(1, max_pages + 1):
+                async with session.get(
+                    branches_api_url(page=page),
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status == 403:
+                        raise DevBranchError(
+                            "GitHub API rate limit hit while listing branches. "
+                            "Wait a few minutes or type the branch name manually."
+                        )
+                    if resp.status != 200:
+                        raise DevBranchError(
+                            f"Could not list branches (HTTP {resp.status})."
+                        )
+                    page_items = await resp.json()
+                if not page_items:
+                    break
+                names.extend(parse_branches(page_items))
+                if len(page_items) < 100:
+                    break
+    except DevBranchError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise DevBranchError(f"Could not list branches: {e}") from e
+
+    # Re-sort the merged set so the default branch stays on top across pages.
+    return parse_branches([{"name": n} for n in names])
+
+
 def active_status() -> Optional[Dict[str, Any]]:
     """Return the active overlay's metadata, or ``None`` if none installed.
 

@@ -3909,6 +3909,35 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if not dev_branch.developer_mode_enabled():
             raise HTTPException(status_code=404, detail="Not found")
 
+    @app.get("/api/system/dev/branches")
+    async def dev_list_branches():
+        """List branches of this repo to populate the System-tab dropdown.
+
+        Best-effort: on any GitHub failure (rate limit, no network) returns
+        ``success: false`` with a message so the UI can fall back to the
+        manual branch-name field rather than breaking.
+        """
+        _require_dev_mode()
+        from ml_forecast_lab import dev_branch
+
+        token = os.environ.get("GITHUB_TOKEN", "") or None
+        try:
+            branches = await dev_branch.list_repo_branches(token=token)
+        except dev_branch.DevBranchError as e:
+            return JSONResponse(content={"success": False, "error": str(e),
+                                         "branches": []})
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Branch listing failed: {e}")
+            return JSONResponse(content={"success": False,
+                                         "error": _safe_error(e), "branches": []})
+
+        active = dev_branch.active_status() or {}
+        return JSONResponse(content={
+            "success": True,
+            "branches": branches,
+            "current": active.get("branch"),
+        })
+
     @app.post("/api/system/dev/install-branch")
     async def dev_install_branch(request: Request):
         """Fetch a branch of this repo and stage it as the boot overlay.

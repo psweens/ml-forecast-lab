@@ -227,16 +227,30 @@
     {% endif %}
 
     <form id="dev-branch-form" onsubmit="installDevBranch(event)" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-        <input type="text" id="dev-branch-input" name="branch"
-               placeholder="branch name (e.g. claude/my-feature)"
-               style="flex:1;min-width:240px;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);"
-               required>
+        <select id="dev-branch-select"
+                style="flex:1;min-width:240px;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);">
+            <option value="">Loading branches…</option>
+        </select>
+        <button type="button" class="btn" onclick="loadDevBranches()" title="Refresh branch list"
+                style="background:var(--bg);border:1px solid var(--border);">↻</button>
         <button type="submit" class="btn">Fetch &amp; run branch</button>
         {% if dev_installed %}
         <button type="button" class="btn" onclick="revertDevBranch()"
                 style="background:var(--bg);border:1px solid var(--border);">Revert to bundled</button>
         {% endif %}
     </form>
+    <details style="margin-top:8px;">
+        <summary style="cursor:pointer;font-size:0.85rem;color:var(--text-muted,#9ca3af);">
+            …or enter a branch name manually
+        </summary>
+        <input type="text" id="dev-branch-input" name="branch"
+               placeholder="branch name (e.g. claude/my-feature)"
+               style="margin-top:6px;width:100%;max-width:420px;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);">
+        <p style="margin-top:4px;font-size:0.8rem;color:var(--text-muted,#9ca3af);">
+            Overrides the dropdown when filled. Use this if the list can't load
+            (e.g. GitHub rate limit) or the branch isn't shown.
+        </p>
+    </details>
     <p id="dev-branch-status" style="margin-top:10px;font-size:0.9rem;"></p>
     <p style="margin-top:6px;font-size:0.8rem;color:var(--text-muted,#9ca3af);">
         Installing or reverting restarts the add-on; the web UI will drop for
@@ -289,10 +303,43 @@
         if (el) { el.textContent = msg; el.style.color = color || 'var(--text)'; }
     }
 
+    var DEV_CURRENT_BRANCH = {{ (dev_installed.branch | tojson) if dev_installed else 'null' }};
+
+    function loadDevBranches() {
+        var sel = document.getElementById('dev-branch-select');
+        if (!sel) { return; }
+        sel.innerHTML = '<option value="">Loading branches…</option>';
+        fetch(BASE_PATH + '/api/system/dev/branches')
+        .then(r => r.json())
+        .then(body => {
+            if (!body.success || !body.branches || !body.branches.length) {
+                sel.innerHTML = '<option value="">'
+                    + (body.error ? 'Could not load — use manual entry' : 'No branches found')
+                    + '</option>';
+                return;
+            }
+            sel.innerHTML = '';
+            body.branches.forEach(function (name) {
+                var opt = document.createElement('option');
+                opt.value = name;
+                opt.textContent = name + (name === DEV_CURRENT_BRANCH ? '  (running)' : '');
+                if (name === DEV_CURRENT_BRANCH) { opt.selected = true; }
+                sel.appendChild(opt);
+            });
+        })
+        .catch(function (err) {
+            sel.innerHTML = '<option value="">Could not load — use manual entry</option>';
+        });
+    }
+
     function installDevBranch(e) {
         e.preventDefault();
-        var branch = document.getElementById('dev-branch-input').value.trim();
-        if (!branch) { return; }
+        // Manual override wins when filled; otherwise use the dropdown.
+        var manual = document.getElementById('dev-branch-input');
+        var sel = document.getElementById('dev-branch-select');
+        var branch = (manual && manual.value.trim())
+            || (sel ? sel.value.trim() : '');
+        if (!branch) { _devStatus('Pick a branch first.', 'var(--error)'); return; }
         if (!confirm('Fetch and run branch "' + branch + '"? This downloads and '
             + 'executes code from that branch and restarts the add-on.')) { return; }
         _devStatus('Fetching ' + branch + '…', 'var(--text)');
@@ -327,6 +374,13 @@
             }
         })
         .catch(err => _devStatus('Error: ' + err, 'var(--error)'));
+    }
+
+    // Populate the branch dropdown as soon as the card is in the DOM.
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', loadDevBranches);
+    } else {
+        loadDevBranches();
     }
 {% endif %}
 
