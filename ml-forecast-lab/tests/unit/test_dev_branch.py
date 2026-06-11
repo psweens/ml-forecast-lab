@@ -139,6 +139,40 @@ def test_revert_noop_when_nothing_installed(_isolate_overlay):
     assert dev_branch.revert() is False
 
 
+# ---- branch listing (parse only; network lives in the endpoint) ----
+
+def test_parse_branches_floats_default_to_top():
+    payload = [
+        {"name": "zeta"},
+        {"name": "claude/feature"},
+        {"name": "main"},
+        {"name": "Alpha"},
+    ]
+    assert dev_branch.parse_branches(payload) == [
+        "main", "Alpha", "claude/feature", "zeta",
+    ]
+
+
+def test_parse_branches_master_also_floats():
+    assert dev_branch.parse_branches(
+        [{"name": "x"}, {"name": "master"}]
+    ) == ["master", "x"]
+
+
+def test_parse_branches_dedupes_and_ignores_malformed():
+    payload = [
+        {"name": "dup"}, {"name": "dup"}, {"name": 123},
+        {"nope": "x"}, "string-not-dict", {"name": "abc"},
+    ]
+    assert dev_branch.parse_branches(payload) == ["abc", "dup"]
+
+
+def test_parse_branches_empty_and_non_list():
+    assert dev_branch.parse_branches([]) == []
+    assert dev_branch.parse_branches(None) == []
+    assert dev_branch.parse_branches({"name": "x"}) == []
+
+
 # ---- version label ----
 
 def test_version_label_plain_when_not_running(monkeypatch):

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.42.1
+
+**Developer mode: pick the branch from a dropdown.** The System-tab
+Developer card (shown only when `developer_mode` is on) now lists the
+repository's branches in a dropdown fetched live from GitHub, instead of
+requiring the branch name to be typed. The currently-running overlay
+branch is pre-selected and marked. A manual-entry field remains as a
+fallback for when the list can't load (e.g. GitHub API rate limit) or a
+branch isn't shown, and a ↻ button refreshes the list. New gated
+endpoint `GET /api/system/dev/branches`; like the rest of the developer
+surface it 404s when `developer_mode` is off.
+
 ## 2.42.0
 
 **Developer mode: run a branch in place of the bundled release
