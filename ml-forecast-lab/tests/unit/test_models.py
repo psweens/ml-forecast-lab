@@ -591,3 +591,418 @@ class TestApplyPatience:
         _apply_patience(tree, cfg)
         assert neural.patience == 40
         assert tree.patience == 40
+
+
+class TestTimeXer:
+    def test_fit_predict_with_sequence_data(self):
+        from ml_forecast_lab.models.timexer_backend import TimeXerModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = TimeXerModel(d_model=16, n_heads=2, epochs=5, patience=3)
+        result = model.fit(X_flat, y, sequence_data=seq_data)
+        assert model.is_fitted
+        assert "best_val_loss" in result
+
+    def test_multi_horizon_predict_sequence(self):
+        from ml_forecast_lab.models.timexer_backend import TimeXerModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random((100, 12)).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = TimeXerModel(d_model=16, n_heads=2, epochs=3, patience=2)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        preds = model.predict_sequence(seq_data[:7])
+        assert preds.shape == (7, 12)
+        assert not np.any(np.isnan(preds))
+
+    def test_univariate_no_exog_path(self):
+        """With a single channel there are no exogenous variate tokens —
+        the cross-attention stage must be skipped, not crash."""
+        from ml_forecast_lab.models.timexer_backend import TimeXerModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((80, 24, 1)).astype(np.float32)
+        y = rng.random((80, 6)).astype(np.float32)
+        X_flat = rng.random((80, 10)).astype(np.float32)
+        model = TimeXerModel(d_model=16, n_heads=2, epochs=3, patience=2)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        preds = model.predict_sequence(seq_data[:5])
+        assert preds.shape == (5, 6)
+        assert not np.any(np.isnan(preds))
+
+    def test_z_score_standardisation_stored(self):
+        """With RevIN off, dataset-level z-score stats are fitted and stored."""
+        from ml_forecast_lab.models.timexer_backend import TimeXerModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = TimeXerModel(
+            d_model=16, n_heads=2, epochs=3, patience=2, use_revin=False,
+        )
+        model.fit(X_flat, y, sequence_data=seq_data)
+        assert model._channel_mean is not None
+        assert model._channel_std is not None
+        assert model._channel_mean.shape == (3,)
+
+    def test_z_score_skipped_when_revin_enabled(self):
+        from ml_forecast_lab.models.timexer_backend import TimeXerModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = TimeXerModel(
+            d_model=16, n_heads=2, epochs=3, patience=2, use_revin=True,
+        )
+        model.fit(X_flat, y, sequence_data=seq_data)
+        assert model._channel_mean is None
+        assert model._channel_std is None
+
+    def test_save_load_roundtrip(self, tmp_path):
+        from ml_forecast_lab.models.timexer_backend import TimeXerModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random((100, 8)).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = TimeXerModel(d_model=16, n_heads=2, epochs=3, patience=2)
+        model.fit(X_flat, y, sequence_data=seq_data, past_window_size=16)
+        preds = model.predict_sequence(seq_data[:5])
+        path = str(tmp_path / "timexer.bin")
+        model.save(path)
+        restored = TimeXerModel()
+        restored.load(path)
+        preds2 = restored.predict_sequence(seq_data[:5])
+        assert np.allclose(preds, preds2)
+        assert restored._past_window_size == 16
+
+
+class TestModernTCN:
+    def test_fit_predict_with_sequence_data(self):
+        from ml_forecast_lab.models.moderntcn_backend import ModernTCNModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = ModernTCNModel(d_model=8, epochs=5, patience=3)
+        result = model.fit(X_flat, y, sequence_data=seq_data)
+        assert model.is_fitted
+        assert "best_val_loss" in result
+
+    def test_multi_horizon_predict_sequence(self):
+        from ml_forecast_lab.models.moderntcn_backend import ModernTCNModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random((100, 12)).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = ModernTCNModel(d_model=8, epochs=3, patience=2)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        preds = model.predict_sequence(seq_data[:7])
+        assert preds.shape == (7, 12)
+        assert not np.any(np.isnan(preds))
+
+    def test_z_score_standardisation_stored(self):
+        from ml_forecast_lab.models.moderntcn_backend import ModernTCNModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = ModernTCNModel(d_model=8, epochs=3, patience=2, use_revin=False)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        assert model._channel_mean is not None
+        assert model._channel_std is not None
+        assert model._channel_mean.shape == (3,)
+
+    def test_z_score_skipped_when_revin_enabled(self):
+        from ml_forecast_lab.models.moderntcn_backend import ModernTCNModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = ModernTCNModel(d_model=8, epochs=3, patience=2, use_revin=True)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        assert model._channel_mean is None
+        assert model._channel_std is None
+
+    def test_save_load_roundtrip(self, tmp_path):
+        from ml_forecast_lab.models.moderntcn_backend import ModernTCNModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random((100, 8)).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = ModernTCNModel(d_model=8, epochs=3, patience=2)
+        model.fit(X_flat, y, sequence_data=seq_data, past_window_size=16)
+        preds = model.predict_sequence(seq_data[:5])
+        path = str(tmp_path / "moderntcn.bin")
+        model.save(path)
+        restored = ModernTCNModel()
+        restored.load(path)
+        preds2 = restored.predict_sequence(seq_data[:5])
+        assert np.allclose(preds, preds2)
+        assert restored._past_window_size == 16
+
+
+class _FakeChronosPipeline:
+    """Stand-in matching ChronosBoltPipeline.predict_quantiles's contract:
+    returns (quantiles, mean) where mean repeats each context's last value.
+    Records received contexts so tests can assert on the conditioning data
+    without any network access or pretrained weights."""
+
+    def __init__(self):
+        self.received_contexts = []
+
+    def predict_quantiles(self, inputs, prediction_length, quantile_levels):
+        import torch
+        self.received_contexts.extend([t.clone() for t in inputs])
+        mean = torch.stack([
+            torch.full((prediction_length,), float(t[-1])) for t in inputs
+        ])
+        quantiles = torch.stack(
+            [mean * q for q in [0.9, 1.0, 1.1]], dim=-1,
+        )
+        return quantiles, mean
+
+
+class TestChronosBolt:
+    @pytest.fixture()
+    def fake_pipeline(self, monkeypatch):
+        pytest.importorskip("chronos")
+        from ml_forecast_lab.models.chronos_bolt_backend import ChronosBoltModel
+        fake = _FakeChronosPipeline()
+        monkeypatch.setitem(
+            ChronosBoltModel._PIPELINE_CACHE,
+            ("amazon/chronos-bolt-tiny", "cpu"),
+            fake,
+        )
+        return fake
+
+    def _fit_model(self, **kwargs):
+        from ml_forecast_lab.models.chronos_bolt_backend import ChronosBoltModel
+        rng = np.random.default_rng(42)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        y = rng.random((100, 12)).astype(np.float32)
+        model = ChronosBoltModel()
+        model.fit(X_flat, y, **kwargs)
+        return model
+
+    def test_zero_shot_fit_caches_tail_only(self, fake_pipeline):
+        model = self._fit_model()
+        assert model.is_fitted
+        assert model._train_tail is not None
+        assert model._n_horizons == 12
+
+    def test_predict_sequence_shape_and_values(self, fake_pipeline):
+        model = self._fit_model()
+        rng = np.random.default_rng(0)
+        windows = rng.random((7, 24, 3)).astype(np.float32)
+        preds = model.predict_sequence(windows)
+        assert preds.shape == (7, 12)
+        # Fake repeats each context's last value — which is the window's
+        # last target value because window (24) + tail (100) < context cap.
+        assert np.allclose(preds[:, 0], windows[:, -1, 0], atol=1e-6)
+
+    def test_extended_window_conditions_on_past_only(self, fake_pipeline):
+        """In extended-window mode the future block holds zero target
+        placeholders — the context must stop at past_window_size."""
+        model = self._fit_model(extended_window=True, past_window_size=16)
+        rng = np.random.default_rng(0)
+        windows = rng.random((3, 24, 3)).astype(np.float32)
+        windows[:, 16:, 0] = 0.0  # zeroed future target block
+        preds = model.predict_sequence(windows)
+        # Context's last value must be the last PAST value, not the zero.
+        assert np.allclose(preds[:, 0], windows[:, 15, 0], atol=1e-6)
+
+    def test_short_window_stitches_train_tail(self, fake_pipeline):
+        model = self._fit_model()
+        rng = np.random.default_rng(0)
+        windows = rng.random((2, 24, 3)).astype(np.float32)
+        model.predict_sequence(windows)
+        # 24-step window alone is far below context_length=512, so the
+        # cached training tail must have been prepended.
+        assert all(
+            len(c) > 24 for c in fake_pipeline.received_contexts
+        )
+
+    def test_save_load_roundtrip(self, fake_pipeline, tmp_path):
+        model = self._fit_model(extended_window=True, past_window_size=16)
+        path = str(tmp_path / "chronos.bin")
+        model.save(path)
+        from ml_forecast_lab.models.chronos_bolt_backend import ChronosBoltModel
+        restored = ChronosBoltModel()
+        restored.load(path)
+        assert restored.is_fitted
+        assert restored._n_horizons == 12
+        assert restored._past_window_size == 16
+        assert np.allclose(restored._train_tail, model._train_tail)
+
+    def test_set_params_rejects_output_activation(self, fake_pipeline):
+        """Foundation backends have no output activation — set_params must
+        raise ValueError so _apply_output_activation skips them cleanly."""
+        from ml_forecast_lab.models.chronos_bolt_backend import ChronosBoltModel
+        model = ChronosBoltModel()
+        with pytest.raises(ValueError):
+            model.set_params(output_activation="softplus")
+
+    def test_fit_fails_clearly_without_weights(self, monkeypatch):
+        """No cached pipeline + loader failure => informative RuntimeError
+        (the benchmark runner records it as a per-model failure)."""
+        pytest.importorskip("chronos")
+        from ml_forecast_lab.models.chronos_bolt_backend import ChronosBoltModel
+
+        def _boom(cls, model_name, device):
+            raise OSError("offline")
+
+        monkeypatch.setattr(
+            ChronosBoltModel, "_load_pipeline", classmethod(_boom),
+        )
+        rng = np.random.default_rng(42)
+        model = ChronosBoltModel()
+        with pytest.raises(RuntimeError, match="Hugging Face"):
+            model.fit(
+                rng.random((50, 10)).astype(np.float32),
+                rng.random(50).astype(np.float32),
+            )
+
+
+class _FakeTTM:
+    """Stand-in for TinyTimeMixerForPrediction: returns an object exposing
+    ``prediction_outputs`` that repeats each context's last value for
+    ``pred_len`` steps. Records inputs for assertions."""
+
+    def __init__(self, pred_len=96):
+        self.pred_len = pred_len
+        self.received_shapes = []
+
+    def eval(self):
+        return self
+
+    def __call__(self, past_values):
+        import torch
+        from types import SimpleNamespace
+        self.received_shapes.append(tuple(past_values.shape))
+        last = past_values[:, -1:, :]  # (B, 1, C)
+        po = last.repeat(1, self.pred_len, 1)
+        return SimpleNamespace(prediction_outputs=po)
+
+
+class TestTTM:
+    @pytest.fixture()
+    def fake_model(self, monkeypatch):
+        pytest.importorskip("tsfm_public")
+        from ml_forecast_lab.models.ttm_backend import TTMModel
+        fake = _FakeTTM()
+        monkeypatch.setitem(
+            TTMModel._MODEL_CACHE,
+            ("ibm-granite/granite-timeseries-ttm-r2", 512, 96),
+            fake,
+        )
+        return fake
+
+    def _fit_model(self, **kwargs):
+        from ml_forecast_lab.models.ttm_backend import TTMModel
+        rng = np.random.default_rng(42)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        y = rng.random((100, 12)).astype(np.float32)
+        model = TTMModel()
+        model.fit(X_flat, y, **kwargs)
+        return model
+
+    def test_zero_shot_fit_caches_tail_only(self, fake_model):
+        model = self._fit_model()
+        assert model.is_fitted
+        assert model._train_tail is not None
+        assert model._n_horizons == 12
+
+    def test_contexts_are_exactly_context_length(self, fake_model):
+        """TTM checkpoints take fixed-length input — every conditioning
+        tensor must be exactly (batch, context_length, 1)."""
+        model = self._fit_model()
+        rng = np.random.default_rng(0)
+        windows = rng.random((5, 24, 3)).astype(np.float32)
+        preds = model.predict_sequence(windows)
+        assert preds.shape == (5, 12)
+        assert all(s[1] == 512 and s[2] == 1 for s in fake_model.received_shapes)
+
+    def test_extended_window_conditions_on_past_only(self, fake_model):
+        model = self._fit_model(extended_window=True, past_window_size=16)
+        rng = np.random.default_rng(0)
+        windows = rng.random((3, 24, 3)).astype(np.float32)
+        windows[:, 16:, 0] = 0.0
+        preds = model.predict_sequence(windows)
+        assert np.allclose(preds[:, 0], windows[:, 15, 0], atol=1e-6)
+
+    def test_autoregressive_extension_beyond_checkpoint_horizon(self, monkeypatch):
+        """Horizons longer than the checkpoint's native prediction length
+        are produced by rolling the context forward."""
+        pytest.importorskip("tsfm_public")
+        from ml_forecast_lab.models.ttm_backend import TTMModel
+        fake = _FakeTTM(pred_len=8)
+        monkeypatch.setitem(
+            TTMModel._MODEL_CACHE,
+            ("ibm-granite/granite-timeseries-ttm-r2", 512, 96),
+            fake,
+        )
+        rng = np.random.default_rng(42)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        y = rng.random((100, 20)).astype(np.float32)  # > pred_len=8
+        model = TTMModel()
+        model.fit(X_flat, y)
+        windows = rng.random((2, 24, 3)).astype(np.float32)
+        preds = model.predict_sequence(windows)
+        assert preds.shape == (2, 20)
+        assert not np.any(np.isnan(preds))
+        # 20 horizons at 8 per pass => 3 forward passes per batch.
+        assert len(fake.received_shapes) == 3
+
+    def test_save_load_roundtrip(self, fake_model, tmp_path):
+        model = self._fit_model(extended_window=True, past_window_size=16)
+        path = str(tmp_path / "ttm.bin")
+        model.save(path)
+        from ml_forecast_lab.models.ttm_backend import TTMModel
+        restored = TTMModel()
+        restored.load(path)
+        assert restored.is_fitted
+        assert restored._n_horizons == 12
+        assert restored._past_window_size == 16
+        assert np.allclose(restored._train_tail, model._train_tail)
+
+    def test_set_params_rejects_output_activation(self, fake_model):
+        from ml_forecast_lab.models.ttm_backend import TTMModel
+        model = TTMModel()
+        with pytest.raises(ValueError):
+            model.set_params(output_activation="softplus")
+
+
+class TestFoundationLazyImports:
+    def test_backend_modules_do_not_import_heavy_stack(self):
+        """Startup-RAM contract: the registry imports every backend module
+        at app startup, so the foundation backends must NOT pull chronos /
+        tsfm_public / transformers in at module-import time (the stack
+        holds ~300 MB RSS on top of torch). Heavy imports belong in
+        _load_pipeline / _load_model — first actual use only. Run in a
+        subprocess because sibling tests may already have imported the
+        heavy stack into this process."""
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        pkg_root = Path(__file__).resolve().parents[2]
+        code = (
+            "import sys;"
+            "import ml_forecast_lab.models.chronos_bolt_backend;"
+            "import ml_forecast_lab.models.ttm_backend;"
+            "leaked = [m for m in ('chronos', 'tsfm_public', 'transformers')"
+            " if m in sys.modules];"
+            "print('leaked:', leaked);"
+            "sys.exit(1 if leaked else 0)"
+        )
+        env = dict(os.environ, PYTHONPATH=str(pkg_root))
+        res = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, env=env, timeout=120,
+        )
+        assert res.returncode == 0, (
+            f"heavy stack imported at module import: "
+            f"{res.stdout} {res.stderr[-300:]}"
+        )

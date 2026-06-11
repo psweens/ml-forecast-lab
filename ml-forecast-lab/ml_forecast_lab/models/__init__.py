@@ -43,10 +43,14 @@ _optional_imports = {
     'CrossformerModel': 'crossformer_backend',
     'TimesNetModel': 'timesnet_backend',
     'TFTModel': 'tft_backend',
+    'TimeXerModel': 'timexer_backend',
+    'ModernTCNModel': 'moderntcn_backend',
     'SeasonalNaiveModel': 'seasonal_naive_backend',
     'ARIMAModel': 'statsforecast_backend',
     'ETSModel': 'statsforecast_backend',
     'ThetaModel': 'statsforecast_backend',
+    'ChronosBoltModel': 'chronos_bolt_backend',
+    'TTMModel': 'ttm_backend',
 }
 
 for _cls_name, _module in _optional_imports.items():

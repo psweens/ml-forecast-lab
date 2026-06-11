@@ -63,6 +63,10 @@ REPO_NAME = "ml-forecast-lab"
 DEV_SRC_DIR = Path("/data/ml_forecast_lab/dev_src")
 ACTIVE_MARKER = DEV_SRC_DIR / "ACTIVE.json"
 PACKAGE_DIRNAME = "ml_forecast_lab"
+# The branch's requirements.txt is captured here on install so the
+# installer can diff it against the running environment and install any
+# new dependencies (see install-stream endpoint).
+BRANCH_REQS_FILENAME = "branch_requirements.txt"
 
 # Branch names: GitHub allows a fairly broad charset, but we keep this
 # strict (alnum plus . _ / -) and reject any "/.." traversal attempt.
@@ -305,6 +309,15 @@ def _safe_extract_package(raw_gz: bytes, dest_pkg_parent: Path) -> None:
                 "(expected at ml-forecast-lab/ml_forecast_lab)."
             )
 
+        # Capture the branch's requirements.txt (sibling of the package's
+        # parent — i.e. the addon dir) before the swap, so the installer can
+        # diff it against the running env and install any new dependencies.
+        reqs_src = pkg.parent / "requirements.txt"
+        reqs_text = (
+            reqs_src.read_text(encoding="utf-8", errors="replace")
+            if reqs_src.is_file() else None
+        )
+
         # Atomic-ish swap: stage the package next to the live dir, then
         # replace. Keeps a half-written overlay from ever being booted.
         final = dest_pkg_parent / PACKAGE_DIRNAME
@@ -315,6 +328,13 @@ def _safe_extract_package(raw_gz: bytes, dest_pkg_parent: Path) -> None:
         if final.exists():
             shutil.rmtree(final, ignore_errors=True)
         os.replace(new, final)
+
+        # Persist (or clear) the captured requirements alongside the overlay.
+        reqs_dest = dest_pkg_parent / BRANCH_REQS_FILENAME
+        if reqs_text is not None:
+            reqs_dest.write_text(reqs_text, encoding="utf-8")
+        elif reqs_dest.exists():
+            reqs_dest.unlink()
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
@@ -376,3 +396,112 @@ def revert() -> bool:
             "bundled release."
         )
     return existed
+
+
+# ---------------------------------------------------------------------------
+# Dependency installation for overlays that add new requirements.
+#
+# The overlay's PYTHONPATH shadow only swaps Python *source*; a branch that
+# adds new packages (e.g. the foundation-model backends needing
+# chronos-forecasting / granite-tsfm) also needs those installed. We diff
+# the branch's captured requirements.txt against what's already installed
+# in the running interpreter and install only the genuinely-new
+# distributions into the live environment (not a --target dir), so pip
+# reuses the image's existing packages and only fetches what's missing.
+# Installs persist across add-on restarts (same container) but not across a
+# rebuild — re-fetch the branch to reinstall. Skipped on 32-bit ARM, which
+# has no wheels for the compiled transformers stack.
+# ---------------------------------------------------------------------------
+
+# pip requirement option lines (not packages) we never try to "install".
+_REQ_OPTION_PREFIXES = ("-", "git+", "http://", "https://", ".", "/")
+
+
+def canonical_name(name: str) -> str:
+    """PEP 503 canonical distribution name (lower-case, dashes)."""
+    return re.sub(r"[-_.]+", "-", name).strip().lower()
+
+
+def requirement_package_name(line: str) -> Optional[str]:
+    """Extract the canonical package name from one requirements.txt line.
+
+    Returns ``None`` for blank lines, comments, and pip option / URL /
+    path lines (which we never install via the diff path).
+    """
+    line = line.split("#", 1)[0].strip()
+    if not line or line.startswith(_REQ_OPTION_PREFIXES):
+        return None
+    # Drop environment markers and version specifiers; keep the name (and
+    # strip any extras in brackets).
+    head = re.split(r"[;<>=!~\[\( ]", line, 1)[0].strip()
+    return canonical_name(head) if head else None
+
+
+def read_branch_requirements() -> Optional[str]:
+    """Return the installed overlay's captured requirements.txt text, if any."""
+    path = DEV_SRC_DIR / BRANCH_REQS_FILENAME
+    try:
+        return path.read_text(encoding="utf-8") if path.is_file() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def installed_distribution_names() -> set:
+    """Canonical names of every distribution installed in this interpreter."""
+    import importlib.metadata as md
+    names = set()
+    for dist in md.distributions():
+        try:
+            name = dist.metadata["Name"]
+        except Exception:  # noqa: BLE001
+            name = None
+        if name:
+            names.add(canonical_name(name))
+    return names
+
+
+def new_requirements(
+    branch_reqs_text: Optional[str],
+    installed: Optional[set] = None,
+) -> List[str]:
+    """Return the branch requirement lines whose package isn't installed.
+
+    Full original lines are returned (version specifiers and environment
+    markers intact) so pip applies the branch's constraints and skips any
+    line whose marker excludes this platform. Already-satisfied packages
+    are left untouched, so core deps like torch/numpy are never disturbed.
+    Pure and testable: pass ``installed`` to avoid touching the real env.
+    """
+    if not branch_reqs_text:
+        return []
+    if installed is None:
+        installed = installed_distribution_names()
+    out: List[str] = []
+    seen = set()
+    for raw in branch_reqs_text.splitlines():
+        name = requirement_package_name(raw)
+        if not name or name in installed or name in seen:
+            continue
+        seen.add(name)
+        out.append(raw.split("#", 1)[0].strip())
+    return out
+
+
+def dependency_install_supported() -> bool:
+    """Whether new compiled deps can be installed on this platform.
+
+    False on 32-bit ARM (armv6l/armv7l), which has no wheels for the
+    transformers/tokenizers stack — matching the ``platform_machine !=
+    "armv7l"`` markers in requirements.txt.
+    """
+    import platform
+    return platform.machine().lower() not in ("armv7l", "armv6l", "arm")
+
+
+def pip_install_command(reqs: List[str]) -> List[str]:
+    """Argv to install the given requirement specifiers into this env."""
+    import sys
+    return [
+        sys.executable, "-m", "pip", "install",
+        "--no-input", "--disable-pip-version-check", *reqs,
+    ]

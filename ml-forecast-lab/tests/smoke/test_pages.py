@@ -31,7 +31,7 @@ def test_top_level_page_renders(client, path, expected_status, must_contain):
 
 
 def test_models_page_lists_all_backends(client):
-    """Models page must list all 24 backends from MODEL_CATALOG."""
+    """Models page must list all 28 backends from MODEL_CATALOG."""
     resp = client.get("/models")
     assert resp.status_code == 200
     body = resp.text
@@ -39,11 +39,28 @@ def test_models_page_lists_all_backends(client):
     expected_models = [
         "LightGBM", "XGBoost", "CatBoost",  # tree
         "LSTM", "CNN", "TFT", "PatchTST", "iTransformer", "TimeMixer",  # neural
+        "TimeXer", "ModernTCN",  # 2024 architectures
+        "Chronos-Bolt", "Granite TTM",  # zero-shot foundation
         "Seasonal Naive",  # baseline
         "ARIMA", "ETS", "Theta",  # statsforecast
     ]
     missing = [m for m in expected_models if m not in body]
     assert not missing, f"Models page missing: {missing}"
+
+
+def test_models_page_category_headings(client):
+    """Models page groups backends under per-category headings, including a
+    dedicated Foundation Models section for the zero-shot backends."""
+    body = client.get("/models").text
+    for heading in ("Tree Models", "Neural Models", "Foundation Models",
+                    "Classical Models", "Baselines"):
+        assert heading in body, f"missing category heading: {heading!r}"
+    # The foundation backends sit under the Foundation Models heading.
+    foundation_idx = body.index("Foundation Models")
+    assert foundation_idx < body.index("Chronos-Bolt")
+    assert foundation_idx < body.index("Granite TTM")
+    # …and the Foundation heading itself comes after the Tree heading.
+    assert body.index("Tree Models") < foundation_idx
 
 
 def test_models_page_alphabetical(client):

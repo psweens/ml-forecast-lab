@@ -979,6 +979,29 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
             "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
+        "timexer": {
+            "patch_len": {"type": "int", "default": 8, "label": "Patch length", "min": 2, "max": 48},
+            "d_model": {"type": "int", "default": 32, "label": "Model dimension", "min": 8, "max": 256},
+            "n_heads": {"type": "int", "default": 4, "label": "Attention heads", "min": 1, "max": 16},
+            "n_encoder_layers": {"type": "int", "default": 1, "label": "Encoder layers", "min": 1, "max": 8},
+            "dim_feedforward": {"type": "int", "default": 64, "label": "Feedforward dimension", "min": 16, "max": 512},
+            "dropout": {"type": "float", "default": 0.2, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
+            "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
+        },
+        "moderntcn": {
+            "patch_len": {"type": "int", "default": 4, "label": "Patch length", "min": 1, "max": 24},
+            "patch_stride": {"type": "int", "default": 2, "label": "Patch stride", "min": 1, "max": 24},
+            "d_model": {"type": "int", "default": 16, "label": "Model dimension", "min": 4, "max": 128},
+            "large_kernel": {"type": "int", "default": 13, "label": "Large DW kernel", "min": 5, "max": 51},
+            "ffn_ratio": {"type": "int", "default": 2, "label": "FFN expansion ratio", "min": 1, "max": 8},
+            "n_blocks": {"type": "int", "default": 1, "label": "Backbone blocks", "min": 1, "max": 4},
+            "dropout": {"type": "float", "default": 0.1, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
+            "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
+        },
         # `seasonal_period` is marked non-tunable on the classical backends:
         # it's a data-cadence property (set once based on sampling rate, e.g.
         # 48 for half-hourly daily, 168 for hourly weekly), not a hyperparameter
@@ -987,6 +1010,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # Optuna to tune on these backends. Tuning is blocked at the API layer
         # for any model whose schema has zero tunable params, so users get a
         # clear error rather than an Optuna study spinning on no-op trials.
+        # The same applies to the zero-shot foundation backends
+        # (chronos_bolt / ttm): the pretrained weights are frozen and the
+        # remaining knobs are checkpoint-selection properties, not search
+        # dimensions.
         "seasonal_naive": {
             "seasonal_period": {"type": "int", "default": 48, "label": "Seasonal period (steps)", "min": 1, "max": 1440, "tunable": False},
         },
@@ -1001,6 +1028,18 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         "theta": {
             "seasonal_period": {"type": "int", "default": 48, "label": "Seasonal period (steps)", "min": 1, "max": 1440, "tunable": False},
             "train_history": {"type": "int", "default": 1024, "label": "Max train history", "min": 64, "max": 8192, "tunable": False},
+        },
+        "chronos_bolt": {
+            "model_name": {"type": "select", "default": "amazon/chronos-bolt-tiny", "label": "Pretrained checkpoint",
+                           "options": ["amazon/chronos-bolt-tiny", "amazon/chronos-bolt-mini", "amazon/chronos-bolt-small"], "tunable": False},
+            "context_length": {"type": "int", "default": 512, "label": "Max context length", "min": 32, "max": 2048, "tunable": False},
+            "train_history": {"type": "int", "default": 512, "label": "Cached history tail", "min": 64, "max": 8192, "tunable": False},
+        },
+        "ttm": {
+            "model_path": {"type": "select", "default": "ibm-granite/granite-timeseries-ttm-r2", "label": "Pretrained checkpoint",
+                           "options": ["ibm-granite/granite-timeseries-ttm-r2", "ibm-granite/granite-timeseries-ttm-r1"], "tunable": False},
+            "context_length": {"type": "int", "default": 512, "label": "Context length", "min": 52, "max": 1536, "tunable": False},
+            "train_history": {"type": "int", "default": 1024, "label": "Cached history tail", "min": 64, "max": 8192, "tunable": False},
         },
     }
 
@@ -1152,6 +1191,18 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         {"name": "tft", "display_name": "TFT", "model_type": "PyTorch",
          "description": "Temporal Fusion Transformer with variable selection.",
          "speed": "🐢 Slower", "best_for": "Interpretable forecasts with covariates"},
+        {"name": "timexer", "display_name": "TimeXer", "model_type": "PyTorch",
+         "description": "Endogenous patch tokens with cross-attention to exogenous variate tokens.",
+         "speed": "🔶 Moderate", "best_for": "Covariate-driven targets (solar, heating)"},
+        {"name": "moderntcn", "display_name": "ModernTCN", "model_type": "PyTorch",
+         "description": "Modernised pure-convolution backbone with large-kernel depthwise temporal mixing.",
+         "speed": "⚡ Fast", "best_for": "Transformer-class accuracy at convolution cost"},
+        {"name": "chronos_bolt", "display_name": "Chronos-Bolt", "model_type": "Foundation",
+         "description": "Amazon's pretrained zero-shot forecaster — no training on your data.",
+         "speed": "⚡ Fast", "best_for": "Cold start with little history; strong zero-shot accuracy"},
+        {"name": "ttm", "display_name": "Granite TTM", "model_type": "Foundation",
+         "description": "IBM's Tiny Time Mixer — pretrained zero-shot forecaster in the 1-5M param range.",
+         "speed": "⚡ Fast", "best_for": "Cold start on tight hardware budgets"},
         {"name": "seasonal_naive", "display_name": "Seasonal Naive", "model_type": "Baseline",
          "description": "Reference baseline: ŷ[t+h] = y[t+h-period]. No training.",
          "speed": "⚡ Instant", "best_for": "Sanity-check reference for all other models"},
@@ -4048,6 +4099,151 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 ),
             },
             background=BackgroundTask(_deferred_restart) if restarting else None,
+        )
+
+    @app.get("/api/system/dev/install-stream")
+    async def dev_install_stream(request: Request):
+        """Fetch a branch, install any new dependencies, and restart —
+        streaming live progress as Server-Sent Events.
+
+        Backs the System-tab Developer card so the user sees download and
+        pip progress in real time. Branches that add new Python
+        dependencies (e.g. the foundation-model backends needing
+        chronos-forecasting / granite-tsfm) get those installed into the
+        live environment *before* the restart; on 32-bit ARM (no wheels)
+        the dependency step is skipped with a warning. The install reuses
+        the image's existing packages, so only genuinely-new distributions
+        are fetched and core deps like torch are never disturbed.
+        """
+        _require_dev_mode()
+        from ml_forecast_lab import dev_branch
+
+        branch_raw = request.query_params.get("branch", "")
+
+        def _sse(obj) -> str:
+            return f"data: {json.dumps(obj)}\n\n"
+
+        async def _gen():
+            import aiohttp
+            try:
+                try:
+                    branch = dev_branch.validate_branch(branch_raw)
+                except dev_branch.DevBranchError as e:
+                    yield _sse({"type": "error", "message": str(e)})
+                    return
+
+                yield _sse({"type": "step", "message": f"Resolving {branch}…"})
+                sha = ""
+                try:
+                    async with aiohttp.ClientSession() as s:
+                        async with s.get(
+                            dev_branch.commit_api_url(branch),
+                            headers={"Accept": "application/vnd.github+json"},
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as r:
+                            if r.status == 200:
+                                sha = (await r.json()).get("sha", "") or ""
+                            elif r.status == 404:
+                                yield _sse({"type": "error", "message":
+                                            f"Branch {branch!r} not found in "
+                                            f"{dev_branch.REPO_OWNER}/{dev_branch.REPO_NAME}."})
+                                return
+                except Exception as e:  # noqa: BLE001
+                    yield _sse({"type": "log", "message": f"(could not resolve sha: {e})"})
+
+                yield _sse({"type": "step", "message": "Downloading branch…"})
+                try:
+                    async with aiohttp.ClientSession() as s:
+                        async with s.get(
+                            dev_branch.tarball_url(branch),
+                            timeout=aiohttp.ClientTimeout(total=180),
+                        ) as r:
+                            if r.status != 200:
+                                yield _sse({"type": "error", "message":
+                                            f"Download failed (HTTP {r.status}). Check the "
+                                            f"branch name and the Pi's internet access."})
+                                return
+                            raw = await r.read()
+                except Exception as e:  # noqa: BLE001
+                    yield _sse({"type": "error",
+                                "message": f"Download failed: {_safe_error(e)}"})
+                    return
+
+                yield _sse({"type": "step", "message": "Extracting overlay…"})
+                try:
+                    status = dev_branch.install_from_tarball_bytes(branch, raw, sha=sha)
+                except dev_branch.DevBranchError as e:
+                    yield _sse({"type": "error", "message": str(e)})
+                    return
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"Overlay install failed: {e}", exc_info=True)
+                    yield _sse({"type": "error", "message": _safe_error(e)})
+                    return
+                yield _sse({"type": "log", "message":
+                            f"Installed overlay {branch}@{status['sha_short'] or '?'}"})
+
+                # Install any dependencies the branch adds but the image lacks.
+                new_reqs = dev_branch.new_requirements(
+                    dev_branch.read_branch_requirements())
+                if new_reqs and not dev_branch.dependency_install_supported():
+                    import platform
+                    yield _sse({"type": "log", "message":
+                                f"Skipping dependency install on {platform.machine()} "
+                                f"(no 32-bit ARM wheels): {', '.join(new_reqs)}. "
+                                f"Those backends will be unavailable."})
+                elif new_reqs:
+                    yield _sse({"type": "step", "message":
+                                f"Installing {len(new_reqs)} new "
+                                f"{'dependencies' if len(new_reqs) != 1 else 'dependency'}… "
+                                f"(can take a few minutes)"})
+                    yield _sse({"type": "log", "message": "$ pip install " + " ".join(new_reqs)})
+                    rc = -1
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            *dev_branch.pip_install_command(new_reqs),
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.STDOUT,
+                        )
+                        async for bline in proc.stdout:
+                            line = bline.decode("utf-8", "replace").rstrip()
+                            if line:
+                                yield _sse({"type": "log", "message": line})
+                        rc = await proc.wait()
+                    except Exception as e:  # noqa: BLE001
+                        yield _sse({"type": "log", "message": f"pip error: {_safe_error(e)}"})
+                    if rc != 0:
+                        yield _sse({"type": "log", "message":
+                                    f"Dependency install exited with code {rc}; those backends "
+                                    f"may be unavailable, but the branch will still run."})
+                    else:
+                        yield _sse({"type": "log", "message": "Dependencies installed."})
+                else:
+                    yield _sse({"type": "log", "message": "No new dependencies to install."})
+
+                # Restart so the overlay (and any new deps) take effect.
+                if _can_self_restart():
+                    yield _sse({"type": "restarting", "message":
+                                f"Installed {branch}@{status['sha_short'] or '?'}. Restarting…"})
+                    await asyncio.sleep(1.5)  # flush the event before the container dies
+                    await _restart_addon()
+                else:
+                    yield _sse({"type": "done", "message":
+                                f"Installed {branch}@{status['sha_short'] or '?'}. "
+                                f"Restart the add-on to run it (auto-restart unavailable)."})
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"install-stream failed: {e}", exc_info=True)
+                yield _sse({"type": "error", "message": _safe_error(e)})
+
+        return StreamingResponse(
+            _gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     @app.post("/api/system/dev/revert")

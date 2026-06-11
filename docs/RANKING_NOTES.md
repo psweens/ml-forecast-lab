@@ -59,10 +59,10 @@ sliding-window CV folds share most of their training data, identical feature
 pipelines, and identical generative process — they're emphatically not
 independent.
 
-A second issue is scale: at typical settings (K = 24 backends, N = 5 folds),
+A second issue is scale: at typical settings (K = 28 backends, N = 5 folds),
 the Nemenyi critical difference is
 
-$$\mathrm{CD} = q_{0.05} \cdot \sqrt{\frac{K(K+1)}{6N}} \approx 3.43 \cdot \sqrt{\frac{24 \cdot 25}{30}} \approx 15.3$$
+$$\mathrm{CD} = q_{0.05} \cdot \sqrt{\frac{K(K+1)}{6N}} \approx 3.50 \cdot \sqrt{\frac{28 \cdot 29}{30}} \approx 18.2$$
 
 — wider than the entire rank scale. Even at K = 5, N = 5 the CD is ~2.7 rank
 units. So even if the independence assumption *did* hold, the test would

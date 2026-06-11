@@ -1,6 +1,6 @@
 # ML Forecast Lab — Documentation
 
-This is the full reference for users running the app. For a quick install and a first forecast, see [README.md](README.md). For picking which of the 24 backends to enable, see [`docs/MODEL_GUIDE.md`](https://github.com/psweens/ml-forecast-lab/blob/main/docs/MODEL_GUIDE.md) in the repository.
+This is the full reference for users running the app. For a quick install and a first forecast, see [README.md](README.md). For picking which of the 28 backends to enable, see [`docs/MODEL_GUIDE.md`](https://github.com/psweens/ml-forecast-lab/blob/main/docs/MODEL_GUIDE.md) in the repository.
 
 ## Contents
 
@@ -177,7 +177,7 @@ When `include_clear_sky_irradiance` is on, the app also gates production forecas
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `models_enabled` | list | `[lightgbm, xgboost, lstm, cnn]` | Backends to train. Names match the registry slugs in `docs/MODEL_GUIDE.md` (`seasonal_naive`, `lightgbm`, `xgboost`, `catboost`, `lstm`, `gru`, `cnn`, `dlinear`, `nlinear`, `tsmixer`, `timemixer`, `tide`, `sparsetsf`, `fits`, `nbeats`, `nhits`, `patchtst`, `itransformer`, `crossformer`, `timesnet`, `tft`, `arima`, `ets`, `theta`). |
+| `models_enabled` | list | `[lightgbm, xgboost, lstm, cnn]` | Backends to train. Names match the registry slugs in `docs/MODEL_GUIDE.md` (`seasonal_naive`, `lightgbm`, `xgboost`, `catboost`, `lstm`, `gru`, `cnn`, `dlinear`, `nlinear`, `tsmixer`, `timemixer`, `tide`, `sparsetsf`, `fits`, `nbeats`, `nhits`, `patchtst`, `itransformer`, `crossformer`, `timesnet`, `tft`, `timexer`, `moderntcn`, `arima`, `ets`, `theta`, `chronos_bolt`, `ttm`). The zero-shot foundation backends (`chronos_bolt`, `ttm`) download pretrained weights from the Hugging Face Hub on first use (cached afterwards) and are unavailable on `armv7`. |
 | `model_params` | mapping | `{}` | Per-experiment hyperparameter overrides; keys are model names. Takes precedence over global `model_overrides`. Easier path: tune in the UI and use **Apply Tuned Params, Promote & Retrain**. |
 | `loss_fn` | `mse` \| `mae` \| `huber` \| `tweedie` | `huber` | Training loss for neural models. `huber` is quadratic near zero and linear in the tails, which is right for the spiky near-zero HA signals most users forecast. `tweedie` is honoured only by tree backends (LightGBM / XGBoost / CatBoost). |
 | `optimiser` | `adam` \| `adamw` | `adamw` | Neural optimiser. `adamw` (decoupled weight decay) matches every published time-series transformer paper; `adam` is the classic. Ignored by tree models. |
@@ -361,14 +361,15 @@ If you're developing the app and want to try a branch without rebuilding the ima
 
 1. Set `developer_mode: true` in the app **Configuration** tab and restart the app.
 2. A **Developer** card appears at the bottom of the **System** tab. Pick a branch of `psweens/ml-forecast-lab` from the dropdown (it's populated live from GitHub; the ↻ button refreshes it, and the running branch is marked) and click **Fetch & run branch**. If the list can't load — e.g. a GitHub API rate limit — expand **…or enter a branch name manually** and type it (e.g. `claude/my-feature`).
-3. The app downloads that branch from GitHub, stages it as an overlay under `/data`, and restarts. On the next boot it runs the branch's code instead of the bundled release. A persistent **Developer build** banner and the annotated version string (`2.42.0 (dev: my-feature@1a2b3c4)`) confirm you're off-release.
+3. The app downloads that branch from GitHub, stages it as an overlay under `/data`, installs any new dependencies the branch adds (**live progress streams into the card**), and restarts. On the next boot it runs the branch's code instead of the bundled release. A persistent **Developer build** banner and the annotated version string (`2.43.0 (dev: my-feature@1a2b3c4)`) confirm you're off-release.
 4. Click **Revert to bundled** (or just set `developer_mode: false`) to return to the shipped version on the next restart.
 
 Notes and limits:
 
 - Only branches of this repository can be run — you supply a branch name, never a URL.
 - The bundled image is never modified; the overlay lives in `/data` and is removed on revert.
-- First fetch needs internet access on the Pi. The branch must only change **Python code** — a running container can't install new system or Python *dependencies*, so a branch that adds a package needs a full image rebuild instead.
+- First fetch needs internet access on the Pi.
+- **New dependencies:** if a branch adds Python packages (e.g. the foundation-model backends' `chronos-forecasting` / `granite-tsfm`), only the genuinely-new ones are installed into the running environment before the restart — existing packages are left as the image built them. This step can take a few minutes and is **skipped on 32-bit ARM** (`armv7l`), which has no wheels for the compiled stack; those backends stay unavailable there. Dependencies installed this way persist across restarts but are wiped by an add-on update/rebuild — re-fetch the branch to reinstall. (For a permanent install, the dependency belongs in `requirements.txt` and a normal release.)
 - Requires the Supervisor API (`hassio_api`), used solely to restart the app after install/revert.
 
 ---

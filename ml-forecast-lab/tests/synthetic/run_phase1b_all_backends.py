@@ -118,6 +118,12 @@ def _all_backends() -> List[Tuple[str, type]]:
         ("tft", "tft_backend", "TFTModel"),
         ("nbeats", "nbeats_backend", "NBeatsModel"),
         ("nhits", "nhits_backend", "NHiTSModel"),
+        ("timexer", "timexer_backend", "TimeXerModel"),
+        ("moderntcn", "moderntcn_backend", "ModernTCNModel"),
+        # chronos_bolt / ttm are deliberately absent: zero-shot foundation
+        # backends take no gradient steps, so the epochs-based harness has
+        # nothing to exercise, and a benchmark run here would trigger a
+        # Hugging Face weight download.
     ]
     for name, mod, cls_name in catalog:
         try:

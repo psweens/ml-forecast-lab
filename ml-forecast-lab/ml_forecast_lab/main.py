@@ -701,10 +701,18 @@ class MLForecastLabApp:
                 ("crossformer", "crossformer_backend", "CrossformerModel"),
                 ("timesnet", "timesnet_backend", "TimesNetModel"),
                 ("tft", "tft_backend", "TFTModel"),
+                ("timexer", "timexer_backend", "TimeXerModel"),
+                ("moderntcn", "moderntcn_backend", "ModernTCNModel"),
                 ("seasonal_naive", "seasonal_naive_backend", "SeasonalNaiveModel"),
                 ("arima", "statsforecast_backend", "ARIMAModel"),
                 ("ets", "statsforecast_backend", "ETSModel"),
                 ("theta", "statsforecast_backend", "ThetaModel"),
+                # Zero-shot foundation models. Optional heavy deps
+                # (chronos-forecasting / granite-tsfm) — skipped cleanly
+                # here when the packages aren't installed, e.g. on armv7
+                # where the transformers stack has no wheels.
+                ("chronos_bolt", "chronos_bolt_backend", "ChronosBoltModel"),
+                ("ttm", "ttm_backend", "TTMModel"),
             ]
             for _name, _module, _cls_name in _optional_backends:
                 try:
@@ -2529,16 +2537,20 @@ class MLForecastLabApp:
         except Exception as _e:
             logger.debug("Pairwise comparison build failed: %s", _e)
 
-        # Capture the Seasonal Naive baseline MAE for the skill chip. If
-        # the user didn't enable Seasonal Naive we hide it from the rank
-        # table (it was force-included by the runner just for the chip).
+        # Capture the Seasonal Naive baseline MAE for the "vs Seasonal
+        # Naive" skill chip. Seasonal Naive is force-run by the runner as
+        # the reference baseline even when the user didn't enable it: it
+        # stays visible in the results tables (it's the yardstick the other
+        # models are measured against) and is part of the rank pool, so the
+        # leaderboard ranks stay contiguous. It is only excluded from the
+        # auto-promote decision below (so the user's mlfl.yaml is never
+        # silently switched to a baseline they didn't choose) — never from
+        # the displayed results.
         naive_baseline_mae: Optional[float] = None
         for _wm in web_models:
             if _wm.name == "seasonal_naive":
                 naive_baseline_mae = float(_wm.mae.mean) if _wm.mae else None
                 break
-        if naive_was_enabled is False:
-            web_models = [m for m in web_models if m.name != "seasonal_naive"]
 
         web_result = WebBenchmarkResult(
             experiment_name=exp_cfg.name,

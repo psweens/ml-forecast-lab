@@ -262,10 +262,15 @@
         </p>
     </details>
     <p id="dev-branch-status" style="margin-top:10px;font-size:0.9rem;"></p>
+    <pre id="dev-progress" style="display:none;margin-top:8px;max-height:260px;overflow:auto;
+        background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;
+        font-size:0.78rem;line-height:1.3;white-space:pre-wrap;color:var(--text-muted,#9ca3af);"></pre>
     <p style="margin-top:6px;font-size:0.8rem;color:var(--text-muted,#9ca3af);">
-        Installing or reverting restarts the add-on; the web UI will drop for
-        ~15–30 s (longer if the branch needs new Python dependencies, which a
-        running container cannot install — those require an image rebuild).
+        Installing streams live progress below. A branch that adds new Python
+        dependencies (e.g. the foundation-model backends) installs them here
+        before restarting — that step can take a few minutes and is skipped on
+        32-bit ARM, which has no wheels for them. The add-on then restarts and
+        the web UI drops briefly.
     </p>
 </section>
 {% endif %}
@@ -375,6 +380,14 @@
         });
     }
 
+    function _devLog(line) {
+        var pre = document.getElementById('dev-progress');
+        if (!pre) { return; }
+        pre.style.display = 'block';
+        pre.textContent += line + '\n';
+        pre.scrollTop = pre.scrollHeight;
+    }
+
     function installDevBranch(e) {
         e.preventDefault();
         // Manual override wins when filled; otherwise use the dropdown.
@@ -384,13 +397,53 @@
             || (sel ? sel.value.trim() : '');
         if (!branch) { _devStatus('Pick a branch first.', 'var(--error)'); return; }
         if (!confirm('Fetch and run branch "' + branch + '"? This downloads and '
-            + 'executes code from that branch and restarts the add-on.')) { return; }
+            + 'executes code from that branch (and any new dependencies) and '
+            + 'restarts the add-on.')) { return; }
+
+        var pre = document.getElementById('dev-progress');
+        if (pre) { pre.textContent = ''; pre.style.display = 'block'; }
         _devStatus('Fetching ' + branch + '…', 'var(--text)');
-        _devRestartPost(BASE_PATH + '/api/system/dev/install-branch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ branch: branch }),
-        });
+
+        // Live progress over SSE. The stream ends when the add-on restarts
+        // (connection drops → onerror), which we treat as success-in-flight.
+        var url = BASE_PATH + '/api/system/dev/install-stream?branch='
+            + encodeURIComponent(branch);
+        var es = new EventSource(url);
+        var finished = false;  // a terminal event arrived; ignore the drop
+        es.onmessage = function (ev) {
+            var d;
+            try { d = JSON.parse(ev.data); } catch (_) { return; }
+            if (d.type === 'log') {
+                _devLog(d.message);
+            } else if (d.type === 'step') {
+                _devStatus(d.message, 'var(--text)');
+                _devLog('» ' + d.message);
+            } else if (d.type === 'error') {
+                finished = true;
+                _devStatus('Error: ' + d.message, 'var(--error)');
+                _devLog('ERROR: ' + d.message);
+                es.close();
+            } else if (d.type === 'restarting') {
+                finished = true;
+                _devStatus(d.message + ' Reloading shortly…', 'var(--success)');
+                _devLog('» ' + d.message);
+                es.close();
+                _devReload();
+            } else if (d.type === 'done') {
+                finished = true;
+                _devStatus(d.message, 'var(--success)');
+                _devLog('» ' + d.message);
+                es.close();
+            }
+        };
+        es.onerror = function () {
+            es.close();
+            if (finished) { return; }
+            // Connection dropped without a terminal event — almost always the
+            // add-on restarting after a successful install.
+            _devStatus('Add-on is restarting… reloading shortly.', 'var(--success)');
+            _devReload();
+        };
     }
 
     function revertDevBranch() {

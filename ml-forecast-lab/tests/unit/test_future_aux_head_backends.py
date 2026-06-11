@@ -251,3 +251,68 @@ def test_itransformer_no_aux_head_in_legacy_past_only_mode():
     )
     assert model.future_aux_head is None
     assert model.future_window_size == 0
+
+
+# ----------------------------------------------------------------------
+# TimeXer
+# ----------------------------------------------------------------------
+
+def test_timexer_aux_head_zero_init_matches_past_only_at_step_zero():
+    from ml_forecast_lab.models.timexer_backend import _TimeXerNet
+
+    past, future, n_channels = 48, 96, 8
+    seq_len = past + future
+    model = _TimeXerNet(
+        seq_len=seq_len, n_channels=n_channels, patch_len=8, d_model=16,
+        n_heads=2, n_encoder_layers=1, dim_feedforward=32, dropout=0.0,
+        n_horizons=future,
+        use_revin=False,  # simpler check without revin bookkeeping
+        past_window_size=past,
+    )
+    model.eval()
+    x = _make_extended_window(past=past, future=future, n_channels=n_channels)
+    with torch.no_grad():
+        out_with_future = model(x)
+        x_perm = x.clone()
+        x_perm[:, past:, :] = torch.randn_like(x_perm[:, past:, :])
+        out_perm_future = model(x_perm)
+    assert torch.allclose(out_with_future, out_perm_future, atol=1e-6)
+
+
+def test_timexer_aux_head_responds_to_future_after_training():
+    from ml_forecast_lab.models.timexer_backend import _TimeXerNet
+
+    past, future, n_channels = 48, 96, 8
+    seq_len = past + future
+    model = _TimeXerNet(
+        seq_len=seq_len, n_channels=n_channels, patch_len=8, d_model=16,
+        n_heads=2, n_encoder_layers=1, dim_feedforward=32, dropout=0.0,
+        n_horizons=future,
+        use_revin=False,
+        past_window_size=past,
+    )
+    with torch.no_grad():
+        final = model.future_aux_head[-1]
+        final.weight.uniform_(-0.1, 0.1)
+        final.bias.uniform_(-0.1, 0.1)
+    model.eval()
+
+    x = _make_extended_window(past=past, future=future, n_channels=n_channels)
+    with torch.no_grad():
+        out_a = model(x)
+        x_b = x.clone()
+        x_b[:, past:, 1:] = torch.randn_like(x_b[:, past:, 1:])
+        out_b = model(x_b)
+    assert not torch.allclose(out_a, out_b, atol=1e-4)
+
+
+def test_timexer_no_aux_head_in_legacy_past_only_mode():
+    from ml_forecast_lab.models.timexer_backend import _TimeXerNet
+    model = _TimeXerNet(
+        seq_len=48, n_channels=4, patch_len=8, d_model=16,
+        n_heads=2, n_encoder_layers=1, dim_feedforward=32, dropout=0.0,
+        n_horizons=24, use_revin=False,
+        past_window_size=None,
+    )
+    assert model.future_aux_head is None
+    assert model.future_window_size == 0

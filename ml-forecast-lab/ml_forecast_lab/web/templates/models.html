@@ -8,8 +8,22 @@
     <p class="subtitle">Configure default hyperparameters for each model backend. Select which models to train in each experiment's detail page.</p>
 </section>
 
-{% set tree_models = models | selectattr('model_type', 'equalto', 'Tree') | list %}
-{% set neural_models = models | rejectattr('model_type', 'equalto', 'Tree') | list %}
+{# Category grouping: one section per model_type, in this order, rendered
+   only when non-empty. A trailing catch-all guarantees a model with an
+   unrecognised type is still shown rather than silently dropped. #}
+{% set model_groups = [
+    ('Tree', 'Tree Models',
+     'Gradient-boosted decision trees — fast, feature-driven, interpretable via feature importance.'),
+    ('PyTorch', 'Neural Models',
+     'Deep learning architectures — sequence-aware, benefit from longer history and richer covariate signals.'),
+    ('Foundation', 'Foundation Models',
+     'Pretrained zero-shot forecasters — no training on your data, and covariate channels are ignored: they condition on the target history alone. Strong for cold starts with little history. Weights download on first use and are unavailable on armv7.'),
+    ('Classical', 'Classical Models',
+     'Statistical baselines (statsforecast) — robust univariate methods that ignore covariates.'),
+    ('Baseline', 'Baselines',
+     'Reference baselines — sanity checks the other models should beat.'),
+] %}
+{% set known_types = model_groups | map(attribute=0) | list %}
 
 {% macro model_card(model) %}
 <div class="experiment-card model-card" id="card-{{ model.name }}">
@@ -90,21 +104,29 @@
         </div>
 {% endmacro %}
 
+{% for cat, heading, blurb in model_groups %}
+{% set group = models | selectattr('model_type', 'equalto', cat) | list %}
+{% if group %}
 <section class="section">
-    <h2 style="color: var(--text-primary); margin-bottom: 0.25rem;">Tree Models</h2>
-    <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">Gradient-boosted decision trees — fast, feature-driven, interpretable via feature importance.</p>
+    <h2 style="color: var(--text-primary); margin-bottom: 0.25rem;">{{ heading }}</h2>
+    <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">{{ blurb }}</p>
     <div class="experiments-grid" style="grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));">
-        {% for model in tree_models %}{{ model_card(model) }}{% endfor %}
+        {% for model in group %}{{ model_card(model) }}{% endfor %}
     </div>
 </section>
+{% endif %}
+{% endfor %}
 
+{# Catch-all: any model whose type isn't one of the known categories above. #}
+{% set other = models | rejectattr('model_type', 'in', known_types) | list %}
+{% if other %}
 <section class="section">
-    <h2 style="color: var(--text-primary); margin-bottom: 0.25rem;">Neural Models</h2>
-    <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">Deep learning architectures — sequence-aware, benefit from longer history and richer covariate signals.</p>
+    <h2 style="color: var(--text-primary); margin-bottom: 0.25rem;">Other Models</h2>
     <div class="experiments-grid" style="grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));">
-        {% for model in neural_models %}{{ model_card(model) }}{% endfor %}
+        {% for model in other %}{{ model_card(model) }}{% endfor %}
     </div>
 </section>
+{% endif %}
 
 <script>
 function toggleParams(name) {

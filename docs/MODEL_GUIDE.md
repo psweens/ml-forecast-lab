@@ -1,10 +1,10 @@
 # Model Guide — Picking Backends to Benchmark
 
-ML Forecast Lab ships with 24 model backends. You don't need all of them — that's a lot of compute for a Pi, and many overlap in behaviour. This guide is a practical "which should I enable?" pre-flight that takes about 5 minutes to read.
+ML Forecast Lab ships with 28 model backends. You don't need all of them — that's a lot of compute for a Pi, and many overlap in behaviour. This guide is a practical "which should I enable?" pre-flight that takes about 5 minutes to read.
 
-The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add more once you've seen how those do on your data.
+The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add more once you've seen how those do on your data. If you have almost no history yet, add `chronos_bolt` — it forecasts zero-shot from pretrained weights and needs no training data at all.
 
-## The 24 backends at a glance
+## The 28 backends at a glance
 
 | Family | Backend | Strength | Weakness | Speed |
 |---|---|---|---|---|
@@ -15,6 +15,7 @@ The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add 
 | Recurrent | `gru` | Lighter than LSTM, often comparable | Same caveats as LSTM | Medium |
 | Convolutional | `cnn` | WaveNet-style dilated causal convs, strong on cyclical patterns | Less interpretable than trees | Medium |
 | Convolutional | `timesnet` | 2D-vision backbone for time series, captures multi-period seasonality | Heavy, ~2-3× slower than CNN | Slow |
+| Convolutional | `moderntcn` | Modernised large-kernel TCN (Luo & Wang 2024, ICLR) — transformer-class accuracy at convolution cost | Newer — less battle-tested | Fast |
 | Linear / MLP | `dlinear` | Decomposition-Linear (Zeng 2023): simple, surprisingly competitive | Limited capacity | Very fast |
 | Linear / MLP | `nlinear` | Variant of DLinear, sometimes wins on stationary series | Same limited capacity | Very fast |
 | Linear / MLP | `tsmixer` | All-MLP mixer, strong on multivariate | Newer — less battle-tested | Fast |
@@ -28,6 +29,9 @@ The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add 
 | Transformer | `itransformer` | Variable-as-token inversion, competitive on multivariate | Same | Slow |
 | Transformer | `crossformer` | Cross-variable attention, multivariate-focused | Heavy | Slow |
 | Transformer | `tft` | Temporal Fusion Transformer, interpretable variable selection | Heaviest in the catalogue, very slow | Very slow |
+| Transformer | `timexer` | Built for exogenous variables (Wang et al. 2024, NeurIPS): patch tokens + cross-attention to covariate tokens | Needs meaningful covariates to earn its keep | Medium |
+| Foundation | `chronos_bolt` | Amazon's pretrained zero-shot forecaster — works with no training history, strong out of the box | Univariate (ignores covariates); first use downloads ~30 MB of weights | Fast |
+| Foundation | `ttm` | IBM Granite Tiny Time Mixer — zero-shot at 1-5M params, lightest foundation model published | Univariate; fixed context/horizon geometry; first use downloads weights | Fast |
 | Classical | `arima` (statsforecast) | Strong baseline on stationary univariate series | Univariate only — ignores covariates | Medium |
 | Classical | `ets` (statsforecast) | Exponential smoothing, good seasonal decomposition | Univariate only | Medium |
 | Classical | `theta` (statsforecast) | M3 competition winner, low-complexity | Univariate only | Fast |
@@ -39,17 +43,17 @@ The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add 
 
 **Then pick by data shape:**
 
-- **<2 weeks of history** → just trees (`lightgbm`, `xgboost`) and `seasonal_naive`. Neural models will overfit.
-- **2 weeks – 2 months** → add `lstm`, `cnn`, `dlinear`, `nlinear`. Skip the heavy transformers.
-- **2 months – 6 months** → add `nhits`, `patchtst`, `tide`, `tsmixer`. This is the sweet spot for the modern architectures.
+- **<2 weeks of history** → trees (`lightgbm`, `xgboost`), `seasonal_naive`, and the zero-shot foundation models (`chronos_bolt`, `ttm`). Supervised neural models will overfit; the foundation models don't train on your data at all, so they're immune — this is the cold-start niche they were added for.
+- **2 weeks – 2 months** → add `lstm`, `cnn`, `dlinear`, `nlinear`, `moderntcn`. Skip the heavy transformers.
+- **2 months – 6 months** → add `nhits`, `patchtst`, `tide`, `tsmixer`, `timexer`. This is the sweet spot for the modern architectures.
 - **>6 months** → also try `tft`, `crossformer`, `timemixer` if you want to invest the compute.
 
 **Then pick by target characteristics:**
 
 - **Strong daily / weekly seasonality** (e.g. household load, water demand): trees + `nhits` + `fits` are usually winners.
 - **Noisy, sparse, low SNR** (e.g. EV charging, intermittent appliances): trees + `seasonal_naive`. Neural models often struggle here — the noise overwhelms the signal.
-- **Covariate-driven** (e.g. heating ~ outside temp, solar ~ irradiance): `tide`, `tft`, `tsmixer` shine when the target is mostly explained by external features.
-- **Univariate, no good covariates**: `arima` and `ets` (statsforecast) are surprisingly hard to beat. Don't underestimate classical baselines.
+- **Covariate-driven** (e.g. heating ~ outside temp, solar ~ irradiance): `tide`, `tft`, `tsmixer`, `timexer` shine when the target is mostly explained by external features — `timexer` is the only transformer in the catalogue designed *specifically* around exogenous variables.
+- **Univariate, no good covariates**: `arima` and `ets` (statsforecast) are surprisingly hard to beat, and `chronos_bolt` / `ttm` bring modern zero-shot accuracy to exactly this setting. Don't underestimate classical baselines.
 - **Solar generation specifically**: tree models with the built-in solar-physics covariates (`include_clear_sky_irradiance`, `include_sun_elevation`) typically win. Pure neural backends without those covariates struggle to learn the day/night structure.
 
 ## Speed tradeoffs on a Pi 5
@@ -58,12 +62,14 @@ A typical 60-day, 30-min experiment with default hyperparameters takes roughly:
 
 | Tier | Backends | Per-fold time |
 |---|---|---|
-| Fast | `seasonal_naive`, `dlinear`, `nlinear`, `theta`, `fits`, `sparsetsf` | < 5s |
-| Medium | `lightgbm`, `xgboost`, `cnn`, `gru`, `tsmixer`, `timemixer` | 5–30s |
+| Fast | `seasonal_naive`, `dlinear`, `nlinear`, `theta`, `fits`, `sparsetsf`, `chronos_bolt`*, `ttm`* | < 5s |
+| Medium | `lightgbm`, `xgboost`, `cnn`, `gru`, `tsmixer`, `timemixer`, `moderntcn`, `timexer` | 5–30s |
 | Slow | `lstm`, `nbeats`, `nhits`, `patchtst`, `itransformer`, `tide`, `arima`, `ets`, `catboost`, `timesnet` | 30s–2min |
 | Very slow | `tft`, `crossformer` | 2–10min |
 
-With 5 CV folds, multiply each by 5. A "throw everything at it" benchmark with all 24 backends enabled takes 1-2 hours on a Pi 5. A more reasonable setup with 6-8 selected backends finishes in 10-20 minutes.
+\* Zero-shot — no training happens at all; "fit" is a weight load (first ever use also downloads the pretrained weights from the Hugging Face Hub, ~5–30 MB, cached afterwards). Inference per window is a single CPU forward pass.
+
+With 5 CV folds, multiply each by 5. A "throw everything at it" benchmark with all 28 backends enabled takes 1-2 hours on a Pi 5. A more reasonable setup with 6-8 selected backends finishes in 10-20 minutes.
 
 ## Pragmatic starter sets
 
@@ -97,9 +103,25 @@ models_enabled:
   - arima
   - ets
   - theta
+  - chronos_bolt     # zero-shot foundation model — modern univariate reference
   - lightgbm         # tree comparison even on univariate
   - dlinear          # linear comparison
 ```
+
+**The "brand-new sensor, no history yet" set** (zero-shot — produces sensible
+forecasts from day one, before any supervised model has enough data to train):
+```yaml
+models_enabled:
+  - seasonal_naive
+  - chronos_bolt     # Amazon Chronos-Bolt, pretrained
+  - ttm              # IBM Granite TTM, pretrained
+  - lightgbm         # will overtake the zero-shot models as history accrues
+```
+Re-benchmark after a few weeks: once there is enough history, the trained
+backends usually overtake the zero-shot ones because they can exploit your
+covariates and sensor-specific quirks. Note the foundation backends need
+internet access on first use (pretrained weight download, cached afterwards)
+and are not available on `armv7` builds.
 
 ## After the benchmark
 
