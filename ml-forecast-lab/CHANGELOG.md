@@ -76,6 +76,12 @@ Also in this release:
   wired for all four backends; 28 new unit tests (fit/predict
   round-trips, save/load, RevIN stats, extended-window past-only
   conditioning, TTM autoregressive extension, aux-head zero-init).
+- **Models page now groups backends by category** — Tree / Neural /
+  Foundation / Classical / Baselines, each under its own heading
+  (replacing the old Tree-vs-everything split), so the zero-shot
+  foundation models get a dedicated section that notes they don't train
+  and ignore covariates.
+
 ## 2.42.2
 
 **Fix: a developer-mode overlay of a branch that predates developer mode

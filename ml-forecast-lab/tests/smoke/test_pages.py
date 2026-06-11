@@ -48,6 +48,21 @@ def test_models_page_lists_all_backends(client):
     assert not missing, f"Models page missing: {missing}"
 
 
+def test_models_page_category_headings(client):
+    """Models page groups backends under per-category headings, including a
+    dedicated Foundation Models section for the zero-shot backends."""
+    body = client.get("/models").text
+    for heading in ("Tree Models", "Neural Models", "Foundation Models",
+                    "Classical Models", "Baselines"):
+        assert heading in body, f"missing category heading: {heading!r}"
+    # The foundation backends sit under the Foundation Models heading.
+    foundation_idx = body.index("Foundation Models")
+    assert foundation_idx < body.index("Chronos-Bolt")
+    assert foundation_idx < body.index("Granite TTM")
+    # …and the Foundation heading itself comes after the Tree heading.
+    assert body.index("Tree Models") < foundation_idx
+
+
 def test_models_page_alphabetical(client):
     """Per project convention (v2.27.4), MODEL_CATALOG is sorted alphabetically."""
     resp = client.get("/models")
