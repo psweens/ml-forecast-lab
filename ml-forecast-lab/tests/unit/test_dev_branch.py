@@ -139,6 +139,29 @@ def test_revert_noop_when_nothing_installed(_isolate_overlay):
     assert dev_branch.revert() is False
 
 
+# ---- overlay compatibility guard (the 2.42.2 anti-trap fix) ----
+
+def test_overlay_compatible_true_when_nothing_installed(_isolate_overlay):
+    assert dev_branch.overlay_is_compatible() is True
+
+
+def test_overlay_incompatible_when_dev_branch_missing(_isolate_overlay):
+    # The synthetic tarball ships __init__/__main__/models but no
+    # dev_branch.py — i.e. a branch that predates developer mode.
+    dev_branch.install_from_tarball_bytes("old", _make_repo_tarball("old"), sha="o")
+    assert not (_isolate_overlay / "ml_forecast_lab" / "dev_branch.py").exists()
+    assert dev_branch.overlay_is_compatible() is False
+
+
+def test_overlay_compatible_when_dev_branch_present(_isolate_overlay):
+    dev_branch.install_from_tarball_bytes("new", _make_repo_tarball("new"), sha="n")
+    # Simulate a branch that carries the developer tooling.
+    (_isolate_overlay / "ml_forecast_lab" / "dev_branch.py").write_text(
+        "# dev tooling\n", encoding="utf-8",
+    )
+    assert dev_branch.overlay_is_compatible() is True
+
+
 # ---- branch listing (parse only; network lives in the endpoint) ----
 
 def test_parse_branches_floats_default_to_top():

@@ -88,6 +88,25 @@ def test_branches_endpoint_reports_error_gracefully(client, monkeypatch):
     assert "rate limited" in body["error"]
 
 
+def test_system_page_flags_incompatible_overlay(client, monkeypatch, tmp_path):
+    """An installed overlay that predates the dev tooling (no dev_branch.py)
+    is flagged 'ignored at boot' with a pointer to Revert."""
+    monkeypatch.setenv("DEVELOPER_MODE", "true")
+    from ml_forecast_lab import dev_branch
+
+    overlay = tmp_path / "dev_src"
+    (overlay / "ml_forecast_lab").mkdir(parents=True)
+    (overlay / "ACTIVE.json").write_text(
+        '{"branch": "old-branch", "sha_short": "abc1234"}', encoding="utf-8")
+    monkeypatch.setattr(dev_branch, "DEV_SRC_DIR", overlay)
+    monkeypatch.setattr(dev_branch, "ACTIVE_MARKER", overlay / "ACTIVE.json")
+
+    resp = client.get("/system")
+    assert resp.status_code == 200
+    assert "ignored at boot" in resp.text
+    assert "old-branch" in resp.text
+
+
 def test_revert_when_enabled_reports_no_overlay(client, monkeypatch, tmp_path):
     """Revert with nothing installed is a clean no-op (no restart)."""
     monkeypatch.setenv("DEVELOPER_MODE", "true")

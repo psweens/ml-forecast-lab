@@ -217,9 +217,19 @@
         </span>
         <span class="stat-label">
             installed {{ dev_installed.fetched_at }} —
-            {% if dev_running %}running now{% else %}restart pending{% endif %}
+            {% if dev_running %}running now
+            {% elif not dev_compatible %}ignored at boot
+            {% else %}restart pending{% endif %}
         </span>
     </div>
+    {% if dev_installed and not dev_compatible %}
+    <p style="margin-bottom:12px;color:#ea580c;font-size:0.9rem;">
+        ⚠️ This overlay is from a branch that predates developer mode (no
+        <code>dev_branch.py</code>), so it was ignored at boot and you're
+        running the bundled release. Click <strong>Revert to bundled</strong>
+        below to remove it.
+    </p>
+    {% endif %}
     {% else %}
     <p style="margin-bottom:12px;color:var(--success);">
         Running the bundled release (no overlay installed).

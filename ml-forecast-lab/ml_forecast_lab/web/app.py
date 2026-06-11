@@ -3808,6 +3808,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "developer_mode": developer_mode,
                 "dev_installed": dev_installed,
                 "dev_running": dev_branch.is_overlay_running(),
+                "dev_compatible": dev_branch.overlay_is_compatible(),
                 "dev_repo": f"{dev_branch.REPO_OWNER}/{dev_branch.REPO_NAME}",
             },
         )
