@@ -361,14 +361,15 @@ If you're developing the app and want to try a branch without rebuilding the ima
 
 1. Set `developer_mode: true` in the app **Configuration** tab and restart the app.
 2. A **Developer** card appears at the bottom of the **System** tab. Pick a branch of `psweens/ml-forecast-lab` from the dropdown (it's populated live from GitHub; the ↻ button refreshes it, and the running branch is marked) and click **Fetch & run branch**. If the list can't load — e.g. a GitHub API rate limit — expand **…or enter a branch name manually** and type it (e.g. `claude/my-feature`).
-3. The app downloads that branch from GitHub, stages it as an overlay under `/data`, and restarts. On the next boot it runs the branch's code instead of the bundled release. A persistent **Developer build** banner and the annotated version string (`2.42.0 (dev: my-feature@1a2b3c4)`) confirm you're off-release.
+3. The app downloads that branch from GitHub, stages it as an overlay under `/data`, installs any new dependencies the branch adds (**live progress streams into the card**), and restarts. On the next boot it runs the branch's code instead of the bundled release. A persistent **Developer build** banner and the annotated version string (`2.43.0 (dev: my-feature@1a2b3c4)`) confirm you're off-release.
 4. Click **Revert to bundled** (or just set `developer_mode: false`) to return to the shipped version on the next restart.
 
 Notes and limits:
 
 - Only branches of this repository can be run — you supply a branch name, never a URL.
 - The bundled image is never modified; the overlay lives in `/data` and is removed on revert.
-- First fetch needs internet access on the Pi. The branch must only change **Python code** — a running container can't install new system or Python *dependencies*, so a branch that adds a package needs a full image rebuild instead.
+- First fetch needs internet access on the Pi.
+- **New dependencies:** if a branch adds Python packages (e.g. the foundation-model backends' `chronos-forecasting` / `granite-tsfm`), only the genuinely-new ones are installed into the running environment before the restart — existing packages are left as the image built them. This step can take a few minutes and is **skipped on 32-bit ARM** (`armv7l`), which has no wheels for the compiled stack; those backends stay unavailable there. Dependencies installed this way persist across restarts but are wiped by an add-on update/rebuild — re-fetch the branch to reinstall. (For a permanent install, the dependency belongs in `requirements.txt` and a normal release.)
 - Requires the Supervisor API (`hassio_api`), used solely to restart the app after install/revert.
 
 ---

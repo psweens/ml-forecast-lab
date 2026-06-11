@@ -32,7 +32,8 @@ def test_system_page_shows_dev_card_when_enabled(client, monkeypatch):
     resp = client.get("/system")
     assert resp.status_code == 200
     assert ">Developer<" in resp.text
-    assert "install-branch" in resp.text
+    # The card wires the live-progress install stream.
+    assert "install-stream" in resp.text
 
 
 def test_install_rejects_bad_branch_when_enabled(client, monkeypatch):
@@ -143,3 +144,21 @@ def test_revert_with_overlay_returns_clean_json(client, monkeypatch, tmp_path):
     assert body["reverted"] is True
     assert body["restarting"] is False  # no token → no restart scheduled
     assert not overlay.exists()
+
+
+def test_install_stream_404_when_disabled(client, monkeypatch):
+    monkeypatch.delenv("DEVELOPER_MODE", raising=False)
+    assert client.get(
+        "/api/system/dev/install-stream?branch=main").status_code == 404
+
+
+def test_install_stream_bad_branch_emits_error_event(client, monkeypatch):
+    """With dev mode on, a malformed branch produces an SSE error event
+    (no network is touched — validation happens first)."""
+    monkeypatch.setenv("DEVELOPER_MODE", "true")
+    resp = client.get("/api/system/dev/install-stream?branch=../etc/passwd")
+    assert resp.status_code == 200
+    assert "text/event-stream" in resp.headers.get("content-type", "")
+    body = resp.text
+    assert '"type": "error"' in body
+    assert "Invalid branch name" in body

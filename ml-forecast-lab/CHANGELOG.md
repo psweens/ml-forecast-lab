@@ -89,6 +89,15 @@ Also in this release:
   reference baseline and keeps its contiguous rank; it remains excluded
   only from the auto-promote decision, so the config is never silently
   switched to a baseline the user didn't choose.
+- **Developer mode can now install a branch's new dependencies** when you
+  fetch it, with **live progress** streamed into the card. A branch that
+  adds packages (like the foundation backends'
+  `chronos-forecasting` / `granite-tsfm`) has only the genuinely-new
+  distributions installed into the running environment before the
+  restart — existing packages like torch are untouched. Skipped on
+  32-bit ARM (no wheels). This lets the foundation models be trialled via
+  the dev overlay without a full image rebuild (aarch64/amd64).
+
 ## 2.42.3
 
 **Fix: "Fetch & run branch" and "Revert to bundled" reported a spurious

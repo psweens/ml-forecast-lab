@@ -4101,6 +4101,151 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             background=BackgroundTask(_deferred_restart) if restarting else None,
         )
 
+    @app.get("/api/system/dev/install-stream")
+    async def dev_install_stream(request: Request):
+        """Fetch a branch, install any new dependencies, and restart —
+        streaming live progress as Server-Sent Events.
+
+        Backs the System-tab Developer card so the user sees download and
+        pip progress in real time. Branches that add new Python
+        dependencies (e.g. the foundation-model backends needing
+        chronos-forecasting / granite-tsfm) get those installed into the
+        live environment *before* the restart; on 32-bit ARM (no wheels)
+        the dependency step is skipped with a warning. The install reuses
+        the image's existing packages, so only genuinely-new distributions
+        are fetched and core deps like torch are never disturbed.
+        """
+        _require_dev_mode()
+        from ml_forecast_lab import dev_branch
+
+        branch_raw = request.query_params.get("branch", "")
+
+        def _sse(obj) -> str:
+            return f"data: {json.dumps(obj)}\n\n"
+
+        async def _gen():
+            import aiohttp
+            try:
+                try:
+                    branch = dev_branch.validate_branch(branch_raw)
+                except dev_branch.DevBranchError as e:
+                    yield _sse({"type": "error", "message": str(e)})
+                    return
+
+                yield _sse({"type": "step", "message": f"Resolving {branch}…"})
+                sha = ""
+                try:
+                    async with aiohttp.ClientSession() as s:
+                        async with s.get(
+                            dev_branch.commit_api_url(branch),
+                            headers={"Accept": "application/vnd.github+json"},
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as r:
+                            if r.status == 200:
+                                sha = (await r.json()).get("sha", "") or ""
+                            elif r.status == 404:
+                                yield _sse({"type": "error", "message":
+                                            f"Branch {branch!r} not found in "
+                                            f"{dev_branch.REPO_OWNER}/{dev_branch.REPO_NAME}."})
+                                return
+                except Exception as e:  # noqa: BLE001
+                    yield _sse({"type": "log", "message": f"(could not resolve sha: {e})"})
+
+                yield _sse({"type": "step", "message": "Downloading branch…"})
+                try:
+                    async with aiohttp.ClientSession() as s:
+                        async with s.get(
+                            dev_branch.tarball_url(branch),
+                            timeout=aiohttp.ClientTimeout(total=180),
+                        ) as r:
+                            if r.status != 200:
+                                yield _sse({"type": "error", "message":
+                                            f"Download failed (HTTP {r.status}). Check the "
+                                            f"branch name and the Pi's internet access."})
+                                return
+                            raw = await r.read()
+                except Exception as e:  # noqa: BLE001
+                    yield _sse({"type": "error",
+                                "message": f"Download failed: {_safe_error(e)}"})
+                    return
+
+                yield _sse({"type": "step", "message": "Extracting overlay…"})
+                try:
+                    status = dev_branch.install_from_tarball_bytes(branch, raw, sha=sha)
+                except dev_branch.DevBranchError as e:
+                    yield _sse({"type": "error", "message": str(e)})
+                    return
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"Overlay install failed: {e}", exc_info=True)
+                    yield _sse({"type": "error", "message": _safe_error(e)})
+                    return
+                yield _sse({"type": "log", "message":
+                            f"Installed overlay {branch}@{status['sha_short'] or '?'}"})
+
+                # Install any dependencies the branch adds but the image lacks.
+                new_reqs = dev_branch.new_requirements(
+                    dev_branch.read_branch_requirements())
+                if new_reqs and not dev_branch.dependency_install_supported():
+                    import platform
+                    yield _sse({"type": "log", "message":
+                                f"Skipping dependency install on {platform.machine()} "
+                                f"(no 32-bit ARM wheels): {', '.join(new_reqs)}. "
+                                f"Those backends will be unavailable."})
+                elif new_reqs:
+                    yield _sse({"type": "step", "message":
+                                f"Installing {len(new_reqs)} new "
+                                f"{'dependencies' if len(new_reqs) != 1 else 'dependency'}… "
+                                f"(can take a few minutes)"})
+                    yield _sse({"type": "log", "message": "$ pip install " + " ".join(new_reqs)})
+                    rc = -1
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            *dev_branch.pip_install_command(new_reqs),
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.STDOUT,
+                        )
+                        async for bline in proc.stdout:
+                            line = bline.decode("utf-8", "replace").rstrip()
+                            if line:
+                                yield _sse({"type": "log", "message": line})
+                        rc = await proc.wait()
+                    except Exception as e:  # noqa: BLE001
+                        yield _sse({"type": "log", "message": f"pip error: {_safe_error(e)}"})
+                    if rc != 0:
+                        yield _sse({"type": "log", "message":
+                                    f"Dependency install exited with code {rc}; those backends "
+                                    f"may be unavailable, but the branch will still run."})
+                    else:
+                        yield _sse({"type": "log", "message": "Dependencies installed."})
+                else:
+                    yield _sse({"type": "log", "message": "No new dependencies to install."})
+
+                # Restart so the overlay (and any new deps) take effect.
+                if _can_self_restart():
+                    yield _sse({"type": "restarting", "message":
+                                f"Installed {branch}@{status['sha_short'] or '?'}. Restarting…"})
+                    await asyncio.sleep(1.5)  # flush the event before the container dies
+                    await _restart_addon()
+                else:
+                    yield _sse({"type": "done", "message":
+                                f"Installed {branch}@{status['sha_short'] or '?'}. "
+                                f"Restart the add-on to run it (auto-restart unavailable)."})
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"install-stream failed: {e}", exc_info=True)
+                yield _sse({"type": "error", "message": _safe_error(e)})
+
+        return StreamingResponse(
+            _gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @app.post("/api/system/dev/revert")
     async def dev_revert(request: Request):
         """Remove the overlay and restart back onto the bundled release."""

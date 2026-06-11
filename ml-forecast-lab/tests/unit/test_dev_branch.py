@@ -26,7 +26,7 @@ def _isolate_overlay(tmp_path, monkeypatch):
 
 
 def _make_repo_tarball(branch="my-branch", with_package=True,
-                       traversal=False) -> bytes:
+                       traversal=False, requirements=None) -> bytes:
     """Build a .tar.gz shaped like GitHub's codeload archive."""
     buf = io.BytesIO()
     top = f"ml-forecast-lab-{branch.replace('/', '-')}"
@@ -37,6 +37,9 @@ def _make_repo_tarball(branch="my-branch", with_package=True,
             tf.addfile(info, io.BytesIO(data))
 
         add(f"{top}/README.md", b"# repo\n")
+        if requirements is not None:
+            add(f"{top}/ml-forecast-lab/requirements.txt",
+                requirements.encode("utf-8"))
         if with_package:
             pkg = f"{top}/ml-forecast-lab/ml_forecast_lab"
             add(f"{pkg}/__init__.py", b"__version__='9.9.9'\n")
@@ -209,3 +212,80 @@ def test_version_label_annotated_when_running(_isolate_overlay, monkeypatch):
     )
     monkeypatch.setattr(dev_branch, "is_overlay_running", lambda: True)
     assert dev_branch.version_label("2.42.0") == "2.42.0 (dev: claude/feat@1a2b3c4)"
+
+
+# ---- dependency diff / install helpers ----
+
+def test_requirement_package_name_parsing():
+    f = dev_branch.requirement_package_name
+    assert f('chronos-forecasting>=1.5.0,<3.0.0; platform_machine != "armv7l"') == "chronos-forecasting"
+    assert f("granite_tsfm>=0.3.0") == "granite-tsfm"
+    assert f("torch") == "torch"
+    assert f("uvicorn[standard]==0.30") == "uvicorn"
+    # Comments, blanks, and pip option/URL/path lines are ignored.
+    assert f("# a comment") is None
+    assert f("   ") is None
+    assert f("-r other.txt") is None
+    assert f("--extra-index-url https://x") is None
+    assert f("git+https://github.com/x/y") is None
+
+
+def test_new_requirements_returns_only_missing_full_lines():
+    branch_reqs = (
+        "# heavy deps\n"
+        "torch>=2.0.0\n"
+        'chronos-forecasting>=1.5.0,<3.0.0; platform_machine != "armv7l"\n'
+        "granite-tsfm>=0.3.0,<1.0.0\n"
+        "\n"
+    )
+    installed = {"torch", "numpy", "fastapi"}
+    new = dev_branch.new_requirements(branch_reqs, installed=installed)
+    # torch is already installed → skipped; the two foundation deps are new,
+    # returned as full lines (markers/specifiers intact) for pip.
+    assert new == [
+        'chronos-forecasting>=1.5.0,<3.0.0; platform_machine != "armv7l"',
+        "granite-tsfm>=0.3.0,<1.0.0",
+    ]
+
+
+def test_new_requirements_empty_when_all_satisfied_or_none():
+    assert dev_branch.new_requirements(None) == []
+    assert dev_branch.new_requirements("", installed=set()) == []
+    assert dev_branch.new_requirements(
+        "torch\nnumpy\n", installed={"torch", "numpy"}) == []
+
+
+def test_dependency_install_supported_by_arch(monkeypatch):
+    import platform
+    monkeypatch.setattr(platform, "machine", lambda: "aarch64")
+    assert dev_branch.dependency_install_supported() is True
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    assert dev_branch.dependency_install_supported() is True
+    monkeypatch.setattr(platform, "machine", lambda: "armv7l")
+    assert dev_branch.dependency_install_supported() is False
+
+
+def test_install_captures_branch_requirements(_isolate_overlay):
+    reqs = "torch>=2.0.0\nchronos-forecasting>=1.5.0\n"
+    dev_branch.install_from_tarball_bytes(
+        "feat", _make_repo_tarball("feat", requirements=reqs), sha="abc",
+    )
+    assert dev_branch.read_branch_requirements() == reqs
+    # And the diff picks up only the genuinely-new line.
+    new = dev_branch.new_requirements(
+        dev_branch.read_branch_requirements(), installed={"torch"})
+    assert new == ["chronos-forecasting>=1.5.0"]
+
+
+def test_install_without_requirements_leaves_none(_isolate_overlay):
+    dev_branch.install_from_tarball_bytes(
+        "feat", _make_repo_tarball("feat"), sha="abc")
+    assert dev_branch.read_branch_requirements() is None
+
+
+def test_pip_install_command_targets_this_interpreter():
+    import sys
+    cmd = dev_branch.pip_install_command(["pkg-a", "pkg-b"])
+    assert cmd[0] == sys.executable
+    assert cmd[1:4] == ["-m", "pip", "install"]
+    assert cmd[-2:] == ["pkg-a", "pkg-b"]
