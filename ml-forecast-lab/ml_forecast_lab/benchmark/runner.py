@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from ml_forecast_lab.models.base import ForecastModel
+from ml_forecast_lab.models.base import ForecastModel, TrainingCancelled
 
 from .metrics import MetricRegistry, get_metric_registry
 
@@ -345,6 +345,8 @@ class BenchmarkRunner:
         fold_indices: List[Tuple[np.ndarray, np.ndarray]],
         epoch_callback: Any = None,
         precomputed_sequences: dict = None,
+        cancel_event: Any = None,
+        future_features_df: Optional[pd.DataFrame] = None,
     ) -> ModelResult:
         """
         Run a single model across all CV folds.
@@ -366,7 +368,27 @@ class BenchmarkRunner:
         model_result = ModelResult(model_name=model.name)
         n_folds = len(fold_indices)
 
+        # Wrap the caller's epoch callback so a set cancel_event raises
+        # TrainingCancelled from inside the backend's epoch loop —
+        # _emit_epoch re-raises it and fit() unwinds at the next epoch
+        # boundary. This is the only way to stop an executor thread
+        # that asyncio.Task.cancel() cannot reach (audit F10).
+        if cancel_event is not None:
+            _user_cb = epoch_callback
+
+            def epoch_callback(**cb_data):  # noqa: F811 — deliberate shadow
+                if cancel_event.is_set():
+                    raise TrainingCancelled(
+                        f'{model.name}: cancelled via stop-training'
+                    )
+                if _user_cb is not None:
+                    _user_cb(**cb_data)
+
         for fold_idx, (train_idx, test_idx) in enumerate(fold_indices):
+            if cancel_event is not None and cancel_event.is_set():
+                raise TrainingCancelled(
+                    f'{model.name}: cancelled before fold {fold_idx + 1}'
+                )
             fold_start_time = time.time()
             logger.info(
                 f'  [fold {fold_idx + 1}/{n_folds}] {model.name}: '
@@ -419,7 +441,10 @@ class BenchmarkRunner:
 
             # Generate time-decay sample weights (exponential recency weighting)
             n_train_samples = len(y_train)
-            half_life_days = self.experiment_cfg.get('recency_half_life_days', 7.0)
+            # Fallback matches the ExperimentCfg default (0.0 = disabled);
+            # a 7.0 fallback here silently enabled recency weighting for
+            # any caller building a partial cfg dict (audit F18).
+            half_life_days = self.experiment_cfg.get('recency_half_life_days', 0.0)
             if half_life_days > 0:
                 interval_min = self.experiment_cfg.get('interval_minutes', 30)
                 half_life = max(1, half_life_days * (24 * 60 / interval_min))
@@ -482,11 +507,22 @@ class BenchmarkRunner:
                             # by reducing effective sample size.
                             window_size = min(48, len(df_train_raw) // 3)
                             if window_size >= 12:
+                                # v2.41.0 (audit F8): pass the same
+                                # future-known features production
+                                # training uses, so the leaderboard
+                                # ranks the architecture that actually
+                                # gets deployed. Before this, CV
+                                # trained past-only windows while
+                                # _retrain_and_cache trained extended
+                                # ones — model selection was made on a
+                                # different input pipeline than the
+                                # champion runs in production.
                                 seq_X, seq_y, channel_names = create_sliding_windows(
                                     df_train_raw, target_col, window_size=window_size,
                                     covariate_cols=neural_cov_cols if neural_cov_cols else None,
                                     add_temporal=True,
                                     horizon_steps=horizon_steps,
+                                    future_features_df=future_features_df,
                                 )
                                 sequence_kwargs['sequence_data'] = seq_X
                                 sequence_kwargs['channel_names'] = channel_names
@@ -516,6 +552,10 @@ class BenchmarkRunner:
                           sample_weight=sample_weights,
                           epoch_callback=fold_cb,
                           **sequence_kwargs)
+            except TrainingCancelled:
+                # Not a model failure — propagate so the orchestrator
+                # stops the whole run instead of moving to the next fold.
+                raise
             except Exception as e:
                 logger.error(
                     f'Model training failed for model={model.name} fold={fold_idx + 1}/{len(fold_indices)}: {e}',
@@ -553,35 +593,75 @@ class BenchmarkRunner:
                 if 'sequence_data' in sequence_kwargs and model.is_neural and window_size:
                     try:
                         from ml_forecast_lab.features import create_sliding_windows
-                        # Bridge fold boundary: prepend trailing train rows for context
-                        n_bridge = min(window_size, len(train_idx))
-                        bridge_idx = np.concatenate([train_idx[-n_bridge:], test_idx])
+                        # Bridge fold boundary: prepend the rows
+                        # IMMEDIATELY preceding the test fold for
+                        # context. Using train_idx's tail here (as
+                        # pre-v2.41.0) skipped the embargo rows, so
+                        # every bridged window spanned a
+                        # cv_embargo_periods-sized time discontinuity
+                        # (audit F14). The embargo only has to keep
+                        # those rows out of TRAINING; test-input
+                        # context may legitimately include them.
+                        test_start = int(test_idx[0])
+                        n_bridge = min(window_size, test_start)
+                        bridge_idx = np.concatenate([
+                            np.arange(test_start - n_bridge, test_start),
+                            test_idx,
+                        ])
                         df_combined_test = df.iloc[bridge_idx]
 
-                        # Use horizon_steps=[1] for the test windows so we get
-                        # ONE window per test row (full coverage). The model
-                        # was trained with dense horizons so y_pred still has
-                        # shape (n, future_periods); we take the h=1 column
-                        # for ranking. This matches the holdout-chart path.
-                        seq_X_test, _, _ = create_sliding_windows(
-                            df_combined_test, 'target', window_size=window_size,
-                            covariate_cols=neural_cov_cols if neural_cov_cols else None,
-                            add_temporal=True,
-                            horizon_steps=[1],
-                        )
-                        y_pred_full = model.predict_sequence(seq_X_test)
-                        # Reduce to h=1 (1D) so the metric path treats this
-                        # like every other model — same shape as tree models.
-                        if y_pred_full.ndim == 2:
-                            y_pred = y_pred_full[:, 0]
+                        if future_features_df is not None and horizon_steps:
+                            # Extended-window parity (audit F8): the
+                            # model was trained on windows of
+                            # window_size + future_periods steps, so
+                            # test windows must have the same shape.
+                            # Dense horizons shrink coverage by
+                            # (future_periods − 1) rows at the fold
+                            # tail; predictions align with the HEAD of
+                            # the test fold (window i's h=1 label is
+                            # test row i), so y_test / timestamps are
+                            # head-trimmed — a tail trim here would
+                            # shift every pair by future_periods − 1.
+                            seq_X_test, _, _ = create_sliding_windows(
+                                df_combined_test, 'target', window_size=window_size,
+                                covariate_cols=neural_cov_cols if neural_cov_cols else None,
+                                add_temporal=True,
+                                horizon_steps=horizon_steps,
+                                future_features_df=future_features_df,
+                            )
+                            y_pred_full = model.predict_sequence(seq_X_test)
+                            if y_pred_full.ndim == 2:
+                                y_pred = y_pred_full[:, 0]
+                            else:
+                                y_pred = y_pred_full
+                            if len(y_pred) < len(y_test):
+                                y_test = y_test[:len(y_pred)]
+                                test_timestamps = test_timestamps[:len(y_pred)]
                         else:
-                            y_pred = y_pred_full
-                        # y_test stays as the original 1D test fold values.
-                        # Make sure shapes match (drop any leading rows the
-                        # window builder couldn't fit, which shouldn't happen
-                        # with horizon_steps=[1] but be defensive).
-                        if len(y_pred) != len(y_test):
-                            y_test = y_test[-len(y_pred):]
+                            # Use horizon_steps=[1] for the test windows so we get
+                            # ONE window per test row (full coverage). The model
+                            # was trained with dense horizons so y_pred still has
+                            # shape (n, future_periods); we take the h=1 column
+                            # for ranking. This matches the holdout-chart path.
+                            seq_X_test, _, _ = create_sliding_windows(
+                                df_combined_test, 'target', window_size=window_size,
+                                covariate_cols=neural_cov_cols if neural_cov_cols else None,
+                                add_temporal=True,
+                                horizon_steps=[1],
+                            )
+                            y_pred_full = model.predict_sequence(seq_X_test)
+                            # Reduce to h=1 (1D) so the metric path treats this
+                            # like every other model — same shape as tree models.
+                            if y_pred_full.ndim == 2:
+                                y_pred = y_pred_full[:, 0]
+                            else:
+                                y_pred = y_pred_full
+                            # y_test stays as the original 1D test fold values.
+                            # Make sure shapes match (drop any leading rows the
+                            # window builder couldn't fit, which shouldn't happen
+                            # with horizon_steps=[1] but be defensive).
+                            if len(y_pred) != len(y_test):
+                                y_test = y_test[-len(y_pred):]
                     except Exception:
                         y_pred = model.predict(X_test)
                 else:

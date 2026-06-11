@@ -647,7 +647,17 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
     # Template globals — available in every rendered template without
     # threading through each TemplateResponse context dict. Used by
     # base.html to cache-bust static assets on version bumps.
-    templates.env.globals["app_version"] = APP_VERSION
+    #
+    # When the process booted from a developer branch overlay, the version
+    # shown across the whole UI is annotated (e.g. "2.42.0 (dev: foo@1a2b3c4)")
+    # and a banner is rendered site-wide. Both are resolved once at startup
+    # because the overlay only changes via an add-on restart, so startup is
+    # exactly the right time to read it.
+    from ml_forecast_lab import dev_branch
+    templates.env.globals["app_version"] = dev_branch.version_label(APP_VERSION)
+    templates.env.globals["dev_overlay"] = (
+        dev_branch.active_status() if dev_branch.is_overlay_running() else None
+    )
 
     # Custom Jinja filters
     def _humanise_name(value: str) -> str:
@@ -1223,17 +1233,16 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         models_list = MODEL_CATALOG
 
-        # Load enabled models and overrides from config
-        models_enabled = []
+        # Load model overrides from config. (A models_enabled read —
+        # taken from the FIRST experiment only — used to live here too,
+        # but the template never referenced it; per-experiment toggles
+        # live on the experiment page. Removed in v2.41.0, audit F17.)
         model_overrides = {}
         config_path = _find_config_path()
         if config_path:
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
                     yaml_data = yaml.safe_load(f) or {}
-                exps = yaml_data.get("experiments", [])
-                if exps:
-                    models_enabled = exps[0].get("models_enabled", [])
                 model_overrides = yaml_data.get("model_overrides", {})
             except Exception:
                 pass
@@ -1247,7 +1256,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "active_page": "models",
                 "version": APP_VERSION,
                 "models": models_list,
-                "models_enabled": models_enabled,
                 "model_overrides": model_overrides,
                 "param_schema": MODEL_PARAM_SCHEMA,
             },
@@ -1377,7 +1385,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         exp_status = app.state.appstate.experiment_statuses[name]
         benchmark_result = app.state.appstate.benchmark_results.get(name)
-        forecast_data = app.state.appstate.forecast_data.get(name)
         lab_forecast = app.state.appstate.lab_forecast_data.get(name)
         feature_imps = app.state.appstate.feature_importances.get(name, [])
         covariate_analysis = app.state.appstate.covariate_analysis_results.get(name)
@@ -1385,17 +1392,12 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         # Embed training event history so the page can restore live
         # progress without a separate fetch (same pattern as training_page).
-        from ml_forecast_lab.training_events import TrainingEventBus, summarise_history
+        from ml_forecast_lab.training_events import TrainingEventBus
         embedded_history: Dict[str, list] = {}
         event_bus = TrainingEventBus.get_instance()
         exp_history = event_bus.get_history(name)
         if exp_history:
             embedded_history[name] = [ev.to_dict() for ev in exp_history]
-
-        # Build a lightweight training summary for the header bar
-        training_summary: Optional[Dict] = None
-        if is_running and exp_history:
-            training_summary = summarise_history(exp_history)
 
         # Get units, per-experiment models_enabled, and full config from config
         units = ""
@@ -1424,7 +1426,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "version": APP_VERSION,
                 "experiment": exp_status,
                 "benchmark_result": benchmark_result,
-                "forecast_data": forecast_data,
                 "lab_forecast": lab_forecast,
                 "feature_importances": feature_imps,
                 "is_running": is_running,
@@ -1443,7 +1444,6 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "units": units,
                 "models_json": [m.model_dump() for m in (benchmark_result.models if benchmark_result else [])],
                 "embedded_history": embedded_history,
-                "training_summary": training_summary,
                 "model_catalog": MODEL_CATALOG,
                 "exp_models_enabled": exp_models_enabled,
                 "exp_config": exp_config,
@@ -2806,9 +2806,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         try:
             level = float(getattr(exp_cfg, 'conformal_coverage', 0.8))
             # NEW-D1.2: scale `min_samples` with the requested coverage
-            # level. The conformal quantile at level=0.8 is the 90th
-            # percentile of absolute residuals; at level=0.95 it's the
-            # 97.5th. Higher percentiles need more samples for stable
+            # level. The conformal quantile at level=0.8 is the 80th
+            # percentile of absolute residuals (v2.41.0 — see
+            # get_conformal_quantiles); at level=0.95 it's the 95th.
+            # Higher percentiles need more samples for stable
             # estimates. Rule-of-thumb: max(10, ceil(10 / (1 - level)))
             # — at level=0.8 that's 50, at level=0.95 it's 200. The
             # floor of 10 keeps backwards compatibility for the
@@ -2885,61 +2886,19 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             default_version = getattr(exp_status, "model_version", None)
 
         try:
-            cur = db.conn.cursor()
-            # Per-cohort row counts + range, newest first.
-            cur.execute(
-                """
-                SELECT model_name,
-                       COALESCE(model_version, '(null)') AS mv,
-                       COUNT(*) AS n,
-                       MIN(issued_at) AS first_issued_at,
-                       MAX(issued_at) AS last_issued_at,
-                       MAX(target_dt) AS last_target_dt
-                FROM forecast_log
-                WHERE experiment = ?
-                GROUP BY model_name, model_version
-                ORDER BY last_issued_at DESC
-                """,
-                (name,),
+            # v2.41.0 (audit F4): queries moved into
+            # HistoryDB.get_forecast_log_stats — this handler used to
+            # run them on a raw cursor, on the event loop, without the
+            # DB lock.
+            stats = await asyncio.to_thread(
+                db.get_forecast_log_stats, name,
+                default_model, default_version,
             )
-            cohorts = [
-                {
-                    "model_name": r[0],
-                    "model_version": None if r[1] == "(null)" else r[1],
-                    "rows": int(r[2]),
-                    "first_issued_at": r[3],
-                    "last_issued_at": r[4],
-                    "last_target_dt": r[5],
-                }
-                for r in cur.fetchall()
+            cohorts = stats["cohorts"]
+            totals = stats["totals"]
+            targets_with_multi_issuances = stats[
+                "targets_with_multi_issuances"
             ]
-            # Total rows for the experiment — sanity check vs cohorts.
-            cur.execute(
-                "SELECT COUNT(*), MIN(issued_at), MAX(issued_at) "
-                "FROM forecast_log WHERE experiment = ?",
-                (name,),
-            )
-            total_row = cur.fetchone()
-            # For the current-champion cohort, count how many target_dts
-            # have ≥2 distinct issuances — if 0 or 1, the stability
-            # fallback will fire even though rows exist.
-            targets_with_multi_issuances = None
-            if default_model and default_version:
-                cur.execute(
-                    """
-                    SELECT COUNT(*) FROM (
-                        SELECT target_dt
-                        FROM forecast_log
-                        WHERE experiment = ?
-                          AND model_name = ?
-                          AND model_version = ?
-                        GROUP BY target_dt
-                        HAVING COUNT(DISTINCT issued_at) >= 2
-                    )
-                    """,
-                    (name, default_model, default_version),
-                )
-                targets_with_multi_issuances = int(cur.fetchone()[0])
         except Exception as e:
             logger.error(f"forecast-log-stats failed for {name}: {e}", exc_info=True)
             return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
@@ -2983,11 +2942,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "best_model": best_model,
                 "matches": default_model == best_model,
             },
-            "totals": {
-                "rows": int(total_row[0]) if total_row else 0,
-                "first_issued_at": total_row[1] if total_row else None,
-                "last_issued_at": total_row[2] if total_row else None,
-            },
+            "totals": totals,
             "targets_with_multi_issuances_under_default_filter": targets_with_multi_issuances,
             "cohorts": cohorts,
             "notes": notes,
@@ -3038,12 +2993,12 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 model_name=mn, model_version=mv,
             )
 
-        result = _fetch(model_name, model_version)
+        result = await asyncio.to_thread(_fetch, model_name, model_version)
         # Same fallback ladder as /forecast-accuracy:
         def _empty(res):
             return not res.get("available_targets")
         if _empty(result) and model_version and not version_param:
-            relaxed = _fetch(model_name, None)
+            relaxed = await asyncio.to_thread(_fetch, model_name, None)
             if not _empty(relaxed):
                 logger.info(
                     f"/forecast-trajectory fallback for {name}: no targets "
@@ -3059,7 +3014,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 }
                 model_version = None
         if _empty(result) and model_name and not model_param:
-            relaxed = _fetch(None, None)
+            relaxed = await asyncio.to_thread(_fetch, None, None)
             if not _empty(relaxed):
                 logger.info(
                     f"/forecast-trajectory fallback for {name}: no targets "
@@ -3130,7 +3085,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 source_is_cumulative=bool(exp_cfg.source_is_cumulative),
             )
 
-        result = _fetch(model_name, model_version)
+        result = await asyncio.to_thread(_fetch, model_name, model_version)
 
         # Empty if either there are no cycles at all, or every cycle's
         # targets are still in the future so the actuals query returns
@@ -3145,7 +3100,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return not actuals.get("values")
 
         if _empty(result) and model_version and not version_param:
-            relaxed = _fetch(model_name, None)
+            relaxed = await asyncio.to_thread(_fetch, model_name, None)
             if not _empty(relaxed):
                 logger.info(
                     f"/forecast-evolution fallback for {name}: no cycles "
@@ -3161,7 +3116,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 }
                 model_version = None
         if _empty(result) and model_name and not model_param:
-            relaxed = _fetch(None, None)
+            relaxed = await asyncio.to_thread(_fetch, None, None)
             if not _empty(relaxed):
                 logger.info(
                     f"/forecast-evolution fallback for {name}: no cycles "
@@ -3251,7 +3206,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 day_offset_hours=day_offset_hours,
             )
 
-        result = _fetch(model_name, model_version)
+        result = await asyncio.to_thread(_fetch, model_name, model_version)
         # v2.34.0: the version-widening + model-widening fallbacks
         # were removed. Stability is a per-cohort metric — pooling
         # cross-version cycles produces a number that doesn't reflect
@@ -3880,6 +3835,13 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception:
             pass
 
+        # Developer-mode branch overlay state (maintainer aid; default off).
+        # The card and its endpoints are inert unless developer_mode is on,
+        # so normal users never see this.
+        from ml_forecast_lab import dev_branch
+        developer_mode = dev_branch.developer_mode_enabled()
+        dev_installed = dev_branch.active_status() if developer_mode else None
+
         return templates.TemplateResponse(
             request=request,
             name="system.html",
@@ -3894,6 +3856,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "config_path": config_path_str,
                 "experiment_statuses": experiment_statuses,
                 "experiment_configs": experiment_configs,
+                "developer_mode": developer_mode,
+                "dev_installed": dev_installed,
+                "dev_running": dev_branch.is_overlay_running(),
+                "dev_compatible": dev_branch.overlay_is_compatible(),
+                "dev_repo": f"{dev_branch.REPO_OWNER}/{dev_branch.REPO_NAME}",
             },
         )
 
@@ -3945,6 +3912,190 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             logger.error(f"Failed to save settings: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
+    # ===== Developer-mode branch overlay (maintainer aid; default off) =====
+    #
+    # These endpoints let a developer run an arbitrary branch of the app's
+    # own repository in place of the bundled release. They are gated behind
+    # the `developer_mode` add-on option: when it is off, every endpoint
+    # 404s and the System-tab card is not rendered, so the capability is
+    # invisible and inert for normal users. See ml_forecast_lab/dev_branch.py.
+
+    async def _restart_addon() -> bool:
+        """Ask the Supervisor to restart this add-on. Best-effort.
+
+        Returns True if the Supervisor accepted the request. Requires
+        `hassio_api: true` in config.yaml and the SUPERVISOR_TOKEN env var
+        (both present in the add-on runtime).
+        """
+        import aiohttp
+
+        token = os.environ.get("SUPERVISOR_TOKEN", "")
+        if not token:
+            logger.warning("No SUPERVISOR_TOKEN; cannot self-restart.")
+            return False
+        url = "http://supervisor/addons/self/restart"
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers,
+                                        timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status in (200, 201):
+                        return True
+                    logger.error(
+                        f"Supervisor restart returned {resp.status}: "
+                        f"{(await resp.text())[:200]}"
+                    )
+                    return False
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Supervisor restart request failed: {e}")
+            return False
+
+    def _require_dev_mode():
+        """Raise 404 unless developer_mode is enabled.
+
+        404 (not 403) so the endpoints are indistinguishable from
+        nonexistent when the option is off — nothing hints the capability
+        exists.
+        """
+        from ml_forecast_lab import dev_branch
+        if not dev_branch.developer_mode_enabled():
+            raise HTTPException(status_code=404, detail="Not found")
+
+    @app.get("/api/system/dev/branches")
+    async def dev_list_branches():
+        """List branches of this repo to populate the System-tab dropdown.
+
+        Best-effort: on any GitHub failure (rate limit, no network) returns
+        ``success: false`` with a message so the UI can fall back to the
+        manual branch-name field rather than breaking.
+        """
+        _require_dev_mode()
+        from ml_forecast_lab import dev_branch
+
+        token = os.environ.get("GITHUB_TOKEN", "") or None
+        try:
+            branches = await dev_branch.list_repo_branches(token=token)
+        except dev_branch.DevBranchError as e:
+            return JSONResponse(content={"success": False, "error": str(e),
+                                         "branches": []})
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Branch listing failed: {e}")
+            return JSONResponse(content={"success": False,
+                                         "error": _safe_error(e), "branches": []})
+
+        active = dev_branch.active_status() or {}
+        return JSONResponse(content={
+            "success": True,
+            "branches": branches,
+            "current": active.get("branch"),
+        })
+
+    @app.post("/api/system/dev/install-branch")
+    async def dev_install_branch(request: Request):
+        """Fetch a branch of this repo and stage it as the boot overlay.
+
+        On success the add-on restarts itself; on the next boot the s6
+        script runs the overlaid branch instead of the bundled package.
+        """
+        _require_dev_mode()
+        from ml_forecast_lab import dev_branch
+
+        try:
+            data = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400,
+                                content={"success": False, "error": "Invalid JSON"})
+        branch = (data or {}).get("branch", "")
+        try:
+            branch = dev_branch.validate_branch(branch)
+        except dev_branch.DevBranchError as e:
+            return JSONResponse(status_code=400,
+                                content={"success": False, "error": str(e)})
+
+        import aiohttp
+
+        # Resolve the branch head SHA (best-effort; non-fatal for install).
+        sha = ""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    dev_branch.commit_api_url(branch),
+                    headers={"Accept": "application/vnd.github+json"},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status == 200:
+                        sha = (await resp.json()).get("sha", "") or ""
+                    elif resp.status == 404:
+                        return JSONResponse(
+                            status_code=404,
+                            content={"success": False,
+                                     "error": f"Branch {branch!r} not found in "
+                                              f"{dev_branch.REPO_OWNER}/{dev_branch.REPO_NAME}."},
+                        )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not resolve SHA for {branch!r}: {e}")
+
+        # Download the branch tarball.
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    dev_branch.tarball_url(branch),
+                    timeout=aiohttp.ClientTimeout(total=120),
+                ) as resp:
+                    if resp.status != 200:
+                        return JSONResponse(
+                            status_code=502,
+                            content={"success": False,
+                                     "error": f"Download failed (HTTP {resp.status}). "
+                                              f"Check the branch name and that the Pi "
+                                              f"has internet access."},
+                        )
+                    raw = await resp.read()
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(status_code=502,
+                                content={"success": False,
+                                         "error": f"Download failed: {_safe_error(e)}"})
+
+        try:
+            status = dev_branch.install_from_tarball_bytes(branch, raw, sha=sha)
+        except dev_branch.DevBranchError as e:
+            return JSONResponse(status_code=400,
+                                content={"success": False, "error": str(e)})
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Overlay install failed: {e}", exc_info=True)
+            return JSONResponse(status_code=500,
+                                content={"success": False, "error": _safe_error(e)})
+
+        restarting = await _restart_addon()
+        return JSONResponse(content={
+            "success": True,
+            "status": status,
+            "restarting": restarting,
+            "message": (
+                f"Installed {branch}@{status['sha_short'] or '?'}. "
+                + ("Restarting the add-on now…" if restarting else
+                   "Restart the add-on to run it (auto-restart unavailable).")
+            ),
+        })
+
+    @app.post("/api/system/dev/revert")
+    async def dev_revert(request: Request):
+        """Remove the overlay and restart back onto the bundled release."""
+        _require_dev_mode()
+        from ml_forecast_lab import dev_branch
+        existed = dev_branch.revert()
+        restarting = await _restart_addon() if existed else False
+        return JSONResponse(content={
+            "success": True,
+            "reverted": existed,
+            "restarting": restarting,
+            "message": (
+                ("Reverted to the bundled release. Restarting…" if restarting
+                 else "Reverted to the bundled release. Restart to apply.")
+                if existed else "No developer overlay was installed."
+            ),
+        })
+
     @app.post("/api/experiment-settings")
     async def save_experiment_settings(request: Request):
         """
@@ -3990,15 +4141,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "production_metric": lambda v: v if v in ("mae", "rmse", "mase", "seasonal_mase") else None,
             "loss_fn": lambda v: v if v in ("mse", "mae", "huber", "tweedie") else None,
             "optimiser": lambda v: v if v in ("adamw", "adam") else None,
-            # UI sends bool (toggle); we map true→0.5, false→0.0. Raw float values
-            # (e.g. from hand-edited YAML) pass through clamped to ≥ 0 so sophisticated
-            # users can still override the default λ without UI churn.
-            "daily_loss_weight": lambda v: max(0.0, float(v)),
-            # v2.40.14: loss_balance setter retained so older clients
-            # can still POST without 4xx; value is stored on the YAML
-            # but no longer affects training (the cumulative-loss path
-            # was removed — see CHANGELOG + LOSS_COMPARISON_FINDINGS).
-            "loss_balance": lambda v: float(v) if 0.0 <= float(v) <= 1.0 else None,
+            # v2.41.0: daily_loss_weight / loss_balance validators
+            # removed. The fields were inert since v2.40.14 but the API
+            # still accepted and persisted them to YAML — exactly the
+            # silent-misconfiguration pattern audit F11 flagged. POSTs
+            # carrying them now get the standard unknown-field error.
             # v2.40.12: per-experiment early-stopping patience. null →
             # each backend uses its constructor default (20 neural, 50
             # tree). Set 1..500 to override uniformly.
@@ -4019,7 +4166,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         }
 
         # Fields where None/null means "use global default" (valid, not an error)
-        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country", "loss_balance", "patience"}
+        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country", "patience"}
 
         updates = {}
         for field, validator in editable.items():

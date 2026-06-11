@@ -228,8 +228,12 @@ trades the formal coverage guarantee for zero retraining cost:
   `(forecast, actual)` pairs in `forecast_log`, capped at the most
   recent 14 days.
 - **Per-lead-bucket quantile.** For the requested `conformal_coverage`
-  level (default 0.8), we take the `(1 − α/2)`-th quantile (= 90th
-  percentile for 80% bands) of `|residual|` per lead bucket.
+  level (default 0.8), we take the `level`-th quantile (= 80th
+  percentile for 80% bands) of `|residual|` per lead bucket — for an
+  absolute-residual band, coverage equals the quantile level directly.
+  (Before v2.41.0 the `(1 − α/2)` signed-residual rule was applied to
+  `|residual|`, so nominal-80% bands realised ~90% coverage and were
+  ~1.5× wider than calibrated.)
 - **Cohort filtering.** Quantiles are filtered to the current
   `(model_name, model_version)` so the band width reflects the
   champion's actual behaviour, not a previous version's. If the
@@ -348,6 +352,24 @@ The SQLite database survives the experiment deletion — only the per-experiment
 ### Updating the app
 
 Updates are delivered via the HA app store like any other app. Read the [CHANGELOG](CHANGELOG.md) before upgrading — the changelog calls out behaviour changes that require config edits.
+
+### Developer mode — running a branch (maintainers only)
+
+> **For app development only.** This runs unreleased code and is a remote-code-execution surface. Leave `developer_mode` **off** for normal use. It is off by default, and while off the feature is completely hidden — no card, no endpoints, no hint it exists.
+
+If you're developing the app and want to try a branch without rebuilding the image:
+
+1. Set `developer_mode: true` in the app **Configuration** tab and restart the app.
+2. A **Developer** card appears at the bottom of the **System** tab. Pick a branch of `psweens/ml-forecast-lab` from the dropdown (it's populated live from GitHub; the ↻ button refreshes it, and the running branch is marked) and click **Fetch & run branch**. If the list can't load — e.g. a GitHub API rate limit — expand **…or enter a branch name manually** and type it (e.g. `claude/my-feature`).
+3. The app downloads that branch from GitHub, stages it as an overlay under `/data`, and restarts. On the next boot it runs the branch's code instead of the bundled release. A persistent **Developer build** banner and the annotated version string (`2.42.0 (dev: my-feature@1a2b3c4)`) confirm you're off-release.
+4. Click **Revert to bundled** (or just set `developer_mode: false`) to return to the shipped version on the next restart.
+
+Notes and limits:
+
+- Only branches of this repository can be run — you supply a branch name, never a URL.
+- The bundled image is never modified; the overlay lives in `/data` and is removed on revert.
+- First fetch needs internet access on the Pi. The branch must only change **Python code** — a running container can't install new system or Python *dependencies*, so a branch that adds a package needs a full image rebuild instead.
+- Requires the Supervisor API (`hassio_api`), used solely to restart the app after install/revert.
 
 ---
 

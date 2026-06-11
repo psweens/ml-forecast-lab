@@ -1,6 +1,6 @@
 ---
 name: ML Forecast Lab
-version: 2.41.0
+version: 2.43.0
 slug: ml_forecast_lab
 description: Multi-model ML forecasting and benchmarking for Home Assistant
 url: https://github.com/psweens/ml-forecast-lab
@@ -13,6 +13,11 @@ arch:
   - armv7
 init: false
 homeassistant_api: true
+# hassio_api lets the add-on call the Supervisor API — used only to
+# restart itself after a developer-mode branch overlay is installed or
+# reverted (see ml_forecast_lab/dev_branch.py). No other Supervisor
+# access is used.
+hassio_api: true
 ingress: true
 ingress_port: 5052
 panel_icon: mdi:chart-timeline-variant-shimmer
@@ -22,5 +27,11 @@ map:
   - homeassistant_config:ro
 options:
   log_level: info
+  developer_mode: false
 schema:
   log_level: list(trace|debug|info|notice|warning|error|critical)?
+  # Maintainer aid (default off): exposes the System-tab "Developer"
+  # card that can run an arbitrary branch of this repository in place of
+  # the bundled release. Leave off in normal use — it is a remote-code
+  # execution surface intended only for app development.
+  developer_mode: bool?

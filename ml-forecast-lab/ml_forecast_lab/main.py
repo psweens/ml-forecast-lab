@@ -11,6 +11,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +25,11 @@ from ml_forecast_lab.training_events import TrainingEvent, TrainingEventBus
 
 logger = logging.getLogger(__name__)
 
+# Age-based forecast_log retention (audit F5). Must stay above the UI's
+# largest analytics window (90 days) so pruning never truncates a view
+# the user can select. Pruned per-experiment on the retrain cadence.
+FORECAST_LOG_RETENTION_DAYS = 120
+
 
 def _resolve_output_activation(exp_cfg, model_name: str = '') -> str:
     """
@@ -36,33 +42,28 @@ def _resolve_output_activation(exp_cfg, model_name: str = '') -> str:
       z-score normalisation with linear head, denormalised at inference;
       conditions gradients across widely-varying target scales and is the
       best general default for recurrent backends)
-    - Other neural, ``source_is_cumulative=True`` OR
-      ``target_is_nonnegative=True``                  → ``'softplus'``
-      (non-negative, smooth gradient near zero — ideal for energy /
-      rainfall / counts that reset to zero overnight, or instantaneous
-      non-negative targets like PV power. Softplus has a non-zero
-      gradient everywhere, which immunises against the "dying ReLU"
-      collapse where a high LR or aggressive anchor delta drives the
-      linear head into all-negative pre-activations and freezes the
-      model at a literal-zero forecast for the entire horizon.)
-    - Other neural, default                           → ``'linear'`` (unbounded
-      signed output suitable for temperature, net grid flow, deltas)
+    - Other neural                                    → ``'linear'``
+      (unbounded output; non-negativity for cumulative / non-negative
+      targets is enforced by the publish-time clamp instead — see the
+      ``target_is_nonnegative`` clip in ``_forecast_with_cached`` /
+      ``_run_production_inference``)
 
-    The ``target_is_nonnegative`` branch is the v2.37 PF8 addition for
-    users with non-cumulative non-negative targets (PV power in W,
-    irradiance, instantaneous demand). It resolves to softplus on the
-    same rationale as cumulative — a non-negative-by-construction
-    activation with non-zero gradient everywhere is robust to the
-    anchor/RevIN/log_transform interactions that the v2.37 PF1-PF7
-    extended-window path introduces.
-
-    History: the initial v2.37 PF8 picked ``'relu'`` here on the theory
-    that softplus's +log(2)≈0.69 floor would bias small-magnitude
-    cumulative kWh intervals high. In production this caused the
-    user-reported flat-zero forecast (dying-ReLU on the extended-window
-    NLinear with the PF2 anchor add-back), and the test
-    ``test_cumulative_source_picks_softplus`` had been pinning the
-    correct (softplus) behaviour all along.
+    History: v2.37 PF8 originally picked ``'relu'`` for non-negative
+    targets, which produced the user-reported flat-zero forecast via
+    dying-ReLU; v2.37.1 switched to ``'softplus'`` on the theory that
+    its non-zero gradient everywhere immunises against the collapse.
+    Empirically it does not: with the (since-removed) cumulative-loss
+    term inactive — which is every real deployment, since
+    ``daily_loss_weight`` defaulted to 0 — the zero-valued half of a
+    PV/demand target keeps pushing the pre-activation down until
+    float32 softplus saturates to exactly 0 with a vanishing gradient,
+    and the daytime signal can no longer recover. The integration suite
+    (``tests/integration/test_pv_forecast_pipeline.py``) pins this:
+    softplus collapses flat, a linear head trains cleanly. v2.41.0
+    therefore resolves 'auto' to 'linear' and moves the non-negativity
+    guarantee to the publish boundary, where a clamp costs nothing and
+    cannot interfere with optimisation. Users can still pin
+    ``output_activation: softplus`` explicitly.
     """
     act = getattr(exp_cfg, 'output_activation', 'auto')
     if act == 'auto':
@@ -72,11 +73,7 @@ def _resolve_output_activation(exp_cfg, model_name: str = '') -> str:
         # targets ranging from small fractions to large cumulative values.
         if model_name == 'lstm':
             return 'zscore'
-        is_nonneg = (
-            getattr(exp_cfg, 'source_is_cumulative', False)
-            or getattr(exp_cfg, 'target_is_nonnegative', False)
-        )
-        return 'softplus' if is_nonneg else 'linear'
+        return 'linear'
     return act
 
 
@@ -339,29 +336,6 @@ def _collect_train_future_covariates(
     return out
 
 
-def _resolve_daily_loss_weight(exp_cfg) -> float:
-    """
-    Resolve the effective ``daily_loss_weight`` for a neural model.
-
-    PF9 (v2.37): when the user leaves ``daily_loss_weight=0.0`` (the default)
-    but the target is non-negative (cumulative or explicitly flagged), apply
-    a moderate weight of 0.5 by default. The cumulative-trajectory loss term
-    is the most effective remaining lever against the residual amplitude
-    compression on linear-head backends after PF1+PF7 (see
-    ``docs/investigations/2026-05-neural-pv.md``).
-
-    An explicitly non-zero user value is honoured as-is.
-    """
-    user_value = float(getattr(exp_cfg, 'daily_loss_weight', 0.0))
-    if user_value > 0:
-        return user_value
-    is_nonneg = (
-        getattr(exp_cfg, 'source_is_cumulative', False)
-        or getattr(exp_cfg, 'target_is_nonnegative', False)
-    )
-    return 0.5 if is_nonneg else 0.0
-
-
 def _holdout_display_from_windows(y_p: 'np.ndarray', target_len: int) -> 'np.ndarray':
     """Build a full-length per-point holdout display series from a windowed
     multi-horizon prediction array.
@@ -418,34 +392,18 @@ def _apply_patience(model, exp_cfg, overrides=None) -> None:
     model.patience = int(p)
 
 
-def _apply_loss_balance(model, exp_cfg, overrides=None) -> None:
-    """v2.40.14: no-op stub. The cumulative-loss path was removed (see
-    ``ForecastModel._composite_horizon_loss`` and CHANGELOG). The five
-    historical call sites in this file still call it so YAML
-    backwards-compat keeps working; the function pins
-    ``model.loss_balance = 0`` and ``model._loss_ema = None`` only as
-    defensive housekeeping in case a model object carries stale
-    attributes from a checkpoint."""
-    if not getattr(model, 'is_neural', False):
-        return
-    if hasattr(model, 'loss_balance'):
-        model.loss_balance = 0.0
-    if hasattr(model, '_loss_ema'):
-        model._loss_ema = None
-
-
 def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
     """
     Propagate experiment-level neural training settings to a model.
 
-    Currently propagates ``loss_fn``, ``daily_loss_weight``, and
-    ``optimiser`` from ``exp_cfg`` so every code path that instantiates a
+    Currently propagates ``loss_fn`` and ``optimiser`` from ``exp_cfg``
+    so every code path that instantiates a
     neural model (benchmark CV, production training, Tuning trials,
     holdout refits, Covariate Analysis) honours the user's Settings
     selection — not just the main CV loop. Without this helper, secondary
     paths would silently train with the backend's default ``loss_fn='mse'``
-    / ``optimiser='adamw'`` / ``daily_loss_weight=0`` regardless of what
-    the user picked in Settings.
+    / ``optimiser='adamw'`` regardless of what the user picked in
+    Settings.
 
     Silently no-ops for tree backends (``hasattr`` guard).
     Skips any param already present in ``overrides`` so user-provided
@@ -465,15 +423,10 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
     if not getattr(model, 'is_neural', False):
         return
     overrides = overrides or {}
-    for attr in ('loss_fn', 'daily_loss_weight', 'optimiser'):
+    for attr in ('loss_fn', 'optimiser'):
         if attr in overrides:
             continue
-        # PF9: daily_loss_weight goes through the resolver so non-negative
-        # targets default to 0.5 even when the user hasn't explicitly set it.
-        if attr == 'daily_loss_weight':
-            value = _resolve_daily_loss_weight(exp_cfg)
-        else:
-            value = getattr(exp_cfg, attr, None)
+        value = getattr(exp_cfg, attr, None)
         if value is None:
             continue
         if not hasattr(model, attr):
@@ -485,9 +438,6 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
             # migrated) — silently skip rather than break the whole run.
             pass
 
-    # Interval↔cumulative loss balance — centralised in one helper so every
-    # training path applies it identically (see _apply_loss_balance).
-    _apply_loss_balance(model, exp_cfg, overrides)
     _apply_patience(model, exp_cfg, overrides)
 
 
@@ -524,11 +474,17 @@ class MLForecastLabApp:
         self._cached_models = {}
         # Track running asyncio tasks for stop-training support
         self._running_tasks: Dict[str, asyncio.Task] = {}
+        # Cooperative cancel flags for executor-thread training (audit
+        # F10): task.cancel() can't interrupt a thread, so stop-training
+        # also sets this event, which the epoch callbacks check.
+        self._cancel_events: Dict[str, threading.Event] = {}
         # Sequential retrain queue — prevents parallel training
         self._retrain_queue: asyncio.Queue = asyncio.Queue()
         self._retrain_consumer_running = False
         # Global training lock — ensures only one training operation
-        # (benchmark OR retrain) runs at a time across all code paths.
+        # (benchmark, retrain, tuning, or covariate analysis) runs at a
+        # time across all code paths. v2.41.0 closed the gap where
+        # tuning and covariate analysis trained outside it (audit F7).
         self._training_lock: asyncio.Lock = asyncio.Lock()
         # Track config file mtime so we only log on real changes (the timer
         # loop reloads config every 30s; we don't want a log line each time).
@@ -912,10 +868,15 @@ class MLForecastLabApp:
                         exp_cfg = cfg
                         break
                 if exp_cfg:
-                    try:
-                        await self._run_covariate_analysis(exp_cfg, selected_model=selected_model)
-                    except Exception as e:
-                        logger.error(f"Covariate analysis failed: {e}", exc_info=True)
+                    # Covariate analysis trains models × covariate
+                    # combinations — a full training workload. Take the
+                    # global training lock so it can't overlap a
+                    # scheduled retrain or benchmark (audit F7).
+                    async with self._training_lock:
+                        try:
+                            await self._run_covariate_analysis(exp_cfg, selected_model=selected_model)
+                        except Exception as e:
+                            logger.error(f"Covariate analysis failed: {e}", exc_info=True)
 
             self.web_app.state.appstate.covariate_analysis_callback = _covariate_analysis_trigger
 
@@ -924,9 +885,14 @@ class MLForecastLabApp:
                                       n_trials: int = 30, strategy: str = "tpe",
                                       param_schema: dict = None):
                 try:
-                    await self._run_tuning(
-                        experiment_name, model_name, n_trials, strategy, param_schema
-                    )
+                    # Tuning runs n_trials × CV fits — a full training
+                    # workload. Serialise behind the global training
+                    # lock (audit F7: the lock's "all code paths" claim
+                    # previously excluded tuning + covariate analysis).
+                    async with self._training_lock:
+                        await self._run_tuning(
+                            experiment_name, model_name, n_trials, strategy, param_schema
+                        )
                 except Exception as e:
                     logger.error(f"Tuning failed: {e}", exc_info=True)
                     tr = self.web_app.state.appstate.tuning_results.get(experiment_name)
@@ -964,9 +930,14 @@ class MLForecastLabApp:
                 )
                 for m_name in models:
                     try:
-                        await self._run_tuning(
-                            experiment_name, m_name, n_trials, strategy, None,
-                        )
+                        # Per-model lock acquisition (not one hold for
+                        # the whole sweep) so a scheduled retrain can
+                        # interleave between models rather than waiting
+                        # hours for the full tune-all to finish.
+                        async with self._training_lock:
+                            await self._run_tuning(
+                                experiment_name, m_name, n_trials, strategy, None,
+                            )
                     except Exception as e:
                         logger.error("tune-all: %s/%s failed: %s",
                                      experiment_name, m_name, e, exc_info=True)
@@ -1026,6 +997,13 @@ class MLForecastLabApp:
 
             # Register stop-training callback
             async def _stop_training_trigger(experiment_name: str) -> bool:
+                # Set the cooperative cancel flag FIRST: cancelling the
+                # asyncio task only abandons the coroutine — the
+                # executor thread running model.fit keeps the CPU
+                # saturated until it checks this flag (audit F10).
+                ev = self._cancel_events.get(experiment_name)
+                if ev is not None:
+                    ev.set()
                 task = self._running_tasks.get(experiment_name)
                 # Also check pipeline tasks launched from the web UI
                 if not task or task.done():
@@ -1708,7 +1686,12 @@ class MLForecastLabApp:
         # cost is negligible (~72 KB / experiment for a 30-day window,
         # bounded by the cleanup call below).
         if self.history_db and table_name:
-            cached_df = self.history_db.get_history(table_name)
+            # Offloaded: the DB lock may be held by a long analytics
+            # read in a worker thread; waiting for it inline would
+            # block the whole event loop (audit F9).
+            cached_df = await asyncio.to_thread(
+                self.history_db.get_history, table_name,
+            )
             if not cached_df.empty:
                 # Rename 'y' back to 'value' for consistency
                 cached_df = cached_df.rename(columns={"y": "value"})
@@ -1766,13 +1749,17 @@ class MLForecastLabApp:
         # v2.33.1: unconditional — the `exp_cfg.database` gate was
         # removed (see the matching comment on the cache-read above).
         if self.history_db and table_name:
-            inserted = self.history_db.store_history(table_name, df)
+            inserted = await asyncio.to_thread(
+                self.history_db.store_history, table_name, df,
+            )
             if inserted > 0:
                 logger.info(f"  Cached {inserted} new records in SQLite")
 
             # Cleanup old records beyond max_age
             oldest = now - timedelta(days=exp_cfg.max_age)
-            self.history_db.cleanup(table_name, oldest)
+            await asyncio.to_thread(
+                self.history_db.cleanup, table_name, oldest,
+            )
 
         # --- Carry-forward when recorder has gone quiet -------------------
         # HA's recorder dedups identical state writes, so a sensor whose
@@ -1910,7 +1897,27 @@ class MLForecastLabApp:
 
         # --- Optional log transform ---
         if exp_cfg.log_transform:
-            series = apply_log_transform(series)
+            # Pin the transform to log1p (shift=1). apply_log_transform
+            # derives shift=|min|+1 for signed series, but every
+            # inversion site in the pipeline is a hard-coded
+            # np.expm1 (shift=1) — a signed target would be inverted
+            # with the wrong shift and publish systematically-offset
+            # values (audit F6). log_transform is meant for
+            # non-negative magnitudes; clip and warn rather than
+            # silently publish garbage.
+            _n_neg = int((series.dropna() < 0).sum())
+            if _n_neg > 0:
+                logger.warning(
+                    f"  {exp_cfg.name}: log_transform=true but the "
+                    f"target has {_n_neg} negative value(s). "
+                    f"log_transform assumes a non-negative magnitude "
+                    f"(energy, power, demand); negatives are clipped "
+                    f"to 0 before the transform. For signed targets "
+                    f"(net grid flow, temperature deltas) disable "
+                    f"log_transform."
+                )
+                series = series.clip(lower=0.0)
+            series = apply_log_transform(series, shift=1.0)
 
         # --- Build DataFrame ---
         result = pd.DataFrame({"y": series}, index=series.index)
@@ -2617,6 +2624,7 @@ class MLForecastLabApp:
         from ml_forecast_lab.features import build_features
         from ml_forecast_lab.benchmark.runner import BenchmarkRunner
         from ml_forecast_lab.benchmark.metrics import get_metric_registry
+        from ml_forecast_lab.models.base import TrainingCancelled
         from ml_forecast_lab.web.app import (
             BenchmarkResult as WebBenchmarkResult,
             ModelResult as WebModelResult,
@@ -2775,10 +2783,6 @@ class MLForecastLabApp:
                         # gracefully on a mixed-backend benchmark.
                         user_loss = 'huber'
                     m.set_params(loss_fn=user_loss)
-                if (m.is_neural and hasattr(m, 'daily_loss_weight')
-                        and 'daily_loss_weight' not in overrides):
-                    m.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
-                _apply_loss_balance(m, exp_cfg, overrides)
                 _apply_patience(m, exp_cfg, overrides)
                 if (m.is_neural and hasattr(m, 'optimiser')
                         and 'optimiser' not in overrides):
@@ -2879,6 +2883,54 @@ class MLForecastLabApp:
         completed_models = {}
         rankings = {}
 
+        # Fresh cooperative-cancel flag for this run (audit F10).
+        cancel_ev = threading.Event()
+        self._cancel_events[exp_cfg.name] = cancel_ev
+
+        # v2.41.0 (audit F8): build the SAME future-known feature frame
+        # production training uses (_retrain_and_cache) and pass it into
+        # every CV fold, so the leaderboard ranks the extended-window
+        # architecture that actually ships. Deterministic columns
+        # (temporal, solar) are exact; user future-covariates use
+        # in-sample observed values — identical to the production
+        # training side, and equally optimistic for every backend, so
+        # relative ranking is preserved. (Inference-side production uses
+        # HA forecasts for those channels; CV cannot, short of storing
+        # historical forecast snapshots.)
+        bench_future_features_df = None
+        try:
+            from ml_forecast_lab.features import compute_known_future_features
+            _engineered_bench = {
+                'hour_of_day', 'day_of_week', 'is_weekend', 'month',
+                'day_of_month', 'hour_sin', 'hour_cos', 'dow_sin',
+                'dow_cos', 'is_holiday',
+            }
+            _engineered_bench.update(
+                c for c in combined.columns if c.startswith('y_lag_')
+            )
+            _raw_cov_bench = [
+                c for c in combined.columns
+                if c not in _engineered_bench and c != 'target'
+            ]
+            _loc = await self._get_site_location()
+            _future_cov_bench = _collect_train_future_covariates(
+                combined, exp_cfg,
+            )
+            bench_future_features_df = compute_known_future_features(
+                combined.index,
+                add_temporal=True,
+                country=getattr(exp_cfg, 'country', None),
+                solar_lat_lon=_loc if _loc is not None else None,
+                include_sun_elevation='sun_elevation' in _raw_cov_bench,
+                include_clear_sky_ghi='clear_sky_ghi' in _raw_cov_bench,
+                future_covariate_values=_future_cov_bench or None,
+            )
+        except Exception as _e:
+            logger.warning(
+                f"  Benchmark future-feature build failed — CV falls "
+                f"back to past-only windows: {_e}"
+            )
+
         # Set up live training event bus
         event_bus = TrainingEventBus.get_instance()
         event_bus.clear_history(exp_cfg.name)
@@ -2889,6 +2941,10 @@ class MLForecastLabApp:
         ))
 
         for model_idx, (model_name, model) in enumerate(models.items(), 1):
+            if cancel_ev.is_set():
+                logger.info(f"  Benchmark for {exp_cfg.name} cancelled — "
+                            f"stopping before {model_name}")
+                break
             logger.info(f"")
             logger.info(f"  [{model_idx}/{len(models)}] Benchmarking: {model_name}")
 
@@ -2923,12 +2979,27 @@ class MLForecastLabApp:
             epoch_cb = _make_epoch_cb(exp_cfg.name, model_name)
 
             loop = asyncio.get_running_loop()
-            model_result = await loop.run_in_executor(
-                None, lambda: runner.run_single_model(
-                    combined, model, fold_indices, epoch_callback=epoch_cb,
+            try:
+                model_result = await loop.run_in_executor(
+                    None, lambda: runner.run_single_model(
+                        combined, model, fold_indices, epoch_callback=epoch_cb,
+                        cancel_event=cancel_ev,
+                        future_features_df=bench_future_features_df,
+                    )
                 )
-            )
+            except TrainingCancelled:
+                logger.info(
+                    f"  Benchmark for {exp_cfg.name} cancelled during "
+                    f"{model_name} — stopping"
+                )
+                break
             completed_models[model_name] = model_result
+            # Release the trained model — its metrics/predictions are
+            # captured in model_result, and the holdout chart re-fits
+            # fresh instances. Keeping every trained backend referenced
+            # until the run ends made peak RSS the SUM of all trained
+            # models on a 20+-model benchmark (audit F13).
+            models[model_name] = None
 
             event_bus.publish(TrainingEvent(
                 event_type="model_end",
@@ -3135,10 +3206,6 @@ class MLForecastLabApp:
                     overrides = self.config.model_overrides.get(m_name, {})
                     if m.is_neural and hasattr(m, 'loss_fn') and 'loss_fn' not in overrides:
                         m.set_params(loss_fn=exp_cfg.loss_fn)
-                    if (m.is_neural and hasattr(m, 'daily_loss_weight')
-                            and 'daily_loss_weight' not in overrides):
-                        m.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
-                    _apply_loss_balance(m, exp_cfg, overrides)
                     _apply_patience(m, exp_cfg, overrides)
                     if (m.is_neural and hasattr(m, 'optimiser')
                             and 'optimiser' not in overrides):
@@ -3517,10 +3584,6 @@ class MLForecastLabApp:
         overrides = self.config.model_overrides.get(prod_model_name, {})
         if model.is_neural and hasattr(model, 'loss_fn') and 'loss_fn' not in overrides:
             model.set_params(loss_fn=exp_cfg.loss_fn)
-        if (model.is_neural and hasattr(model, 'daily_loss_weight')
-                and 'daily_loss_weight' not in overrides):
-            model.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
-        _apply_loss_balance(model, exp_cfg, overrides)
         _apply_patience(model, exp_cfg, overrides)
         if (model.is_neural and hasattr(model, 'optimiser')
                 and 'optimiser' not in overrides):
@@ -3912,6 +3975,14 @@ class MLForecastLabApp:
             y_pred = np.expm1(y_pred).astype(np.float32)
             y_pred = np.maximum(y_pred, 0.0)
 
+        # Publish-boundary non-negativity clamp — same rationale as in
+        # _forecast_with_cached (v2.41.0 linear-head change).
+        if (
+            getattr(exp_cfg, 'target_is_nonnegative', False)
+            or getattr(exp_cfg, 'source_is_cumulative', False)
+        ):
+            y_pred = np.maximum(y_pred, 0.0).astype(np.float32)
+
         logger.info(
             f"Forecast curve: {len(y_pred)} points over "
             f"{future_periods * exp_cfg.interval_minutes / 60:.0f}h, "
@@ -4041,6 +4112,35 @@ class MLForecastLabApp:
             else:
                 await self._retrain_and_cache(exp_cfg)
             await self.publish_heartbeat()
+
+            # Age-based forecast_log retention (audit F5). Before
+            # v2.41.0 the log was only pruned on champion change, so a
+            # stable production experiment grew it without bound
+            # (~69k rows / 16.5 MB per experiment-month at 30-min
+            # cadence × 48 horizons) and every analytics query slowed
+            # with it. 120 days keeps the UI's largest window (90 days)
+            # fully served with margin. Runs on the retrain cadence
+            # (~daily) so the delete is small and cheap.
+            if self.history_db:
+                try:
+                    pruned = await asyncio.to_thread(
+                        self.history_db.cleanup_forecast_log,
+                        exp_cfg.name,
+                        datetime.now(timezone.utc).replace(tzinfo=None)
+                        - timedelta(days=FORECAST_LOG_RETENTION_DAYS),
+                    )
+                    if pruned:
+                        logger.info(
+                            f"  forecast_log retention: pruned {pruned} "
+                            f"rows older than "
+                            f"{FORECAST_LOG_RETENTION_DAYS}d for "
+                            f"{exp_cfg.name}"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"  forecast_log retention prune failed for "
+                        f"{exp_cfg.name}: {e}"
+                    )
         except Exception as e:
             logger.error(f"Retrain failed for {exp_cfg.name}: {e}", exc_info=True)
             # Surface the error in the web UI so the user doesn't have to
@@ -4139,8 +4239,21 @@ class MLForecastLabApp:
     async def _retrain_and_cache(self, exp_cfg):
         """Train a production model and cache it for fast forecast cycles."""
         from ml_forecast_lab.features import build_features
+        from ml_forecast_lab.models.base import TrainingCancelled
 
         logger.info(f"  Retraining {exp_cfg.name}...")
+
+        # Cooperative cancel flag (audit F10) — checked by the epoch
+        # callback below so stop-training can halt the executor thread
+        # at the next epoch boundary, not just abandon it.
+        _cancel_ev = threading.Event()
+        self._cancel_events[exp_cfg.name] = _cancel_ev
+
+        def _cancel_cb(**_kw):
+            if _cancel_ev.is_set():
+                raise TrainingCancelled(
+                    f"{exp_cfg.name}: retrain cancelled via stop-training"
+                )
 
         # Fetch and prepare data
         df = await self._fetch_and_preprocess(exp_cfg)
@@ -4179,10 +4292,6 @@ class MLForecastLabApp:
             overrides.update(exp_params)
         if model.is_neural and hasattr(model, 'loss_fn') and 'loss_fn' not in overrides:
             model.set_params(loss_fn=exp_cfg.loss_fn)
-        if (model.is_neural and hasattr(model, 'daily_loss_weight')
-                and 'daily_loss_weight' not in overrides):
-            model.set_params(daily_loss_weight=exp_cfg.daily_loss_weight)
-        _apply_loss_balance(model, exp_cfg, overrides)
         _apply_patience(model, exp_cfg, overrides)
         if (model.is_neural and hasattr(model, 'optimiser')
                 and 'optimiser' not in overrides):
@@ -4311,14 +4420,13 @@ class MLForecastLabApp:
                 # "the LSTM forecast is still flat after the v2.37 upgrade"
                 # this log line is the first place to look: it confirms
                 # whether the past_window_size / extended_window /
-                # output_activation / daily_loss_weight values are what
+                # output_activation values are what
                 # the PF1-PF9 fixes expect.
                 logger.info(
                     f"  PF1-PF10 diagnostics for {prod_model_name}: "
                     f"past_window_size={seq_kwargs.get('past_window_size')}, "
                     f"extended_window={seq_kwargs.get('extended_window')}, "
                     f"output_activation={getattr(model, 'output_activation', '<n/a>')}, "
-                    f"daily_loss_weight={getattr(model, 'daily_loss_weight', '<n/a>')}, "
                     f"use_revin={getattr(model, 'use_revin', '<n/a>')}, "
                     f"learning_rate={getattr(model, 'learning_rate', getattr(model, 'lr', '<n/a>'))}, "
                     f"optimiser={getattr(exp_cfg, 'optimiser', '<n/a>')}, "
@@ -4331,15 +4439,23 @@ class MLForecastLabApp:
 
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(
-                    None, lambda: model.fit(X_train_seq, y_train_seq, **seq_kwargs)
+                    None, lambda: model.fit(
+                        X_train_seq, y_train_seq,
+                        epoch_callback=_cancel_cb, **seq_kwargs,
+                    )
                 )
             else:
                 is_neural = False
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, model.fit, X, y)
+                await loop.run_in_executor(
+                    None,
+                    lambda: model.fit(X, y, epoch_callback=_cancel_cb),
+                )
         else:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, model.fit, X, y)
+            await loop.run_in_executor(
+                None, lambda: model.fit(X, y, epoch_callback=_cancel_cb),
+            )
 
         # Debug bundle: capture training inputs for offline analysis. Gated
         # per-experiment so disk usage stays bounded and ordinary users
@@ -4457,8 +4573,24 @@ class MLForecastLabApp:
         except Exception:
             pass
 
-        # Also run a forecast immediately after retrain
-        await self._forecast_with_cached(exp_cfg.name)
+        # Also run a forecast immediately after retrain. Reserve the
+        # per-experiment forecast slot first — without it a
+        # concurrently-scheduled _forecast_single could publish in
+        # parallel with this call, double-writing sensors and
+        # forecast_log rows for the same minute (audit F15). If a
+        # scheduled forecast is already mid-flight, skip ours — the
+        # running one re-reads the cache entry we just stored.
+        if not self._forecast_running.get(exp_cfg.name, False):
+            self._forecast_running[exp_cfg.name] = True
+            try:
+                await self._forecast_with_cached(exp_cfg.name)
+            finally:
+                self._forecast_running[exp_cfg.name] = False
+        else:
+            logger.info(
+                f"  Skipping post-retrain forecast for {exp_cfg.name} — "
+                f"a scheduled forecast is already running"
+            )
 
     @staticmethod
     def _cached_model_dir(exp_name: str) -> Path:
@@ -4521,7 +4653,13 @@ class MLForecastLabApp:
                     f"  Could not archive previous {exp_name} cache: {_e}"
                 )
 
-            cache["model"].save(str(model_bin))
+            # Write-then-rename so a crash mid-save can't leave a torn
+            # model.bin paired with the previous (matching-schema) meta
+            # — the restore path would load it silently (audit F16).
+            # The meta JSON below already uses the same pattern.
+            model_bin_tmp = model_dir / "model.bin.tmp"
+            cache["model"].save(str(model_bin_tmp))
+            model_bin_tmp.replace(model_bin)
 
             # window_size is only meaningful for neural backends that
             # trained through the sliding-window path — derive it from
@@ -4986,7 +5124,12 @@ class MLForecastLabApp:
                 # saw "some forecast sensors aren't updating".
                 cached = self._cached_models.get(exp_cfg.name) or {}
                 current_version = cached.get("model_version")
-                cq = self.history_db.get_conformal_quantiles(
+                # Offloaded: this query joins forecast_log against the
+                # actuals grid and scales with both; running it inline
+                # froze the event loop (web UI + scheduler) for the
+                # duration of every publish cycle (audit F3).
+                cq = await asyncio.to_thread(
+                    self.history_db.get_conformal_quantiles,
                     exp_cfg.name,
                     actuals_table,
                     level=target_level,
@@ -4999,7 +5142,8 @@ class MLForecastLabApp:
                     and (cq.get("fallback_quantile") is None
                          or cq.get("total_samples", 0) < 10)
                 ):
-                    cq_all = self.history_db.get_conformal_quantiles(
+                    cq_all = await asyncio.to_thread(
+                        self.history_db.get_conformal_quantiles,
                         exp_cfg.name,
                         actuals_table,
                         level=target_level,
@@ -5088,7 +5232,8 @@ class MLForecastLabApp:
                 # retrain cycles under the same model_name.
                 cached = self._cached_models.get(exp_cfg.name) or {}
                 model_version = cached.get("model_version")
-                n_logged = self.history_db.log_forecast(
+                n_logged = await asyncio.to_thread(
+                    self.history_db.log_forecast,
                     experiment=exp_cfg.name,
                     issued_at=issued_at,
                     targets=ds_future_aware.tolist(),
@@ -5997,6 +6142,17 @@ class MLForecastLabApp:
             y_pred = np.expm1(y_pred).astype(np.float32)
             y_pred = np.maximum(y_pred, 0.0)
 
+        # Publish-boundary non-negativity clamp (v2.41.0). With 'auto'
+        # output_activation now resolving to a linear head, physically
+        # non-negative targets can emit small negative dips; clamping
+        # here keeps the published sensors physical without putting a
+        # saturating activation back into the optimisation path.
+        if (
+            getattr(exp_cfg, 'target_is_nonnegative', False)
+            or getattr(exp_cfg, 'source_is_cumulative', False)
+        ):
+            y_pred = np.maximum(y_pred, 0.0).astype(np.float32)
+
         logger.info(
             f"  Forecast {exp_cfg.name}: {len(y_pred)} points, "
             f"range [{y_pred.min():.3f}, {y_pred.max():.3f}]"
@@ -6805,7 +6961,7 @@ class MLForecastLabApp:
                     if 'output_activation' not in overrides:
                         _apply_output_activation(model, exp_cfg)
                     # Honour Settings-level neural params (loss_fn,
-                    # daily_loss_weight, optimiser) so covariate analysis
+                    # optimiser) so covariate analysis
                     # minimises the SAME objective as the main benchmark.
                     _apply_experiment_neural_params(model, exp_cfg, overrides=overrides)
 

@@ -342,10 +342,15 @@ class TestResolveOutputActivation:
             self._cfg(log_transform=True), 'lstm'
         ) == 'zscore'
 
-    def test_cumulative_source_picks_softplus(self):
+    def test_cumulative_source_picks_linear(self):
+        """v2.41.0: 'auto' resolves to 'linear' even for cumulative /
+        non-negative targets. The softplus auto-pick collapsed to flat
+        zero once the cumulative-loss term stopped masking it (see
+        tests/integration/test_pv_forecast_pipeline.py); non-negativity
+        is now enforced by the publish-time clamp instead."""
         from ml_forecast_lab.main import _resolve_output_activation
         cfg = self._cfg(source_is_cumulative=True)
-        assert _resolve_output_activation(cfg, 'nlinear') == 'softplus'
+        assert _resolve_output_activation(cfg, 'nlinear') == 'linear'
 
     def test_log_transform_alone_picks_linear(self):
         """``log_transform=True`` alone does NOT trigger softplus — that's an
@@ -525,8 +530,7 @@ class TestEarlyStopStep:
 
 class TestApplyPatience:
     """v2.40.12: ``_apply_patience`` plumbs the per-experiment Setting
-    onto a backend's ``self.patience`` attribute, mirroring the
-    ``_apply_loss_balance`` pattern. Called from every training-setup
+    onto a backend's ``self.patience`` attribute. Called from every training-setup
     site (benchmark CV, holdout, production retrain, tuning) so
     backend default asymmetries (20 neural vs 50 tree) collapse to
     one uniform value when the user sets it."""

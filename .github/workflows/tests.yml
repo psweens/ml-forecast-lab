@@ -62,3 +62,31 @@ jobs:
       - name: Run unit tests
         working-directory: ml-forecast-lab
         run: python -m pytest tests/unit/ -v --tb=short
+
+  integration:
+    name: Integration tests (production train/predict/publish path)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install full deps
+        working-directory: ml-forecast-lab
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r tests/requirements-dev.txt
+
+      # These tests replay the exact production train -> predict ->
+      # publish pipeline and pin the user-reported forecast-collapse
+      # signatures. They are the only release gate that exercises model
+      # training end to end — v2.40.14 merged with all of them failing
+      # precisely because this job didn't exist.
+      - name: Run integration tests
+        working-directory: ml-forecast-lab
+        run: python -m pytest tests/integration/ -v --tb=short

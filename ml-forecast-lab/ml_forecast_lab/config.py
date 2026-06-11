@@ -290,9 +290,6 @@ class ExperimentCfg:
     )
     """Standard metrics to compute."""
 
-    custom_metrics: Optional[Dict[str, str]] = None
-    """Custom metrics as {name: 'Python expression'} using y_true, y_pred."""
-
     production_model: Optional[str] = None
     """Which model to use in production; if None, auto-select best by production_metric."""
 
@@ -321,9 +318,6 @@ class ExperimentCfg:
 
     units: str = ''
     """Units of the target variable (e.g. 'kWh', 'W', 'L')."""
-
-    output_units: Optional[str] = None
-    """Optional units for output; if different from input, a conversion is applied."""
 
     log_transform: bool = False
     """Whether to apply log transform to target before modelling."""
@@ -374,26 +368,6 @@ class ExperimentCfg:
     to dataset-level channel stats + the zscore denormalisation path, if you
     need published-parity with papers that explicitly disable RevIN."""
 
-    future_covariate_features: List[str] = field(default_factory=list)
-    """Feature names (as they appear in the engineered feature matrix) that
-    contain KNOWN-FUTURE values for each forecast horizon step.
-
-    Currently only consumed by the TiDE backend's temporal-decoder path
-    (Das et al. 2023): if this list is non-empty AND the runner supplies
-    a ``future_covariates`` array at fit time, TiDE routes the named
-    features through a feature-projection block and combines them with the
-    decoder state per horizon step via the paper's temporal decoder.
-
-    Typical contents for forecasting use cases:
-    - Calendar features: hour-of-day, day-of-week, day-of-year, holiday flag
-    - Externally-forecast weather: Solcast GHI (p10/p50/p90), Open-Meteo
-      temperature / cloud cover / wind
-    - Known-future schedule: EV charging plan, occupancy calendar
-
-    Do NOT include lags of the target, rolling stats, or any feature
-    derived from the true future value — the whole point is that these
-    values are knowable at forecast-issue time without peeking."""
-
     subtract: List[str] = field(default_factory=list)
     """DEPRECATED stub — prefer ``load_subtract`` with per-sensor config.
 
@@ -433,24 +407,6 @@ class ExperimentCfg:
     pattern. Clearing pre-retrain rows keeps the metric honest. Set to
     False if you want to preserve the full history for offline analysis
     and are willing to read the stability chart with that in mind."""
-
-    stability_focus: str = 'per_moment'
-    """Which stability metric drives the Forecast Accuracy verdict chip.
-
-    - ``per_moment`` (default): chip reads median cross-cycle CV of
-      predictions at the same target moment. Right when the downstream
-      consumer cares about *when* demand hits (HVAC setpoints, pre-heat
-      timing, battery dispatch).
-    - ``daily_total``: chip reads median cross-cycle CV of daily-total
-      predictions (cumulative sensors only). Right when the downstream
-      consumer only integrates over the day — e.g. a tank-heating
-      automation deciding how much energy to dispatch, EV daily charging
-      budget, solar-export daily planning. For those use cases a
-      ±50% per-moment swing may be fine as long as the daily total is
-      stable, so reporting per-moment "poor" gives the wrong verdict.
-
-    The Layer 3 accordion still shows both metrics regardless; only
-    the Layer 1 chip and headline follow this setting."""
 
     max_age: int = 365
     """Maximum days to keep in SQLite cache."""
@@ -499,52 +455,6 @@ class ExperimentCfg:
     share the same ``learning_rate`` and ``weight_decay=1e-4``; the difference
     is purely in how weight decay composes with the adaptive update. Ignored
     by tree models."""
-
-    daily_loss_weight: float = 0.0
-    """v2.40.14 DEPRECATED — kept on the model only so existing YAML
-    configs continue to load. The underlying cumulative-trajectory loss
-    term was removed (see CHANGELOG): measured to hurt the daily total
-    in both sparse-demand and smooth-cumulative regimes, with a
-    structural gradient asymmetry that systematically biased the model
-    toward under-prediction at early horizon steps. Setting this field
-    no longer affects training.
-
-    Historical description below for context; ignore for new experiments.
-
-    Original: Weight λ for the cumulative-trajectory loss term added
-    to the per-interval loss during neural training. 0.0 disables
-    (interval loss only — default).
-
-    The daily term penalised error in the cumulative forecast curve at
-    every horizon step (not just the endpoint), so the SHAPE of the
-    predicted cumulative trajectory had to match the actual cumulative
-    trajectory. With ``future_periods=48`` and ``interval_minutes=30``
-    this is the 24 h daily-cumulative curve, directly aligned with
-    what users evaluate on cumulative-origin targets such as
-    ``sensor.energy_today`` or daily
-    energy-usage sensors.
-
-    History: v2.16 used a mean-over-horizons constraint (just the endpoint).
-    v2.18 replaced it with the trajectory formulation above after experiments
-    on a daily-cumulative demand target showed the mean-only version was too
-    weak to affect training measurably — the mean is already matched by any
-    unbiased model, regardless of the curve shape.
-
-    Applied to torch neural backends only; silently ignored by tree models.
-
-    v2.40.14: SETTING THIS FIELD HAS NO EFFECT. Retained on the model
-    only so existing YAML configs load without error."""
-
-    loss_balance: Optional[float] = None
-    """v2.40.14 DEPRECATED — kept on the model only so existing YAML
-    configs continue to load. The convex-blend cumulative-loss path
-    was removed (see CHANGELOG): the harness measured the slider as a
-    cliff (any α>0 → 50-95% daily-MAE degradation, flat across the
-    α∈[0.1, 1.0] range) on BOTH sparse-demand and smooth-cumulative
-    targets, with the same gradient-asymmetry mechanism identified in
-    ``_cumulative_trajectory_loss``. Faster EMA decay softened the
-    cliff but did not remove it. Setting this field no longer affects
-    training."""
 
     recency_half_life_days: float = 0.0
     """Half-life for exponential recency weighting in days. ``0`` (default,
@@ -656,15 +566,6 @@ class ExperimentCfg:
     forecasting — turns the problem into predicting cloud-cover-driven attenuation
     rather than raw generation."""
 
-    @property
-    def effective_loss_balance(self) -> float:
-        """v2.40.14: always 0.0 — the cumulative loss path is gone.
-
-        Retained as a property so any caller / template that still
-        references it gets a safe value rather than an AttributeError.
-        """
-        return 0.0
-
     def __post_init__(self) -> None:
         """Validate configuration."""
         valid_modes = {'lab', 'production'}
@@ -676,18 +577,6 @@ class ExperimentCfg:
         if self.cv_strategy not in valid_cv:
             raise ValueError(
                 f'cv_strategy must be one of {valid_cv}, got {self.cv_strategy!r}'
-            )
-        valid_stability = {'per_moment', 'daily_total'}
-        if self.stability_focus not in valid_stability:
-            raise ValueError(
-                f'stability_focus must be one of {valid_stability}, '
-                f'got {self.stability_focus!r}'
-            )
-        if self.stability_focus == 'daily_total' and not self.source_is_cumulative:
-            # Daily-total CV isn't meaningful for instantaneous sensors —
-            # summing them over a day doesn't produce a physical quantity.
-            raise ValueError(
-                "stability_focus='daily_total' requires source_is_cumulative=True"
             )
         if self.cv_folds < 2:
             raise ValueError(f'cv_folds must be >= 2, got {self.cv_folds}')
@@ -713,17 +602,6 @@ class ExperimentCfg:
         if self.recency_half_life_days < 0:
             raise ValueError(
                 f'recency_half_life_days must be >= 0, got {self.recency_half_life_days}'
-            )
-        # v2.40.14: daily_loss_weight and loss_balance kept on the model
-        # for YAML backwards-compat but are no-ops. Bounds validation
-        # retained so a typo still surfaces at load.
-        if self.daily_loss_weight < 0:
-            raise ValueError(
-                f'daily_loss_weight must be >= 0, got {self.daily_loss_weight}'
-            )
-        if self.loss_balance is not None and not (0.0 <= self.loss_balance <= 1.0):
-            raise ValueError(
-                f'loss_balance must be in [0, 1] or None, got {self.loss_balance}'
             )
         valid_optimisers = {'adam', 'adamw'}
         if self.optimiser not in valid_optimisers:
@@ -795,6 +673,24 @@ class AppConfig:
             )
         if not self.experiments:
             logger.warning('No experiments configured')
+
+
+# Experiment-level YAML keys that older configs may carry but the code
+# no longer reads. load_config strips them (with a log line) and
+# rewrites the YAML so they don't linger as silent no-ops.
+_DEPRECATED_EXPERIMENT_FIELDS = (
+    'horizons_minutes',
+    'database',
+    'output_units',
+    'custom_metrics',
+    'stability_focus',
+    'future_covariate_features',
+    # v2.41.0: the cumulative-trajectory loss was removed in v2.40.14;
+    # these knobs were retained as silently-ignored no-ops. Now they
+    # are stripped from YAML on load like every other dead field.
+    'daily_loss_weight',
+    'loss_balance',
+)
 
 
 def load_config(config_path: Path | str) -> AppConfig:
@@ -882,18 +778,17 @@ def load_config(config_path: Path | str) -> AppConfig:
         exp_name_for_err = exp_data.get('name', '<unnamed>') if isinstance(exp_data, dict) else '?'
 
         try:
-            # Migration: silently remove deprecated fields
-            if 'horizons_minutes' in exp_data:
-                exp_data.pop('horizons_minutes')
-                _needs_migrate = True
-            # v2.33.1: `database` removed. Actuals are cached
-            # unconditionally now; the flag was a foot-gun (off → entire
-            # Forecast Accuracy view silently broken). Old yamls carrying
-            # either `database: true` or `database: false` are auto-cleaned
-            # below; the field is no longer consulted at runtime.
-            if 'database' in exp_data:
-                exp_data.pop('database')
-                _needs_migrate = True
+            # Migration: silently remove deprecated fields.
+            # 'database' removed in v2.33.1 (actuals always cached);
+            # 'output_units', 'custom_metrics', 'stability_focus' and
+            # 'future_covariate_features' removed in v2.41.0 — they were
+            # parsed (and 'output_units' even shipped in the example
+            # YAML) but consumed by nothing, silently absorbing
+            # misconfiguration (audit F11).
+            for _deprecated in _DEPRECATED_EXPERIMENT_FIELDS:
+                if _deprecated in exp_data:
+                    exp_data.pop(_deprecated)
+                    _needs_migrate = True
 
             # Parse covariates
             covariates_data = exp_data.pop('covariates', [])
@@ -988,7 +883,7 @@ def load_config(config_path: Path | str) -> AppConfig:
             removed: list = []
             for exp in raw.get('experiments', []):
                 if isinstance(exp, dict):
-                    for fld in ('horizons_minutes', 'database'):
+                    for fld in _DEPRECATED_EXPERIMENT_FIELDS:
                         if exp.pop(fld, None) is not None and fld not in removed:
                             removed.append(fld)
             atomic_yaml_write(config_path, raw)
