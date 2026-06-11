@@ -60,9 +60,24 @@ DEV_SRC="/data/ml_forecast_lab/dev_src"
 if [ "${DEV_MODE}" = "true" ] \
     && [ -f "${DEV_SRC}/ACTIVE.json" ] \
     && [ -d "${DEV_SRC}/ml_forecast_lab" ]; then
-    bashio::log.warning "DEVELOPER MODE: running overlaid branch from ${DEV_SRC}"
-    bashio::log.warning "  -> this is NOT the bundled release; revert from the System tab."
-    export PYTHONPATH="${DEV_SRC}:${PYTHONPATH}"
+    # Compatibility guard: only apply the overlay if it actually carries the
+    # developer tooling (dev_branch.py). An overlay of a branch that predates
+    # developer mode has no revert/dropdown UI, so applying it would shadow
+    # the bundled card and leave no in-app way to revert — trapping the user.
+    # In that case ignore the overlay and boot the bundled image instead, so
+    # the System-tab revert control is reachable. This runs from the image's
+    # own run script (never the overlay), so a normal add-on update self-heals
+    # an already-trapped instance with no shell access required.
+    if [ -f "${DEV_SRC}/ml_forecast_lab/dev_branch.py" ]; then
+        bashio::log.warning "DEVELOPER MODE: running overlaid branch from ${DEV_SRC}"
+        bashio::log.warning "  -> this is NOT the bundled release; revert from the System tab."
+        export PYTHONPATH="${DEV_SRC}:${PYTHONPATH}"
+    else
+        bashio::log.warning "DEVELOPER MODE: overlay at ${DEV_SRC} predates the developer"
+        bashio::log.warning "  tooling (no dev_branch.py) — ignoring it and booting the bundled"
+        bashio::log.warning "  release so the System-tab Revert control is reachable. Click"
+        bashio::log.warning "  Revert (or delete ${DEV_SRC}) to clear it."
+    fi
 fi
 
 bashio::log.info "Starting ML Forecast Lab service..."

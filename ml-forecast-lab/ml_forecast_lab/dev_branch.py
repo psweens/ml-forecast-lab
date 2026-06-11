@@ -230,6 +230,22 @@ def is_overlay_running() -> bool:
         return False
 
 
+def overlay_is_compatible() -> bool:
+    """Whether an installed overlay carries the developer tooling.
+
+    The boot script only applies an overlay whose package contains
+    ``dev_branch.py``; an overlay of a branch that predates developer
+    mode lacks it and is ignored at boot (otherwise it would shadow the
+    revert UI and trap the user). The app mirrors that check so the
+    System tab can explain *why* an installed overlay isn't running and
+    point the user at Revert. Returns ``True`` when no overlay is
+    installed (nothing to be incompatible).
+    """
+    if not ACTIVE_MARKER.is_file():
+        return True
+    return (DEV_SRC_DIR / PACKAGE_DIRNAME / "dev_branch.py").is_file()
+
+
 def version_label(base_version: str) -> str:
     """Annotate the base version with overlay info when running a branch.
 

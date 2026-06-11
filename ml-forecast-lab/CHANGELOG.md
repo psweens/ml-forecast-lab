@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.42.2
+
+**Fix: a developer-mode overlay of a branch that predates developer mode
+could trap the UI.** Installing an overlay from a branch older than the
+developer feature (one with no `dev_branch.py`) meant the running code
+had no Developer card — so neither the dropdown nor the **Revert to
+bundled** button was reachable, and there was no in-app way out.
+
+The boot script now applies an overlay only if it actually carries the
+developer tooling; an incompatible overlay is ignored (with a clear log
+warning) and the bundled release boots instead, so the Revert control is
+always reachable. Because this guard lives in the image's own boot
+script — never in the overlay — **a normal add-on update self-heals an
+already-trapped instance, no shell access required**: update, and on the
+next boot you're back on the bundled release with a one-click Revert. The
+System-tab card also now flags an overlay that was "ignored at boot" and
+points to Revert.
+
 ## 2.42.1
 
 **Developer mode: pick the branch from a dropdown.** The System-tab
