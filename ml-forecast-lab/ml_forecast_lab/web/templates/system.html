@@ -342,6 +342,39 @@
         });
     }
 
+    function _devReload() { setTimeout(function () { location.reload(); }, 20000); }
+
+    // POST to a dev endpoint that restarts the add-on. The restart can drop
+    // the connection before the JSON arrives, so a non-JSON / empty body or
+    // a network failure is treated as "restart in progress" rather than an
+    // error. A real validation/download failure still returns JSON with an
+    // error and is shown as such.
+    function _devRestartPost(url, opts) {
+        fetch(url, opts)
+        .then(function (r) {
+            return r.text().then(function (t) {
+                var body = null;
+                try { body = t ? JSON.parse(t) : null; } catch (e) { body = null; }
+                return { body: body };
+            });
+        })
+        .then(function (res) {
+            if (res.body && res.body.success) {
+                _devStatus(res.body.message + ' Reloading shortly…', 'var(--success)');
+                _devReload();
+            } else if (res.body && res.body.error) {
+                _devStatus('Error: ' + res.body.error, 'var(--error)');
+            } else {
+                _devStatus('Add-on is restarting… reloading shortly.', 'var(--success)');
+                _devReload();
+            }
+        })
+        .catch(function () {
+            _devStatus('Add-on is restarting… reloading shortly.', 'var(--success)');
+            _devReload();
+        });
+    }
+
     function installDevBranch(e) {
         e.preventDefault();
         // Manual override wins when filled; otherwise use the dropdown.
@@ -353,37 +386,17 @@
         if (!confirm('Fetch and run branch "' + branch + '"? This downloads and '
             + 'executes code from that branch and restarts the add-on.')) { return; }
         _devStatus('Fetching ' + branch + '…', 'var(--text)');
-        fetch(BASE_PATH + '/api/system/dev/install-branch', {
+        _devRestartPost(BASE_PATH + '/api/system/dev/install-branch', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ branch: branch }),
-        })
-        .then(r => r.json().then(j => ({ ok: r.ok, body: j })))
-        .then(res => {
-            if (res.ok && res.body.success) {
-                _devStatus(res.body.message + ' Reloading shortly…', 'var(--success)');
-                setTimeout(function () { location.reload(); }, 20000);
-            } else {
-                _devStatus('Error: ' + (res.body.error || 'install failed'), 'var(--error)');
-            }
-        })
-        .catch(err => _devStatus('Error: ' + err, 'var(--error)'));
+        });
     }
 
     function revertDevBranch() {
         if (!confirm('Revert to the bundled release and restart the add-on?')) { return; }
         _devStatus('Reverting…', 'var(--text)');
-        fetch(BASE_PATH + '/api/system/dev/revert', { method: 'POST' })
-        .then(r => r.json())
-        .then(body => {
-            if (body.success) {
-                _devStatus(body.message + ' Reloading shortly…', 'var(--success)');
-                setTimeout(function () { location.reload(); }, 20000);
-            } else {
-                _devStatus('Error: ' + (body.error || 'revert failed'), 'var(--error)');
-            }
-        })
-        .catch(err => _devStatus('Error: ' + err, 'var(--error)'));
+        _devRestartPost(BASE_PATH + '/api/system/dev/revert', { method: 'POST' });
     }
 
     // Populate the branch dropdown as soon as the card is in the DOM.

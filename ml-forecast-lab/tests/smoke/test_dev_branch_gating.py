@@ -119,3 +119,27 @@ def test_revert_when_enabled_reports_no_overlay(client, monkeypatch, tmp_path):
     assert body["success"] is True
     assert body["reverted"] is False
     assert body["restarting"] is False
+
+
+def test_revert_with_overlay_returns_clean_json(client, monkeypatch, tmp_path):
+    """Revert with an overlay installed and no Supervisor token returns a
+    clean JSON success and removes the overlay — exercises the existed=True
+    branch and confirms the response isn't lost to an inline restart (the
+    2.42.3 race fix; no restart is scheduled without a token)."""
+    monkeypatch.setenv("DEVELOPER_MODE", "true")
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    from ml_forecast_lab import dev_branch
+
+    overlay = tmp_path / "dev_src"
+    (overlay / "ml_forecast_lab").mkdir(parents=True)
+    (overlay / "ACTIVE.json").write_text('{"branch": "x"}', encoding="utf-8")
+    monkeypatch.setattr(dev_branch, "DEV_SRC_DIR", overlay)
+    monkeypatch.setattr(dev_branch, "ACTIVE_MARKER", overlay / "ACTIVE.json")
+
+    resp = client.post("/api/system/dev/revert")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["reverted"] is True
+    assert body["restarting"] is False  # no token → no restart scheduled
+    assert not overlay.exists()

@@ -38,6 +38,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 from starlette.requests import Request
 
 logger = logging.getLogger(__name__)
@@ -3950,6 +3951,24 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             logger.error(f"Supervisor restart request failed: {e}")
             return False
 
+    def _can_self_restart() -> bool:
+        """Whether a Supervisor self-restart is available (token present)."""
+        return bool(os.environ.get("SUPERVISOR_TOKEN"))
+
+    async def _deferred_restart() -> None:
+        """Restart the add-on a beat after the HTTP response is flushed.
+
+        Run as a Starlette BackgroundTask (which executes only after the
+        response is sent) so the JSON payload reaches the browser *before*
+        the Supervisor kills the container. Restarting inline — before
+        returning — races the response: the container dies mid-flight and
+        the client sees a dropped connection, which surfaces as a JSON
+        parse error rather than the success message. The short sleep adds
+        margin for the response bytes to drain.
+        """
+        await asyncio.sleep(1.0)
+        await _restart_addon()
+
     def _require_dev_mode():
         """Raise 404 unless developer_mode is enabled.
 
@@ -4066,17 +4085,21 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(status_code=500,
                                 content={"success": False, "error": _safe_error(e)})
 
-        restarting = await _restart_addon()
-        return JSONResponse(content={
-            "success": True,
-            "status": status,
-            "restarting": restarting,
-            "message": (
-                f"Installed {branch}@{status['sha_short'] or '?'}. "
-                + ("Restarting the add-on now…" if restarting else
-                   "Restart the add-on to run it (auto-restart unavailable).")
-            ),
-        })
+        # Respond first, restart after (BackgroundTask) — see _deferred_restart.
+        restarting = _can_self_restart()
+        return JSONResponse(
+            content={
+                "success": True,
+                "status": status,
+                "restarting": restarting,
+                "message": (
+                    f"Installed {branch}@{status['sha_short'] or '?'}. "
+                    + ("Restarting the add-on now…" if restarting else
+                       "Restart the add-on to run it (auto-restart unavailable).")
+                ),
+            },
+            background=BackgroundTask(_deferred_restart) if restarting else None,
+        )
 
     @app.post("/api/system/dev/revert")
     async def dev_revert(request: Request):
@@ -4084,17 +4107,21 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         _require_dev_mode()
         from ml_forecast_lab import dev_branch
         existed = dev_branch.revert()
-        restarting = await _restart_addon() if existed else False
-        return JSONResponse(content={
-            "success": True,
-            "reverted": existed,
-            "restarting": restarting,
-            "message": (
-                ("Reverted to the bundled release. Restarting…" if restarting
-                 else "Reverted to the bundled release. Restart to apply.")
-                if existed else "No developer overlay was installed."
-            ),
-        })
+        # Respond first, restart after (BackgroundTask) — see _deferred_restart.
+        restarting = existed and _can_self_restart()
+        return JSONResponse(
+            content={
+                "success": True,
+                "reverted": existed,
+                "restarting": restarting,
+                "message": (
+                    ("Reverted to the bundled release. Restarting…" if restarting
+                     else "Reverted to the bundled release. Restart to apply.")
+                    if existed else "No developer overlay was installed."
+                ),
+            },
+            background=BackgroundTask(_deferred_restart) if restarting else None,
+        )
 
     @app.post("/api/experiment-settings")
     async def save_experiment_settings(request: Request):

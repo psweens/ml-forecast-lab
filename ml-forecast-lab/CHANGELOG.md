@@ -89,6 +89,19 @@ Also in this release:
   reference baseline and keeps its contiguous rank; it remains excluded
   only from the auto-promote decision, so the config is never silently
   switched to a baseline the user didn't choose.
+## 2.42.3
+
+**Fix: "Fetch & run branch" and "Revert to bundled" reported a spurious
+`SyntaxError` even when they worked.** Both endpoints restarted the
+add-on *before* returning their JSON response, so the Supervisor killed
+the container mid-flight and the browser received a dropped/empty body —
+which surfaced as "SyntaxError: The string did not match the expected
+pattern" (a failed `JSON.parse`). The restart is now deferred to a
+background task that runs only after the response is flushed, so the
+success payload always reaches the UI before the container goes down.
+The client is also hardened: a dropped connection or non-JSON body is
+read as "restarting…" (with the usual reload) rather than an error,
+while genuine validation/download failures still show their message.
 
 ## 2.42.2
 
