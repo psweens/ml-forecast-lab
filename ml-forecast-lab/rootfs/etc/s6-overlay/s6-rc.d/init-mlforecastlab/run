@@ -40,5 +40,30 @@ if [ -n "$ADDON_CONFIG" ] && [ ! -f "${ADDON_CONFIG}/mlfl.yaml" ]; then
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# Developer-mode branch overlay (maintainer aid; default OFF).
+#
+# When the `developer_mode` add-on option is enabled AND a branch overlay
+# has been installed from the System-tab Developer card, run that branch
+# in place of the bundled package by prepending the overlay to PYTHONPATH
+# so its `ml_forecast_lab` shadows /app/ml_forecast_lab. The bundled image
+# is never modified: turning developer_mode off (or deleting the overlay)
+# falls straight back to /app on the next restart. See
+# ml_forecast_lab/dev_branch.py for the full contract.
+#
+# DEVELOPER_MODE is also exported so the running app can gate the card and
+# its endpoints, mirroring how the base image surfaces LOG_LEVEL.
+# ---------------------------------------------------------------------------
+DEV_MODE="$(bashio::config 'developer_mode' 'false')"
+export DEVELOPER_MODE="${DEV_MODE}"
+DEV_SRC="/data/ml_forecast_lab/dev_src"
+if [ "${DEV_MODE}" = "true" ] \
+    && [ -f "${DEV_SRC}/ACTIVE.json" ] \
+    && [ -d "${DEV_SRC}/ml_forecast_lab" ]; then
+    bashio::log.warning "DEVELOPER MODE: running overlaid branch from ${DEV_SRC}"
+    bashio::log.warning "  -> this is NOT the bundled release; revert from the System tab."
+    export PYTHONPATH="${DEV_SRC}:${PYTHONPATH}"
+fi
+
 bashio::log.info "Starting ML Forecast Lab service..."
 exec python3 -m ml_forecast_lab
