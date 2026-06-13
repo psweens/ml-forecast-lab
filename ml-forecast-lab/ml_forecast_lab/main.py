@@ -498,6 +498,14 @@ class MLForecastLabApp:
         # Cached site location (lat, lon) from HA's /api/config — used for
         # deterministic solar physics covariates. Fetched lazily on first use.
         self._site_location: Optional[tuple[float, float]] = None
+        # Per-target-entity cache of the source sensor's HA
+        # ``unit_of_measurement``, used to auto-inherit the forecast
+        # unit when the experiment leaves ``units`` blank. Fetched lazily
+        # on first publish for an entity and reused for the process
+        # lifetime (a source sensor's unit effectively never changes;
+        # a restart re-resolves it). Keyed by target_entity so multiple
+        # experiments on the same sensor share one lookup.
+        self._source_unit_cache: Dict[str, str] = {}
         # Resolved runtime-resource limits actually applied to this process
         # (CPU thread cap, nice value). Surfaced on the System page so the
         # user can verify their settings took effect.
@@ -1191,6 +1199,51 @@ class MLForecastLabApp:
         except (TypeError, ValueError):
             return None
         return self._site_location
+
+    async def _resolve_units(self, exp_cfg) -> str:
+        """Resolve the unit to publish on this experiment's HA sensors.
+
+        Precedence:
+          1. ``exp_cfg.units`` if the user set it explicitly (YAML wins).
+          2. Otherwise auto-inherit the ``unit_of_measurement`` of the
+             target sensor from HA — the forecast is a prediction of that
+             same sensor, so its unit is the right default (W stays W,
+             kWh stays kWh, °C stays °C). This is what makes units "just
+             work" for experiments created through the web UI, which has
+             no units field.
+          3. Empty string if the source has no unit or the fetch fails —
+             identical to the prior behaviour, never raises.
+
+        The inherited value is cached per target entity so this costs at
+        most one extra HA call per entity per process, not one per
+        publish cycle.
+        """
+        if exp_cfg.units:
+            return exp_cfg.units
+
+        entity = exp_cfg.target_entity
+        cached = self._source_unit_cache.get(entity)
+        if cached is not None:
+            return cached
+
+        unit = ""
+        if self.ha_interface:
+            try:
+                fetched = await self.ha_interface.get_state(
+                    entity, attribute="unit_of_measurement", default=None,
+                )
+                if isinstance(fetched, str) and fetched.strip():
+                    unit = fetched.strip()
+                    logger.info(
+                        f"  Auto-inherited unit '{unit}' from {entity} "
+                        f"for {exp_cfg.name} (no units set in config)"
+                    )
+            except Exception as e:
+                logger.debug(
+                    f"  Could not auto-resolve unit from {entity}: {e}"
+                )
+        self._source_unit_cache[entity] = unit
+        return unit
 
     async def _prepare_load_subtract_inputs(
         self,
@@ -4247,6 +4300,12 @@ class MLForecastLabApp:
 
         logger.info(f"  Retraining {exp_cfg.name}...")
 
+        # Re-resolve the auto-inherited unit on each retrain (~daily) so a
+        # value cached as empty during a cold-start miss, or a source
+        # sensor whose unit was changed in HA, gets picked up. The
+        # immediate post-retrain forecast then publishes with it.
+        self._source_unit_cache.pop(exp_cfg.target_entity, None)
+
         # Cooperative cancel flag (audit F10) — checked by the epoch
         # callback below so stop-training can halt the executor thread
         # at the next epoch boundary, not just abandon it.
@@ -5042,7 +5101,7 @@ class MLForecastLabApp:
         issued_at = datetime.now(timezone.utc)
         issued_at_iso = issued_at.isoformat()
 
-        units = exp_cfg.units or ""
+        units = await self._resolve_units(exp_cfg)
         publish_name = exp_cfg.publish_name or exp_cfg.name
         prefix = exp_cfg.publish_prefix
         base_entity = f"sensor.{prefix}{publish_name}"
