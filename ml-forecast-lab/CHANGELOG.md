@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.43.1
+
+**Forecast sensors now inherit their unit automatically.** When an
+experiment leaves `units` blank, the published sensors
+(`_forecast`, `_cumulative`, `_interval`, the conformal bound sensors,
+and `_forecast_accuracy`) now inherit the `unit_of_measurement` of the
+target sensor from Home Assistant — the forecast predicts that sensor,
+so its unit is the right default (W stays W, kWh stays kWh, °C stays
+°C). Previously `units` was only settable by hand-editing `mlfl.yaml`
+(there is no units field in the web UI), so every experiment created
+through the UI published unitless sensors with no obvious fix.
+
+- An explicit `units:` in the experiment config still wins — this only
+  fills the blank, so nothing changes for configs that already set it.
+- The inherited value is cached per target entity (one HA lookup per
+  entity, not one per 30-minute publish cycle) and re-resolved on each
+  retrain so a cold-start miss or a source-sensor unit change is picked
+  up within a day.
+- A source sensor with no unit, or an HA lookup failure, falls back to
+  the empty unit exactly as before — never raises.
+
+Note: the in-app dashboard/experiment chart axis labels still read the
+literal config `units` and will show no unit for a UI-created
+experiment until you set one; only the Home Assistant sensors
+auto-inherit. Unifying the chart labels is a follow-up.
+
+**Docs:** removed the config keys deleted in v2.41.0 (`output_units`,
+`custom_metrics`, `stability_focus`, `future_covariate_features`,
+`daily_loss_weight`, `loss_balance`) from `DOCS.md` — they were still
+documented as live config but the loader auto-strips them. Corrected
+the backwards-compatibility note to list what's actually migrated.
+
 ## 2.43.0
 
 **Four new model backends — the catalogue grows from 24 to 28.** Two
