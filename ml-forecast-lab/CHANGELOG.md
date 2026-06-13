@@ -26,6 +26,12 @@ literal config `units` and will show no unit for a UI-created
 experiment until you set one; only the Home Assistant sensors
 auto-inherit. Unifying the chart labels is a follow-up.
 
+**Docs:** removed the config keys deleted in v2.41.0 (`output_units`,
+`custom_metrics`, `stability_focus`, `future_covariate_features`,
+`daily_loss_weight`, `loss_balance`) from `DOCS.md` — they were still
+documented as live config but the loader auto-strips them. Corrected
+the backwards-compatibility note to list what's actually migrated.
+
 ## 2.43.0
 
 **Four new model backends — the catalogue grows from 24 to 28.** Two
