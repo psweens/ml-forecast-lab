@@ -57,7 +57,6 @@ The app searches these in order: explicit `--config-path` (development only) →
 | `retrain_every_hours` | float | inherits global | Per-experiment override of the retrain cadence. |
 | `country` | ISO code | unset | Two-letter country code for holiday features (`GB`, `US`, `DE`, …). Unset = no holiday feature. |
 | `units` | string | `""` | Target units (`W`, `kWh`, `%`, …). Shown in the UI and on published sensors. |
-| `output_units` | string | unset | Optional unit conversion at publish time (e.g. train on Wh, publish kWh). |
 | `max_age` | int (days) | `365` | Cap on rows kept in the SQLite actuals cache. The cache is always-on (v2.33.1+); older rows are pruned each cycle. |
 | `publish_prefix` | string | `mlfl_` | Prefix for every companion sensor. Change only if you have a naming clash. |
 | `publish_name` | string | inherits `name` | Override the experiment's name when constructing companion sensor IDs. |
@@ -183,10 +182,8 @@ When `include_clear_sky_irradiance` is on, the app also gates production forecas
 | `optimiser` | `adam` \| `adamw` | `adamw` | Neural optimiser. `adamw` (decoupled weight decay) matches every published time-series transformer paper; `adam` is the classic. Ignored by tree models. |
 | `output_activation` | `auto` \| `linear` \| `softplus` \| `relu` \| `exp` \| `sigmoid` \| `zscore` | `auto` | Output-head activation for PyTorch neural backends. `auto` picks `softplus` for cumulative sources and `linear` otherwise (and `zscore` for LSTM). Override for niche cases — `sigmoid` for hard-bounded quantities (battery SOC, humidity %), `linear` for signed targets (temperature delta). Tree models ignore this. |
 | `use_revin` | bool | `true` | Reversible Instance Normalisation. Per-window normalisation at the network's input + reversal at the output. Matches the published transformer / MLP-mixer reference implementations. Tree models, N-BEATS, and N-HiTS ignore this. |
-| `daily_loss_weight` | float | `0.0` | Weight λ for an auxiliary cumulative-trajectory loss term during neural training. `0.0` disables it (interval loss only). Try `0.1–1.0` if cumulative-curve shape is the metric your downstream automation cares about. |
 | `recency_half_life_days` | float | `0.0` | Exponential recency weighting for training samples. `0` = uniform (default; the right choice for stable household sensors). Set to e.g. `7` if your series recently entered a new regime (heat pump install, schedule change). |
 | `quantiles` | list[float] | `[]` | Multi-quantile training. Empty = point forecast wrapped in a conformal band (recommended). Non-empty (e.g. `[0.1, 0.5, 0.9]`) routes the DLinear backend through a pinball-loss head; other backends still use the point + conformal path. |
-| `future_covariate_features` | list[string] | `[]` | Names of feature columns that the TiDE backend should route through its known-future temporal-decoder path. Calendar features and externally-forecast weather. Do not include lags of the target. |
 
 ### Pre-processing pipeline
 
@@ -204,7 +201,6 @@ When `include_clear_sky_irradiance` is on, the app also gates production forecas
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `metrics` | list | `[mae, rmse, mase, seasonal_mase]` | Metrics to compute during benchmarking. Available: `mae`, `rmse`, `mape`, `smape`, `mase`, `seasonal_mase`, `r2`, `pinball`, `coverage`. |
-| `custom_metrics` | mapping | unset | `{name: 'python expression'}` evaluated in a sandbox (`asteval`) with `y_true`, `y_pred`, `np` in scope. |
 | `production_metric` | string | `seasonal_mase` | Metric used to auto-select the best model when `production_model` is unset. `seasonal_mase` (scaled by the same-time-yesterday baseline) is the right comparison for daily-seasonal HA sensors. |
 | `production_model` | string | unset | Pin a specific model name. Unset = auto-pick by `production_metric`. |
 | `selected_model` | string | unset | Which model the Results-tab UI highlights by default. The `/select-model` click in the UI persists here. |
@@ -214,7 +210,6 @@ When `include_clear_sky_irradiance` is on, the app also gates production forecas
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `conformal_coverage` | float in (0, 1) | `0.8` | Nominal coverage of the prediction interval. Default 0.8 publishes `_upper_80` / `_lower_80` companion sensors. Raise to 0.9 if downstream automations need wider safety margins; lower to 0.5 for diagnostic plots. |
-| `stability_focus` | `per_moment` \| `daily_total` | `per_moment` | Which stability metric drives the Forecast Accuracy verdict chip. `per_moment` is right when downstream consumers care about *when* something happens (HVAC pre-heat, battery dispatch). `daily_total` (cumulative sources only) is right when only the daily integral matters. |
 | `clear_forecast_log_on_retrain` | bool | `true` | Whether to prune forecast-log rows older than the latest retrain when a champion is promoted. Keeps stability metrics honest — set `false` only if you want to preserve full history for offline analysis. |
 
 #### How the conformal bands are calibrated
@@ -425,17 +420,13 @@ Disable the heaviest backends (`tft`, `crossformer`, `timesnet`, `patchtst`) and
 
 Expected. LightGBM, XGBoost, and PyTorch all compile native extensions for `aarch64` on first install. Subsequent updates use the cached image and start in seconds.
 
-### Custom-metric expression errors
-
-`custom_metrics` is evaluated by `asteval` (a Python-subset sandbox). Available names are `y_true`, `y_pred`, and `np`. Errors land in the `[BENCH]` log lines with the offending expression quoted. Common gotchas: passing a list comprehension (asteval doesn't support all forms), or calling functions outside the allow-list.
-
 For anything else, the `[BENCH]`, `[MODEL]`, `[WEB]`, `[HA]`, `[PREP]`, `[FEAT]`, `[COV]`, `[CFG]`, `[DB]` tags should let you narrow the failure to a subsystem in a few `grep`s.
 
 ---
 
 ## Upgrading and version compatibility
 
-- **Backwards compatibility.** `mlfl.yaml` is auto-migrated where possible: deprecated fields (`horizons_minutes`) are silently stripped, and the legacy `subtract: [entity_id]` list is loaded but ignored with a deprecation warning in the log. Migrate to `load_subtract` with explicit `source` / `on_missing` per sensor.
+- **Backwards compatibility.** `mlfl.yaml` is auto-migrated where possible: deprecated fields (`horizons_minutes`, `database`, and the v2.41.0-removed `output_units`, `custom_metrics`, `stability_focus`, `future_covariate_features`, `daily_loss_weight`, `loss_balance`) are silently stripped and the file is rewritten, and the legacy `subtract: [entity_id]` list is loaded but ignored with a deprecation warning in the log. Migrate to `load_subtract` with explicit `source` / `on_missing` per sensor.
 - **Default changes between versions.** Several knobs have changed their defaults in recent releases — most notably `production_metric` (`mae` → `seasonal_mase`), `outlier_quantile` (`0.995` → `0.999`), and `recency_half_life_days` (`7` → `0`). The CHANGELOG calls these out per version.
 - **2.30.0 ingress-only.** Direct port 5052 exposure was removed. The web UI is now reached exclusively through HA's authenticated ingress proxy. If you were proxying directly to the port, switch to ingress.
 
