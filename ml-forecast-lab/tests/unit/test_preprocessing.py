@@ -85,6 +85,32 @@ class TestResampleToGrid:
         result = resample_to_grid(synthetic_interval_series, freq="30min", method="mean")
         assert not result.isna().any()
 
+    def test_interpolate_does_not_backfill_interior_gaps(self):
+        """``gap_handling='interpolate'`` must only back-fill the LEADING
+        run of NaNs (before the first observation). A long interior gap
+        (e.g. an overnight PV blackout) must stay NaN beyond the
+        interpolation horizon — back-filling it with the next observation
+        would plant a future value into the past (lookahead leakage) and,
+        for solar, paint non-zero generation into the small hours."""
+        idx = pd.date_range("2024-01-01 06:00", periods=48, freq="30min")
+        s = pd.Series(np.nan, index=idx)
+        # Observations only at the two ends; a 10-hour hole in the middle.
+        s.iloc[0:4] = [1.0, 2.0, 3.0, 4.0]
+        s.iloc[-4:] = [5.0, 6.0, 7.0, 8.0]
+        result = resample_to_grid(
+            s.dropna(), freq="30min", method="mean",
+            gap_handling="interpolate", gap_max_minutes=90,
+        )
+        result = result.reindex(idx)
+        # The deep interior gap (beyond the 90-min / 3-step horizon) is
+        # NOT filled with the trailing block's values.
+        interior = result.iloc[7:-7]
+        assert interior.isna().any(), (
+            "interior gap was back-filled — interpolate must leave long "
+            "gaps as NaN, not inherit the next observation"
+        )
+        assert result.iloc[-1] == 8.0  # trailing observation preserved
+
 
 class TestClipOutliers:
     def test_clips_at_quantile(self):

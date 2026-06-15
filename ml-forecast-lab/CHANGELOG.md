@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.43.2
+
+**Solar forecasts no longer learn phantom night-time generation.** For
+non-negative solar targets the night-time rows are now forced to zero
+(or the configured `idle_value`) using the `clear_sky_ghi` /
+`sun_elevation` physics gate — every night row, not just the missing
+ones.
+
+Previously the night-time fill only rewrote `NaN` rows. But with the
+default `gap_handling: interpolate`, the overnight gap rarely stays
+`NaN`: the resample step linearly interpolates the first slots after
+dusk toward the next morning's value, and a blanket back-fill carried a
+neighbouring daytime reading across the rest of the night. The result
+was a training set with non-zero generation through the small hours, so
+the model predicted phantom output at, say, 23:00 and phase-shifted the
+daily peak. Because those rows were not `NaN`, the old fill skipped
+them.
+
+- The `resample_to_grid` `interpolate` path now back-fills only the
+  *leading* `NaN` run (before the first observation) instead of every
+  gap. A long interior gap (the overnight blackout) stays `NaN` rather
+  than inheriting the next observation — this also removes a lookahead
+  leak where a future value was planted into the past.
+- Daytime gaps are still preserved: a `clear_sky_ghi > 0` row with a
+  `NaN` target remains `NaN` so a genuine daylight sensor outage
+  surfaces via the dropna step instead of being masked as zero.
+- Non-solar targets are unchanged — without physics features the fill
+  still only acts on `NaN` rows and only when `idle_value` is set.
+
 ## 2.43.1
 
 **Forecast sensors now inherit their unit automatically.** When an

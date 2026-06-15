@@ -226,8 +226,18 @@ def resample_to_grid(
             method='linear', limit=max_steps, limit_direction='forward'
         )
         # Leading NaNs (before the first observation) still need a value;
-        # back-fill those so the dataframe construction doesn't drop them.
-        resampled = resampled.bfill()
+        # back-fill ONLY those so the dataframe construction doesn't drop
+        # them. A blanket ``bfill()`` would also reach backwards across
+        # every interior gap that exceeds ``max_steps`` and fill it with
+        # the next observation — e.g. an overnight PV gap would inherit
+        # the following morning's value, planting non-zero readings into
+        # the small hours (lookahead leakage). Restricting the back-fill
+        # to the head leaves interior gaps as NaN so downstream dropna /
+        # idle-value handling deals with them.
+        first_valid = resampled.first_valid_index()
+        if first_valid is not None:
+            head = resampled.index <= first_valid
+            resampled.loc[head] = resampled.loc[head].bfill()
         return resampled.astype('float64')
 
     # Default / legacy: forward-fill, then back-fill leading NaNs.

@@ -106,10 +106,14 @@ def _apply_idle_value_fill(result: 'pd.DataFrame', exp_cfg) -> int:
 
     1. **Solar / irradiance** (``clear_sky_ghi`` or ``sun_elevation``
        in result columns): use solar physics to identify night-time
-       slots and fill ONLY those with ``exp_cfg.idle_value`` (default
-       0.0). Daytime NaN is preserved — a clear_sky_ghi > 0 row with
-       a NaN target is a real sensor outage worth surfacing via the
-       dropna step rather than silently masking.
+       slots and force ALL of them to ``exp_cfg.idle_value`` (default
+       0.0) — not just the NaN ones. PV output is physically ~zero
+       when the sun is below the horizon, so a non-zero night row is
+       always a gap-fill artefact (see the note on interpolation
+       below), never real data. Daytime NaN is preserved — a
+       clear_sky_ghi > 0 row with a NaN target is a real sensor
+       outage worth surfacing via the dropna step rather than
+       silently masking.
 
     2. **Non-solar non-negative** (no physics features present, but
        ``idle_value`` explicitly set): fill ALL remaining NaN slots
@@ -140,14 +144,17 @@ def _apply_idle_value_fill(result: 'pd.DataFrame', exp_cfg) -> int:
         return 0
     if "y" not in result.columns:
         return 0
-    if result["y"].isna().sum() == 0:
-        return 0
 
     idle_value = getattr(exp_cfg, "idle_value", None)
     has_physics = (
         "clear_sky_ghi" in result.columns
         or "sun_elevation" in result.columns
     )
+
+    # NOTE: there is deliberately no "return early if no NaN" guard here.
+    # The solar path below also has to correct non-NaN night rows that
+    # gap-fill interpolation planted with spurious generation, so a frame
+    # with zero NaNs can still have work to do.
 
     if has_physics:
         # Solar path: use physics to gate the fill so daytime outages
@@ -160,7 +167,22 @@ def _apply_idle_value_fill(result: 'pd.DataFrame', exp_cfg) -> int:
             # -0.833° is the standard astronomical horizon (accounts
             # for atmospheric refraction). Anything below is night.
             night_mask = result["sun_elevation"].fillna(-90) < -0.833
-        fill_mask = result["y"].isna() & night_mask
+        # Force EVERY night row to the idle value, not just the NaN ones.
+        # PV generation is physically ~zero whenever the sun is at or
+        # below the horizon, so a non-zero night row is never real data —
+        # it is a gap-fill artefact. With the default
+        # ``gap_handling='interpolate'`` the resample step linearly
+        # interpolates the first slots after dusk toward the next
+        # morning's value and back-fills the rest of the overnight gap
+        # with a neighbouring daytime reading, so the night ends up
+        # non-NaN AND non-zero. The old ``isna() & night_mask`` mask
+        # skipped those rows and the model trained on a non-zero night,
+        # predicting phantom 23:00 generation. Overwriting the whole
+        # night removes the artefact. Daytime NaN is still preserved
+        # (``night_mask`` is False there) so a genuine daylight outage
+        # surfaces via the dropna step.
+        y = result["y"]
+        fill_mask = night_mask & (y.isna() | (y != fill_value))
     else:
         # Non-solar path: ALL NaN → idle_value, but only when the
         # user has explicitly declared what idle means. No physics
