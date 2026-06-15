@@ -1,5 +1,61 @@
 # Changelog
 
+## 2.44.1
+
+**Forecast Comparison tab — completed against the agreed spec.** Builds on
+2.44.0 (which over-delivered on unit-aware conversion, the two
+state/attribute ingestion modes, on-tab management, auto-detect and the
+scale-mismatch guard — all kept) by adding the pieces that were still
+missing:
+
+- **Seasonal Naive baseline.** A "same time yesterday" do-nothing
+  reference is now computed and shown as its own row (kept out of the
+  five-competitor cap) plus a dashed line on the overlay, and folded into
+  the verdict ("· vs Seasonal Naive: ahead/behind").
+
+- **Warming-up / inconclusive warnings.** A source is "warming up" until
+  it has at least **7 days** of overlapping data
+  (`EXTERNAL_COMPARISON_WARMUP_DAYS`). Below that: a page-top **"Results
+  are provisional"** banner names the sources still warming (with their
+  `n/7` day counts), each table row shows an `n/7 ⏳` Days badge, warming
+  overlay/hour lines are drawn faded, and the verdict is prefixed
+  "Provisional ·" and de-emphasised. Previously a winner could be declared
+  off a single overlapping sample.
+
+- **Metric selector.** A "Rank by" dropdown (MAE default; RMSE, Bias,
+  % of typical, Daily MAE, Daily bias) drives the table's column emphasis,
+  the best-in-column highlighting, and the head-to-head verdict.
+
+- **Richer ranking table.** New **% of typical**, **Daily MAE**, **Daily
+  bias** and **Days** columns; the best value in each column is bolded
+  green (the tooltip already promised this); the app reference row uses a
+  standalone `app_self` accuracy block.
+
+- **Error-by-time-of-day chart.** Mean error grouped by hour of day, one
+  line per forecaster — surfaces regime-specific strengths the headline
+  numbers hide. Computed client-side from the overlay so it follows the
+  per-interval/cumulative view.
+
+- **Separate external retention.** New global
+  `external_forecast_retention_days` (default **60**, editable in the
+  System tab) prunes the captured third-party trajectory log on its own
+  window instead of sharing the add-on's 120-day `forecast_log` schedule.
+
+- **Add-time validation.** Adding an attribute-mode external now probes
+  the entity live and returns a non-fatal warning if the chosen
+  attribute / value key doesn't resolve — a typo surfaces immediately
+  instead of after days of empty logging (never blocks the add).
+
+Backend: `get_external_forecast_comparison` now returns per-source
+`% of typical`, daily MAE/bias, `days_logged`/`warming`, an `app_self`
+block, a `baseline` (Seasonal Naive) block, and top-level
+`warming_up`/`warmup_days`/`typical`. 13 new tests; full unit + smoke
+suites pass.
+
+*Not included (the one explicitly-optional item from the spec):* the
+multi-source forecast-convergence / small-multiples chart, which needs a
+new per-target multi-issuance payload — deferred as a follow-up.
+
 ## 2.44.0
 
 **New per-experiment "Forecast Comparison" tab — benchmark the add-on's
