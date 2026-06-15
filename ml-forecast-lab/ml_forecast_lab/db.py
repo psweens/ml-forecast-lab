@@ -2897,6 +2897,462 @@ class HistoryDB:
             return 0
 
     # ------------------------------------------------------------------
+    # External forecast log (third-party forecast trajectories)
+    # ------------------------------------------------------------------
+    # Mirrors forecast_log but for a forecast NOT produced by this add-on
+    # (an external HA sensor — Solcast, a utility curve, etc.). Used by the
+    # per-experiment "External Comparison" tab to score this add-on's
+    # forecast head-to-head against the external one. Only the
+    # ``attribute`` external-forecast mode writes here (it has a real
+    # lead-time / trajectory shape); the ``state`` mode reuses the ordinary
+    # cached-history table (store_history) since it is just a time-series.
+
+    @_locked
+    def ensure_external_forecast_log_table(self) -> None:
+        """Create the external_forecast_log table if it doesn't exist."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS external_forecast_log (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                experiment   TEXT    NOT NULL,
+                issued_at    TEXT    NOT NULL,
+                target_dt    TEXT    NOT NULL,
+                lead_minutes INTEGER NOT NULL,
+                value        REAL    NOT NULL,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_extflog_exp_target "
+            "ON external_forecast_log(experiment, target_dt)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_extflog_exp_issued "
+            "ON external_forecast_log(experiment, issued_at)"
+        )
+        self.conn.commit()
+        logger.debug("Ensured external_forecast_log table")
+
+    @_locked
+    def log_external_forecast(
+        self,
+        experiment: str,
+        issued_at: datetime,
+        targets: list,
+        values: list,
+    ) -> int:
+        """Bulk-insert an external forecast trajectory snapshot.
+
+        Same shape as ``log_forecast`` minus the model columns: each row is
+        one (issued_at, target_dt, lead_minutes, value). Non-finite values
+        are skipped so a partially-NaN external trajectory doesn't poison
+        the comparison join.
+
+        Returns the number of rows inserted.
+        """
+        import math
+        self.ensure_external_forecast_log_table()
+        issued_str = issued_at.strftime("%Y-%m-%d %H:%M:%S")
+        rows = []
+        for ts, val in zip(targets, values):
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(fval):
+                continue
+            target_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+            lead_min = int((ts - issued_at).total_seconds() / 60)
+            rows.append((experiment, issued_str, target_str, lead_min, fval))
+        if not rows:
+            return 0
+        cursor = self.conn.cursor()
+        try:
+            cursor.executemany(
+                "INSERT INTO external_forecast_log "
+                "(experiment, issued_at, target_dt, lead_minutes, value) "
+                "VALUES (?, ?, ?, ?, ?)",
+                rows,
+            )
+            self.conn.commit()
+            return cursor.rowcount
+        except sqlite3.Error as e:
+            logger.error(
+                f"Error logging external forecast for {experiment}: {e}",
+                exc_info=True,
+            )
+            self.conn.rollback()
+            return 0
+
+    @_locked
+    def cleanup_external_forecast_log(
+        self, experiment: str, oldest_datetime: datetime,
+    ) -> int:
+        """Delete external_forecast_log rows issued before *oldest_datetime*."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='external_forecast_log'"
+        )
+        if not cursor.fetchone():
+            return 0
+        oldest_str = oldest_datetime.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            cursor.execute(
+                "DELETE FROM external_forecast_log "
+                "WHERE experiment = ? AND issued_at < ?",
+                (experiment, oldest_str),
+            )
+            self.conn.commit()
+            deleted = cursor.rowcount
+            if deleted:
+                logger.info(
+                    f"Pruned {deleted} old external_forecast_log rows "
+                    f"for {experiment}"
+                )
+            return deleted
+        except sqlite3.Error as e:
+            logger.error(
+                f"Error pruning external_forecast_log for {experiment}: {e}",
+                exc_info=True,
+            )
+            self.conn.rollback()
+            return 0
+
+    @_locked
+    def delete_external_forecast_log(self, experiment: str) -> int:
+        """Delete all external_forecast_log entries for an experiment."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='external_forecast_log'"
+        )
+        if not cursor.fetchone():
+            return 0
+        try:
+            cursor.execute(
+                "DELETE FROM external_forecast_log WHERE experiment = ?",
+                (experiment,),
+            )
+            self.conn.commit()
+            return cursor.rowcount
+        except sqlite3.Error as e:
+            logger.error(
+                f"Error deleting external_forecast_log for {experiment}: {e}",
+                exc_info=True,
+            )
+            self.conn.rollback()
+            return 0
+
+    @_locked
+    def get_external_forecast_comparison(
+        self,
+        experiment: str,
+        actuals_table: str,
+        external_table: Optional[str],
+        mode: str = "state",
+        max_age_days: int = 30,
+        interval_minutes: int = 30,
+        evaluation_mode: str = "raw",
+        external_scale: Optional[float] = None,
+        external_is_cumulative: bool = False,
+        model_name: Optional[str] = None,
+        model_version: Optional[str] = None,
+    ) -> dict:
+        """Score this add-on's forecast head-to-head against an external one.
+
+        Aligns three series on the experiment's interval grid over the last
+        ``max_age_days``:
+
+        - **actual**  — the target's cached history (``actuals_table``)
+        - **app**     — this add-on's logged forecast (``forecast_log``),
+                        the *latest* prediction for each target
+        - **external**— the third-party forecast: in ``state`` mode from the
+                        external entity's cached history (``external_table``);
+                        in ``attribute`` mode the latest snapshot per target
+                        from ``external_forecast_log``.
+
+        Evaluation space matches the Forecast Accuracy tab: ``raw`` for
+        instantaneous targets, ``increment`` (per-interval deltas) for
+        cumulative ones. The app forecast is already logged in that space;
+        actuals are differenced when ``increment``; the external series is
+        differenced only when ``external_is_cumulative``.
+
+        Returns a dict with ``overlay`` (aligned series for the chart),
+        ``head_to_head`` (MAE/RMSE/bias on the common samples + winner), and
+        ``lead_time`` (per-horizon MAE for app vs external — ``attribute``
+        mode only).
+        """
+        import numpy as np
+
+        now = datetime.utcnow()
+        cutoff = now - pd.Timedelta(days=max_age_days)
+        cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+        now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        bucket_min = max(1, int(interval_minutes))
+        freq = f"{bucket_min}min"
+        increment = evaluation_mode == "increment"
+
+        cursor = self.conn.cursor()
+
+        def _table_exists(name: Optional[str]) -> bool:
+            if not name:
+                return False
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (name,),
+            )
+            return cursor.fetchone() is not None
+
+        result: dict = {
+            "configured": True,
+            "mode": mode,
+            "evaluation_mode": evaluation_mode,
+            "interval_minutes": bucket_min,
+            "overlay": {"ds": [], "actual": [], "app": [], "external": []},
+            "head_to_head": None,
+            "lead_time": None,
+            "counts": {},
+            "date_range": {},
+        }
+
+        if not _table_exists(actuals_table):
+            result["error"] = "No actuals data available yet"
+            result["empty_reason"] = "no_actuals"
+            return result
+
+        def _iso_utc(ts) -> str:
+            ts = pd.Timestamp(ts)
+            ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+            return ts.isoformat()
+
+        def _series_from_ds(rows, is_cumulative: bool,
+                            scale: Optional[float]) -> "pd.Series":
+            """Grid-align a (ds, value) frame to a Series indexed by grid
+            timestamp; difference to per-interval demand when the source is
+            cumulative and we're in increment space."""
+            df = pd.DataFrame(rows, columns=["ds", "value"])
+            if df.empty:
+                return pd.Series(dtype="float64")
+            df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
+            df["value"] = pd.to_numeric(df["value"], errors="coerce")
+            df = df.dropna(subset=["ds"]).sort_values("ds")
+            if df.empty:
+                return pd.Series(dtype="float64")
+            if scale is not None:
+                df["value"] = df["value"] * float(scale)
+            df["grid"] = df["ds"].dt.floor(freq)
+            s = df.groupby("grid")["value"].last().sort_index()
+            if increment and is_cumulative and not s.empty:
+                full = pd.date_range(s.index.min(), s.index.max(), freq=freq)
+                d = s.reindex(full).diff()
+                # daily-reset / counter-rollover guard: a negative delta is
+                # a reset, not negative demand.
+                d[d < 0] = np.nan
+                return d
+            return s
+
+        # --- actuals (eval space) ---
+        cursor.execute(
+            f"SELECT ds, value FROM {actuals_table} WHERE ds >= ? ORDER BY ds",
+            (cutoff_str,),
+        )
+        actual_eval = _series_from_ds(cursor.fetchall(), increment, None)
+
+        # --- app forecast: every logged row in the window ---
+        _filt = ""
+        _params: list = [experiment, cutoff_str, now_str]
+        if model_name:
+            _filt += " AND model_name = ?"
+            _params.append(model_name)
+        if model_version:
+            _filt += " AND model_version = ?"
+            _params.append(model_version)
+        cursor.execute(
+            "SELECT target_dt, issued_at, lead_minutes, predicted "
+            "FROM forecast_log "
+            "WHERE experiment = ? AND issued_at >= ? AND target_dt <= ?" + _filt,
+            _params,
+        )
+        fdf = pd.DataFrame(
+            cursor.fetchall(),
+            columns=["target_dt", "issued_at", "lead_minutes", "predicted"],
+        )
+        if not fdf.empty:
+            fdf["target_dt"] = pd.to_datetime(fdf["target_dt"], errors="coerce")
+            fdf["issued_at"] = pd.to_datetime(fdf["issued_at"], errors="coerce")
+            fdf["predicted"] = pd.to_numeric(fdf["predicted"], errors="coerce")
+            fdf["lead_minutes"] = pd.to_numeric(fdf["lead_minutes"], errors="coerce")
+            fdf = fdf.dropna(subset=["target_dt", "issued_at", "predicted"])
+            fdf["grid"] = fdf["target_dt"].dt.floor(freq)
+            fdf = fdf.sort_values("issued_at")
+        app_latest = (
+            fdf.groupby("grid")["predicted"].last().sort_index()
+            if not fdf.empty else pd.Series(dtype="float64")
+        )
+
+        # --- external (eval space) ---
+        edf = pd.DataFrame(
+            columns=["target_dt", "issued_at", "lead_minutes", "value", "grid"]
+        )
+        if mode == "attribute":
+            if _table_exists("external_forecast_log"):
+                cursor.execute(
+                    "SELECT target_dt, issued_at, lead_minutes, value "
+                    "FROM external_forecast_log "
+                    "WHERE experiment = ? AND issued_at >= ? AND target_dt <= ?",
+                    (experiment, cutoff_str, now_str),
+                )
+                edf = pd.DataFrame(
+                    cursor.fetchall(),
+                    columns=["target_dt", "issued_at", "lead_minutes", "value"],
+                )
+            if not edf.empty:
+                edf["target_dt"] = pd.to_datetime(edf["target_dt"], errors="coerce")
+                edf["issued_at"] = pd.to_datetime(edf["issued_at"], errors="coerce")
+                edf["value"] = pd.to_numeric(edf["value"], errors="coerce")
+                edf["lead_minutes"] = pd.to_numeric(edf["lead_minutes"], errors="coerce")
+                edf = edf.dropna(subset=["target_dt", "issued_at", "value"])
+                if external_scale is not None:
+                    edf["value"] = edf["value"] * float(external_scale)
+                edf["grid"] = edf["target_dt"].dt.floor(freq)
+                edf = edf.sort_values("issued_at")
+            ext_raw = (
+                edf.groupby("grid")["value"].last().sort_index()
+                if not edf.empty else pd.Series(dtype="float64")
+            )
+            if increment and external_is_cumulative and not ext_raw.empty:
+                full = pd.date_range(ext_raw.index.min(), ext_raw.index.max(), freq=freq)
+                ext_eval = ext_raw.reindex(full).diff()
+                ext_eval[ext_eval < 0] = np.nan
+            else:
+                ext_eval = ext_raw
+        else:  # state mode
+            srows = []
+            if _table_exists(external_table):
+                cursor.execute(
+                    f"SELECT ds, value FROM {external_table} WHERE ds >= ? ORDER BY ds",
+                    (cutoff_str,),
+                )
+                srows = cursor.fetchall()
+            ext_eval = _series_from_ds(srows, external_is_cumulative, external_scale)
+
+        # --- overlay (union grid within the window) ---
+        idx = pd.DatetimeIndex([])
+        for s in (actual_eval, app_latest, ext_eval):
+            if s is not None and not s.empty:
+                idx = idx.union(s.index)
+        if len(idx):
+            lo, hi = pd.Timestamp(cutoff), pd.Timestamp(now)
+            idx = idx[(idx >= lo) & (idx <= hi)].sort_values()
+
+        def _col(s) -> list:
+            if s is None or s.empty or len(idx) == 0:
+                return [None] * len(idx)
+            r = s.reindex(idx)
+            return [None if pd.isna(v) else round(float(v), 4) for v in r.values]
+
+        result["overlay"] = {
+            "ds": [_iso_utc(t) for t in idx],
+            "actual": _col(actual_eval),
+            "app": _col(app_latest),
+            "external": _col(ext_eval),
+        }
+        if len(idx):
+            result["date_range"] = {"start": _iso_utc(idx.min()), "end": _iso_utc(idx.max())}
+
+        # --- head-to-head on the common samples ---
+        aligned = pd.DataFrame(
+            {"actual": actual_eval, "app": app_latest, "external": ext_eval}
+        )
+        if len(idx):
+            aligned = aligned.reindex(idx)
+        common = aligned.dropna(subset=["actual", "app", "external"])
+        n_common = int(len(common))
+        result["counts"] = {
+            "actuals": int(actual_eval.notna().sum()) if actual_eval is not None else 0,
+            "app": int(app_latest.notna().sum()) if app_latest is not None else 0,
+            "external": int(ext_eval.notna().sum()) if ext_eval is not None else 0,
+            "common": n_common,
+        }
+        if n_common >= 1:
+            def _err(col: str) -> dict:
+                e = (common[col] - common["actual"]).astype(float)
+                return {
+                    "mae": round(float(e.abs().mean()), 4),
+                    "rmse": round(float(np.sqrt((e ** 2).mean())), 4),
+                    "bias": round(float(e.mean()), 4),
+                }
+            app_m = _err("app")
+            ext_m = _err("external")
+            if app_m["mae"] < ext_m["mae"]:
+                winner = "app"
+            elif ext_m["mae"] < app_m["mae"]:
+                winner = "external"
+            else:
+                winner = "tie"
+            impr = None
+            if ext_m["mae"] > 0:
+                impr = round((ext_m["mae"] - app_m["mae"]) / ext_m["mae"] * 100.0, 1)
+            result["head_to_head"] = {
+                "n": n_common,
+                "app": app_m,
+                "external": ext_m,
+                "winner": winner,
+                "app_mae_improvement_pct": impr,
+            }
+
+        # --- lead-time curve (attribute mode only: external carries leads) ---
+        if mode == "attribute":
+            def _leadcurve(traj: "pd.DataFrame", value_col: str,
+                           is_cum: bool) -> "pd.DataFrame":
+                empty = pd.DataFrame(columns=["mean", "count"])
+                if traj is None or traj.empty or value_col not in traj.columns:
+                    return empty
+                t = traj[["grid", "issued_at", "lead_minutes", value_col]].copy()
+                if increment and is_cum:
+                    t = t.sort_values(["issued_at", "grid"])
+                    t["val"] = t.groupby("issued_at")[value_col].diff()
+                    t.loc[t["val"] < 0, "val"] = np.nan
+                    t = t.dropna(subset=["val"])
+                    vcol = "val"
+                else:
+                    vcol = value_col
+                t = t.join(actual_eval.rename("actual"), on="grid")
+                t = t.dropna(subset=["actual", vcol])
+                if t.empty:
+                    return empty
+                t["bucket"] = (t["lead_minutes"] // bucket_min) * bucket_min
+                t["abserr"] = (t[vcol] - t["actual"]).abs()
+                return t.groupby("bucket")["abserr"].agg(["mean", "count"])
+
+            app_curve = _leadcurve(fdf, "predicted", False)
+            ext_curve = _leadcurve(edf, "value", external_is_cumulative)
+            buckets = sorted(set(app_curve.index).union(set(ext_curve.index)))
+            if buckets:
+                result["lead_time"] = {
+                    "lead_minutes": [int(b) for b in buckets],
+                    "app_mae": [
+                        round(float(app_curve.loc[b, "mean"]), 4)
+                        if b in app_curve.index else None for b in buckets
+                    ],
+                    "app_n": [
+                        int(app_curve.loc[b, "count"])
+                        if b in app_curve.index else 0 for b in buckets
+                    ],
+                    "external_mae": [
+                        round(float(ext_curve.loc[b, "mean"]), 4)
+                        if b in ext_curve.index else None for b in buckets
+                    ],
+                    "external_n": [
+                        int(ext_curve.loc[b, "count"])
+                        if b in ext_curve.index else 0 for b in buckets
+                    ],
+                }
+
+        return result
+
+    # ------------------------------------------------------------------
     # Benchmark results persistence
     # ------------------------------------------------------------------
 

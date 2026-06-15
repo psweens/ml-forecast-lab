@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.44.0
+
+**New per-experiment "External Comparison" tab — score your forecast
+against a third-party one.** Point an experiment at an external forecast
+sensor (one *not* produced by this add-on — Solcast, a utility day-ahead
+curve, another model) and a new tab scores this add-on's published
+forecast head-to-head against it, both against the actuals: a verdict
+("✓ this add-on is 23% more accurate"), MAE / RMSE / bias tiles on the
+common samples, an overlay chart (actual / this add-on / external), and —
+in attribute mode — a per-lead-time error curve.
+
+Configure it in the experiment's **Settings** tab → *External forecast
+comparison*:
+
+- **Sensor state (time-series)** mode reads the external entity's recorded
+  state at each timestamp as its estimate for that moment. The state is
+  cached each production cycle (via the same history cache as the actuals),
+  so the comparison survives Home Assistant's recorder retention.
+- **Forecast attribute (trajectory)** mode reads a forecast array from an
+  attribute (`forecast`, `detailedForecast`, or a weather `hourly`/`daily`
+  service type — same resolver as future covariates) and logs the whole
+  trajectory each cycle to a new `external_forecast_log` table, enabling the
+  per-horizon comparison.
+- Optional **scale** (fix a unit mismatch, e.g. Wh→kWh) and an
+  **external-is-cumulative** override (defaults to inheriting the target's
+  cumulative setting) keep the two forecasts in the same evaluation space —
+  raw for instantaneous targets, per-interval demand for cumulative ones.
+
+Notes: the tab only collects data while the experiment is in **production**
+(that's when this add-on logs its own forecasts), and data accrues from when
+you configure it — there's no historical backfill. New config keys:
+`external_forecast_entity`, `external_forecast_mode`,
+`external_forecast_attribute`, `external_forecast_value_key`,
+`external_forecast_scale`, `external_forecast_is_cumulative`,
+`external_forecast_label`.
+
 ## 2.43.1
 
 **Forecast sensors now inherit their unit automatically.** When an

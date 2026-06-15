@@ -164,6 +164,22 @@ Two zero-cost deterministic covariates for solar PV (or any sun-driven target). 
 
 When `include_clear_sky_irradiance` is on, the app also gates production forecasts to zero at night based on past `clear_sky_ghi` — preventing the "small positive forecast at 3 a.m." pattern.
 
+### External forecast comparison
+
+Point an experiment at a **third-party forecast of the same target** — one *not* produced by this add-on (Solcast, a utility day-ahead curve, another model) — and the experiment page gains an **External Comparison** tab that scores this add-on's published forecast head-to-head against it, both against the actuals (verdict + MAE/RMSE/bias tiles + overlay chart + per-lead-time curve). Configure it from the experiment's **Settings** tab or directly in YAML.
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `external_forecast_entity` | string | `null` | HA entity holding the external forecast. Empty hides the tab. |
+| `external_forecast_mode` | `state` \| `attribute` | `state` | `state`: the entity's recorded value at each time is its estimate for that moment (cached each cycle like the actuals). `attribute`: read a forecast trajectory from an attribute and log it per cycle for a per-horizon comparison. |
+| `external_forecast_attribute` | string | `forecast` | `attribute` mode only — which attribute (or weather `hourly`/`daily`/`twice_daily` service type) holds the trajectory. |
+| `external_forecast_value_key` | string | `null` | `attribute` mode only — the value key inside each trajectory entry (e.g. `pv_estimate`). `null` auto-detects. |
+| `external_forecast_scale` | float | `null` | Optional multiplier to fix a unit mismatch against the target (e.g. Wh→kWh = `0.001`). |
+| `external_forecast_is_cumulative` | bool | `null` | Whether the external forecast must be differenced to per-interval demand before comparison. `null` inherits the target's `source_is_cumulative`. |
+| `external_forecast_label` | string | `null` | Friendly name for the external forecast in the tab's chart/legend. |
+
+Only collects data while the experiment is in **production** (that's when this add-on logs its own forecasts), and data accrues from when you configure it — there's no historical backfill, so a freshly-configured comparison fills in over the coming days.
+
 ### Cross-validation
 
 | Key | Type | Default | What it does |
@@ -292,6 +308,7 @@ Open the UI via the app's **Open Web UI** button (HA ingress).
   - **Tuning.** Bayesian optimisation (Optuna TPE) per model with default vs tuned holdout comparison. **Tune All Enabled** sweeps every enabled backend sequentially.
   - **Results.** Composite mean rank across MAE / RMSE / MASE (Demšar-style averaging of per-fold ranks — see [`docs/RANKING_NOTES.md`](docs/RANKING_NOTES.md) for what the rank does and does not claim) with 95% bootstrap CIs over fold resamples so the leaderboard can flag genuine ties ("T#1") rather than promoting a single winner that's within noise of second place. Models that errored on at least one fold are listed separately under **Did not complete** rather than ranked last — keeps the comparison like-for-like. Plus the always-on "vs Seasonal Naive" skill chip, a pairwise model-comparison matrix (paired-t test on per-fold MAE), the training-window vs test-window drift verdict (PSI), and a "Compare with previous run" strip — the last five benchmarks are retained and diff-able.
   - **Forecast Accuracy.** Three-layer diagnostic: verdict chip, per-horizon error chart, retrain-history chips (filter the chart to a specific `(model_name, model_version)` cohort). Conformal-band calibration countdown surfaces "Calibrating · N of 10 residuals" rather than a silent blank.
+  - **External Comparison.** (Shown when an `external_forecast_entity` is configured and the experiment is in production.) Scores this add-on's published forecast head-to-head against a third-party forecast sensor — both against the actuals — with a verdict, MAE/RMSE/bias tiles, an overlay chart, and (in attribute mode) a per-lead-time error curve. See *Configuration reference → External forecast comparison*.
   - **Predictions** and **Covariate Analysis.** Forecast-trace overlay and an automatic search across covariate combinations to identify which signals genuinely improve forecasts.
 - **System page.** CPU-core / nice-priority controls (actually applied) and a global "Run all benchmarks" trigger.
 

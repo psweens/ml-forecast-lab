@@ -667,6 +667,7 @@ class MLForecastLabApp:
             db_path = Path("/data/ml_forecast_lab/history.db")
             self.history_db = HistoryDB(db_path)
             self.history_db.ensure_forecast_log_table()
+            self.history_db.ensure_external_forecast_log_table()
             self.history_db.ensure_benchmark_table()
             logger.info(f"HistoryDB initialised at {db_path}")
 
@@ -5041,6 +5042,102 @@ class MLForecastLabApp:
         except Exception as e:
             logger.error(f"Error in forecast cycle: {e}", exc_info=True)
 
+    async def _capture_external_forecast(
+        self, exp_cfg, issued_at: datetime, ds_future: pd.DatetimeIndex,
+    ) -> None:
+        """Snapshot the configured third-party forecast for head-to-head
+        scoring on the experiment's "External Comparison" tab.
+
+        - ``state`` mode: read the external entity's current state and append
+          a single grid point to its cached-history table (``store_history``).
+          Accumulated over cycles this builds the external series the same way
+          actuals are cached — independent of HA recorder retention.
+        - ``attribute`` mode: resolve the external forecast trajectory onto
+          this cycle's forecast grid (reusing the covariate ``fetch_future``
+          resolver, which handles list-of-dict / date-dict attributes and the
+          ``weather.get_forecasts`` service shape) and log it to
+          ``external_forecast_log`` so a true per-lead-time comparison is
+          possible. Note: ``fetch_future`` interpolates / edge-fills onto the
+          grid, so targets beyond the external source's own horizon are
+          forward-filled; the comparison surfaces per-lead sample counts so
+          that fill is visible.
+        """
+        entity = getattr(exp_cfg, "external_forecast_entity", None)
+        if not entity or not self.ha_interface or not self.history_db:
+            return
+        mode = getattr(exp_cfg, "external_forecast_mode", "state") or "state"
+
+        if mode == "attribute":
+            attr_name = (
+                getattr(exp_cfg, "external_forecast_attribute", "forecast")
+                or "forecast"
+            )
+            value_key = getattr(exp_cfg, "external_forecast_value_key", None)
+            from ml_forecast_lab.covariates import CovariateResolver
+
+            resolver = getattr(self, "covariate_resolver", None)
+            if resolver is None:
+                resolver = CovariateResolver(
+                    self.ha_interface, history_db=self.history_db,
+                )
+            cov_cfg = {
+                "entity_id": entity,
+                "future_attribute": attr_name,
+                "future_value_key": value_key,
+            }
+            series = await resolver.fetch_future(cov_cfg, ds_future)
+            if series is None or len(series) == 0:
+                logger.debug(
+                    f"  External forecast (attribute) for {exp_cfg.name}: "
+                    f"{entity}.{attr_name} returned no data"
+                )
+                return
+            series = series.dropna()
+            if series.empty:
+                return
+            targets = [pd.Timestamp(t).to_pydatetime() for t in series.index]
+            # Strip tz so the strftime in log_external_forecast matches the
+            # naive-UTC convention forecast_log / the actuals cache use.
+            targets = [
+                t.replace(tzinfo=None) if t.tzinfo is not None else t
+                for t in targets
+            ]
+            issued_naive = (
+                issued_at.replace(tzinfo=None)
+                if issued_at.tzinfo is not None else issued_at
+            )
+            values = [float(v) for v in series.values]
+            n = await asyncio.to_thread(
+                self.history_db.log_external_forecast,
+                experiment=exp_cfg.name,
+                issued_at=issued_naive,
+                targets=targets,
+                values=values,
+            )
+            if n:
+                logger.info(
+                    f"  Logged {n} external_forecast_log rows for "
+                    f"{exp_cfg.name} ({entity}.{attr_name})"
+                )
+        else:  # state mode
+            from ml_forecast_lab.ha_interface import state_to_float
+
+            raw = await self.ha_interface.get_state(entity, default=None)
+            val = state_to_float(raw)
+            if val is None:
+                logger.debug(
+                    f"  External forecast (state) for {exp_cfg.name}: "
+                    f"{entity} state {raw!r} not numeric"
+                )
+                return
+            issued_naive = (
+                issued_at.replace(tzinfo=None)
+                if issued_at.tzinfo is not None else issued_at
+            )
+            table = self.history_db.safe_table_name(entity)
+            df = pd.DataFrame({"ds": [issued_naive], "value": [float(val)]})
+            await asyncio.to_thread(self.history_db.store_history, table, df)
+
     async def _publish_forecast_sensors(
         self,
         exp_cfg,
@@ -5328,6 +5425,25 @@ class MLForecastLabApp:
                     )
             except Exception as e:
                 logger.warning(f"Failed to log forecast evolution: {e}")
+
+        # --- Capture the external (third-party) forecast ---------------------
+        # Logged at the SAME issuance instant as the app's own forecast so the
+        # External Comparison tab scores like-for-like cycles. Production-only
+        # and best-effort — a flaky external sensor never blocks publishing.
+        if (
+            self.history_db
+            and exp_cfg.mode == "production"
+            and getattr(exp_cfg, "external_forecast_entity", None)
+        ):
+            try:
+                await self._capture_external_forecast(
+                    exp_cfg, issued_at, ds_future_aware,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to capture external forecast for "
+                    f"{exp_cfg.name}: {e}"
+                )
 
         # Common attrs applied to every sensor in this cycle. Sharing
         # last_trained + issued_at lets the dashboard correlate bounds,

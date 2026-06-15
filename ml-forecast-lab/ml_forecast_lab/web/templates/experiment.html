@@ -107,6 +107,13 @@
     {% else %}
     <a class="nav-disabled" title="Promote a model to production to see live forecast accuracy">Forecast Accuracy</a>
     {% endif %}
+    {% if exp_config and exp_config.external_forecast_entity and experiment.mode == 'production' %}
+    <a data-tab="sec-external-comparison" onclick="showTab(this)">External Comparison</a>
+    {% elif exp_config and exp_config.external_forecast_entity %}
+    <a class="nav-disabled" title="Promote a model to production to compare your forecast against the external one">External Comparison</a>
+    {% else %}
+    <a class="nav-disabled" title="Set an external forecast sensor in this experiment's Settings tab to compare your forecast against it">External Comparison</a>
+    {% endif %}
 </nav>
 
 <!-- ====== TAB: Settings ====== -->
@@ -407,6 +414,71 @@
                 <span class="field-label">Clear-sky irradiance <span class="info-tip">?<span class="tip-text">Theoretical maximum solar GHI (W/m²) under perfect clear-sky conditions via pvlib Ineichen model. Zero at night, peak at solar noon — ideal for solar PV forecasting.</span></span></span>
             </div>
         </div>
+    </div>
+
+    <!-- External forecast comparison -->
+    <div class="settings-group">
+        <h3 class="settings-group-title">External forecast comparison
+            <span class="info-tip">?<span class="tip-text">Point this at a <b>third-party forecast of this same target</b> — one NOT produced by this add-on (e.g. Solcast, a utility day-ahead curve, another model). The experiment gets an <b>External Comparison</b> tab that scores this add-on's published forecast head-to-head against the external one, both against the actuals. Only collects data while the experiment is in <b>production</b> (that's when this add-on logs its own forecasts). Data accrues from when you set this — there's no historical backfill. Clear the entity to remove the tab.</span></span>
+        </h3>
+        <div class="exp-field entity-search-wrapper" style="max-width:480px;">
+            <label class="field-label">External forecast entity</label>
+            <input type="text" class="setting-input" id="external-entity-input"
+                   data-field="external_forecast_entity"
+                   placeholder="Search HA entities (e.g. sensor.solcast_forecast)..."
+                   autocomplete="off" oninput="searchEntities(this)"
+                   value="{{ exp_config.external_forecast_entity or '' if exp_config else '' }}"
+                   onchange="saveSettingsField(this)">
+            <div class="entity-search-results" style="display:none;"></div>
+        </div>
+        <div class="exp-field-grid" style="grid-template-columns:repeat(3, 1fr);margin-top:0.75rem;">
+            <div class="exp-field">
+                <label class="field-label">Read forecast from <span class="info-tip">?<span class="tip-text"><b>Sensor state</b>: the entity's recorded value at each time IS its estimate for that moment (a plain numeric / template sensor). Compared contemporaneously against the actuals. <b>Forecast attribute</b>: the entity exposes a trajectory of future <code>{datetime, value}</code> points in an attribute (Solcast, weather) — captured each cycle so a per-horizon comparison is possible.</span></span></label>
+                <select class="setting-input" data-field="external_forecast_mode"
+                        onchange="saveSettingsField(this); onExternalModeChanged()">
+                    <option value="state" {% if not exp_config or exp_config.external_forecast_mode != 'attribute' %}selected{% endif %}>Sensor state (time-series)</option>
+                    <option value="attribute" {% if exp_config and exp_config.external_forecast_mode == 'attribute' %}selected{% endif %}>Forecast attribute (trajectory)</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">External is cumulative? <span class="info-tip">?<span class="tip-text">Whether the external forecast is a running total that must be differenced to per-interval demand before comparison (the same way the target is when its source is cumulative). <b>Inherit</b> uses the target's "Cumulative source" setting; override when the external sensor is already an instantaneous / per-period forecast.</span></span></label>
+                <select class="setting-input" data-field="external_forecast_is_cumulative"
+                        onchange="saveSettingsField(this)">
+                    <option value="" {% if not exp_config or exp_config.external_forecast_is_cumulative is none %}selected{% endif %}>Inherit from target</option>
+                    <option value="true" {% if exp_config and exp_config.external_forecast_is_cumulative == true %}selected{% endif %}>Yes — cumulative</option>
+                    <option value="false" {% if exp_config and exp_config.external_forecast_is_cumulative == false %}selected{% endif %}>No — per-interval</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Scale <span class="info-tip">?<span class="tip-text">Optional multiplier applied to the external forecast to fix a unit mismatch against the target (e.g. Wh→kWh = 0.001). Leave blank for none.</span></span></label>
+                <input type="number" class="setting-input" data-field="external_forecast_scale" step="any"
+                       value="{{ exp_config.external_forecast_scale if exp_config and exp_config.external_forecast_scale is not none else '' }}"
+                       placeholder="None" onchange="saveSettingsField(this)">
+            </div>
+        </div>
+        <div class="exp-field-grid" id="external-attr-fields" style="grid-template-columns:repeat(3, 1fr);margin-top:0.75rem;{% if not exp_config or exp_config.external_forecast_mode != 'attribute' %}display:none;{% endif %}">
+            <div class="exp-field">
+                <label class="field-label">Forecast attribute <span class="info-tip">?<span class="tip-text">Which entity attribute (or weather forecast type) holds the trajectory. Common: <code>forecast</code> (default, Met.no weather), <code>detailedForecast</code> (Solcast / Forecast.Solar), or <code>hourly</code>/<code>daily</code> for modern weather entities. Blank = "forecast".</span></span></label>
+                <input type="text" class="setting-input" data-field="external_forecast_attribute"
+                       value="{{ exp_config.external_forecast_attribute if exp_config and exp_config.external_forecast_attribute else '' }}"
+                       placeholder="forecast" onchange="saveSettingsField(this)">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Value key <span class="info-tip">?<span class="tip-text">The key inside each trajectory entry holding the value (e.g. <code>pv_estimate</code> for Solcast, <code>temperature</code> for weather). Blank = auto-detect among the common keys.</span></span></label>
+                <input type="text" class="setting-input" data-field="external_forecast_value_key"
+                       value="{{ exp_config.external_forecast_value_key or '' if exp_config else '' }}"
+                       placeholder="Auto-detect" onchange="saveSettingsField(this)">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Display label <span class="info-tip">?<span class="tip-text">Friendly name for the external forecast in the comparison tab's legend and tiles. Blank uses the entity's short name.</span></span></label>
+                <input type="text" class="setting-input" data-field="external_forecast_label"
+                       value="{{ exp_config.external_forecast_label or '' if exp_config else '' }}"
+                       placeholder="e.g. Solcast" onchange="saveSettingsField(this)">
+            </div>
+        </div>
+        <p style="color:var(--text-secondary);font-size:0.8rem;margin:0.6rem 0 0 0;">
+            After setting (or clearing) the entity, <b>reload the page</b> to show or hide the External Comparison tab.
+        </p>
     </div>
 
     <!-- Covariates -->
@@ -2074,6 +2146,86 @@
 </div>
 {% endif %}
 
+<!-- ====== TAB: External Comparison ====== -->
+{% if exp_config and exp_config.external_forecast_entity and experiment.mode == 'production' %}
+{% set _ext_label = exp_config.external_forecast_label or exp_config.external_forecast_entity.split('.')[-1] %}
+<div class="tab-section" id="sec-external-comparison" style="display:none;">
+<section class="section">
+    <h2>External Comparison
+        <span class="info-tip">?<span class="tip-text">Head-to-head: this add-on's published forecast vs <b>{{ exp_config.external_forecast_entity }}</b> (a forecast not produced by this add-on), both scored against the actuals over the selected window. Data is captured each production forecast cycle and accrues from when you configured it — there's no historical backfill, so a freshly-configured comparison fills in over the coming days.</span></span>
+    </h2>
+    <p class="subtitle" style="margin-top:-0.25rem;">vs <strong>{{ _ext_label }}</strong>
+        <span style="color:var(--text-secondary);">·
+        {% if exp_config.external_forecast_mode == 'attribute' %}forecast-attribute (trajectory){% else %}sensor-state (time-series){% endif %} mode</span></p>
+
+    <div class="acc-top-controls">
+        <div class="acc-control">
+            <label for="external-window">Window:</label>
+            <select id="external-window" class="setting-input" onchange="loadExternalComparison()">
+                <option value="7">Last 7 days</option>
+                <option value="30" selected>Last 30 days</option>
+                <option value="90">Last 90 days</option>
+            </select>
+            <span class="info-tip">?<span class="tip-text">Time range for every chart and number on this tab. Shorter reflects recent behaviour; longer gives more samples.</span></span>
+        </div>
+    </div>
+
+    <!-- Verdict -->
+    <div id="external-verdict-card" class="verdict-card" style="display:none;">
+        <div class="verdict-headline" id="external-verdict-headline">Comparing forecasts…</div>
+        <div class="verdict-numbers">
+            <div class="vnum">
+                <div class="vnum-label">This add-on — typical error
+                    <span class="info-tip">?<span class="tip-text">Mean absolute error of this add-on's published forecast vs the actuals, over the samples where both forecasts and an actual exist (so the comparison is like-for-like). Smaller is better. Units match the target sensor.</span></span>
+                </div>
+                <div class="vnum-value" id="external-app-mae">—</div>
+                <div class="vnum-sub" id="external-app-sub">—</div>
+            </div>
+            <div class="vnum">
+                <div class="vnum-label" id="external-ext-label-tile">External — typical error
+                    <span class="info-tip">?<span class="tip-text">Mean absolute error of the external forecast vs the actuals, on the same samples. Smaller is better.</span></span>
+                </div>
+                <div class="vnum-value" id="external-ext-mae">—</div>
+                <div class="vnum-sub" id="external-ext-sub">—</div>
+            </div>
+            <div class="vnum">
+                <div class="vnum-label">Samples compared
+                    <span class="info-tip">?<span class="tip-text">Number of grid points where this add-on's forecast, the external forecast, AND an actual all exist — the common set the head-to-head is computed on.</span></span>
+                </div>
+                <div class="vnum-value" id="external-common-n">—</div>
+                <div class="vnum-sub">grid points</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Overlay chart -->
+    <div class="settings-group">
+        <h3 class="settings-group-title">Forecast vs actual
+            <span class="info-tip">?<span class="tip-text">The measured actuals overlaid with this add-on's latest forecast for each moment and the external forecast. For cumulative targets the series are shown as per-interval demand (the space the comparison is scored in).</span></span>
+        </h3>
+        <div id="external-overlay-chart" style="width:100%;height:380px;"></div>
+    </div>
+
+    <!-- Lead-time curve (attribute mode only) -->
+    <div id="external-leadtime-group" class="settings-group" style="display:none;">
+        <h3 class="settings-group-title">Error by forecast horizon — this add-on vs external
+            <span class="info-tip">?<span class="tip-text">Mean absolute error binned by lead time (how far ahead the forecast was looking). Available because the external forecast is read as a trajectory. A lower line is the more accurate forecaster at that horizon.</span></span>
+        </h3>
+        <div id="external-leadtime-chart" style="width:100%;height:340px;"></div>
+    </div>
+
+    <!-- Empty / status -->
+    <div id="external-empty" style="display:none;">
+        <div class="empty-state">
+            <span class="empty-state-icon">📊</span>
+            <p id="external-empty-title">No comparison data yet.</p>
+            <p class="empty-state-hint" id="external-empty-hint">Each production forecast cycle captures the external forecast alongside this add-on's; once the actuals arrive, this tab scores them head-to-head. Data accrues from when you set the external sensor — give it a few cycles.</p>
+        </div>
+    </div>
+</section>
+</div>
+{% endif %}
+
 {% endblock %}
 
 {% block scripts %}
@@ -2204,6 +2356,7 @@ var _CHART_TABS = {
     'sec-results': true, 'sec-predictions': true, 'sec-generalisation': true,
     'sec-features': true, 'sec-tuning': true, 'sec-forecast-accuracy': true,
     'sec-training': true, 'sec-covariate-analysis': true,
+    'sec-external-comparison': true,
 };
 
 window.showTab = function(el) {
@@ -2304,8 +2457,10 @@ window.showTab = function(el) {
         var field = el.getAttribute('data-field');
         var value = el.value;
         var intFields = ['days_history', 'interval_minutes', 'future_periods', 'forecast_every_minutes', 'cv_folds'];
-        var floatFields = ['recency_half_life_days', 'retrain_every_hours', 'max_increment'];
-        var nullableFields = ['forecast_every_minutes', 'retrain_every_hours', 'max_increment'];
+        var floatFields = ['recency_half_life_days', 'retrain_every_hours', 'max_increment', 'external_forecast_scale'];
+        var nullableFields = ['forecast_every_minutes', 'retrain_every_hours', 'max_increment',
+            'external_forecast_entity', 'external_forecast_attribute', 'external_forecast_value_key',
+            'external_forecast_scale', 'external_forecast_is_cumulative', 'external_forecast_label'];
 
         if ((value === '' || value === null) && nullableFields.indexOf(field) >= 0) {
             value = null;
@@ -6425,6 +6580,190 @@ window.showTab = function(el) {
                       || document.querySelector('.section-nav a[data-tab="sec-models"]');
         if (defaultTab) showTab(defaultTab);
     }
+})();
+</script>
+
+<!-- ======== External Comparison tab ======== -->
+<script>
+(function() {
+    var BASE = {{ base_path | tojson }};
+    var EXP = {{ experiment.name | tojson }};
+
+    var C_ACTUAL = '#e0e0e0', C_APP = '#22d3ee', C_EXT = '#f59e0b';
+    var DARK = {
+        plot_bgcolor: 'rgba(0,0,0,0)', paper_bgcolor: 'rgba(0,0,0,0)',
+        font: { color: '#e0e0e0' }, grid: '#2d3561', axis: '#b0b0b0',
+    };
+
+    // Toggle the attribute-only Settings fields when the mode changes.
+    window.onExternalModeChanged = function() {
+        var sel = document.querySelector('select[data-field="external_forecast_mode"]');
+        var fields = document.getElementById('external-attr-fields');
+        if (sel && fields) {
+            fields.style.display = (sel.value === 'attribute') ? '' : 'none';
+        }
+    };
+
+    function _fmt(v, units) {
+        if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return '—';
+        var n = Number(v);
+        var s = (Math.abs(n) >= 100) ? n.toFixed(1) : n.toFixed(3);
+        return s + (units ? (' ' + units) : '');
+    }
+
+    function _showEmpty(title, hint) {
+        var card = document.getElementById('external-verdict-card');
+        if (card) card.style.display = 'none';
+        var lg = document.getElementById('external-leadtime-group');
+        if (lg) lg.style.display = 'none';
+        var empty = document.getElementById('external-empty');
+        if (empty) {
+            empty.style.display = '';
+            if (title) { var t = document.getElementById('external-empty-title'); if (t) t.textContent = title; }
+            if (hint) { var h = document.getElementById('external-empty-hint'); if (h) h.textContent = hint; }
+        }
+        var oc = document.getElementById('external-overlay-chart');
+        if (oc && window.Plotly) { try { Plotly.purge(oc); } catch (e) {} }
+    }
+
+    function _renderVerdict(data) {
+        var card = document.getElementById('external-verdict-card');
+        if (!card) return;
+        var h2h = data.head_to_head;
+        var units = data.units || '';
+        var extLabel = data.external_label || 'External';
+        var labelTile = document.getElementById('external-ext-label-tile');
+        if (labelTile && labelTile.firstChild) {
+            labelTile.firstChild.textContent = extLabel + ' — typical error ';
+        }
+        if (!h2h) { card.style.display = 'none'; return; }
+        card.style.display = '';
+        document.getElementById('external-app-mae').textContent = _fmt(h2h.app.mae, units);
+        document.getElementById('external-app-sub').textContent =
+            'RMSE ' + _fmt(h2h.app.rmse, units) + ' · bias ' + _fmt(h2h.app.bias, units);
+        document.getElementById('external-ext-mae').textContent = _fmt(h2h.external.mae, units);
+        document.getElementById('external-ext-sub').textContent =
+            'RMSE ' + _fmt(h2h.external.rmse, units) + ' · bias ' + _fmt(h2h.external.bias, units);
+        document.getElementById('external-common-n').textContent = h2h.n;
+        var head = document.getElementById('external-verdict-headline');
+        var impr = h2h.app_mae_improvement_pct;
+        if (h2h.winner === 'app' && impr !== null && impr !== undefined) {
+            head.innerHTML = '✓ This add-on is <strong>' + Math.abs(impr).toFixed(0)
+                + '% more accurate</strong> than ' + extLabel + ' (lower MAE vs actuals)';
+            head.style.color = 'var(--success)';
+        } else if (h2h.winner === 'external' && impr !== null && impr !== undefined) {
+            head.innerHTML = '✗ ' + extLabel + ' is <strong>' + Math.abs(impr).toFixed(0)
+                + '% more accurate</strong> than this add-on (lower MAE vs actuals)';
+            head.style.color = 'var(--warning)';
+        } else {
+            head.textContent = '≈ The two forecasts are within a rounding of each other';
+            head.style.color = 'var(--text-primary)';
+        }
+    }
+
+    function _renderOverlay(data) {
+        var oc = document.getElementById('external-overlay-chart');
+        if (!oc || !window.Plotly) return;
+        var ov = data.overlay || {};
+        if (!ov.ds || !ov.ds.length) { try { Plotly.purge(oc); } catch (e) {} return; }
+        var ds = ov.ds.map(function(s) { return new Date(s); });
+        var units = data.units || '';
+        var extLabel = data.external_label || 'External';
+        var perBin = (data.evaluation_mode === 'increment');
+        var traces = [
+            { x: ds, y: ov.actual || [], name: 'Actual', type: 'scatter', mode: 'lines',
+              line: { color: C_ACTUAL, width: 2 }, connectgaps: false },
+            { x: ds, y: ov.app || [], name: 'This add-on', type: 'scatter', mode: 'lines',
+              line: { color: C_APP, width: 2 }, connectgaps: false },
+            { x: ds, y: ov.external || [], name: extLabel, type: 'scatter', mode: 'lines',
+              line: { color: C_EXT, width: 2, dash: 'dot' }, connectgaps: false },
+        ];
+        var yUnits = units ? (' (' + units + (perBin ? ' / interval' : '') + ')')
+                           : (perBin ? ' (per interval)' : '');
+        var layout = {
+            xaxis: { color: DARK.axis, gridcolor: DARK.grid },
+            yaxis: { title: 'Value' + yUnits, color: DARK.axis, gridcolor: DARK.grid,
+                     zeroline: true, zerolinecolor: '#4a5178' },
+            plot_bgcolor: DARK.plot_bgcolor, paper_bgcolor: DARK.paper_bgcolor,
+            font: DARK.font, hovermode: 'x unified',
+            legend: { orientation: 'h', y: -0.2 },
+            margin: { t: 20, r: 20, b: 60 },
+        };
+        Plotly.newPlot(oc, traces, layout, { responsive: true });
+    }
+
+    function _renderLeadtime(data) {
+        var group = document.getElementById('external-leadtime-group');
+        var lc = document.getElementById('external-leadtime-chart');
+        if (!group || !lc) return;
+        var lt = data.lead_time;
+        if (!lt || !lt.lead_minutes || !lt.lead_minutes.length || !window.Plotly) {
+            group.style.display = 'none';
+            return;
+        }
+        group.style.display = '';
+        var xHours = lt.lead_minutes.map(function(m) { return m / 60; });
+        var units = data.units || '';
+        var extLabel = data.external_label || 'External';
+        var traces = [
+            { x: xHours, y: lt.app_mae, name: 'This add-on', type: 'scatter',
+              mode: 'lines+markers', line: { color: C_APP, width: 2 },
+              marker: { size: 4 }, connectgaps: false },
+            { x: xHours, y: lt.external_mae, name: extLabel, type: 'scatter',
+              mode: 'lines+markers', line: { color: C_EXT, width: 2, dash: 'dot' },
+              marker: { size: 4 }, connectgaps: false },
+        ];
+        var layout = {
+            xaxis: { title: 'Lead time (hours)', color: DARK.axis, gridcolor: DARK.grid },
+            yaxis: { title: 'MAE' + (units ? (' (' + units + ')') : ''),
+                     color: DARK.axis, gridcolor: DARK.grid },
+            plot_bgcolor: DARK.plot_bgcolor, paper_bgcolor: DARK.paper_bgcolor,
+            font: DARK.font, hovermode: 'x unified',
+            legend: { orientation: 'h', y: -0.25 },
+            margin: { t: 20, r: 20, b: 60 },
+        };
+        Plotly.newPlot(lc, traces, layout, { responsive: true });
+    }
+
+    window.loadExternalComparison = function() {
+        var winSel = document.getElementById('external-window');
+        var days = winSel ? winSel.value : '30';
+        var url = BASE + '/experiment/' + EXP
+            + '/external-forecast-comparison?days=' + encodeURIComponent(days);
+        fetch(url)
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (!data || data.configured === false) {
+                    _showEmpty('No external forecast configured.',
+                        'Set an external forecast sensor in this experiment’s Settings tab.');
+                    return;
+                }
+                if (data.error) {
+                    _showEmpty('Could not load comparison.', String(data.error));
+                    return;
+                }
+                var hasOverlay = data.overlay && data.overlay.ds && data.overlay.ds.length;
+                if (!hasOverlay && !data.head_to_head) {
+                    _showEmpty();  // default copy: "give it a few cycles"
+                    return;
+                }
+                var empty = document.getElementById('external-empty');
+                if (empty) empty.style.display = 'none';
+                _renderVerdict(data);
+                _renderOverlay(data);
+                _renderLeadtime(data);
+            })
+            .catch(function(err) {
+                _showEmpty('Could not load comparison.', String(err));
+            });
+    };
+
+    // Render on first activation of the tab (Plotly is loaded by then).
+    if (typeof queueChart === 'function') {
+        queueChart('sec-external-comparison', function() { loadExternalComparison(); });
+    }
+    // Sync the Settings attribute-field visibility to the saved mode.
+    try { window.onExternalModeChanged(); } catch (e) {}
 })();
 </script>
 {% endblock %}

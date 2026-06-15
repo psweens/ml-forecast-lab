@@ -2239,6 +2239,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if db:
             try:
                 db.delete_forecast_log(name)
+                db.delete_external_forecast_log(name)
                 db.delete_benchmark_result(name)
             except Exception:
                 pass
@@ -2850,6 +2851,104 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             }
         except Exception as e:
             result["calibration"] = {"error": _safe_error(e)}
+        return JSONResponse(content=result)
+
+    @app.get("/experiment/{name}/external-forecast-comparison")
+    async def external_forecast_comparison(name: str, request: Request):
+        """Head-to-head: this add-on's forecast vs a third-party (external)
+        forecast sensor, both scored against the actuals.
+
+        Reads only local SQLite (the cached actuals, this add-on's
+        ``forecast_log``, and — for ``attribute`` mode — the captured
+        ``external_forecast_log``); the external data is ingested by the
+        production forecast cycle, not fetched live here.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        db = app.state.appstate.history_db
+        if not db:
+            return JSONResponse(content={"error": "Database not available"}, status_code=503)
+
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"error": "Config not found"}, status_code=503)
+
+        from ml_forecast_lab.config import load_config
+        try:
+            cfg = load_config(config_path)
+            exp_cfg = next((e for e in cfg.experiments if e.name == name), None)
+            if not exp_cfg:
+                return JSONResponse(content={"error": "Experiment not in config"}, status_code=404)
+        except Exception as e:
+            return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
+
+        external_entity = getattr(exp_cfg, "external_forecast_entity", None)
+        if not external_entity:
+            # Tab is configured off — tell the frontend so it can show the
+            # "configure an external sensor in Settings" empty state.
+            return JSONResponse(content={"configured": False})
+
+        try:
+            days = int(request.query_params.get("days", "30"))
+        except (TypeError, ValueError):
+            days = 30
+        days = max(1, min(365, days))
+
+        ext_mode = getattr(exp_cfg, "external_forecast_mode", "state") or "state"
+        evaluation_mode = "increment" if exp_cfg.source_is_cumulative else "raw"
+        ext_is_cum = getattr(exp_cfg, "external_forecast_is_cumulative", None)
+        if ext_is_cum is None:
+            ext_is_cum = bool(exp_cfg.source_is_cumulative)
+
+        try:
+            actuals_table = db.safe_table_name(exp_cfg.target_entity)
+            external_table = (
+                db.safe_table_name(external_entity)
+                if ext_mode == "state" else None
+            )
+        except Exception as e:
+            return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
+
+        # Optional model pin (default: compare against everything the
+        # add-on actually published, latest-per-target — that's the deployed
+        # forecast the user is comparing). ?model=/?version= narrow it.
+        model_param = request.query_params.get("model")
+        version_param = request.query_params.get("version")
+        model_name = model_param if model_param and model_param != "all" else None
+        model_version = version_param if version_param and version_param != "all" else None
+
+        try:
+            result = await asyncio.to_thread(
+                db.get_external_forecast_comparison,
+                name,
+                actuals_table,
+                external_table,
+                ext_mode,
+                days,
+                exp_cfg.interval_minutes,
+                evaluation_mode,
+                getattr(exp_cfg, "external_forecast_scale", None),
+                bool(ext_is_cum),
+                model_name,
+                model_version,
+            )
+        except Exception as e:
+            logger.error(
+                "external-forecast-comparison failed for %s: %s",
+                name, e, exc_info=True,
+            )
+            return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
+
+        # Metadata the frontend uses for labels / units.
+        result["external_entity"] = external_entity
+        result["external_label"] = (
+            getattr(exp_cfg, "external_forecast_label", None)
+            or external_entity.split(".")[-1]
+        )
+        result["external_is_cumulative"] = bool(ext_is_cum)
+        result["units"] = exp_cfg.units or ""
+        result["days"] = days
         return JSONResponse(content=result)
 
     @app.get("/experiment/{name}/forecast-log-stats")
@@ -4335,10 +4434,31 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "output_activation": lambda v: v if v in (
                 "auto", "linear", "softplus", "relu", "exp", "sigmoid", "zscore"
             ) else None,
+            # External forecast comparison (per-experiment third-party forecast).
+            # Clearable text/number fields are nullable (empty → field removed).
+            "external_forecast_entity": lambda v: (str(v).strip() or None) if v is not None else None,
+            "external_forecast_mode": lambda v: v if v in ("state", "attribute") else None,
+            "external_forecast_attribute": lambda v: (str(v).strip() or None) if v is not None else None,
+            "external_forecast_value_key": lambda v: (str(v).strip() or None) if v is not None else None,
+            "external_forecast_scale": lambda v: (None if v is None or v == "" else float(v)),
+            "external_forecast_is_cumulative": lambda v: (
+                True if str(v).lower() in ("true", "1", "yes", "on")
+                else (False if str(v).lower() in ("false", "0", "no", "off") else None)
+            ),
+            "external_forecast_label": lambda v: (str(v).strip() or None) if v is not None else None,
         }
 
         # Fields where None/null means "use global default" (valid, not an error)
-        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country", "patience"}
+        nullable_fields = {
+            "forecast_every_minutes", "retrain_every_hours", "max_increment",
+            "country", "patience",
+            # External-forecast fields: null clears the override (entity →
+            # hides the tab; is_cumulative → inherit the target's setting;
+            # attribute → falls back to the 'forecast' default).
+            "external_forecast_entity", "external_forecast_attribute",
+            "external_forecast_value_key", "external_forecast_scale",
+            "external_forecast_is_cumulative", "external_forecast_label",
+        }
 
         updates = {}
         for field, validator in editable.items():

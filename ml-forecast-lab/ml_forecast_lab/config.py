@@ -566,6 +566,59 @@ class ExperimentCfg:
     forecasting — turns the problem into predicting cloud-cover-driven attenuation
     rather than raw generation."""
 
+    external_forecast_entity: Optional[str] = None
+    """Optional Home Assistant entity holding a *third-party* forecast of this
+    same target (one NOT produced by this add-on — e.g. Solcast, a utility's
+    day-ahead curve, a neighbour's model). When set, the experiment page shows
+    an **External Comparison** tab that scores this add-on's published forecast
+    head-to-head against the external one, both against the actuals.
+
+    Only meaningful for ``mode='production'`` experiments — the comparison
+    reads this add-on's logged forecasts from ``forecast_log``, which are only
+    written in production. ``None`` (default) hides the tab."""
+
+    external_forecast_mode: str = 'state'
+    """How the external forecast is read from ``external_forecast_entity``:
+
+    - ``state``: the entity's recorded **state** at each timestamp IS its
+      estimate for that moment (a plain numeric sensor / template). Compared
+      contemporaneously against the actuals. No lead-time dimension.
+    - ``attribute``: the entity exposes a **forecast trajectory** in an
+      attribute (``forecast`` / ``detailedForecast`` / a weather
+      ``hourly``/``daily`` service type), a list of future ``{datetime,
+      value}`` points — same shape as this add-on's own forecast. Captured
+      each production cycle into ``external_forecast_log`` so a true
+      per-lead-time head-to-head is possible."""
+
+    external_forecast_attribute: str = 'forecast'
+    """For ``external_forecast_mode='attribute'``: the entity attribute (or
+    weather forecast type) holding the trajectory. Mirrors a covariate's
+    ``future_attribute``. Ignored in ``state`` mode."""
+
+    external_forecast_value_key: Optional[str] = None
+    """For ``external_forecast_mode='attribute'``: the key inside each
+    trajectory entry that holds the value (e.g. ``pv_estimate`` for Solcast).
+    ``None`` auto-detects among the common keys, exactly like a covariate's
+    ``future_value_key``. Ignored in ``state`` mode."""
+
+    external_forecast_scale: Optional[float] = None
+    """Optional multiplier applied to the external forecast before comparison
+    — use to fix a unit mismatch against the target (e.g. Wh→kWh = 0.001).
+    ``None`` = no scaling."""
+
+    external_forecast_is_cumulative: Optional[bool] = None
+    """Whether the external forecast is a cumulative/running-total signal (so
+    it must be differenced to per-interval demand before comparison, the same
+    way the target is when ``source_is_cumulative``). ``None`` (default)
+    inherits the target's ``source_is_cumulative``. Set ``False`` explicitly
+    when the external sensor is already an instantaneous / per-period forecast
+    even though the target is a cumulative ``*_today`` sensor."""
+
+    external_forecast_label: Optional[str] = None
+    """Optional friendly name for the external forecast in the comparison
+    tab's chart legend and tiles. ``None`` falls back to the entity's short
+    suffix."""
+
     def __post_init__(self) -> None:
         """Validate configuration."""
         valid_modes = {'lab', 'production'}
@@ -616,6 +669,12 @@ class ExperimentCfg:
             raise ValueError(
                 f'output_activation must be one of {sorted(valid_activations)}, '
                 f'got {self.output_activation!r}'
+            )
+        valid_ext_modes = {'state', 'attribute'}
+        if self.external_forecast_mode not in valid_ext_modes:
+            raise ValueError(
+                f'external_forecast_mode must be one of {sorted(valid_ext_modes)}, '
+                f'got {self.external_forecast_mode!r}'
             )
 
         # v2.37.6 added a warning here for nbeats / nhits / itransformer
