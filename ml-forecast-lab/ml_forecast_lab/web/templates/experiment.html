@@ -2137,12 +2137,16 @@
                 <input type="number" class="setting-input" id="ext-scale-input" step="any" placeholder="None">
             </div>
             <div class="exp-field" id="ext-attr-field" style="display:none;">
-                <label class="field-label">Forecast attribute <span class="info-tip">?<span class="tip-text">Which attribute (or weather type) holds the trajectory: <code>forecast</code> (default), <code>detailedForecast</code> (Solcast), <code>hourly</code>/<code>daily</code>. Blank = "forecast".</span></span></label>
-                <input type="text" class="setting-input" id="ext-attr-input" placeholder="forecast">
+                <label class="field-label">Forecast data <span class="info-tip">?<span class="tip-text">Which attribute on the entity holds the forecast to compare from — auto-detected from the entity's live attributes once you pick it (e.g. <code>results</code> for Predbat, <code>detailedForecast</code> for Solcast, <code>forecast</code> for weather, or a <code>hourly</code>/<code>daily</code> weather-service forecast). "Auto" uses the resolver's default (<code>forecast</code>).</span></span></label>
+                <select class="setting-input" id="ext-attr-input" onchange="onExternalAttrChanged()">
+                    <option value="">Auto (forecast)</option>
+                </select>
             </div>
             <div class="exp-field" id="ext-key-field" style="display:none;">
-                <label class="field-label">Value key <span class="info-tip">?<span class="tip-text">Key inside each trajectory entry holding the value (e.g. <code>pv_estimate</code>). Blank = auto-detect.</span></span></label>
-                <input type="text" class="setting-input" id="ext-key-input" placeholder="Auto-detect">
+                <label class="field-label">Value key <span class="info-tip">?<span class="tip-text">Which value within each forecast entry to read (e.g. <code>pv_estimate</code> for Solcast). Populated from the chosen attribute; "Auto-detect" picks the first recognised numeric key.</span></span></label>
+                <select class="setting-input" id="ext-key-input">
+                    <option value="">Auto-detect</option>
+                </select>
             </div>
             <div class="exp-field">
                 <label class="field-label">Display label <span class="info-tip">?<span class="tip-text">Friendly name shown in the comparison. Blank uses the entity's short name.</span></span></label>
@@ -6616,11 +6620,79 @@ window.showTab = function(el) {
     window.onExternalModeChanged = function() {
         var sel = document.getElementById('ext-mode-input');
         var attr = document.getElementById('ext-attr-field');
-        var key = document.getElementById('ext-key-field');
         var isAttr = sel && sel.value === 'attribute';
         if (attr) attr.style.display = isAttr ? '' : 'none';
-        if (key) key.style.display = isAttr ? '' : 'none';
+        if (isAttr) {
+            // Populate the "Forecast data" picker from the chosen entity.
+            refreshExternalAttrs();
+        } else {
+            var key = document.getElementById('ext-key-field');
+            if (key) key.style.display = 'none';
+        }
     };
+
+    // Inspect the chosen entity's HA attributes and offer the forecast-shaped
+    // ones to compare from (same detector the covariate form uses). "Auto"
+    // falls back to the resolver's default ("forecast").
+    window.refreshExternalAttrs = function() {
+        var entEl = document.getElementById('ext-entity-input');
+        var entity = entEl ? entEl.value.trim() : '';
+        var sel = document.getElementById('ext-attr-input');
+        if (!sel) return;
+        sel.innerHTML = '<option value="">Auto (forecast)</option>';
+        if (!entity) { onExternalAttrChanged(); return; }
+        fetch(BASE + '/api/ha/forecast-attrs?entity=' + encodeURIComponent(entity))
+            .then(function(r){ return r.json(); })
+            .then(function(data){
+                var attrs = (data && data.forecast_attributes) || [];
+                attrs.forEach(function(a){
+                    var opt = document.createElement('option');
+                    opt.value = a.name;
+                    opt.textContent = a.format === 'weather-service'
+                        ? (a.name + ' (weather service)')
+                        : a.format === 'date-dict'
+                            ? (a.name + ' (date-keyed)')
+                            : (a.name + ' (' + a.format + ')');
+                    opt.dataset.sampleKeys = JSON.stringify(a.sample_keys || []);
+                    opt.dataset.format = a.format;
+                    sel.appendChild(opt);
+                });
+                onExternalAttrChanged();
+            })
+            .catch(function(){ onExternalAttrChanged(); });
+    };
+
+    // Populate the value-key picker from the chosen attribute's sample keys
+    // (hidden for date-keyed dicts, which need no value key).
+    window.onExternalAttrChanged = function() {
+        var sel = document.getElementById('ext-attr-input');
+        var keyField = document.getElementById('ext-key-field');
+        var keySel = document.getElementById('ext-key-input');
+        if (!sel || !keyField || !keySel) return;
+        keySel.innerHTML = '<option value="">Auto-detect</option>';
+        var opt = sel.options[sel.selectedIndex];
+        if (!opt || !opt.value || opt.dataset.format === 'date-dict') {
+            keyField.style.display = 'none';
+            return;
+        }
+        var keys = [];
+        try { keys = JSON.parse(opt.dataset.sampleKeys || '[]'); } catch (e) {}
+        if (!keys.length) { keyField.style.display = 'none'; return; }
+        keys.forEach(function(k){
+            var o = document.createElement('option');
+            o.value = k; o.textContent = k; keySel.appendChild(o);
+        });
+        keyField.style.display = '';
+    };
+
+    // Re-detect when the entity is picked from the autocomplete (which sets
+    // the value and dispatches 'change').
+    document.addEventListener('change', function(ev){
+        if (ev.target && ev.target.id === 'ext-entity-input') {
+            var m = document.getElementById('ext-mode-input');
+            if (m && m.value === 'attribute') refreshExternalAttrs();
+        }
+    });
 
     window.addExternalForecast = function() {
         var get = function(id){ var el=document.getElementById(id); return el ? el.value.trim() : ''; };

@@ -22,10 +22,12 @@ has:
   added state sensors are backfilled from recorder history so the comparison
   populates immediately rather than only accruing going forward.
   *Forecast attribute (trajectory)* reads a forecast array from an attribute
-  (`forecast`, `detailedForecast`, or a weather `hourly`/`daily` service
-  type — the same resolver future covariates use) and logs the whole
-  trajectory each cycle to the `external_forecast_log` table (tagged by
-  source), enabling the per-horizon comparison.
+  (`forecast`, `detailedForecast`, a Predbat `results` dict, or a weather
+  `hourly`/`daily` service type — the same resolver future covariates use)
+  and logs the whole trajectory each cycle to the `external_forecast_log`
+  table (tagged by source), enabling the per-horizon comparison. The
+  attribute and value key are **auto-detected** from the chosen entity's live
+  attributes — you pick which data to compare from rather than typing names.
 - Optional overrides — a **scale** and an explicit **is-cumulative** — on
   top of the automatic handling below.
 
