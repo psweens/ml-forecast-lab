@@ -506,6 +506,13 @@ class MLForecastLabApp:
         # a restart re-resolves it). Keyed by target_entity so multiple
         # experiments on the same sensor share one lookup.
         self._source_unit_cache: Dict[str, str] = {}
+        # Last *successfully* resolved non-empty source unit per target
+        # entity. Unlike ``_source_unit_cache`` this is NEVER invalidated on
+        # retrain — it's the fallback that stops a transient HA fetch failure
+        # (or the source sensor being momentarily ``unavailable``) during the
+        # post-retrain re-resolve from republishing an empty unit and making
+        # HA flag a unit_of_measurement change.
+        self._source_unit_last_good: Dict[str, str] = {}
         # Resolved runtime-resource limits actually applied to this process
         # (CPU thread cap, nice value). Surfaced on the System page so the
         # user can verify their settings took effect.
@@ -1212,8 +1219,14 @@ class MLForecastLabApp:
              kWh stays kWh, °C stays °C). This is what makes units "just
              work" for experiments created through the web UI, which has
              no units field.
-          3. Empty string if the source has no unit or the fetch fails —
-             identical to the prior behaviour, never raises.
+          3. The last successfully-resolved unit if a fresh fetch comes back
+             empty or fails — so a transient HA hiccup (or the source sensor
+             being momentarily ``unavailable``) on the post-retrain
+             re-resolve doesn't republish an empty unit and make HA flag a
+             unit_of_measurement change.
+          4. Empty string only if the source genuinely has no unit and we've
+             never resolved one — identical to the prior cold-start
+             behaviour, never raises.
 
         The inherited value is cached per target entity so this costs at
         most one extra HA call per entity per process, not one per
@@ -1227,7 +1240,7 @@ class MLForecastLabApp:
         if cached is not None:
             return cached
 
-        unit = ""
+        unit = None
         if self.ha_interface:
             try:
                 fetched = await self.ha_interface.get_state(
@@ -1235,16 +1248,39 @@ class MLForecastLabApp:
                 )
                 if isinstance(fetched, str) and fetched.strip():
                     unit = fetched.strip()
-                    logger.info(
-                        f"  Auto-inherited unit '{unit}' from {entity} "
-                        f"for {exp_cfg.name} (no units set in config)"
-                    )
             except Exception as e:
                 logger.debug(
                     f"  Could not auto-resolve unit from {entity}: {e}"
                 )
-        self._source_unit_cache[entity] = unit
-        return unit
+
+        if unit:
+            # Successful resolve — remember it as the authoritative fallback.
+            prev_good = self._source_unit_last_good.get(entity)
+            if unit != prev_good:
+                logger.info(
+                    f"  Auto-inherited unit '{unit}' from {entity} "
+                    f"for {exp_cfg.name} (no units set in config)"
+                )
+            self._source_unit_cache[entity] = unit
+            self._source_unit_last_good[entity] = unit
+            return unit
+
+        # Fetch failed or the source reported no unit. Prefer the last known
+        # good unit over republishing "" — the empty-unit regression the
+        # user saw after a retrain was exactly this path clobbering a good
+        # value on a transient miss.
+        last_good = self._source_unit_last_good.get(entity)
+        if last_good:
+            logger.debug(
+                f"  Unit fetch for {entity} returned empty; keeping "
+                f"last-known unit '{last_good}' for {exp_cfg.name}"
+            )
+            self._source_unit_cache[entity] = last_good
+            return last_good
+
+        # Never resolved a unit for this entity — cold-start empty, as before.
+        self._source_unit_cache[entity] = ""
+        return ""
 
     async def _prepare_load_subtract_inputs(
         self,

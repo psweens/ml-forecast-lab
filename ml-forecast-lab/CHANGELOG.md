@@ -52,6 +52,18 @@ forecast-evolution y-axis uses the humanised experiment name (e.g. "Solar
 Forecast (W)") instead of the raw slug, the run-to-run stability spread
 shows units, and a few lower-cased or unit-less labels were corrected.
 
+**Fixed: auto-inherited forecast unit could reset to empty after a
+retrain.** The per-target unit cache is invalidated on each retrain so a
+genuine source-sensor unit change is picked up, but if the immediate
+re-resolve hit a transient Home Assistant fetch failure — or the source
+sensor was momentarily `unavailable` (its attributes absent) — the empty
+result was published, so Home Assistant flagged the forecast sensor's
+`unit_of_measurement` as having changed to "". The last successfully
+resolved unit is now remembered and reused whenever a fresh lookup comes
+back empty, so a transient miss can no longer clear a known unit; a real
+unit change is still adopted, and a genuinely unitless source still
+publishes empty.
+
 ## 2.43.1
 
 **Forecast sensors now inherit their unit automatically.** When an
