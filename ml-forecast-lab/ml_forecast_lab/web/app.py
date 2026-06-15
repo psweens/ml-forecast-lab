@@ -2897,27 +2897,40 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         evaluation_mode = "increment" if exp_cfg.source_is_cumulative else "raw"
 
+        # Per-sensor HA units for unit-aware conversion (cached). Target unit
+        # prefers the experiment's explicit ``units``, else the source
+        # sensor's HA unit_of_measurement.
+        try:
+            units_map = await _entity_units(
+                [exp_cfg.target_entity] + [e.entity_id for e in externals_cfg]
+            )
+        except Exception:
+            units_map = {}
+        target_unit = exp_cfg.units or units_map.get(exp_cfg.target_entity)
+
         # Build the per-external spec list the DB layer consumes. State-mode
         # entries resolve to their cached-history table; attribute-mode ones
-        # read from external_forecast_log (table=None). is_cumulative=None
-        # inherits the target's source_is_cumulative.
+        # read from external_forecast_log (table=None). is_cumulative is
+        # passed through as-is: None lets the DB auto-detect a cumulative
+        # shape; True/False is an explicit override.
         try:
             actuals_table = db.safe_table_name(exp_cfg.target_entity)
             specs = []
             for e in externals_cfg:
-                is_cum = e.is_cumulative
-                if is_cum is None:
-                    is_cum = bool(exp_cfg.source_is_cumulative)
                 specs.append({
                     "entity": e.entity_id,
                     "table": db.safe_table_name(e.entity_id) if e.mode == "state" else None,
                     "mode": e.mode,
                     "scale": e.scale,
-                    "is_cumulative": bool(is_cum),
+                    "is_cumulative": e.is_cumulative,
                     "label": e.label or e.entity_id.split(".")[-1],
+                    "unit": units_map.get(e.entity_id),
                 })
         except Exception as e:
             return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
+
+        analysis = request.query_params.get("analysis")
+        analysis_mode = analysis if analysis in ("per_interval", "cumulative") else "per_interval"
 
         # Optional model pin (default: compare against everything the
         # add-on actually published, latest-per-target — that's the deployed
@@ -2938,6 +2951,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 evaluation_mode,
                 model_name,
                 model_version,
+                analysis_mode,
+                target_unit,
             )
         except Exception as e:
             logger.error(
@@ -2949,6 +2964,42 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         result["units"] = exp_cfg.units or ""
         result["days"] = days
         return JSONResponse(content=result)
+
+    _unit_cache: Dict[str, tuple] = {}  # entity -> (fetched_at, unit_or_None)
+
+    async def _entity_units(entities: list) -> Dict[str, Optional[str]]:
+        """Resolve each entity's HA unit_of_measurement, cached 5 min, for
+        unit-aware comparison conversion. One HA session for all misses;
+        failures resolve to None (→ the comparison falls back to raw + the
+        scale-mismatch guard)."""
+        import time as _t
+        out: Dict[str, Optional[str]] = {}
+        missing = []
+        for e in entities:
+            if not e:
+                continue
+            c = _unit_cache.get(e)
+            if c and (_t.time() - c[0]) < 300:
+                out[e] = c[1]
+            else:
+                missing.append(e)
+        if missing:
+            from ml_forecast_lab.ha_interface import HAInterface
+            iface = HAInterface()
+            try:
+                for e in missing:
+                    try:
+                        u = await iface.get_state(
+                            e, attribute="unit_of_measurement", default=None,
+                        )
+                        u = u.strip() if isinstance(u, str) and u.strip() else None
+                    except Exception:
+                        u = None
+                    _unit_cache[e] = (_t.time(), u)
+                    out[e] = u
+            finally:
+                await iface.close()
+        return out
 
     async def _backfill_external_state(entity: str, days: int = 90) -> int:
         """Cache a state-mode external sensor's existing HA recorder history

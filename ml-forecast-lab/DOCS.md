@@ -174,9 +174,11 @@ Compare this add-on's forecast against up to **five third-party forecasts of the
 | `mode` | `state` \| `attribute` | `state` | `state`: the entity's recorded value at each time is its estimate for that moment (cached each cycle like the actuals; newly added sensors are backfilled from recorder history so the comparison shows immediately). `attribute`: read a forecast trajectory from an attribute and log it per cycle (tagged by source) for a per-horizon comparison. |
 | `attribute` | string | `forecast` | `attribute` mode only — which attribute (or weather `hourly`/`daily`/`twice_daily` service type) holds the trajectory. |
 | `value_key` | string | `null` | `attribute` mode only — the value key inside each trajectory entry (e.g. `pv_estimate`). `null` auto-detects. |
-| `scale` | float | `null` | Optional multiplier to fix a unit mismatch against the target (e.g. Wh→kWh = `0.001`). |
-| `is_cumulative` | bool | `null` | Whether this forecast must be differenced to per-interval demand before comparison. `null` inherits the target's `source_is_cumulative`. |
+| `scale` | float | `null` | Optional multiplier override. Usually unnecessary — base units (W/kW/MW, Wh/kWh/MWh) are reconciled automatically from each sensor's HA unit. |
+| `is_cumulative` | bool | `null` | Override for whether the sensor is a running total. `null` auto-detects the cumulative shape (and differences it before comparison). |
 | `label` | string | `null` | Friendly name in the tab's chart/legend. |
+
+The comparison is **unit-aware**: it reads each sensor's HA `unit_of_measurement` and converts everything into a common space, so a cumulative **kWh** energy sensor lines up correctly against an instantaneous **kW** power target with no manual setup (cumulative shape is differenced; power↔energy is reconciled via the interval length and base units). When a unit isn't a recognised power/energy unit, the series is left raw and a scale-mismatch guard warns rather than guessing. The tab has a **per-interval ↔ cumulative** toggle: per-interval shows per-bin demand in the target's native unit; cumulative shows the running daily total in kWh (integrating power forecasts to energy), which is what makes a daily-total energy sensor directly comparable.
 
 ```yaml
 external_forecasts:

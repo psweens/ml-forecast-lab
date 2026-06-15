@@ -278,6 +278,75 @@ class TestComparisonMulti:
             GENEROUS_WINDOW, INTERVAL, "raw")
         assert res["comparisons"][0]["scale_mismatch"] is False
 
+    def test_unit_aware_power_target_vs_cumulative_energy(self, db):
+        # Target = instantaneous power (kW); external = cumulative daily
+        # energy (kWh) that is the true integral of the power. Unit-aware
+        # conversion must make them line up (no scale mismatch) in BOTH the
+        # per-interval (kW) and cumulative (kWh) views, and auto-detect the
+        # cumulative shape.
+        ih = INTERVAL / 60.0
+        grid = _grid()
+        power = [max(0.0, math.sin((i - 10) / 6.0)) * 3.0 for i in range(48)]
+        ttbl = db.safe_table_name("sensor.pv_power")
+        db.store_history(ttbl, pd.DataFrame({"ds": grid, "value": power}))
+        for i, t in enumerate(grid):
+            db.log_forecast(experiment="e", issued_at=t - timedelta(minutes=INTERVAL),
+                            targets=[t], predictions=[power[i]], model_name="lgb", model_version="v1")
+        cum, s = [], 0.0
+        for i in range(48):
+            s += power[i] * ih
+            cum.append(s)
+        e1 = db.safe_table_name("sensor.pv_today")
+        db.store_history(e1, pd.DataFrame({"ds": grid, "value": cum}))
+        spec = {"entity": "sensor.pv_today", "mode": "state", "table": e1,
+                "scale": None, "is_cumulative": None, "label": "PV Today", "unit": "kWh"}
+
+        # Per-interval view (target unit kW).
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, [spec], GENEROUS_WINDOW, INTERVAL, "raw",
+            None, None, "per_interval", "kW")
+        c = res["comparisons"][0]
+        assert res["unit_aware"] is True
+        assert c["auto_cumulative"] is True          # detected cumulative shape
+        assert c["scale_mismatch"] is False, c["scale_ratio"]
+        assert c["head_to_head"]["external"]["mae"] < 0.2   # ≈ the power curve
+        assert res["display_unit"] == "kW"
+
+        # Cumulative view → both in kWh, still aligned.
+        res2 = db.get_external_forecast_comparison(
+            "e", ttbl, [spec], GENEROUS_WINDOW, INTERVAL, "raw",
+            None, None, "cumulative", "kW")
+        c2 = res2["comparisons"][0]
+        assert res2["display_unit"] == "kWh"
+        assert c2["scale_mismatch"] is False
+        assert c2["head_to_head"]["external"]["mae"] < 0.6
+
+    def test_unit_aware_base_scale_wh_vs_kw(self, db):
+        # External in Wh (cumulative) vs kW target — base-unit scaling (Wh→kWh)
+        # must be handled automatically.
+        ih = INTERVAL / 60.0
+        grid = _grid()
+        power = [max(0.0, math.sin((i - 10) / 6.0)) * 2.0 for i in range(48)]
+        ttbl = db.safe_table_name("sensor.p2")
+        db.store_history(ttbl, pd.DataFrame({"ds": grid, "value": power}))
+        for i, t in enumerate(grid):
+            db.log_forecast(experiment="e", issued_at=t - timedelta(minutes=INTERVAL),
+                            targets=[t], predictions=[power[i]], model_name="lgb", model_version="v1")
+        cum, s = [], 0.0
+        for i in range(48):
+            s += power[i] * ih * 1000.0   # Wh
+            cum.append(s)
+        e1 = db.safe_table_name("sensor.e_wh")
+        db.store_history(e1, pd.DataFrame({"ds": grid, "value": cum}))
+        spec = {"entity": "sensor.e_wh", "mode": "state", "table": e1,
+                "scale": None, "is_cumulative": None, "label": "Wh", "unit": "Wh"}
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, [spec], GENEROUS_WINDOW, INTERVAL, "raw",
+            None, None, "per_interval", "kW")
+        c = res["comparisons"][0]
+        assert c["scale_mismatch"] is False, c["scale_ratio"]
+        assert c["head_to_head"]["external"]["mae"] < 0.2
+
     def test_delete_source(self, db):
         ttbl, e1, _ = self._seed(db)
         assert db.delete_external_forecast_source("e", "sensor.solcast") > 0

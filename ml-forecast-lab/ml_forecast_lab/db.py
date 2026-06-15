@@ -3100,34 +3100,26 @@ class HistoryDB:
         evaluation_mode: str = "raw",
         model_name: Optional[str] = None,
         model_version: Optional[str] = None,
+        analysis_mode: str = "per_interval",
+        target_unit: Optional[str] = None,
     ) -> dict:
         """Score this add-on's forecast against one or more external forecasts.
 
-        ``externals`` is a list of specs (max enforced by the caller), each a
-        dict with ``entity`` (id), ``table`` (state-mode cached-history table
-        name or None), ``mode`` (``state``/``attribute``), ``scale``,
-        ``is_cumulative`` and ``label``.
+        ``externals`` is a list of specs, each a dict with ``entity``,
+        ``table`` (state-mode cached-history table or None), ``mode``,
+        ``scale``, ``is_cumulative`` (None = auto-detect), ``label`` and
+        ``unit`` (HA unit_of_measurement, for unit-aware conversion).
 
-        Aligns everything on the experiment's interval grid over the last
-        ``max_age_days``:
+        Unit-aware: each series is converted to a common per-interval ENERGY
+        canonical using its HA unit (power → ×interval_hours; cumulative
+        energy → differenced) so a cumulative kWh sensor lines up with an
+        instantaneous kW target. When a unit isn't a recognised power/energy
+        unit the series is left in its raw evaluation space and the
+        scale-mismatch guard flags it.
 
-        - **actual**  — the target's cached history (``actuals_table``)
-        - **app**     — this add-on's logged forecast (``forecast_log``),
-                        the *latest* prediction for each target
-        - **external_i** — each third-party forecast: ``state`` mode from the
-                        entity's cached history; ``attribute`` mode the latest
-                        snapshot per target from ``external_forecast_log``
-                        (filtered to that ``source``).
-
-        Evaluation space matches the Forecast Accuracy tab: ``raw`` for
-        instantaneous targets, ``increment`` (per-interval deltas) for
-        cumulative ones. Each external is differenced only when its own
-        ``is_cumulative`` is set.
-
-        Returns ``overlay`` (shared grid + actual + app + one series per
-        external), ``comparisons`` (per-external head-to-head / timing /
-        lead-time), and a combined ``lead_time`` (app vs each attribute-mode
-        external by horizon).
+        ``analysis_mode``: ``per_interval`` (per-bin demand, in the target's
+        native unit) or ``cumulative`` (running daily total in kWh / the
+        target unit). The lead-time curve is always per-interval.
         """
         import numpy as np
 
@@ -3137,7 +3129,28 @@ class HistoryDB:
         now_str = now.strftime("%Y-%m-%d %H:%M:%S")
         bucket_min = max(1, int(interval_minutes))
         freq = f"{bucket_min}min"
-        increment = evaluation_mode == "increment"
+        interval_hours = bucket_min / 60.0
+        target_cumulative = evaluation_mode == "increment"
+        if analysis_mode not in ("per_interval", "cumulative"):
+            analysis_mode = "per_interval"
+
+        # Unit dimension classification → (dimension, scale-to-base) where
+        # base power = kW and base energy = kWh.
+        _POWER = {"w": 0.001, "watt": 0.001, "watts": 0.001, "kw": 1.0, "mw": 1000.0}
+        _ENERGY = {"wh": 0.001, "kwh": 1.0, "mwh": 1000.0}
+
+        def _classify_unit(u):
+            if not u:
+                return ("unknown", 1.0)
+            k = str(u).strip().lower()
+            if k in _POWER:
+                return ("power", _POWER[k])
+            if k in _ENERGY:
+                return ("energy", _ENERGY[k])
+            return ("other", 1.0)
+
+        t_dim, t_base = _classify_unit(target_unit)
+        unit_aware = t_dim in ("power", "energy")
 
         cursor = self.conn.cursor()
 
@@ -3155,10 +3168,9 @@ class HistoryDB:
             ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
             return ts.isoformat()
 
-        def _series_from_ds(rows, is_cumulative: bool,
-                            scale) -> "pd.Series":
-            """Grid-align a (ds, value) frame to a Series indexed by grid
-            timestamp; difference to per-interval demand when cumulative."""
+        def _raw_grid(rows) -> "pd.Series":
+            """Grid-align a (ds, value) frame to a Series (last value per bin);
+            NO differencing — canonicalisation handles that."""
             df = pd.DataFrame(rows, columns=["ds", "value"])
             if df.empty:
                 return pd.Series(dtype="float64")
@@ -3167,24 +3179,79 @@ class HistoryDB:
             df = df.dropna(subset=["ds"]).sort_values("ds")
             if df.empty:
                 return pd.Series(dtype="float64")
-            if scale is not None:
-                df["value"] = df["value"] * float(scale)
             df["grid"] = df["ds"].dt.floor(freq)
-            s = df.groupby("grid")["value"].last().sort_index()
-            if increment and is_cumulative and not s.empty:
-                full = pd.date_range(s.index.min(), s.index.max(), freq=freq)
-                d = s.reindex(full).diff()
-                d[d < 0] = np.nan
-                return d
-            return s
+            return df.groupby("grid")["value"].last().sort_index()
 
-        def _diff_if_cumulative(s, is_cum):
-            if increment and is_cum and s is not None and not s.empty:
-                full = pd.date_range(s.index.min(), s.index.max(), freq=freq)
-                d = s.reindex(full).diff()
-                d[d < 0] = np.nan
-                return d
-            return s
+        def _looks_cumulative(s) -> bool:
+            """Heuristic: a running total is (almost) monotonic non-decreasing
+            between resets, so the vast majority of consecutive diffs are >= 0.
+            A per-interval signal has ~50% negative diffs."""
+            sd = s.dropna() if s is not None else None
+            if sd is None or len(sd) < 6:
+                return False
+            d = sd.diff().dropna()
+            if d.empty:
+                return False
+            return float((d >= 0).mean()) >= 0.8
+
+        def _diff_reset(s):
+            full = pd.date_range(s.index.min(), s.index.max(), freq=freq)
+            d = s.reindex(full).diff()
+            d[d < 0] = np.nan  # daily-reset / rollover guard
+            return d
+
+        def _to_canon(s, dim, base, is_cum):
+            """Raw grid series → per-interval ENERGY (kWh/interval) when the
+            unit is power/energy; else returns the series unchanged (best
+            effort) so the scale guard can flag it."""
+            if s is None or s.empty:
+                return s
+            s = s.astype(float)
+            if base and base != 1.0:
+                s = s * base
+            if dim == "power":
+                return s * interval_hours
+            if dim == "energy":
+                return _diff_reset(s) if is_cum else s
+            return s  # unknown dimension — left raw
+
+        def _legacy_eval(s, is_cum):
+            """Pre-unit-aware behaviour: per-interval deltas for cumulative
+            sources, raw otherwise."""
+            if s is None or s.empty:
+                return s
+            return _diff_reset(s.astype(float)) if is_cum else s
+
+        def _cumsum_daily(s):
+            if s is None or s.empty:
+                return s
+            df = s.to_frame("v")
+            df["day"] = df.index.normalize()
+            df["c"] = df["v"].fillna(0.0).groupby(df["day"]).cumsum()
+            return df["c"]
+
+        def _native_pi(canon):
+            """Per-interval canonical → the target's native per-interval unit
+            for display (kW for a power target; kWh/interval otherwise)."""
+            if unit_aware and t_dim == "power" and canon is not None and not canon.empty:
+                return canon / interval_hours
+            return canon
+
+        def _display(canon):
+            if analysis_mode == "cumulative":
+                return _cumsum_daily(canon)
+            return _native_pi(canon)
+
+        def _canon_factor(dim, base):
+            """Multiplier turning a per-interval VALUE into per-interval energy
+            (power values still need ×interval_hours)."""
+            if not unit_aware:
+                return 1.0
+            if dim == "power":
+                return base * interval_hours
+            if dim == "energy":
+                return base
+            return 1.0
 
         def _median_lead(df):
             if df is None or df.empty or "lead_minutes" not in df.columns \
@@ -3193,32 +3260,26 @@ class HistoryDB:
             rep = df.groupby("grid")["lead_minutes"].last().dropna()
             return round(float(rep.median()), 1) if not rep.empty else None
 
-        def _leadcurve(traj, value_col, is_cum):
-            empty = pd.DataFrame(columns=["mean", "count"])
-            if traj is None or traj.empty or value_col not in traj.columns:
-                return empty
-            t = traj[["grid", "issued_at", "lead_minutes", value_col]].copy()
-            if increment and is_cum:
-                t = t.sort_values(["issued_at", "grid"])
-                t["val"] = t.groupby("issued_at")[value_col].diff()
-                t.loc[t["val"] < 0, "val"] = np.nan
-                t = t.dropna(subset=["val"])
-                vcol = "val"
-            else:
-                vcol = value_col
-            t = t.join(actual_eval.rename("actual"), on="grid")
-            t = t.dropna(subset=["actual", vcol])
-            if t.empty:
-                return empty
-            t["bucket"] = (t["lead_minutes"] // bucket_min) * bucket_min
-            t["abserr"] = (t[vcol] - t["actual"]).abs()
-            return t.groupby("bucket")["abserr"].agg(["mean", "count"])
-
         externals = externals or []
+        # Display unit label for the axes.
+        if analysis_mode == "cumulative":
+            display_unit = "kWh" if unit_aware else (
+                ((target_unit or "") + " (cumulative)").strip()
+            )
+        else:
+            if unit_aware:
+                display_unit = (target_unit or "kW") if t_dim == "power" else "kWh/interval"
+            else:
+                display_unit = target_unit or ""
+
         result: dict = {
             "configured": bool(externals),
             "evaluation_mode": evaluation_mode,
+            "analysis_mode": analysis_mode,
             "interval_minutes": bucket_min,
+            "unit_aware": unit_aware,
+            "display_unit": display_unit,
+            "lead_unit": "kWh/interval" if unit_aware else (target_unit or ""),
             "overlay": {"ds": [], "actual": [], "app": [], "externals": []},
             "comparisons": [],
             "lead_time": None,
@@ -3232,12 +3293,17 @@ class HistoryDB:
             result["empty_reason"] = "no_actuals"
             return result
 
-        # --- actuals (eval space) ---
+        # --- actuals → canonical per-interval ---
         cursor.execute(
             f"SELECT ds, value FROM {actuals_table} WHERE ds >= ? ORDER BY ds",
             (cutoff_str,),
         )
-        actual_eval = _series_from_ds(cursor.fetchall(), increment, None)
+        actual_raw = _raw_grid(cursor.fetchall())
+        if unit_aware:
+            actual_canon = _to_canon(actual_raw, t_dim, t_base, target_cumulative)
+        else:
+            actual_canon = _legacy_eval(actual_raw, target_cumulative)
+        actual_disp = _display(actual_canon)
 
         # --- app forecast: every logged row in the window ---
         _filt = ""
@@ -3266,16 +3332,21 @@ class HistoryDB:
             fdf = fdf.dropna(subset=["target_dt", "issued_at", "predicted"])
             fdf["grid"] = fdf["target_dt"].dt.floor(freq)
             fdf = fdf.sort_values("issued_at")
-        app_latest = (
+        app_raw = (
             fdf.groupby("grid")["predicted"].last().sort_index()
             if not fdf.empty else pd.Series(dtype="float64")
         )
-        app_points = int(app_latest.notna().sum())
+        # The app forecast is already per-interval (delta for cumulative
+        # targets; the instantaneous value otherwise) → never differenced.
+        app_factor = _canon_factor(t_dim, t_base)
+        app_canon = (app_raw * app_factor) if (unit_aware and not app_raw.empty) else app_raw
+        app_disp = _display(app_canon)
+        app_points = int(app_disp.notna().sum()) if app_disp is not None else 0
         app_median_lead = _median_lead(fdf)
 
         ext_table_exists = _table_exists("external_forecast_log")
 
-        # --- resolve each external into an eval series (+ edf for attribute) ---
+        # --- resolve each external → canonical + display ---
         ext_items = []
         for spec in externals:
             entity = spec.get("entity")
@@ -3283,8 +3354,8 @@ class HistoryDB:
                 continue
             mode = spec.get("mode", "state") or "state"
             scale = spec.get("scale")
-            is_cum = bool(spec.get("is_cumulative"))
             label = spec.get("label") or (entity.split(".")[-1] if entity else "External")
+            e_dim, e_base = _classify_unit(spec.get("unit"))
             edf = pd.DataFrame(
                 columns=["target_dt", "issued_at", "lead_minutes", "value", "grid"]
             )
@@ -3316,7 +3387,6 @@ class HistoryDB:
                     edf.groupby("grid")["value"].last().sort_index()
                     if not edf.empty else pd.Series(dtype="float64")
                 )
-                ext_eval = _diff_if_cumulative(ext_raw, is_cum)
             else:  # state mode
                 table = spec.get("table")
                 srows = []
@@ -3326,7 +3396,9 @@ class HistoryDB:
                         (cutoff_str,),
                     )
                     srows = cursor.fetchall()
-                ext_eval = _series_from_ds(srows, is_cum, scale)
+                ext_raw = _raw_grid(srows)
+                if scale is not None and not ext_raw.empty:
+                    ext_raw = ext_raw * float(scale)
                 try:
                     ts = pd.to_datetime(
                         pd.DataFrame(srows, columns=["ds", "value"])["ds"],
@@ -3338,15 +3410,36 @@ class HistoryDB:
                             update_min = round(float(diffs.median()), 1)
                 except Exception:
                     update_min = None
+
+            # Resolve cumulative: explicit override wins; else auto-detect.
+            override = spec.get("is_cumulative")
+            if override is None:
+                is_cum = _looks_cumulative(ext_raw) if e_dim != "power" else False
+                auto_cumulative = bool(is_cum)
+            else:
+                is_cum = bool(override)
+                auto_cumulative = False
+
+            if unit_aware and e_dim in ("power", "energy"):
+                ext_canon = _to_canon(ext_raw, e_dim, e_base, is_cum)
+                ext_convertible = True
+            else:
+                # Unknown unit (or non-unit-aware target): best-effort eval
+                # space; the scale guard flags if it doesn't line up.
+                ext_canon = _legacy_eval(ext_raw, is_cum)
+                ext_convertible = unit_aware is False
+            ext_disp = _display(ext_canon)
             ext_items.append({
                 "entity": entity, "label": label, "mode": mode,
-                "is_cumulative": is_cum, "eval": ext_eval, "edf": edf,
+                "is_cumulative": is_cum, "auto_cumulative": auto_cumulative,
+                "dim": e_dim, "base": e_base, "convertible": ext_convertible,
+                "canon": ext_canon, "disp": ext_disp, "edf": edf,
                 "update_min": update_min,
             })
 
         # --- shared overlay grid (union within the window) ---
         idx = pd.DatetimeIndex([])
-        for s in [actual_eval, app_latest] + [it["eval"] for it in ext_items]:
+        for s in [actual_disp, app_disp] + [it["disp"] for it in ext_items]:
             if s is not None and not s.empty:
                 idx = idx.union(s.index)
         if len(idx):
@@ -3363,11 +3456,11 @@ class HistoryDB:
         result["app_points"] = app_points
         result["overlay"] = {
             "ds": [_iso_utc(t) for t in idx],
-            "actual": _col(actual_eval),
-            "app": _col(app_latest),
+            "actual": _col(actual_disp),
+            "app": _col(app_disp),
             "externals": [
                 {"entity": it["entity"], "label": it["label"],
-                 "mode": it["mode"], "values": _col(it["eval"])}
+                 "mode": it["mode"], "values": _col(it["disp"])}
                 for it in ext_items
             ],
         }
@@ -3382,11 +3475,10 @@ class HistoryDB:
                 "bias": round(float(e.mean()), 4),
             }
 
-        # --- per-external head-to-head + timing ---
+        # --- per-external head-to-head + timing (on the display series) ---
         for it in ext_items:
-            ext_eval = it["eval"]
             aligned = pd.DataFrame(
-                {"actual": actual_eval, "app": app_latest, "external": ext_eval}
+                {"actual": actual_disp, "app": app_disp, "external": it["disp"]}
             )
             if len(idx):
                 aligned = aligned.reindex(idx)
@@ -3411,18 +3503,16 @@ class HistoryDB:
                     "n": n_common, "app": app_m, "external": ext_m,
                     "winner": winner, "app_mae_improvement_pct": impr,
                 }
-                # Scale-mismatch guard: if the external sits on a wildly
-                # different magnitude to the actuals, the head-to-head is
-                # measuring a unit / cumulative mismatch, not forecast skill
-                # (e.g. a cumulative kWh sensor compared raw against
-                # instantaneous kW). Use mean-abs (median is ~0 for
-                # night-heavy solar) on the common samples.
+                # Scale-mismatch guard: after unit-aware conversion a genuine
+                # like-for-like sits near ratio 1; a large gap means the units
+                # couldn't be reconciled (unknown unit, or a quantity we can't
+                # bridge) — the head-to-head isn't meaningful.
                 mean_actual = float(common["actual"].abs().mean())
                 mean_ext = float(common["external"].abs().mean())
                 if mean_actual > 1e-9 and mean_ext > 1e-9:
                     scale_ratio = round(mean_ext / mean_actual, 2)
                     scale_mismatch = scale_ratio > 4.0 or scale_ratio < 0.25
-            ext_points = int(ext_eval.notna().sum()) if ext_eval is not None else 0
+            ext_points = int(it["disp"].notna().sum()) if it["disp"] is not None else 0
             timing = {
                 "app_median_lead_minutes": app_median_lead,
                 "external_median_lead_minutes": (
@@ -3439,14 +3529,39 @@ class HistoryDB:
                 "entity": it["entity"], "label": it["label"], "mode": it["mode"],
                 "head_to_head": h2h, "timing": timing, "n": n_common,
                 "scale_ratio": scale_ratio, "scale_mismatch": scale_mismatch,
+                "auto_cumulative": it["auto_cumulative"],
             })
 
-        # --- combined lead-time (app + each attribute-mode external) ---
+        # --- combined lead-time (app + attribute externals), always
+        #     per-interval canonical energy so horizons are comparable ---
+        def _leadcurve(traj, value_col, is_cum, factor):
+            empty = pd.DataFrame(columns=["mean", "count"])
+            if traj is None or traj.empty or value_col not in traj.columns:
+                return empty
+            t = traj[["grid", "issued_at", "lead_minutes", value_col]].copy()
+            if is_cum:
+                t = t.sort_values(["issued_at", "grid"])
+                t["val"] = t.groupby("issued_at")[value_col].diff()
+                t.loc[t["val"] < 0, "val"] = np.nan
+                t = t.dropna(subset=["val"])
+                vcol = "val"
+            else:
+                vcol = value_col
+            t = t.join(actual_canon.rename("actual"), on="grid")
+            t = t.dropna(subset=["actual", vcol])
+            if t.empty:
+                return empty
+            t["cv"] = t[vcol] * factor
+            t["bucket"] = (t["lead_minutes"] // bucket_min) * bucket_min
+            t["abserr"] = (t["cv"] - t["actual"]).abs()
+            return t.groupby("bucket")["abserr"].agg(["mean", "count"])
+
         attr_items = [it for it in ext_items if it["mode"] == "attribute"]
         if attr_items:
-            app_curve = _leadcurve(fdf, "predicted", False)
+            app_curve = _leadcurve(fdf, "predicted", False, _canon_factor(t_dim, t_base))
             ext_curves = [
-                (it, _leadcurve(it["edf"], "value", it["is_cumulative"]))
+                (it, _leadcurve(it["edf"], "value", it["is_cumulative"],
+                                _canon_factor(it["dim"], it["base"])))
                 for it in attr_items
             ]
             buckets = set(app_curve.index)
@@ -3454,7 +3569,7 @@ class HistoryDB:
                 buckets |= set(c.index)
             buckets = sorted(buckets)
             if buckets:
-                def _series(curve, key):
+                def _ser(curve, key):
                     return [
                         (round(float(curve.loc[b, "mean"]), 4) if key == "mae"
                          else int(curve.loc[b, "count"]))
@@ -3463,11 +3578,11 @@ class HistoryDB:
                     ]
                 result["lead_time"] = {
                     "lead_minutes": [int(b) for b in buckets],
-                    "app_mae": _series(app_curve, "mae"),
-                    "app_n": _series(app_curve, "n"),
+                    "app_mae": _ser(app_curve, "mae"),
+                    "app_n": _ser(app_curve, "n"),
                     "externals": [
                         {"entity": it["entity"], "label": it["label"],
-                         "mae": _series(c, "mae"), "n": _series(c, "n")}
+                         "mae": _ser(c, "mae"), "n": _ser(c, "n")}
                         for it, c in ext_curves
                     ],
                 }

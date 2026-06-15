@@ -2163,6 +2163,14 @@
             </select>
             <span class="info-tip">?<span class="tip-text">Time range for every chart and number below. Shorter reflects recent behaviour; longer gives more samples.</span></span>
         </div>
+        <div class="acc-control">
+            <label>Analysis:</label>
+            <div class="toggle-group" style="display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+                <button type="button" id="external-mode-per-interval" class="toggle-btn active" onclick="setExternalAnalysis('per_interval')" style="padding:0.35rem 0.75rem;background:var(--accent-secondary);color:#fff;border:none;cursor:pointer;font-size:0.85rem;">Per-interval</button>
+                <button type="button" id="external-mode-cumulative" class="toggle-btn" onclick="setExternalAnalysis('cumulative')" style="padding:0.35rem 0.75rem;background:transparent;color:var(--text-secondary);border:none;cursor:pointer;font-size:0.85rem;">Cumulative</button>
+            </div>
+            <span class="info-tip">?<span class="tip-text"><b>Per-interval</b>: per-bin demand in the target's native unit (e.g. kW). <b>Cumulative</b>: the running daily total (kWh), integrating power forecasts to energy — this is what makes a cumulative-energy sensor directly comparable. Scoring follows the chosen view; the horizon chart stays per-interval.</span></span>
+        </div>
     </div>
 
     <!-- Verdict headline -->
@@ -6592,6 +6600,18 @@ window.showTab = function(el) {
     var EXT_COLORS = ['#f59e0b', '#a855f7', '#34d399', '#f43f5e', '#60a5fa'];
     var DARK = { plot_bgcolor:'rgba(0,0,0,0)', paper_bgcolor:'rgba(0,0,0,0)', font:{color:'#e0e0e0'}, grid:'#2d3561', axis:'#b0b0b0' };
 
+    var _externalAnalysis = 'per_interval';
+    window.setExternalAnalysis = function(mode) {
+        if (mode !== 'per_interval' && mode !== 'cumulative') return;
+        _externalAnalysis = mode;
+        var pi = document.getElementById('external-mode-per-interval');
+        var cum = document.getElementById('external-mode-cumulative');
+        [pi, cum].forEach(function(b){ if(!b) return; b.classList.remove('active'); b.style.background='transparent'; b.style.color='var(--text-secondary)'; });
+        var on = (mode === 'cumulative') ? cum : pi;
+        if (on) { on.classList.add('active'); on.style.background='var(--accent-secondary)'; on.style.color='#fff'; }
+        loadExternalComparison();
+    };
+
     // ---- Settings add-form: toggle attribute-only fields by mode ----
     window.onExternalModeChanged = function() {
         var sel = document.getElementById('ext-mode-input');
@@ -6682,7 +6702,7 @@ window.showTab = function(el) {
         var grp = document.getElementById('external-ranktable-group');
         var body = document.getElementById('external-ranktable-body');
         if (!grp || !body) return;
-        var units = data.units || '';
+        var units = data.display_unit || data.units || '';
         var comps = (data.comparisons || []).filter(function(c){ return c.head_to_head; });
         if (!comps.length) { grp.style.display='none'; return; }
         var rows = '';
@@ -6791,7 +6811,7 @@ window.showTab = function(el) {
         var ov = data.overlay || {};
         if (!ov.ds || !ov.ds.length) { try{Plotly.purge(oc);}catch(e){} return; }
         var ds = ov.ds.map(function(s){ return new Date(s); });
-        var units = data.units || ''; var perBin = (data.evaluation_mode === 'increment');
+        var units = data.display_unit || data.units || '';
         var traces = [
             { x:ds, y:ov.actual||[], name:'Actual', type:'scatter', mode:'lines', line:{color:C_ACTUAL,width:2}, connectgaps:false },
             { x:ds, y:ov.app||[], name:'ML Forecast Lab', type:'scatter', mode:'lines', line:{color:C_APP,width:2}, connectgaps:false },
@@ -6800,7 +6820,7 @@ window.showTab = function(el) {
             traces.push({ x:ds, y:ex.values||[], name:ex.label||ex.entity, type:'scatter', mode:'lines',
                 line:{color:EXT_COLORS[i%EXT_COLORS.length], width:2, dash:'dot'}, connectgaps:false });
         });
-        var yUnits = units ? (' (' + units + (perBin ? ' / interval' : '') + ')') : (perBin ? ' (per interval)' : '');
+        var yUnits = units ? (' (' + units + ')') : '';
         Plotly.newPlot(oc, traces, {
             xaxis:{title:'Time', color:DARK.axis, gridcolor:DARK.grid},
             yaxis:{title:'Value'+yUnits, color:DARK.axis, gridcolor:DARK.grid, zeroline:true, zerolinecolor:'#4a5178'},
@@ -6817,7 +6837,7 @@ window.showTab = function(el) {
         if (!lt || !lt.lead_minutes || !lt.lead_minutes.length || !window.Plotly) { grp.style.display='none'; return; }
         grp.style.display = '';
         var xHours = lt.lead_minutes.map(function(m){ return m/60; });
-        var units = data.units || '';
+        var units = data.lead_unit || data.units || '';
         var traces = [{ x:xHours, y:lt.app_mae, name:'ML Forecast Lab', type:'scatter', mode:'lines+markers', line:{color:C_APP,width:2}, marker:{size:4}, connectgaps:false }];
         (lt.externals||[]).forEach(function(ex, i){
             traces.push({ x:xHours, y:ex.mae, name:ex.label||ex.entity, type:'scatter', mode:'lines+markers',
@@ -6834,7 +6854,7 @@ window.showTab = function(el) {
     window.loadExternalComparison = function() {
         var winSel = document.getElementById('external-window');
         var days = winSel ? winSel.value : '30';
-        fetch(BASE + '/experiment/' + EXP + '/external-forecast-comparison?days=' + encodeURIComponent(days))
+        fetch(BASE + '/experiment/' + EXP + '/external-forecast-comparison?days=' + encodeURIComponent(days) + '&analysis=' + encodeURIComponent(_externalAnalysis))
             .then(function(r){ return r.json(); })
             .then(function(data){
                 if (!data || data.configured === false) { _showEmpty('No third-party forecasts added yet.', 'Use the form above to add a forecast sensor to compare against.'); return; }

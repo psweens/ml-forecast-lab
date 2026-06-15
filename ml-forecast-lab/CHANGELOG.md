@@ -26,10 +26,25 @@ has:
   type — the same resolver future covariates use) and logs the whole
   trajectory each cycle to the `external_forecast_log` table (tagged by
   source), enabling the per-horizon comparison.
-- An optional **scale** (to fix a unit mismatch, e.g. Wh→kWh) and an
-  **is-cumulative** override (defaults to inheriting the target's cumulative
-  setting), which keep each forecast in the same evaluation space — raw for
-  instantaneous targets, per-interval demand for cumulative ones.
+- Optional overrides — a **scale** and an explicit **is-cumulative** — on
+  top of the automatic handling below.
+
+**Unit-aware conversion.** Each sensor's Home Assistant `unit_of_measurement`
+is read and used to put every series into a common space, so mismatched
+quantities line up automatically: a cumulative sensor's shape is detected and
+differenced, and power↔energy is reconciled via the interval length and base
+units (W/kW/MW, Wh/kWh/MWh). A cumulative **kWh** sensor can therefore be
+compared correctly against an instantaneous **kW** target without any manual
+setup. When a unit isn't a recognised power/energy unit the series is left in
+its raw space and a **scale-mismatch guard** flags it — replacing the
+meaningless "X% better" verdict with a warning and excluding that sensor from
+the head-to-head — rather than guessing.
+
+**Per-interval / cumulative analysis toggle.** Switch the whole tab between
+*per-interval* (per-bin demand in the target's native unit, e.g. kW) and
+*cumulative* (the running daily total in kWh, integrating power forecasts to
+energy). The cumulative view is what makes a daily-total energy sensor
+directly comparable. The horizon chart stays per-interval.
 
 Everything is aligned on the experiment's target grid and each external is
 scored on the **common samples** (where the actual, the add-on's forecast,
@@ -37,11 +52,7 @@ and that external all exist), so differing update cadences don't bias the
 result. A comparison-basis line states the timing explicitly (same-time
 snapshot for state mode vs lead-matched for trajectory mode, plus each
 side's typical lead) and flags any external that is sparse or stale relative
-to the add-on's own forecasts. A scale-mismatch guard detects when an
-external sits on a very different magnitude to the target (e.g. a cumulative
-kWh sensor compared raw against instantaneous kW): the meaningless "X%
-better" verdict is replaced with a warning and that sensor is excluded from
-the head-to-head until its units / cumulative setting are corrected.
+to the add-on's own forecasts.
 
 The tab only collects data while the experiment is in **production** (when
 the add-on logs its own forecasts), and data accrues going forward — there
