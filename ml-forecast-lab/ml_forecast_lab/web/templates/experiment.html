@@ -6640,6 +6640,10 @@ window.showTab = function(el) {
     // PLOT_COLORWAY lives in a different IIFE, so the values are mirrored
     // here rather than referenced — both palettes must change together.
     var C_ACTUAL = '#ffffff', C_APP = '#ff6b6b';
+    // Seasonal Naive is the do-nothing reference: a soft lavender that
+    // harmonises with the dark blue-purple theme and reads as subordinate
+    // (thin dashed) without competing with the vivid forecaster accents.
+    var C_BASELINE = '#a5b4fc';
     var EXT_COLORS = ['#4d96ff', '#ffd93d', '#6bcb77', '#c084fc', '#ff922b', '#22d3ee', '#f472b6', '#a3e635'];
     var DARK = { plot_bgcolor:'#16213e', paper_bgcolor:'#1a1a2e', font:{color:'#e0e0e0'}, grid:'#2d3561', axis:'#b0b0b0' };
 
@@ -6873,7 +6877,7 @@ window.showTab = function(el) {
         });
         var base = data.baseline;
         if (base && base.metrics) {
-            R.push({ kind:'baseline', label:'Seasonal Naive', color:'#94a3b8',
+            R.push({ kind:'baseline', label:'Seasonal Naive', color:C_BASELINE,
                      block:base.metrics, daily:(base.metrics?base.metrics.daily:null),
                      days:(base.days_logged||0), warming:!!base.warming,
                      mismatch:false, ratio:null, h:base.head_to_head,
@@ -7090,7 +7094,7 @@ window.showTab = function(el) {
         // Seasonal Naive baseline line (the free do-nothing reference).
         if (ov.baseline && ov.baseline.length) {
             traces.push({ x:ds, y:ov.baseline, name:'Seasonal Naive', type:'scatter', mode:'lines',
-                line:{color:'#94a3b8', width:1.5, dash:'dash'}, opacity:0.8, connectgaps:false });
+                line:{color:C_BASELINE, width:1.5, dash:'dash'}, opacity:0.8, connectgaps:false });
         }
         var yUnits = units ? (' (' + units + ')') : '';
         Plotly.newPlot(oc, traces, {
@@ -7132,7 +7136,7 @@ window.showTab = function(el) {
         });
         if (ov.baseline && ov.baseline.length) {
             traces.push({ x:hx, y:_hourMae(ov.baseline), name:'Seasonal Naive', type:'scatter', mode:'lines+markers',
-                line:{color:'#94a3b8', width:1.5, dash:'dash'}, marker:{size:3}, opacity:0.8, connectgaps:false });
+                line:{color:C_BASELINE, width:1.5, dash:'dash'}, marker:{size:3}, opacity:0.8, connectgaps:false });
         }
         var units = data.display_unit || data.units || '';
         Plotly.newPlot(hc, traces, {

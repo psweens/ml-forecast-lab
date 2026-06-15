@@ -9,8 +9,11 @@ next to every other tab. They now use the shared dark panel background
 (`#16213e` / `#1a1a2e`), the same white dotted "Actual" reference line
 used app-wide, and the shared `PLOT_COLORWAY` hues — the add-on's own
 forecast takes the primary accent and each external cycles through the
-same palette as the model series elsewhere. The ranking-table colour
-swatches follow the same constants, so table and chart stay in sync.
+same palette as the model series elsewhere. The Seasonal Naive baseline
+moved from a washed-out grey to a soft lavender (`#a5b4fc`) that
+harmonises with the dark theme while staying subordinate as a dashed
+reference. The ranking-table colour swatches follow the same constants,
+so table and chart stay in sync.
 
 ## 2.44.2
 
