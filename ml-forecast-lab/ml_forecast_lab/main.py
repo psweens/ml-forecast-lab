@@ -5170,7 +5170,7 @@ class MLForecastLabApp:
                     n = await asyncio.to_thread(
                         self.history_db.log_external_forecast,
                         experiment=exp_cfg.name,
-                        source=entity,
+                        source=spec.source_key,
                         issued_at=issued_naive,
                         targets=targets,
                         values=values,

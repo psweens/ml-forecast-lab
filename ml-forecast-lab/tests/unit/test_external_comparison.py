@@ -105,6 +105,39 @@ class TestExternalForecastCfg:
         with pytest.raises(ValueError):
             add_experiment_external_forecast(p, "e", {"entity_id": "sensor.bad", "mode": "nope"})
 
+    def test_same_entity_multiple_forecasts(self, tmp_path):
+        # The same entity can be added more than once with different
+        # attribute / value_key (e.g. Solcast percentiles), but an exact
+        # duplicate is still rejected — and each has a distinct source key.
+        p = tmp_path / "mlfl.yaml"
+        p.write_text(yaml.dump({"experiments": [{"name": "e", "target_entity": "sensor.t"}]}))
+        base = {"entity_id": "sensor.solcast", "mode": "attribute", "attribute": "detailedForecast"}
+        assert add_experiment_external_forecast(p, "e", dict(base, value_key="pv_estimate")) is True
+        assert add_experiment_external_forecast(p, "e", dict(base, value_key="pv_estimate10")) is True
+        assert add_experiment_external_forecast(p, "e", dict(base, value_key="pv_estimate90")) is True
+        # exact duplicate rejected
+        assert add_experiment_external_forecast(p, "e", dict(base, value_key="pv_estimate")) is False
+        exts = load_config(p).experiments[0].external_forecasts
+        assert len(exts) == 3
+        keys = {x.source_key for x in exts}
+        assert len(keys) == 3   # all distinct
+        # remove just the 10% one, by full identity
+        assert remove_experiment_external_forecast(
+            p, "e", "sensor.solcast", mode="attribute",
+            attribute="detailedForecast", value_key="pv_estimate10") is True
+        left = load_config(p).experiments[0].external_forecasts
+        assert len(left) == 2
+        assert all(x.value_key != "pv_estimate10" for x in left)
+
+    def test_source_key_distinguishes_attribute_forecasts(self):
+        a = ExternalForecastCfg(entity_id="sensor.s", mode="attribute",
+                                attribute="detailedForecast", value_key="pv_estimate")
+        b = ExternalForecastCfg(entity_id="sensor.s", mode="attribute",
+                                attribute="detailedForecast", value_key="pv_estimate90")
+        c = ExternalForecastCfg(entity_id="sensor.s", mode="state")
+        assert a.source_key != b.source_key
+        assert c.source_key == "sensor.s"
+
 
 # ---------------------------------------------------------------------
 # DB fixtures & helpers
@@ -346,6 +379,36 @@ class TestComparisonMulti:
         c = res["comparisons"][0]
         assert c["scale_mismatch"] is False, c["scale_ratio"]
         assert c["head_to_head"]["external"]["mae"] < 0.2
+
+    def test_same_entity_two_sources_scored_independently(self, db):
+        # Two attribute forecasts from ONE entity (distinct source keys) must
+        # be scored as separate comparisons.
+        grid = _grid(); actual = _actual_curve()
+        ttbl = db.safe_table_name("sensor.pv")
+        db.store_history(ttbl, pd.DataFrame({"ds": grid, "value": actual}))
+        for i, t in enumerate(grid):
+            db.log_forecast(experiment="e", issued_at=t - timedelta(minutes=INTERVAL),
+                            targets=[t], predictions=[actual[i] + 4.0], model_name="lgb", model_version="v1")
+        for issue_idx in range(0, 48, 4):
+            issued = grid[issue_idx] - timedelta(minutes=INTERVAL)
+            targets = grid[issue_idx:issue_idx + 8]
+            if not targets:
+                continue
+            db.log_external_forecast("e", "sensor.s|detailedForecast|pv_estimate", issued, targets,
+                                     [actual[issue_idx + k] + 2.0 for k in range(len(targets))])
+            db.log_external_forecast("e", "sensor.s|detailedForecast|pv_estimate90", issued, targets,
+                                     [actual[issue_idx + k] + 9.0 for k in range(len(targets))])
+        specs = [
+            {"entity": "sensor.s", "source": "sensor.s|detailedForecast|pv_estimate",
+             "mode": "attribute", "table": None, "scale": None, "is_cumulative": False, "label": "p50"},
+            {"entity": "sensor.s", "source": "sensor.s|detailedForecast|pv_estimate90",
+             "mode": "attribute", "table": None, "scale": None, "is_cumulative": False, "label": "p90"},
+        ]
+        res = db.get_external_forecast_comparison("e", ttbl, specs, GENEROUS_WINDOW, INTERVAL, "raw")
+        assert len(res["comparisons"]) == 2
+        by = {c["label"]: c for c in res["comparisons"]}
+        assert abs(by["p50"]["head_to_head"]["external"]["mae"] - 2.0) < 0.5
+        assert abs(by["p90"]["head_to_head"]["external"]["mae"] - 9.0) < 0.5
 
     def test_delete_source(self, db):
         ttbl, e1, _ = self._seed(db)

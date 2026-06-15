@@ -2913,17 +2913,30 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # read from external_forecast_log (table=None). is_cumulative is
         # passed through as-is: None lets the DB auto-detect a cumulative
         # shape; True/False is an explicit override.
+        def _default_ext_label(e):
+            base = e.entity_id.split(".")[-1]
+            if e.mode == "attribute":
+                extra = e.value_key or (
+                    e.attribute if e.attribute and e.attribute != "forecast" else None
+                )
+                if extra:
+                    return base + " · " + extra
+            return base
+
         try:
             actuals_table = db.safe_table_name(exp_cfg.target_entity)
             specs = []
             for e in externals_cfg:
                 specs.append({
                     "entity": e.entity_id,
+                    # Composite identity so the same entity can supply several
+                    # distinct forecasts (different attribute / value key).
+                    "source": e.source_key,
                     "table": db.safe_table_name(e.entity_id) if e.mode == "state" else None,
                     "mode": e.mode,
                     "scale": e.scale,
                     "is_cumulative": e.is_cumulative,
-                    "label": e.label or e.entity_id.split(".")[-1],
+                    "label": e.label or _default_ext_label(e),
                     "unit": units_map.get(e.entity_id),
                 })
         except Exception as e:
@@ -3101,7 +3114,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     @app.post("/experiment/{name}/remove-external-forecast")
     async def remove_external_forecast(name: str, request: Request):
-        """Remove a third-party forecast (by entity_id) from an experiment."""
+        """Remove a third-party forecast from an experiment. The full identity
+        (entity_id + mode + attribute + value_key) is used so the right one is
+        removed when an entity is configured more than once."""
         if name not in app.state.appstate.experiment_statuses:
             raise HTTPException(status_code=404, detail="Experiment not found")
         try:
@@ -3111,19 +3126,29 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         entity = (body.get("entity_id") or body.get("entity") or "").strip()
         if not entity:
             return JSONResponse(content={"success": False, "error": "entity_id is required"})
+        mode = (body.get("mode") or None)
+        attribute = body.get("attribute") if body.get("attribute") not in (None, "") else None
+        value_key = body.get("value_key") if body.get("value_key") not in (None, "") else None
 
-        from ml_forecast_lab.config import remove_experiment_external_forecast
+        from ml_forecast_lab.config import (
+            remove_experiment_external_forecast, external_source_key,
+        )
         config_path = _find_config_path()
         if not config_path:
             return JSONResponse(content={"success": False, "error": "Config file not found"})
         try:
-            removed = remove_experiment_external_forecast(config_path, name, entity)
-            # Drop the captured trajectory rows for this source too (best
-            # effort) so a re-added sensor starts clean.
+            removed = remove_experiment_external_forecast(
+                config_path, name, entity, mode=mode,
+                attribute=attribute, value_key=value_key,
+            )
+            # Drop the captured trajectory rows for this exact source too
+            # (best effort) so a re-added forecast starts clean.
             db = app.state.appstate.history_db
             if removed and db:
                 try:
-                    db.delete_external_forecast_source(name, entity)
+                    db.delete_external_forecast_source(
+                        name, external_source_key(entity, mode or "state", attribute, value_key),
+                    )
                 except Exception:
                     pass
             return JSONResponse(content={"success": bool(removed)})

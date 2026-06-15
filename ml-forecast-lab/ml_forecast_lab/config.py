@@ -255,6 +255,43 @@ class ExternalForecastCfg:
                 f'got {self.mode!r}'
             )
 
+    @property
+    def source_key(self) -> str:
+        """Stable identity used as the ``external_forecast_log.source`` and to
+        distinguish multiple forecasts read from the *same* entity. State mode
+        has one reading per entity; attribute mode is keyed by the attribute +
+        value key so e.g. Solcast's ``pv_estimate`` / ``pv_estimate10`` /
+        ``pv_estimate90`` are independent comparisons."""
+        return external_source_key(
+            self.entity_id, self.mode, self.attribute, self.value_key,
+        )
+
+
+def external_source_key(entity_id, mode='state', attribute=None, value_key=None) -> str:
+    """Composite identity for an external forecast (see
+    ``ExternalForecastCfg.source_key``)."""
+    if (mode or 'state') == 'attribute':
+        return f"{entity_id}|{attribute or 'forecast'}|{value_key or ''}"
+    return entity_id or ''
+
+
+def _same_external(a: dict, b: dict) -> bool:
+    """Two external-forecast specs are the same only if they read the same
+    data: same entity AND mode, and (in attribute mode) the same attribute +
+    value key. Lets one entity be added more than once for different
+    forecasts within it."""
+    if a.get('entity_id') != b.get('entity_id'):
+        return False
+    am, bm = (a.get('mode') or 'state'), (b.get('mode') or 'state')
+    if am != bm:
+        return False
+    if am == 'attribute':
+        if (a.get('attribute') or 'forecast') != (b.get('attribute') or 'forecast'):
+            return False
+        if (a.get('value_key') or '') != (b.get('value_key') or ''):
+            return False
+    return True
+
 
 @dataclass
 class ExperimentCfg:
@@ -1508,8 +1545,9 @@ def add_experiment_external_forecast(
     Returns
     -------
     bool
-        True if added; False if the experiment wasn't found, the entity is
-        already configured, or the per-experiment cap is reached.
+        True if added; False if the experiment wasn't found, an identical
+        forecast (same entity + mode + attribute + value key) is already
+        configured, or the per-experiment cap is reached.
 
     Raises
     ------
@@ -1534,12 +1572,11 @@ def add_experiment_external_forecast(
         if exp.get('name') != experiment_name:
             continue
         items = exp.setdefault('external_forecasts', [])
+        # Reject only an exact duplicate (same data source) — the same entity
+        # may be added again for a different attribute / value key.
         for existing in items:
-            existing_id = (
-                existing if isinstance(existing, str)
-                else (existing or {}).get('entity_id')
-            )
-            if existing_id == external['entity_id']:
+            ex = {'entity_id': existing} if isinstance(existing, str) else (existing or {})
+            if _same_external(ex, external):
                 return False
         if len(items) >= MAX_EXTERNAL_FORECASTS:
             logger.warning(
@@ -1559,30 +1596,49 @@ def remove_experiment_external_forecast(
     config_path: Path | str,
     experiment_name: str,
     entity_id: str,
+    mode: Optional[str] = None,
+    attribute: Optional[str] = None,
+    value_key: Optional[str] = None,
 ) -> bool:
     """
     Remove a third-party forecast from an experiment's ``external_forecasts``.
 
-    ``entity_id`` can be the full entity id or its short suffix. Returns True
-    if an entry was removed.
+    ``entity_id`` can be the full entity id or its short suffix. When the same
+    entity is configured more than once (different attribute / value key),
+    pass ``mode`` / ``attribute`` / ``value_key`` to remove the specific one;
+    otherwise the first entry matching the entity is removed. Returns True if
+    an entry was removed.
     """
     config_path = Path(config_path)
     with open(config_path, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f) or {}
 
-    def _matches(item, target: str) -> bool:
-        ent = item if isinstance(item, str) else (item or {}).get('entity_id') or ''
+    def _matches(item) -> bool:
+        it = {'entity_id': item} if isinstance(item, str) else (item or {})
+        ent = it.get('entity_id') or ''
         if not ent:
             return False
-        return ent == target or ent.split('.')[-1] == target
+        if not (ent == entity_id or ent.split('.')[-1] == entity_id):
+            return False
+        if mode is not None and (it.get('mode') or 'state') != mode:
+            return False
+        if attribute is not None and (it.get('attribute') or 'forecast') != attribute:
+            return False
+        if value_key is not None and (it.get('value_key') or '') != (value_key or ''):
+            return False
+        return True
 
     removed = False
     for exp in data.get('experiments', []):
         if exp.get('name') != experiment_name:
             continue
         items = exp.get('external_forecasts', [])
-        kept = [i for i in items if not _matches(i, entity_id)]
-        removed = len(kept) < len(items)
+        kept = []
+        for i in items:
+            if not removed and _matches(i):
+                removed = True  # drop only the first match
+                continue
+            kept.append(i)
         if removed:
             if kept:
                 exp['external_forecasts'] = kept

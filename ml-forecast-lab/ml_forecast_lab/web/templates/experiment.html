@@ -2094,7 +2094,10 @@
         <div class="covariate-list" id="external-list">
             {% if _exts %}
             {% for ext in _exts %}
-            <div class="covariate-row" data-entity="{{ ext.entity_id }}">
+            <div class="covariate-row" data-entity="{{ ext.entity_id }}"
+                 data-mode="{{ ext.mode }}"
+                 data-attribute="{{ ext.attribute if ext.mode == 'attribute' else '' }}"
+                 data-value-key="{{ ext.value_key if (ext.mode == 'attribute' and ext.value_key) else '' }}">
                 <span class="cov-entity">{{ ext.label or ext.entity_id }}</span>
                 <span class="cov-meta monospace" style="font-size:0.75rem;color:var(--text-secondary);">{{ ext.entity_id }}</span>
                 <span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">{{ 'attribute' if ext.mode == 'attribute' else 'state' }}</span></span>
@@ -6734,9 +6737,15 @@ window.showTab = function(el) {
         var row = btn.closest('.covariate-row');
         var entity = row ? row.getAttribute('data-entity') : '';
         if (!entity) return;
+        // Full identity so the right entry is removed when one entity is
+        // configured more than once (different attribute / value key).
+        var payload = { entity_id: entity };
+        var m = row.getAttribute('data-mode'); if (m) payload.mode = m;
+        var at = row.getAttribute('data-attribute'); if (at) payload.attribute = at;
+        var vk = row.getAttribute('data-value-key'); if (vk) payload.value_key = vk;
         if (!confirm('Remove external forecast ' + entity + '?')) return;
         fetch(BASE + '/experiment/' + EXP + '/remove-external-forecast', {
-            method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({entity_id:entity}),
+            method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload),
         }).then(function(r){return r.json();}).then(function(res){
             if (res.success) {
                 if (row) row.remove();

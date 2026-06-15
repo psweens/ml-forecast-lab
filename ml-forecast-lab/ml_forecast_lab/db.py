@@ -3354,6 +3354,9 @@ class HistoryDB:
                 continue
             mode = spec.get("mode", "state") or "state"
             scale = spec.get("scale")
+            # Composite source key (entity + attribute + value_key) so the
+            # same entity can supply several distinct forecasts.
+            source = spec.get("source") or entity
             label = spec.get("label") or (entity.split(".")[-1] if entity else "External")
             e_dim, e_base = _classify_unit(spec.get("unit"))
             edf = pd.DataFrame(
@@ -3367,7 +3370,7 @@ class HistoryDB:
                         "FROM external_forecast_log "
                         "WHERE experiment = ? AND source = ? "
                         "AND issued_at >= ? AND target_dt <= ?",
-                        (experiment, entity, cutoff_str, now_str),
+                        (experiment, source, cutoff_str, now_str),
                     )
                     edf = pd.DataFrame(
                         cursor.fetchall(),
