@@ -2,18 +2,18 @@
 
 ## 2.44.0
 
-**New per-experiment "External Comparison" tab — benchmark the add-on's
-forecast against up to five third-party ones.** An experiment can name
-external forecast sensors (ones *not* produced by this add-on — Solcast, a
-utility day-ahead curve, another model) and the tab scores the add-on's
+**New per-experiment "Forecast Comparison" tab — benchmark the add-on's
+forecast against up to five third-party ones.** Add external forecast
+sensors (ones *not* produced by this add-on — Solcast, a utility day-ahead
+curve, another model) directly on the tab, and it scores the add-on's
 published forecast head-to-head against each, all against the actuals: a
 verdict, an accuracy-ranking table (MAE / RMSE / bias on the common
 samples, with the add-on as the reference row), an overlay chart of actual
 vs the add-on vs each external, and — for trajectory externals — a combined
 per-lead-time error curve.
 
-Externals are managed from the experiment's **Settings** tab (add / remove,
-capped at five). Each one has:
+Sensors are added and removed on the tab itself (capped at five). Each one
+has:
 
 - A **mode**. *Sensor state (time-series)* treats the entity's recorded
   state at each timestamp as its estimate for that moment; the state is

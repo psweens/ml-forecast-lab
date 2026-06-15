@@ -107,12 +107,8 @@
     {% else %}
     <a class="nav-disabled" title="Promote a model to production to see live forecast accuracy">Forecast Accuracy</a>
     {% endif %}
-    {% if exp_config and exp_config.external_forecasts and experiment.mode == 'production' %}
-    <a data-tab="sec-external-comparison" onclick="showTab(this)">External Comparison</a>
-    {% elif exp_config and exp_config.external_forecasts %}
-    <a class="nav-disabled" title="Promote a model to production to compare your forecast against the external ones">External Comparison</a>
-    {% else %}
-    <a class="nav-disabled" title="Add an external forecast sensor in this experiment's Settings tab to compare your forecast against it">External Comparison</a>
+    {% if exp_config %}
+    <a data-tab="sec-external-comparison" onclick="showTab(this)">Forecast Comparison</a>
     {% endif %}
 </nav>
 
@@ -414,76 +410,6 @@
                 <span class="field-label">Clear-sky irradiance <span class="info-tip">?<span class="tip-text">Theoretical maximum solar GHI (W/m²) under perfect clear-sky conditions via pvlib Ineichen model. Zero at night, peak at solar noon — ideal for solar PV forecasting.</span></span></span>
             </div>
         </div>
-    </div>
-
-    <!-- External forecast comparison (up to 5 third-party forecasts) -->
-    <div class="settings-group">
-        <h3 class="settings-group-title">External forecast comparison
-            <span class="info-tip">?<span class="tip-text">Compare this add-on's forecast against up to <b>five third-party forecasts of the same target</b> — ones NOT produced by this add-on (e.g. Solcast, a utility day-ahead curve, another model). The experiment gets an <b>External Comparison</b> tab that scores this add-on head-to-head against each, all against the actuals. Only collects data while the experiment is in <b>production</b> (that's when this add-on logs its own forecasts). Data accrues from when you add each — there's no historical backfill.</span></span>
-        </h3>
-        {% set _exts = exp_config.external_forecasts if exp_config else [] %}
-        <div class="covariate-list" id="external-list">
-            {% if _exts %}
-            {% for ext in _exts %}
-            <div class="covariate-row" data-entity="{{ ext.entity_id }}">
-                <span class="cov-entity">{{ ext.label or ext.entity_id }}</span>
-                <span class="cov-meta monospace" style="font-size:0.75rem;color:var(--text-secondary);">{{ ext.entity_id }}</span>
-                <span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">{{ 'attribute' if ext.mode == 'attribute' else 'state' }}</span></span>
-                {% if ext.mode == 'attribute' and ext.attribute %}<span class="cov-meta" style="font-style:italic;">attr: {{ ext.attribute }}</span>{% endif %}
-                {% if ext.mode == 'attribute' and ext.value_key %}<span class="cov-meta" style="font-style:italic;">key: {{ ext.value_key }}</span>{% endif %}
-                {% if ext.scale is not none %}<span class="cov-meta">scale: {{ ext.scale }}</span>{% endif %}
-                {% if ext.is_cumulative is not none %}<span class="cov-meta">{{ 'cumulative' if ext.is_cumulative else 'per-interval' }}</span>{% endif %}
-                <button class="cov-remove-btn" onclick="removeExternalForecast(this)" title="Remove">&times;</button>
-            </div>
-            {% endfor %}
-            {% else %}
-            <p id="no-external-msg" style="color:var(--text-secondary);font-size:0.85rem;">No external forecasts configured.</p>
-            {% endif %}
-        </div>
-
-        <div class="add-cov-form" id="add-external-form" style="margin-top:0.75rem;">
-            <div class="exp-field entity-search-wrapper">
-                <label class="field-label">Entity <span class="info-tip">?<span class="tip-text">The HA entity holding the third-party forecast. Start typing to search your live entity list.</span></span></label>
-                <input type="text" class="setting-input" id="ext-entity-input" placeholder="Search HA entities (e.g. sensor.solcast_forecast)..."
-                       autocomplete="off" oninput="searchEntities(this)">
-                <div class="entity-search-results" style="display:none;"></div>
-            </div>
-            <div class="exp-field">
-                <label class="field-label">Read forecast from <span class="info-tip">?<span class="tip-text"><b>Sensor state</b>: the entity's recorded value at each time IS its estimate for that moment (compared contemporaneously). <b>Forecast attribute</b>: a trajectory of future <code>{datetime, value}</code> points in an attribute (Solcast, weather) — enables a per-horizon comparison.</span></span></label>
-                <select class="setting-input" id="ext-mode-input" onchange="onExternalModeChanged()">
-                    <option value="state">Sensor state (time-series)</option>
-                    <option value="attribute">Forecast attribute (trajectory)</option>
-                </select>
-            </div>
-            <div class="exp-field">
-                <label class="field-label">Is cumulative? <span class="info-tip">?<span class="tip-text">Whether the forecast is a running total that must be differenced to per-interval demand. <b>Inherit</b> uses the target's "Cumulative source" setting.</span></span></label>
-                <select class="setting-input" id="ext-iscum-input">
-                    <option value="">Inherit from target</option>
-                    <option value="true">Yes — cumulative</option>
-                    <option value="false">No — per-interval</option>
-                </select>
-            </div>
-            <div class="exp-field">
-                <label class="field-label">Scale <span class="info-tip">?<span class="tip-text">Optional multiplier to fix a unit mismatch (e.g. Wh→kWh = 0.001). Blank = none.</span></span></label>
-                <input type="number" class="setting-input" id="ext-scale-input" step="any" placeholder="None">
-            </div>
-            <div class="exp-field" id="ext-attr-field" style="display:none;">
-                <label class="field-label">Forecast attribute <span class="info-tip">?<span class="tip-text">Which attribute (or weather type) holds the trajectory: <code>forecast</code> (default), <code>detailedForecast</code> (Solcast), <code>hourly</code>/<code>daily</code>. Blank = "forecast".</span></span></label>
-                <input type="text" class="setting-input" id="ext-attr-input" placeholder="forecast">
-            </div>
-            <div class="exp-field" id="ext-key-field" style="display:none;">
-                <label class="field-label">Value key <span class="info-tip">?<span class="tip-text">Key inside each trajectory entry holding the value (e.g. <code>pv_estimate</code>). Blank = auto-detect.</span></span></label>
-                <input type="text" class="setting-input" id="ext-key-input" placeholder="Auto-detect">
-            </div>
-            <div class="exp-field">
-                <label class="field-label">Display label <span class="info-tip">?<span class="tip-text">Friendly name in the comparison tab. Blank uses the entity's short name.</span></span></label>
-                <input type="text" class="setting-input" id="ext-label-input" placeholder="e.g. Solcast">
-            </div>
-            <button type="button" class="btn btn-secondary" id="add-external-btn" onclick="addExternalForecast()">Add external forecast</button>
-        </div>
-        <p style="color:var(--text-secondary);font-size:0.8rem;margin:0.6rem 0 0 0;">
-            Up to {{ 5 }} external forecasts. After adding or removing one, <b>reload the page</b> to show or hide the External Comparison tab.
-        </p>
     </div>
 
     <!-- Covariates -->
@@ -2151,14 +2077,81 @@
 </div>
 {% endif %}
 
-<!-- ====== TAB: External Comparison ====== -->
-{% if exp_config and exp_config.external_forecasts and experiment.mode == 'production' %}
+<!-- ====== TAB: Forecast Comparison ====== -->
+{% if exp_config %}
+{% set _exts = exp_config.external_forecasts %}
 <div class="tab-section" id="sec-external-comparison" style="display:none;">
 <section class="section">
-    <h2>External Comparison
-        <span class="info-tip">?<span class="tip-text">Head-to-head: this add-on's published forecast vs up to five third-party forecasts of this target (ones not produced by this add-on), all scored against the actuals over the selected window. Data is captured each production forecast cycle and accrues from when you added each — there's no historical backfill, so a freshly-added forecast fills in over the coming days.</span></span>
+    <h2>Forecast Comparison
+        <span class="info-tip">?<span class="tip-text">Head-to-head: this add-on's published forecast vs up to five third-party forecasts of this target (ones not produced by this add-on — Solcast, a utility day-ahead curve, another model), all scored against the actuals. Add the sensors below; data is captured each production forecast cycle and accrues going forward — there's no historical backfill, so a freshly-added forecast fills in over the coming days.</span></span>
     </h2>
-    <p class="subtitle" style="margin-top:-0.25rem;">vs {{ exp_config.external_forecasts | length }} external forecast{{ 's' if (exp_config.external_forecasts | length) != 1 else '' }}</p>
+
+    <!-- Manage the compared third-party forecasts (covariate-style) -->
+    <div class="settings-group" id="external-manage">
+        <h3 class="settings-group-title">Third-party forecasts to compare against
+            <span class="info-tip">?<span class="tip-text">Each entry is an HA entity holding a forecast of this same target, produced by something other than this add-on. Add up to five. <b>Sensor state</b> mode treats the entity's recorded value as its estimate for that moment; <b>Forecast attribute</b> mode reads a future trajectory from an attribute (Solcast, weather) for a per-horizon comparison.</span></span>
+        </h3>
+        <div class="covariate-list" id="external-list">
+            {% if _exts %}
+            {% for ext in _exts %}
+            <div class="covariate-row" data-entity="{{ ext.entity_id }}">
+                <span class="cov-entity">{{ ext.label or ext.entity_id }}</span>
+                <span class="cov-meta monospace" style="font-size:0.75rem;color:var(--text-secondary);">{{ ext.entity_id }}</span>
+                <span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">{{ 'attribute' if ext.mode == 'attribute' else 'state' }}</span></span>
+                {% if ext.mode == 'attribute' and ext.attribute %}<span class="cov-meta" style="font-style:italic;">attr: {{ ext.attribute }}</span>{% endif %}
+                {% if ext.mode == 'attribute' and ext.value_key %}<span class="cov-meta" style="font-style:italic;">key: {{ ext.value_key }}</span>{% endif %}
+                {% if ext.scale is not none %}<span class="cov-meta">scale: {{ ext.scale }}</span>{% endif %}
+                {% if ext.is_cumulative is not none %}<span class="cov-meta">{{ 'cumulative' if ext.is_cumulative else 'per-interval' }}</span>{% endif %}
+                <button class="cov-remove-btn" onclick="removeExternalForecast(this)" title="Remove">&times;</button>
+            </div>
+            {% endfor %}
+            {% else %}
+            <p id="no-external-msg" style="color:var(--text-secondary);font-size:0.85rem;">No third-party forecasts added yet — add one below to start comparing.</p>
+            {% endif %}
+        </div>
+
+        <div class="add-cov-form" id="add-external-form" style="margin-top:0.75rem;">
+            <div class="exp-field entity-search-wrapper">
+                <label class="field-label">Entity <span class="info-tip">?<span class="tip-text">The HA entity holding the third-party forecast. Start typing to search your live entity list.</span></span></label>
+                <input type="text" class="setting-input" id="ext-entity-input" placeholder="Search HA entities (e.g. sensor.solcast_forecast)..."
+                       autocomplete="off" oninput="searchEntities(this)">
+                <div class="entity-search-results" style="display:none;"></div>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Read forecast from <span class="info-tip">?<span class="tip-text"><b>Sensor state</b>: the entity's recorded value at each time IS its estimate for that moment (compared contemporaneously). <b>Forecast attribute</b>: a trajectory of future <code>{datetime, value}</code> points in an attribute (Solcast, weather) — enables a per-horizon comparison.</span></span></label>
+                <select class="setting-input" id="ext-mode-input" onchange="onExternalModeChanged()">
+                    <option value="state">Sensor state (time-series)</option>
+                    <option value="attribute">Forecast attribute (trajectory)</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Is cumulative? <span class="info-tip">?<span class="tip-text">Whether the forecast is a running total that must be differenced to per-interval demand. <b>Inherit</b> uses the target's "Cumulative source" setting.</span></span></label>
+                <select class="setting-input" id="ext-iscum-input">
+                    <option value="">Inherit from target</option>
+                    <option value="true">Yes — cumulative</option>
+                    <option value="false">No — per-interval</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Scale <span class="info-tip">?<span class="tip-text">Optional multiplier to fix a unit mismatch (e.g. Wh→kWh = 0.001). Blank = none.</span></span></label>
+                <input type="number" class="setting-input" id="ext-scale-input" step="any" placeholder="None">
+            </div>
+            <div class="exp-field" id="ext-attr-field" style="display:none;">
+                <label class="field-label">Forecast attribute <span class="info-tip">?<span class="tip-text">Which attribute (or weather type) holds the trajectory: <code>forecast</code> (default), <code>detailedForecast</code> (Solcast), <code>hourly</code>/<code>daily</code>. Blank = "forecast".</span></span></label>
+                <input type="text" class="setting-input" id="ext-attr-input" placeholder="forecast">
+            </div>
+            <div class="exp-field" id="ext-key-field" style="display:none;">
+                <label class="field-label">Value key <span class="info-tip">?<span class="tip-text">Key inside each trajectory entry holding the value (e.g. <code>pv_estimate</code>). Blank = auto-detect.</span></span></label>
+                <input type="text" class="setting-input" id="ext-key-input" placeholder="Auto-detect">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Display label <span class="info-tip">?<span class="tip-text">Friendly name shown in the comparison. Blank uses the entity's short name.</span></span></label>
+                <input type="text" class="setting-input" id="ext-label-input" placeholder="e.g. Solcast">
+            </div>
+            <button type="button" class="btn btn-secondary" id="add-external-btn" onclick="addExternalForecast()">Add forecast</button>
+        </div>
+        <p style="color:var(--text-secondary);font-size:0.8rem;margin:0.6rem 0 0 0;">Up to 5.{% if experiment.mode != 'production' %} <b>This experiment is in lab mode</b> — add forecasts now; scoring begins once you promote it to production (that's when this add-on logs its own forecasts to compare against).{% endif %}</p>
+    </div>
 
     <div class="acc-top-controls">
         <div class="acc-control">
@@ -2168,7 +2161,7 @@
                 <option value="30" selected>Last 30 days</option>
                 <option value="90">Last 90 days</option>
             </select>
-            <span class="info-tip">?<span class="tip-text">Time range for every chart and number on this tab. Shorter reflects recent behaviour; longer gives more samples.</span></span>
+            <span class="info-tip">?<span class="tip-text">Time range for every chart and number below. Shorter reflects recent behaviour; longer gives more samples.</span></span>
         </div>
     </div>
 
@@ -2220,7 +2213,7 @@
         <div class="empty-state">
             <span class="empty-state-icon">📊</span>
             <p id="external-empty-title">No comparison data yet.</p>
-            <p class="empty-state-hint" id="external-empty-hint">Each production forecast cycle captures the external forecast alongside this add-on's; once the actuals arrive, this tab scores them head-to-head. Data accrues from when you set the external sensor — give it a few cycles.</p>
+            <p class="empty-state-hint" id="external-empty-hint">Each production forecast cycle captures the added forecasts alongside this add-on's; once the actuals arrive, this tab scores them head-to-head. Data accrues from when you add each — give it a few cycles.</p>
         </div>
     </div>
 </section>
@@ -6589,7 +6582,7 @@ window.showTab = function(el) {
 })();
 </script>
 
-<!-- ======== External Comparison tab (multi-source) ======== -->
+<!-- ======== Forecast Comparison tab (multi-source) ======== -->
 <script>
 (function() {
     var BASE = {{ base_path | tojson }};
@@ -6629,13 +6622,19 @@ window.showTab = function(el) {
         }).then(function(r){return r.json();}).then(function(res){
             if (btn) btn.disabled = false;
             if (res.success) {
-                mlfl.toast('Added ' + entity + ' — reloading', 'success');
-                setTimeout(function(){ window.location.reload(); }, 600);
+                mlfl.toast('Added ' + entity, 'success');
+                _reloadToThisTab();
             } else {
                 mlfl.toast('Add failed: ' + (res.error || 'unknown'), 'error');
             }
         }).catch(function(err){ if(btn)btn.disabled=false; mlfl.toast('Add failed: '+err,'error'); });
     };
+
+    // Reload but return to this tab (the server re-renders the list + nav).
+    function _reloadToThisTab() {
+        try { window.location.hash = 'sec-external-comparison'; } catch (e) {}
+        setTimeout(function(){ window.location.reload(); }, 500);
+    }
 
     window.removeExternalForecast = function(btn) {
         var row = btn.closest('.covariate-row');
@@ -6647,8 +6646,8 @@ window.showTab = function(el) {
         }).then(function(r){return r.json();}).then(function(res){
             if (res.success) {
                 if (row) row.remove();
-                mlfl.toast('Removed ' + entity + ' — reloading', 'success');
-                setTimeout(function(){ window.location.reload(); }, 600);
+                mlfl.toast('Removed ' + entity, 'success');
+                _reloadToThisTab();
             } else {
                 mlfl.toast('Remove failed: ' + (res.error || 'unknown'), 'error');
             }
@@ -6813,7 +6812,7 @@ window.showTab = function(el) {
         fetch(BASE + '/experiment/' + EXP + '/external-forecast-comparison?days=' + encodeURIComponent(days))
             .then(function(r){ return r.json(); })
             .then(function(data){
-                if (!data || data.configured === false) { _showEmpty('No external forecasts configured.', 'Add one in this experiment’s Settings tab.'); return; }
+                if (!data || data.configured === false) { _showEmpty('No third-party forecasts added yet.', 'Use the form above to add a forecast sensor to compare against.'); return; }
                 if (data.error) { _showEmpty('Could not load comparison.', String(data.error)); return; }
                 var hasOverlay = data.overlay && data.overlay.ds && data.overlay.ds.length;
                 var hasH2H = (data.comparisons||[]).some(function(c){ return c.head_to_head; });
