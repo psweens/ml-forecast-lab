@@ -3040,6 +3040,51 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         table = db.safe_table_name(entity)
         return await asyncio.to_thread(db.store_history, table, df)
 
+    async def _probe_external_attribute(entity, attribute, value_key):
+        """Best-effort live check that an attribute-mode external resolves.
+        Returns a warning string if the chosen attribute is missing/empty or
+        the value_key doesn't appear in the forecast entries — so a typo is
+        caught at add time instead of silently logging zero rows for days.
+        Returns None when it looks fine OR when HA is unreachable (we never
+        block the add on a transient fetch failure)."""
+        import aiohttp as _aiohttp
+        attr = (attribute or "forecast").strip()
+        ha_url = os.environ.get("HA_URL", "http://supervisor/core")
+        ha_token = os.environ.get("SUPERVISOR_TOKEN", "")
+        try:
+            async with _aiohttp.ClientSession() as sess:
+                async with sess.get(
+                    f"{ha_url}/api/states/{entity}",
+                    headers={"Authorization": f"Bearer {ha_token}"},
+                    timeout=_aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status != 200:
+                        return None  # can't confirm — don't block the add
+                    state_obj = await resp.json()
+        except Exception:
+            return None
+        attrs = (state_obj or {}).get("attributes", {}) or {}
+        if attr not in attrs:
+            avail = [a for a in attrs if isinstance(attrs[a], (list, dict))]
+            return (
+                f"Attribute '{attr}' not found on {entity} right now. "
+                + (f"Forecast-shaped attributes available: {', '.join(avail[:6])}. "
+                   if avail else "")
+                + "The comparison will stay empty until it appears."
+            )
+        val = attrs.get(attr)
+        if not val:
+            return f"Attribute '{attr}' on {entity} is currently empty."
+        if value_key and isinstance(val, list) and val and isinstance(val[0], dict):
+            if value_key not in val[0]:
+                keys = [k for k in val[0].keys()]
+                return (
+                    f"Value key '{value_key}' not in '{attr}' entries "
+                    f"(keys: {', '.join(str(k) for k in keys[:8])}). "
+                    "Check the value key."
+                )
+        return None
+
     @app.post("/experiment/{name}/add-external-forecast")
     async def add_external_forecast(name: str, request: Request):
         """Add a third-party forecast to an experiment's external_forecasts.
@@ -3085,6 +3130,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             if added:
                 logger.info(f"Added external forecast {entity} to {name}")
                 backfilled = 0
+                warning = None
                 # State-mode sensors have real recorder history — backfill it
                 # now so the comparison line + head-to-head show immediately
                 # instead of only accruing from the next production cycle.
@@ -3095,9 +3141,19 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                         backfilled = await _backfill_external_state(entity)
                     except Exception as e:
                         logger.debug(f"External backfill for {entity} failed: {e}")
+                else:
+                    # Attribute mode: confirm the chosen attribute/value_key
+                    # resolves live (non-fatal — a typo shouldn't only surface
+                    # after days of empty logging).
+                    try:
+                        warning = await _probe_external_attribute(
+                            entity, ext.get("attribute"), ext.get("value_key"),
+                        )
+                    except Exception:
+                        warning = None
                 return JSONResponse(content={
                     "success": True, "entity_id": entity,
-                    "backfilled": backfilled,
+                    "backfilled": backfilled, "warning": warning,
                 })
             return JSONResponse(content={
                 "success": False,
@@ -4135,6 +4191,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "timezone": cfg.timezone,
                 "cpu_cores": cfg.cpu_cores,
                 "nice_priority": cfg.nice_priority,
+                "external_forecast_retention_days": cfg.external_forecast_retention_days,
             }
             experiment_configs = cfg.experiments
         except Exception:
@@ -4207,6 +4264,14 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 yaml_data["cpu_cores"] = int(data["cpu_cores"])
             if "nice_priority" in data:
                 yaml_data["nice_priority"] = int(data["nice_priority"])
+            if "external_forecast_retention_days" in data:
+                _r = int(data["external_forecast_retention_days"])
+                if _r < 1:
+                    return JSONResponse(content={
+                        "success": False,
+                        "error": "external_forecast_retention_days must be >= 1",
+                    })
+                yaml_data["external_forecast_retention_days"] = _r
 
             atomic_yaml_write(config_path, yaml_data)
 

@@ -769,8 +769,23 @@ class AppConfig:
     model_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     """Per-model hyperparameter overrides. Keys are model registry names."""
 
+    external_forecast_retention_days: int = 60
+    """How long captured third-party / external forecast trajectories
+    (the ``external_forecast_log`` rows behind the Forecast Comparison tab)
+    are kept before age-based pruning. Separate from the add-on's own
+    ``forecast_log`` (120 days) because external comparison data is
+    higher-volume (up to 5 sources × the horizon, every cycle) and a
+    rolling ~2 months is plenty for a head-to-head. Editable in the
+    System tab. State-mode external caches are pruned to the experiment's
+    ``max_age`` instead (they share the actuals cache)."""
+
     def __post_init__(self) -> None:
         """Validate application configuration."""
+        if self.external_forecast_retention_days < 1:
+            raise ValueError(
+                'external_forecast_retention_days must be >= 1, got '
+                f'{self.external_forecast_retention_days}'
+            )
         # Backward compat: if old update_every_minutes was set but new
         # forecast_every_minutes is at default, use the old value.
         if self.forecast_every_minutes == 30 and self.update_every_minutes != 5:

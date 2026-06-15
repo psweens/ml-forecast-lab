@@ -143,6 +143,30 @@ class TestExternalForecastCfg:
 # DB fixtures & helpers
 # ---------------------------------------------------------------------
 
+class TestExternalRetentionSetting:
+    """v2.44.x: external_forecast_retention_days (global, System tab)."""
+
+    def test_default_is_60(self, tmp_path):
+        p = tmp_path / "mlfl.yaml"
+        p.write_text(yaml.dump({"experiments": [
+            {"name": "e", "target_entity": "sensor.t"}]}))
+        assert load_config(p).external_forecast_retention_days == 60
+
+    def test_reads_from_yaml(self, tmp_path):
+        p = tmp_path / "mlfl.yaml"
+        p.write_text(yaml.dump({
+            "external_forecast_retention_days": 30,
+            "experiments": [{"name": "e", "target_entity": "sensor.t"}],
+        }))
+        assert load_config(p).external_forecast_retention_days == 30
+
+    def test_rejects_below_one(self):
+        from ml_forecast_lab.config import AppConfig
+        with pytest.raises(ValueError):
+            AppConfig(external_forecast_retention_days=0,
+                      experiments=[ExternalForecastCfg.__new__(ExternalForecastCfg)])
+
+
 @pytest.fixture
 def db(tmp_db):
     h = HistoryDB(tmp_db)

@@ -4235,22 +4235,28 @@ class MLForecastLabApp:
                         f"  forecast_log retention prune failed for "
                         f"{exp_cfg.name}: {e}"
                     )
-                # Same age-based retention for the external forecast log
-                # (attribute-mode third-party trajectories). State-mode
-                # external caches are pruned at capture time alongside
-                # actuals; this bounds the trajectory log.
+                # Age-based retention for the external forecast log
+                # (attribute-mode third-party trajectories), on its OWN
+                # configurable window (default 60d, System tab) — separate
+                # from forecast_log's 120d because external data is
+                # higher-volume. State-mode external caches are pruned at
+                # capture time alongside actuals (to the experiment's
+                # max_age); this bounds the trajectory log.
+                ext_retention = int(getattr(
+                    self.config, "external_forecast_retention_days", 60,
+                ))
                 try:
                     ext_pruned = await asyncio.to_thread(
                         self.history_db.cleanup_external_forecast_log,
                         exp_cfg.name,
                         datetime.now(timezone.utc).replace(tzinfo=None)
-                        - timedelta(days=FORECAST_LOG_RETENTION_DAYS),
+                        - timedelta(days=ext_retention),
                     )
                     if ext_pruned:
                         logger.info(
                             f"  external_forecast_log retention: pruned "
                             f"{ext_pruned} rows older than "
-                            f"{FORECAST_LOG_RETENTION_DAYS}d for {exp_cfg.name}"
+                            f"{ext_retention}d for {exp_cfg.name}"
                         )
                 except Exception as e:
                     logger.warning(
