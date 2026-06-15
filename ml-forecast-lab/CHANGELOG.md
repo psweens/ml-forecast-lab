@@ -2,58 +2,55 @@
 
 ## 2.44.0
 
-**New per-experiment "External Comparison" tab — score your forecast
-against up to five third-party ones.** Point an experiment at external
-forecast sensors (ones *not* produced by this add-on — Solcast, a utility
-day-ahead curve, another model) and a new tab scores this add-on's
+**New per-experiment "External Comparison" tab — benchmark the add-on's
+forecast against up to five third-party ones.** An experiment can name
+external forecast sensors (ones *not* produced by this add-on — Solcast, a
+utility day-ahead curve, another model) and the tab scores the add-on's
 published forecast head-to-head against each, all against the actuals: a
-verdict, an **accuracy ranking** table (MAE / RMSE / bias on the common
-samples, "this add-on" as the reference row), an overlay chart (actual /
-this add-on / each external), and — for trajectory externals — a combined
+verdict, an accuracy-ranking table (MAE / RMSE / bias on the common
+samples, with the add-on as the reference row), an overlay chart of actual
+vs the add-on vs each external, and — for trajectory externals — a combined
 per-lead-time error curve.
 
-Manage them in the experiment's **Settings** tab → *External forecast
-comparison* (add / remove, capped at **5**). Each external has:
+Externals are managed from the experiment's **Settings** tab (add / remove,
+capped at five). Each one has:
 
-- A **mode**. *Sensor state (time-series)* reads the entity's recorded
+- A **mode**. *Sensor state (time-series)* treats the entity's recorded
   state at each timestamp as its estimate for that moment; the state is
-  cached each production cycle (via the same history cache as the actuals),
+  cached every production cycle (via the same history cache as the actuals),
   so the comparison survives Home Assistant's recorder retention.
-  *Forecast attribute (trajectory)* reads a forecast array from an
-  attribute (`forecast`, `detailedForecast`, or a weather `hourly`/`daily`
-  service type — same resolver as future covariates) and logs the whole
-  trajectory each cycle to the new `external_forecast_log` table (tagged by
+  *Forecast attribute (trajectory)* reads a forecast array from an attribute
+  (`forecast`, `detailedForecast`, or a weather `hourly`/`daily` service
+  type — the same resolver future covariates use) and logs the whole
+  trajectory each cycle to the `external_forecast_log` table (tagged by
   source), enabling the per-horizon comparison.
-- Optional **scale** (fix a unit mismatch, e.g. Wh→kWh) and an
+- An optional **scale** (to fix a unit mismatch, e.g. Wh→kWh) and an
   **is-cumulative** override (defaults to inheriting the target's cumulative
-  setting) keep each forecast in the same evaluation space — raw for
+  setting), which keep each forecast in the same evaluation space — raw for
   instantaneous targets, per-interval demand for cumulative ones.
 
-The comparison aligns everything on the experiment's target grid and scores
-each external on the **common samples** (where the actual, this add-on's
-forecast, and that external all exist), so different update cadences never
-bias the result. A **comparison-basis** line makes the timing explicit
-(same-time snapshot for state mode vs lead-matched for trajectory mode, plus
-each side's typical lead) and flags any external that is sparse/stale
-relative to this add-on's own forecasts.
+Everything is aligned on the experiment's target grid and each external is
+scored on the **common samples** (where the actual, the add-on's forecast,
+and that external all exist), so differing update cadences don't bias the
+result. A comparison-basis line states the timing explicitly (same-time
+snapshot for state mode vs lead-matched for trajectory mode, plus each
+side's typical lead) and flags any external that is sparse or stale relative
+to the add-on's own forecasts.
 
-**Retention.** The new `external_forecast_log` is pruned on the same
-age-based schedule as `forecast_log` (120 days), and state-mode external
-caches are pruned to the experiment's `max_age` at capture time — so the
-internal stores stay bounded.
+The tab only collects data while the experiment is in **production** (when
+the add-on logs its own forecasts), and data accrues going forward — there
+is no historical backfill. The internal stores stay bounded: the trajectory
+log is pruned on the same age-based schedule as `forecast_log` (120 days)
+and state-mode caches are pruned to the experiment's `max_age`. Configured
+via the `external_forecasts` list (each entry: `entity_id`, `mode`,
+`attribute`, `value_key`, `scale`, `is_cumulative`, `label`); configs using
+the older flat `external_forecast_*` keys are migrated to the list on load.
 
-Notes: the tab only collects data while the experiment is in **production**
-(that's when this add-on logs its own forecasts), and data accrues from when
-you add each external — there's no historical backfill. Configured via the
-`external_forecasts` list (each entry: `entity_id`, `mode`, `attribute`,
-`value_key`, `scale`, `is_cumulative`, `label`); legacy flat
-`external_forecast_*` keys are auto-migrated into the list on load.
-
-**Chart axis labels tidied up.** Every experiment chart now has a
-capitalised axis label with units where the quantity carries them — the
+**Chart axis labels tidied up.** Every experiment chart now carries a
+capitalised axis label with units where the quantity has them — the
 forecast-evolution y-axis uses the humanised experiment name (e.g. "Solar
 Forecast (W)") instead of the raw slug, the run-to-run stability spread
-shows units, and a couple of lower-cased / unit-less labels were corrected.
+shows units, and a few lower-cased or unit-less labels were corrected.
 
 ## 2.43.1
 
