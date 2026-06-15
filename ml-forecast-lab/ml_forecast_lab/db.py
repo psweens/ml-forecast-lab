@@ -18,6 +18,13 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# v2.44.x: the Forecast Comparison tab treats a source as "warming up"
+# (results inconclusive) until it has at least this many distinct days of
+# overlapping data. Surfaced per-source and as a top-level flag so the UI
+# can grey provisional lines, badge "n/7 days", and suppress the headline
+# verdict until the comparison clears the gate.
+EXTERNAL_COMPARISON_WARMUP_DAYS = 7
+
 
 def _locked(fn):
     """Serialise SQLite access via ``self._lock``.
@@ -3470,12 +3477,74 @@ class HistoryDB:
         if len(idx):
             result["date_range"] = {"start": _iso_utc(idx.min()), "end": _iso_utc(idx.max())}
 
+        # --- typical magnitude (for "% of typical") in the display space ---
+        # Mean |actual| over the window; the same normaliser for every source
+        # so "% of typical" is comparable across rows.
+        _ad_win = actual_disp.reindex(idx) if (actual_disp is not None and len(idx)) else actual_disp
+        typical = (
+            round(float(_ad_win.abs().mean()), 4)
+            if (_ad_win is not None and _ad_win.notna().any()) else 0.0
+        )
+
+        def _pct(mae):
+            return round(mae / typical * 100.0, 1) if typical and typical > 1e-9 else None
+
         def _err(df, col):
             e = (df[col] - df["actual"]).astype(float)
+            mae = float(e.abs().mean())
             return {
-                "mae": round(float(e.abs().mean()), 4),
+                "mae": round(mae, 4),
                 "rmse": round(float(np.sqrt((e ** 2).mean())), 4),
                 "bias": round(float(e.mean()), 4),
+                "pct": _pct(mae),
+            }
+
+        def _daily_err(pred_canon, common_index):
+            """Daily-total MAE/bias on the CANONICAL per-interval energy,
+            restricted to the supplied (already 2- or 3-way intersected)
+            index so every series sums over identical bins each day — no
+            partial-day coverage bias."""
+            if pred_canon is None or actual_canon is None or len(common_index) == 0:
+                return None
+            m = pd.DataFrame({
+                "a": actual_canon.reindex(common_index),
+                "p": pred_canon.reindex(common_index),
+            }).dropna()
+            if m.empty:
+                return None
+            day = m.index.normalize()
+            a_d = m["a"].groupby(day).sum()
+            p_d = m["p"].groupby(day).sum()
+            de = (p_d - a_d).astype(float)
+            return {
+                "mae": round(float(de.abs().mean()), 4),
+                "bias": round(float(de.mean()), 4),
+                "days": int(de.shape[0]),
+            }
+
+        def _metrics_block(pred_disp, pred_canon):
+            """Standalone accuracy of one source vs the actual on their OWN
+            2-way overlap (for the row display): mae/rmse/bias/% of typical,
+            daily MAE/bias, distinct days logged, and the warming-up flag."""
+            al = pd.DataFrame({"actual": actual_disp, "pred": pred_disp})
+            if len(idx):
+                al = al.reindex(idx)
+            common = al.dropna(subset=["actual", "pred"])
+            if common.empty:
+                return None
+            e = (common["pred"] - common["actual"]).astype(float)
+            mae = float(e.abs().mean())
+            day = common.index.normalize()
+            days_logged = int(len(set(day)))
+            return {
+                "mae": round(mae, 4),
+                "rmse": round(float(np.sqrt((e ** 2).mean())), 4),
+                "bias": round(float(e.mean()), 4),
+                "pct": _pct(mae),
+                "n": int(len(common)),
+                "daily": _daily_err(pred_canon, common.index),
+                "days_logged": days_logged,
+                "warming": days_logged < EXTERNAL_COMPARISON_WARMUP_DAYS,
             }
 
         # --- per-external head-to-head + timing (on the display series) ---
@@ -3505,6 +3574,10 @@ class HistoryDB:
                 h2h = {
                     "n": n_common, "app": app_m, "external": ext_m,
                     "winner": winner, "app_mae_improvement_pct": impr,
+                    "daily": {
+                        "app": _daily_err(app_canon, common.index),
+                        "external": _daily_err(it["canon"], common.index),
+                    },
                 }
                 # Scale-mismatch guard: after unit-aware conversion a genuine
                 # like-for-like sits near ratio 1; a large gap means the units
@@ -3528,12 +3601,84 @@ class HistoryDB:
                 "grid_points": int(len(idx)),
                 "external_stale": bool(app_points > 0 and ext_points < 0.5 * app_points),
             }
+            # Standalone row metrics (own 2-way overlap with actual) + the
+            # warming-up gate. days_logged counts distinct calendar days with
+            # overlapping data; below EXTERNAL_COMPARISON_WARMUP_DAYS the row
+            # is flagged provisional/inconclusive.
+            ext_block = _metrics_block(it["disp"], it["canon"])
             result["comparisons"].append({
                 "entity": it["entity"], "label": it["label"], "mode": it["mode"],
                 "head_to_head": h2h, "timing": timing, "n": n_common,
                 "scale_ratio": scale_ratio, "scale_mismatch": scale_mismatch,
                 "auto_cumulative": it["auto_cumulative"],
+                "metrics": ext_block,
+                "days_logged": (ext_block["days_logged"] if ext_block else 0),
+                "warming": (ext_block["warming"] if ext_block else True),
             })
+
+        # --- app reference row (standalone), Seasonal Naive baseline, and
+        #     the top-level warming-up gate ---
+        app_self = _metrics_block(app_disp, app_canon)
+        result["app_self"] = app_self
+        result["app_days_logged"] = app_self["days_logged"] if app_self else 0
+        result["typical"] = typical
+        result["warmup_days"] = EXTERNAL_COMPARISON_WARMUP_DAYS
+
+        # Seasonal Naive ("same time yesterday") as a default baseline row —
+        # the free do-nothing reference. Computed from the canonical actuals
+        # shifted one day; lands in its own `baseline` key (not `comparisons`)
+        # so it never occupies one of the five competitor slots.
+        result["baseline"] = None
+        result["overlay"]["baseline"] = None
+        if actual_canon is not None and not actual_canon.empty:
+            season_bins = max(1, int(round(1440.0 / bucket_min)))
+            full = pd.date_range(actual_canon.index.min(),
+                                 actual_canon.index.max(), freq=freq)
+            naive_canon = actual_canon.reindex(full).shift(season_bins).dropna()
+            if not naive_canon.empty:
+                naive_disp = _display(naive_canon)
+                nb = _metrics_block(naive_disp, naive_canon)
+                if nb is not None:
+                    al = pd.DataFrame(
+                        {"actual": actual_disp, "app": app_disp, "external": naive_disp}
+                    )
+                    if len(idx):
+                        al = al.reindex(idx)
+                    cb = al.dropna(subset=["actual", "app", "external"])
+                    h2h_b = None
+                    if len(cb) >= 1:
+                        a_m = _err(cb, "app")
+                        n_m = _err(cb, "external")
+                        if a_m["mae"] < n_m["mae"]:
+                            w = "app"
+                        elif n_m["mae"] < a_m["mae"]:
+                            w = "external"
+                        else:
+                            w = "tie"
+                        impr_b = (round((n_m["mae"] - a_m["mae"]) / n_m["mae"] * 100.0, 1)
+                                  if n_m["mae"] > 0 else None)
+                        h2h_b = {
+                            "n": int(len(cb)), "app": a_m, "external": n_m,
+                            "winner": w, "app_mae_improvement_pct": impr_b,
+                            "daily": {
+                                "app": _daily_err(app_canon, cb.index),
+                                "external": _daily_err(naive_canon, cb.index),
+                            },
+                        }
+                    result["baseline"] = {
+                        "label": "Seasonal Naive", "is_baseline": True,
+                        "metrics": nb, "head_to_head": h2h_b,
+                        "days_logged": nb["days_logged"], "warming": nb["warming"],
+                    }
+                    result["overlay"]["baseline"] = _col(naive_disp)
+
+        # Top-level warming gate: inconclusive while the add-on OR any
+        # configured external still lacks the threshold days of overlap.
+        _warm = [bool(app_self and app_self["warming"])]
+        for _c in result["comparisons"]:
+            if _c.get("metrics"):
+                _warm.append(bool(_c["warming"]))
+        result["warming_up"] = any(_warm) if (app_self or result["comparisons"]) else False
 
         # --- combined lead-time (app + attribute externals), always
         #     per-interval canonical energy so horizons are comparable ---

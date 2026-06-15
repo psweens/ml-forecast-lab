@@ -418,6 +418,99 @@ class TestComparisonMulti:
         assert cur.fetchone()[0] == 0
 
 
+class TestComparisonBaselineAndWarmup:
+    """v2.44.x additions: Seasonal Naive baseline row, %-of-typical + daily
+    metrics, and the 7-day warming-up gate."""
+
+    def _seed_days(self, db, n_days=10, interval=INTERVAL, mae_app=4.0, mae_ext=12.0):
+        """Seed n_days of a repeating diurnal actual + app forecast (lead 1)
+        + one state-mode external. Returns (ttbl, e1_table, n_days)."""
+        per_day = 24 * 60 // interval
+        grid = list(pd.date_range("2024-06-01 00:00", periods=per_day * n_days,
+                                   freq=f"{interval}min"))
+        # Repeating daily shape so 'same time yesterday' is a good naive.
+        actual = [100.0 + 50.0 * math.sin((i % per_day) / 4.0) + 60.0 for i in range(len(grid))]
+        ttbl = db.safe_table_name("sensor.load_w")
+        db.store_history(ttbl, pd.DataFrame({"ds": grid, "value": actual}))
+        for i, t in enumerate(grid):
+            db.log_forecast(experiment="e", issued_at=t - timedelta(minutes=interval),
+                            targets=[t], predictions=[actual[i] + mae_app],
+                            model_name="lgb", model_version="v1")
+        e1 = db.safe_table_name("sensor.ext_state")
+        db.store_history(e1, pd.DataFrame({"ds": grid,
+                                           "value": [actual[i] + mae_ext for i in range(len(grid))]}))
+        return ttbl, e1, n_days
+
+    def test_seasonal_naive_baseline_present(self, db):
+        ttbl, e1, _ = self._seed_days(db, n_days=10)
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, [_spec("sensor.ext_state", "state", e1, label="Crude")],
+            GENEROUS_WINDOW, INTERVAL, "raw")
+        base = res["baseline"]
+        assert base is not None, "Seasonal Naive baseline should be computed"
+        assert base["label"] == "Seasonal Naive"
+        assert base["is_baseline"] is True
+        # repeating-day actual → 'same time yesterday' is near-perfect
+        assert base["metrics"]["mae"] < 1.0
+        # baseline is NOT counted as a configured competitor row
+        assert len(res["comparisons"]) == 1
+        # overlay carries a baseline line aligned to ds
+        assert res["overlay"]["baseline"] is not None
+        assert len(res["overlay"]["baseline"]) == len(res["overlay"]["ds"])
+        # naive should beat the +12 external on its head-to-head vs app? no —
+        # naive vs APP: app MAE ~4, naive MAE ~0 → naive wins (external='naive')
+        assert base["head_to_head"]["winner"] == "external"
+
+    def test_single_day_has_no_naive_baseline(self, db):
+        # < 1 day of data → 'same time yesterday' has no overlap → no baseline.
+        ttbl, e1, _ = self._seed_days(db, n_days=1)
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, [_spec("sensor.ext_state", "state", e1)],
+            GENEROUS_WINDOW, INTERVAL, "raw")
+        assert res["baseline"] is None
+        assert res["overlay"]["baseline"] is None
+
+    def test_pct_of_typical_and_daily_metrics(self, db):
+        ttbl, e1, _ = self._seed_days(db, n_days=8, mae_app=4.0, mae_ext=12.0)
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, [_spec("sensor.ext_state", "state", e1, label="Crude")],
+            GENEROUS_WINDOW, INTERVAL, "raw")
+        c = res["comparisons"][0]
+        # %-of-typical present on head-to-head and on the standalone metrics
+        assert c["head_to_head"]["app"]["pct"] is not None
+        assert c["head_to_head"]["external"]["pct"] is not None
+        assert c["metrics"]["pct"] is not None
+        # daily MAE present and external (+12/bin) much worse than app (+4/bin)
+        assert c["head_to_head"]["daily"]["app"]["mae"] < c["head_to_head"]["daily"]["external"]["mae"]
+        assert res["typical"] > 0
+        # app reference row carries the same metric family
+        assert res["app_self"] is not None
+        assert res["app_self"]["pct"] is not None
+        assert res["app_self"]["daily"] is not None
+
+    def test_warming_up_flag_below_threshold(self, db):
+        # 4 distinct days < 7-day threshold → warming.
+        ttbl, e1, _ = self._seed_days(db, n_days=4)
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, [_spec("sensor.ext_state", "state", e1)],
+            GENEROUS_WINDOW, INTERVAL, "raw")
+        assert res["warmup_days"] == 7
+        assert res["warming_up"] is True
+        assert res["comparisons"][0]["warming"] is True
+        assert res["comparisons"][0]["days_logged"] == 4
+        assert res["app_days_logged"] == 4
+
+    def test_not_warming_above_threshold(self, db):
+        # 9 distinct days ≥ 7 → not warming.
+        ttbl, e1, _ = self._seed_days(db, n_days=9)
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, [_spec("sensor.ext_state", "state", e1)],
+            GENEROUS_WINDOW, INTERVAL, "raw")
+        assert res["warming_up"] is False
+        assert res["comparisons"][0]["warming"] is False
+        assert res["comparisons"][0]["days_logged"] == 9
+
+
 class TestComparisonEmptyStates:
     def test_missing_actuals_table(self, db):
         res = db.get_external_forecast_comparison(
