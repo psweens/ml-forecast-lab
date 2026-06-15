@@ -1266,9 +1266,9 @@ class MLForecastLabApp:
             return unit
 
         # Fetch failed or the source reported no unit. Prefer the last known
-        # good unit over republishing "" — the empty-unit regression the
-        # user saw after a retrain was exactly this path clobbering a good
-        # value on a transient miss.
+        # good unit over republishing "": a transient miss on the
+        # post-retrain re-resolve must not clobber a good value and make HA
+        # flag a unit_of_measurement change.
         last_good = self._source_unit_last_good.get(entity)
         if last_good:
             logger.debug(
