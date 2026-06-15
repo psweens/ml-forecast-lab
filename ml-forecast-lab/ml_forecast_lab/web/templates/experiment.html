@@ -2236,6 +2236,14 @@
         <div id="external-overlay-chart" style="width:100%;height:380px;"></div>
     </div>
 
+    <!-- Error by hour-of-day (all sources; client-side from the overlay) -->
+    <div id="external-hour-group" class="settings-group" style="display:none;">
+        <h3 class="settings-group-title">Error by time of day
+            <span class="info-tip">?<span class="tip-text">Mean absolute error grouped by hour of day, one line per forecaster — catches regime-specific strengths the headline numbers hide (e.g. ML Forecast Lab wins mornings, an external wins afternoons). Computed in the current Analysis view (per-interval or cumulative). Provisional (warming) sources are drawn faded.</span></span>
+        </h3>
+        <div id="external-hour-chart" style="width:100%;height:320px;"></div>
+    </div>
+
     <!-- Lead-time curve (attribute-mode externals only) -->
     <div id="external-leadtime-group" class="settings-group" style="display:none;">
         <h3 class="settings-group-title">Error by forecast horizon — ML Forecast Lab vs externals
@@ -6820,7 +6828,7 @@ window.showTab = function(el) {
     }
     function _hide(id){ var el=document.getElementById(id); if(el) el.style.display='none'; }
     function _showEmpty(title, hint) {
-        ['external-verdict-card','external-ranktable-group','external-timing','external-leadtime-group','external-warming-banner'].forEach(_hide);
+        ['external-verdict-card','external-ranktable-group','external-timing','external-leadtime-group','external-hour-group','external-warming-banner'].forEach(_hide);
         var empty = document.getElementById('external-empty');
         if (empty) { empty.style.display='';
             if (title){var t=document.getElementById('external-empty-title'); if(t)t.textContent=title;}
@@ -7086,6 +7094,49 @@ window.showTab = function(el) {
         }, {responsive:true});
     }
 
+    // Error by hour-of-day, derived client-side from the overlay arrays so
+    // it follows the chosen Analysis view and needs no extra endpoint.
+    function _renderHourly(data) {
+        var grp = document.getElementById('external-hour-group');
+        var hc = document.getElementById('external-hour-chart');
+        if (!grp || !hc || !window.Plotly) { if(grp)grp.style.display='none'; return; }
+        var ov = data.overlay || {};
+        if (!ov.ds || !ov.ds.length || !ov.actual) { grp.style.display='none'; return; }
+        var hours = ov.ds.map(function(s){ return new Date(s).getHours(); });
+        // Mean |pred - actual| per hour for one prediction array.
+        function _hourMae(pred) {
+            var sum = new Array(24).fill(0), cnt = new Array(24).fill(0);
+            for (var i = 0; i < hours.length; i++) {
+                var a = ov.actual[i], p = pred ? pred[i] : null;
+                if (a === null || a === undefined || p === null || p === undefined) continue;
+                var h = hours[i]; sum[h] += Math.abs(p - a); cnt[h] += 1;
+            }
+            return sum.map(function(s, h){ return cnt[h] ? s / cnt[h] : null; });
+        }
+        var warmByLabel = {};
+        (data.comparisons || []).forEach(function(c){ warmByLabel[(c.label||c.entity)] = !!c.warming; });
+        var hx = []; for (var h = 0; h < 24; h++) hx.push(h);
+        var traces = [{ x:hx, y:_hourMae(ov.app), name:'ML Forecast Lab', type:'scatter', mode:'lines+markers', line:{color:C_APP,width:2}, marker:{size:4}, connectgaps:false }];
+        (ov.externals||[]).forEach(function(ex, i){
+            var nm = ex.label||ex.entity;
+            traces.push({ x:hx, y:_hourMae(ex.values), name: nm + (warmByLabel[nm]?' ⏳':''), type:'scatter', mode:'lines+markers',
+                line:{color:EXT_COLORS[i%EXT_COLORS.length], width:2, dash:'dot'}, marker:{size:4},
+                opacity: warmByLabel[nm] ? 0.45 : 1.0, connectgaps:false });
+        });
+        if (ov.baseline && ov.baseline.length) {
+            traces.push({ x:hx, y:_hourMae(ov.baseline), name:'Seasonal Naive', type:'scatter', mode:'lines+markers',
+                line:{color:'#94a3b8', width:1.5, dash:'dash'}, marker:{size:3}, opacity:0.8, connectgaps:false });
+        }
+        var units = data.display_unit || data.units || '';
+        Plotly.newPlot(hc, traces, {
+            xaxis:{title:'Hour of day', color:DARK.axis, gridcolor:DARK.grid, dtick:3, range:[-0.5,23.5]},
+            yaxis:{title:'MAE'+(units?(' ('+units+')'):''), color:DARK.axis, gridcolor:DARK.grid},
+            plot_bgcolor:DARK.plot_bgcolor, paper_bgcolor:DARK.paper_bgcolor, font:DARK.font,
+            hovermode:'x unified', legend:{orientation:'h', y:-0.25}, margin:{t:20,r:20,b:60},
+        }, {responsive:true});
+        grp.style.display = '';
+    }
+
     function _renderLeadtime(data) {
         var grp = document.getElementById('external-leadtime-group');
         var lc = document.getElementById('external-leadtime-chart');
@@ -7126,6 +7177,7 @@ window.showTab = function(el) {
                 _renderRankTable(data);
                 _renderTiming(data);
                 _renderOverlay(data);
+                _renderHourly(data);
                 _renderLeadtime(data);
             })
             .catch(function(err){ _showEmpty('Could not load comparison.', String(err)); });
