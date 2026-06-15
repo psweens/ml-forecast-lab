@@ -2178,7 +2178,22 @@
             </div>
             <span class="info-tip">?<span class="tip-text"><b>Per-interval</b>: per-bin demand in the target's native unit (e.g. kW). <b>Cumulative</b>: the running daily total (kWh), integrating power forecasts to energy — this is what makes a cumulative-energy sensor directly comparable. Scoring follows the chosen view; the horizon chart stays per-interval.</span></span>
         </div>
+        <div class="acc-control">
+            <label for="external-metric">Rank by:</label>
+            <select id="external-metric" class="setting-input" onchange="setExternalMetric(this.value)">
+                <option value="mae" selected>MAE</option>
+                <option value="rmse">RMSE</option>
+                <option value="bias">Bias</option>
+                <option value="pct">% of typical</option>
+                <option value="daily_mae">Daily MAE</option>
+                <option value="daily_bias">Daily bias</option>
+            </select>
+            <span class="info-tip">?<span class="tip-text">Which metric ranks the table and decides the head-to-head verdict. <b>MAE</b> (default) is the average error; <b>% of typical</b> normalises it against typical demand so it's readable without knowing the units; <b>Daily MAE/bias</b> compare the running daily total (the headline for an energy sensor). The chosen metric's column is highlighted and the best value in each column is bolded.</span></span>
+        </div>
     </div>
+
+    <!-- Warming-up banner (results inconclusive below the threshold) -->
+    <div id="external-warming-banner" style="display:none;margin:0.25rem 0 0.75rem 0;padding:0.6rem 0.9rem;border:1px solid var(--warning);border-radius:8px;background:rgba(245,158,11,0.08);color:var(--warning);font-size:0.9rem;"></div>
 
     <!-- Verdict headline -->
     <div id="external-verdict-card" class="verdict-card" style="display:none;">
@@ -2193,8 +2208,14 @@
         <div class="table-container">
             <table class="metrics-table" id="external-ranktable">
                 <thead><tr>
-                    <th>Forecast</th><th>MAE</th><th>RMSE</th><th>Bias</th>
-                    <th>vs ML Forecast Lab</th><th>Samples</th>
+                    <th>Forecast</th>
+                    <th data-metric="mae">MAE</th>
+                    <th data-metric="rmse">RMSE</th>
+                    <th data-metric="bias">Bias</th>
+                    <th data-metric="pct">% of typical</th>
+                    <th data-metric="daily_mae">Daily MAE</th>
+                    <th data-metric="daily_bias">Daily bias</th>
+                    <th>vs ML Forecast Lab</th><th>Days</th><th>Samples</th>
                 </tr></thead>
                 <tbody id="external-ranktable-body"></tbody>
             </table>
@@ -6619,6 +6640,32 @@ window.showTab = function(el) {
         loadExternalComparison();
     };
 
+    // v2.44.x: ranking metric + cached payload so the selector re-renders the
+    // table/verdict client-side without a re-fetch.
+    var _externalMetric = 'mae';
+    var _lastExternalData = null;
+    window.setExternalMetric = function(m) {
+        var valid = {mae:1, rmse:1, bias:1, pct:1, daily_mae:1, daily_bias:1};
+        _externalMetric = valid[m] ? m : 'mae';
+        if (_lastExternalData) {
+            _renderVerdict(_lastExternalData);
+            _renderRankTable(_lastExternalData);
+        }
+    };
+    // Pull the selected metric's scalar out of a metric block; returns
+    // {val, lowerBetter} so highlighting/sort know the direction.
+    function _metricVal(block, daily) {
+        if (!block) return null;
+        switch (_externalMetric) {
+            case 'rmse': return {val: block.rmse, lower: true};
+            case 'bias': return {val: block.bias, lower: true, abs: true};
+            case 'pct': return {val: block.pct, lower: true};
+            case 'daily_mae': return {val: daily ? daily.mae : null, lower: true};
+            case 'daily_bias': return {val: daily ? daily.bias : null, lower: true, abs: true};
+            default: return {val: block.mae, lower: true};
+        }
+    }
+
     // ---- Settings add-form: toggle attribute-only fields by mode ----
     window.onExternalModeChanged = function() {
         var sel = document.getElementById('ext-mode-input');
@@ -6720,6 +6767,9 @@ window.showTab = function(el) {
                 var msg = 'Added ' + entity;
                 if (res.backfilled) msg += ' — backfilled ' + res.backfilled + ' history points';
                 mlfl.toast(msg, 'success');
+                // Non-fatal add-time validation (attribute/value_key didn't
+                // resolve live) — warn but keep the add.
+                if (res.warning) { try { mlfl.toast('⚠ ' + res.warning, 'warning'); } catch(e){} }
                 _reloadToThisTab();
             } else {
                 mlfl.toast('Add failed: ' + (res.error || 'unknown'), 'error');
@@ -6770,7 +6820,7 @@ window.showTab = function(el) {
     }
     function _hide(id){ var el=document.getElementById(id); if(el) el.style.display='none'; }
     function _showEmpty(title, hint) {
-        ['external-verdict-card','external-ranktable-group','external-timing','external-leadtime-group'].forEach(_hide);
+        ['external-verdict-card','external-ranktable-group','external-timing','external-leadtime-group','external-warming-banner'].forEach(_hide);
         var empty = document.getElementById('external-empty');
         if (empty) { empty.style.display='';
             if (title){var t=document.getElementById('external-empty-title'); if(t)t.textContent=title;}
@@ -6784,46 +6834,150 @@ window.showTab = function(el) {
         var body = document.getElementById('external-ranktable-body');
         if (!grp || !body) return;
         var units = data.display_unit || data.units || '';
+        var dunits = units;  // daily metrics share the display unit
         var comps = (data.comparisons || []).filter(function(c){ return c.head_to_head; });
         if (!comps.length) { grp.style.display='none'; return; }
-        var rows = '';
+        var warmDays = data.warmup_days || 7;
+
+        // Build a uniform row model: app reference, each external, Seasonal
+        // Naive baseline. Each carries the metric block + daily + warming.
+        var R = [];
+        var appBlock = data.app_self || comps[0].head_to_head.app;
+        var appDaily = (data.app_self && data.app_self.daily)
+            || (comps[0].head_to_head.daily && comps[0].head_to_head.daily.app) || null;
+        R.push({ kind:'app', label:'ML Forecast Lab', color:C_APP,
+                 block:appBlock, daily:appDaily,
+                 days:(data.app_days_logged||0), warming:!!(appBlock && appBlock.warming),
+                 mismatch:false, ratio:null, vs:'reference', n:(appBlock?appBlock.n:0) });
         comps.forEach(function(c, i) {
             var h = c.head_to_head;
-            var deltaTxt;
-            if (c.scale_mismatch) {
-                // A unit / cumulative mismatch makes the % delta meaningless.
-                deltaTxt = '<span style="color:var(--warning);">⚠ scale mismatch (≈' + (c.scale_ratio || '?') + '×)</span>';
-            } else if (h.app_mae_improvement_pct === null || h.app_mae_improvement_pct === undefined) {
-                deltaTxt = '—';
-            } else if (h.winner === 'app') {
-                deltaTxt = '<span style="color:var(--success);">add-on ' + Math.abs(h.app_mae_improvement_pct).toFixed(0) + '% better</span>';
-            } else if (h.winner === 'external') {
-                deltaTxt = '<span style="color:var(--warning);">' + Math.abs(h.app_mae_improvement_pct).toFixed(0) + '% better</span>';
-            } else { deltaTxt = '≈ tie'; }
-            var color = EXT_COLORS[i % EXT_COLORS.length];
-            var nameCell = '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+color+';margin-right:6px;"></span>'
-                + (c.label || c.entity) + ' <span style="color:var(--text-secondary);font-size:0.8rem;">(' + (c.mode === 'attribute' ? 'trajectory' : 'state') + ')</span>'
-                + (c.scale_mismatch ? ' <span title="On a very different scale to the target — likely a unit or cumulative mismatch" style="color:var(--warning);">⚠</span>' : '');
-            rows += '<tr' + (c.scale_mismatch ? ' style="opacity:0.7;"' : '') + '>'
-                + '<td>' + nameCell + '</td>'
-                + '<td>' + _fmt(h.external.mae, units) + '</td>'
-                + '<td>' + _fmt(h.external.rmse, units) + '</td>'
-                + '<td>' + _fmt(h.external.bias, units) + '</td>'
-                + '<td>' + deltaTxt + '</td>'
-                + '<td>' + h.n + '</td>'
-                + '</tr>';
+            R.push({ kind:'ext', label:(c.label||c.entity), color:EXT_COLORS[i%EXT_COLORS.length],
+                     mode:c.mode, block:h.external, daily:(h.daily?h.daily.external:null),
+                     days:(c.days_logged||0), warming:!!c.warming,
+                     mismatch:!!c.scale_mismatch, ratio:c.scale_ratio, h:h, n:h.n });
         });
-        var appRef = comps[0].head_to_head.app;
-        var headRow = '<tr style="border-bottom:2px solid var(--border);">'
-            + '<td><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+C_APP+';margin-right:6px;"></span><strong>ML Forecast Lab</strong></td>'
-            + '<td>' + _fmt(appRef.mae, units) + '</td>'
-            + '<td>' + _fmt(appRef.rmse, units) + '</td>'
-            + '<td>' + _fmt(appRef.bias, units) + '</td>'
-            + '<td style="color:var(--text-secondary);">reference</td>'
-            + '<td>' + comps[0].head_to_head.n + '</td>'
-            + '</tr>';
-        body.innerHTML = headRow + rows;
+        var base = data.baseline;
+        if (base && base.metrics) {
+            R.push({ kind:'baseline', label:'Seasonal Naive', color:'#94a3b8',
+                     block:base.metrics, daily:(base.metrics?base.metrics.daily:null),
+                     days:(base.days_logged||0), warming:!!base.warming,
+                     mismatch:false, ratio:null, h:base.head_to_head,
+                     n:(base.metrics?base.metrics.n:0) });
+        }
+
+        // Winner per column: min over non-mismatch rows (abs for bias cols).
+        var cols = ['mae','rmse','bias','pct','daily_mae','daily_bias'];
+        function _cellVal(r, col) {
+            if (col === 'daily_mae') return r.daily ? r.daily.mae : null;
+            if (col === 'daily_bias') return r.daily ? r.daily.bias : null;
+            return r.block ? r.block[col] : null;
+        }
+        var best = {};
+        cols.forEach(function(col){
+            var isAbs = (col === 'bias' || col === 'daily_bias');
+            var bv = null;
+            R.forEach(function(r){
+                if (r.mismatch) return;
+                var v = _cellVal(r, col);
+                if (v === null || v === undefined || isNaN(v)) return;
+                var s = isAbs ? Math.abs(v) : v;
+                if (bv === null || s < bv) bv = s;
+            });
+            best[col] = bv;
+        });
+
+        function _cell(r, col) {
+            var v = _cellVal(r, col);
+            var isAbs = (col === 'bias' || col === 'daily_bias');
+            var u = (col === 'pct') ? '%' : units;
+            var txt = (col === 'pct')
+                ? (v === null || v === undefined ? '—' : Number(v).toFixed(0) + '%')
+                : _fmt(v, u);
+            var isBest = (!r.mismatch && v !== null && v !== undefined && !isNaN(v)
+                          && best[col] !== null
+                          && Math.abs((isAbs ? Math.abs(v) : v) - best[col]) < 1e-9);
+            var sel = (col === _externalMetric);
+            var style = '';
+            if (isBest) style += 'color:var(--success);font-weight:700;';
+            if (sel) style += 'background:rgba(34,211,238,0.08);';
+            return '<td' + (style ? ' style="' + style + '"' : '') + '>' + txt + '</td>';
+        }
+
+        function _vsCell(r) {
+            if (r.kind === 'app') return '<td style="color:var(--text-secondary);">reference</td>';
+            if (r.mismatch) return '<td><span style="color:var(--warning);">⚠ scale mismatch (≈' + (r.ratio||'?') + '×)</span></td>';
+            var h = r.h;
+            if (!h || h.app_mae_improvement_pct === null || h.app_mae_improvement_pct === undefined) return '<td>—</td>';
+            if (h.winner === 'app') return '<td><span style="color:var(--success);">add-on ' + Math.abs(h.app_mae_improvement_pct).toFixed(0) + '% better</span></td>';
+            if (h.winner === 'external') return '<td><span style="color:var(--warning);">' + Math.abs(h.app_mae_improvement_pct).toFixed(0) + '% better</span></td>';
+            return '<td>≈ tie</td>';
+        }
+
+        function _daysCell(r) {
+            if (r.warming) return '<td><span title="Inconclusive until ' + warmDays + ' days of overlapping data" style="color:var(--warning);">' + r.days + '/' + warmDays + ' ⏳</span></td>';
+            return '<td><span style="color:var(--success);">' + r.days + ' ✓</span></td>';
+        }
+
+        var rowsHtml = R.map(function(r){
+            var tag = r.kind === 'baseline' ? ' <span style="color:var(--text-secondary);font-size:0.8rem;">(baseline)</span>'
+                    : r.kind === 'ext' ? ' <span style="color:var(--text-secondary);font-size:0.8rem;">(' + (r.mode==='attribute'?'trajectory':'state') + ')</span>'
+                    : '';
+            var nameCell = '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+r.color+';margin-right:6px;"></span>'
+                + (r.kind === 'app' ? '<strong>' + r.label + '</strong>' : r.label) + tag
+                + (r.mismatch ? ' <span title="On a very different scale to the target" style="color:var(--warning);">⚠</span>' : '')
+                + (r.warming ? ' <span title="Provisional — still warming up" style="color:var(--warning);">⏳</span>' : '');
+            var op = r.mismatch ? 'opacity:0.6;' : (r.warming ? 'opacity:0.78;' : '');
+            var bdr = r.kind === 'app' ? 'border-bottom:2px solid var(--border);' : '';
+            return '<tr style="' + op + bdr + '">'
+                + '<td>' + nameCell + '</td>'
+                + cols.map(function(col){ return _cell(r, col); }).join('')
+                + _vsCell(r) + _daysCell(r)
+                + '<td>' + (r.n||0) + '</td>'
+                + '</tr>';
+        }).join('');
+        body.innerHTML = rowsHtml;
+
+        // Emphasise the selected metric's column header.
+        var ths = document.querySelectorAll('#external-ranktable thead th[data-metric]');
+        ths.forEach(function(th){
+            var on = th.getAttribute('data-metric') === _externalMetric;
+            th.style.color = on ? 'var(--accent-secondary)' : '';
+            th.style.fontWeight = on ? '700' : '';
+        });
         grp.style.display = '';
+    }
+
+    // Winner on the currently-selected metric between the app and one
+    // external, using their same-sample head-to-head blocks.
+    function _winnerOn(h) {
+        if (!h) return null;
+        var a = _metricVal(h.app, h.daily ? h.daily.app : null);
+        var e = _metricVal(h.external, h.daily ? h.daily.external : null);
+        if (!a || !e || a.val === null || a.val === undefined || e.val === null || e.val === undefined) return null;
+        var av = a.abs ? Math.abs(a.val) : a.val;
+        var ev = e.abs ? Math.abs(e.val) : e.val;
+        if (av < ev) return 'app';
+        if (ev < av) return 'external';
+        return 'tie';
+    }
+
+    var _METRIC_LABEL = {mae:'MAE', rmse:'RMSE', bias:'bias', pct:'% of typical', daily_mae:'daily MAE', daily_bias:'daily bias'};
+
+    function _renderWarmingBanner(data) {
+        var b = document.getElementById('external-warming-banner');
+        if (!b) return;
+        if (!data.warming_up) { b.style.display = 'none'; return; }
+        var days = data.warmup_days || 7;
+        // Name the sources still below the threshold.
+        var names = [];
+        if ((data.app_days_logged || 0) < days) names.push('ML Forecast Lab (' + (data.app_days_logged||0) + '/' + days + ')');
+        (data.comparisons || []).forEach(function(c){
+            if (c.warming) names.push((c.label||c.entity) + ' (' + (c.days_logged||0) + '/' + days + ')');
+        });
+        b.innerHTML = '⏳ <b>Results are provisional</b> — a head-to-head needs at least ' + days
+            + ' days of overlapping data to be reliable. Still warming up: ' + names.join(', ')
+            + '. The ranking and verdict below will firm up as more cycles accrue.';
+        b.style.display = '';
     }
 
     function _renderVerdict(data) {
@@ -6832,25 +6986,36 @@ window.showTab = function(el) {
         if (!card || !head) return;
         var all = (data.comparisons || []).filter(function(c){ return c.head_to_head; });
         if (!all.length) { card.style.display='none'; return; }
+        var mLabel = _METRIC_LABEL[_externalMetric] || 'MAE';
         // Only forecasts on a comparable scale count toward the verdict.
         var comps = all.filter(function(c){ return !c.scale_mismatch; });
         var mismatched = all.length - comps.length;
         var mmNote = mismatched ? ' <span style="color:var(--warning);font-weight:400;">(' + mismatched + ' excluded — scale mismatch)</span>' : '';
+        // Provisional prefix while any compared source is still warming.
+        var prov = data.warming_up ? '<span style="color:var(--warning);">Provisional · </span>' : '';
         if (!comps.length) {
             head.innerHTML = '⚠ Can’t compare yet — the external forecast' + (all.length !== 1 ? 's are' : ' is') + ' on a different scale to the target (likely a unit or cumulative mismatch). Set <b>Is cumulative?</b> / <b>Scale</b> above, or pick a sensor in the target’s units.';
             head.style.color = 'var(--warning)';
             card.style.display = '';
             return;
         }
-        var beaten = comps.filter(function(c){ return c.head_to_head.winner === 'app'; }).length;
-        var lostTo = comps.filter(function(c){ return c.head_to_head.winner === 'external'; });
+        var winners = comps.map(function(c){ return {c:c, w:_winnerOn(c.head_to_head)}; });
+        var beaten = winners.filter(function(x){ return x.w === 'app'; }).length;
+        var lostTo = winners.filter(function(x){ return x.w === 'external'; }).map(function(x){ return x.c; });
         var total = comps.length;
+        // Seasonal Naive line for the headline (the do-nothing baseline).
+        var baseTxt = '';
+        if (data.baseline && data.baseline.head_to_head) {
+            var bw = _winnerOn(data.baseline.head_to_head);
+            baseTxt = ' <span style="color:var(--text-secondary);font-weight:400;">· vs Seasonal Naive: '
+                + (bw === 'app' ? 'ahead' : bw === 'external' ? '<span style="color:var(--warning);">behind</span>' : 'level') + '</span>';
+        }
         if (lostTo.length === 0) {
-            head.innerHTML = '✓ ML Forecast Lab is the most accurate — beats all ' + total + ' external forecast' + (total!==1?'s':'') + ' (lower MAE vs actuals)' + mmNote;
-            head.style.color = 'var(--success)';
+            head.innerHTML = prov + '✓ ML Forecast Lab is the most accurate on ' + mLabel + ' — beats all ' + total + ' external forecast' + (total!==1?'s':'') + mmNote + baseTxt;
+            head.style.color = data.warming_up ? 'var(--text-primary)' : 'var(--success)';
         } else {
-            var best = lostTo.slice().sort(function(a,b){ return (b.head_to_head.app_mae_improvement_pct||0) - (a.head_to_head.app_mae_improvement_pct||0); })[0];
-            head.innerHTML = '✗ ' + (best.label || best.entity) + ' beats ML Forecast Lab (lower MAE); ML Forecast Lab still beats ' + beaten + ' of ' + total + mmNote;
+            var best = lostTo[0];
+            head.innerHTML = prov + '✗ ' + (best.label || best.entity) + ' beats ML Forecast Lab on ' + mLabel + '; ML Forecast Lab still beats ' + beaten + ' of ' + total + mmNote + baseTxt;
             head.style.color = 'var(--warning)';
         }
         card.style.display = '';
@@ -6893,14 +7058,25 @@ window.showTab = function(el) {
         if (!ov.ds || !ov.ds.length) { try{Plotly.purge(oc);}catch(e){} return; }
         var ds = ov.ds.map(function(s){ return new Date(s); });
         var units = data.display_unit || data.units || '';
+        // Warming sources are drawn at half opacity so a provisional line
+        // reads as not-yet-trustworthy at a glance.
+        var warmByLabel = {};
+        (data.comparisons || []).forEach(function(c){ warmByLabel[(c.label||c.entity)] = !!c.warming; });
         var traces = [
             { x:ds, y:ov.actual||[], name:'Actual', type:'scatter', mode:'lines', line:{color:C_ACTUAL,width:2}, connectgaps:false },
             { x:ds, y:ov.app||[], name:'ML Forecast Lab', type:'scatter', mode:'lines', line:{color:C_APP,width:2}, connectgaps:false },
         ];
         (ov.externals||[]).forEach(function(ex, i){
-            traces.push({ x:ds, y:ex.values||[], name:ex.label||ex.entity, type:'scatter', mode:'lines',
-                line:{color:EXT_COLORS[i%EXT_COLORS.length], width:2, dash:'dot'}, connectgaps:false });
+            var nm = ex.label||ex.entity;
+            traces.push({ x:ds, y:ex.values||[], name: nm + (warmByLabel[nm] ? ' ⏳' : ''), type:'scatter', mode:'lines',
+                line:{color:EXT_COLORS[i%EXT_COLORS.length], width:2, dash:'dot'},
+                opacity: warmByLabel[nm] ? 0.45 : 1.0, connectgaps:false });
         });
+        // Seasonal Naive baseline line (the free do-nothing reference).
+        if (ov.baseline && ov.baseline.length) {
+            traces.push({ x:ds, y:ov.baseline, name:'Seasonal Naive', type:'scatter', mode:'lines',
+                line:{color:'#94a3b8', width:1.5, dash:'dash'}, opacity:0.8, connectgaps:false });
+        }
         var yUnits = units ? (' (' + units + ')') : '';
         Plotly.newPlot(oc, traces, {
             xaxis:{title:'Time', color:DARK.axis, gridcolor:DARK.grid},
@@ -6944,6 +7120,8 @@ window.showTab = function(el) {
                 var hasH2H = (data.comparisons||[]).some(function(c){ return c.head_to_head; });
                 if (!hasOverlay && !hasH2H) { _showEmpty(); return; }
                 var empty = document.getElementById('external-empty'); if (empty) empty.style.display='none';
+                _lastExternalData = data;
+                _renderWarmingBanner(data);
                 _renderVerdict(data);
                 _renderRankTable(data);
                 _renderTiming(data);
