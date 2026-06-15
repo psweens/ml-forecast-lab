@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.44.3
+
+**Forecast Comparison plots now match the rest of the app.** The
+comparison tab's charts were drawn on transparent panels with their own
+accent palette and a grey solid "Actual" line, so they looked foreign
+next to every other tab. They now use the shared dark panel background
+(`#16213e` / `#1a1a2e`), the same white dotted "Actual" reference line
+used app-wide, and the shared `PLOT_COLORWAY` hues — the add-on's own
+forecast takes the primary accent and each external cycles through the
+same palette as the model series elsewhere. The ranking-table colour
+swatches follow the same constants, so table and chart stay in sync.
+
 ## 2.44.2
 
 **Solar forecasts no longer learn phantom night-time generation.** For

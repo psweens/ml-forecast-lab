@@ -6632,9 +6632,16 @@ window.showTab = function(el) {
     var BASE = {{ base_path | tojson }};
     var EXP = {{ experiment.name | tojson }};
 
-    var C_ACTUAL = '#e0e0e0', C_APP = '#22d3ee';
-    var EXT_COLORS = ['#f59e0b', '#a855f7', '#34d399', '#f43f5e', '#60a5fa'];
-    var DARK = { plot_bgcolor:'rgba(0,0,0,0)', paper_bgcolor:'rgba(0,0,0,0)', font:{color:'#e0e0e0'}, grid:'#2d3561', axis:'#b0b0b0' };
+    // Keep these in lockstep with the shared PLOT_COLORWAY / dark layout
+    // used by every other tab's charts (defined in the main chart script)
+    // so the comparison plots read as part of the same family. Actual is
+    // the white dotted reference line used app-wide; the app's own forecast
+    // takes the first palette colour and externals cycle through the rest.
+    // PLOT_COLORWAY lives in a different IIFE, so the values are mirrored
+    // here rather than referenced — both palettes must change together.
+    var C_ACTUAL = '#ffffff', C_APP = '#ff6b6b';
+    var EXT_COLORS = ['#4d96ff', '#ffd93d', '#6bcb77', '#c084fc', '#ff922b', '#22d3ee', '#f472b6', '#a3e635'];
+    var DARK = { plot_bgcolor:'#16213e', paper_bgcolor:'#1a1a2e', font:{color:'#e0e0e0'}, grid:'#2d3561', axis:'#b0b0b0' };
 
     var _externalAnalysis = 'per_interval';
     window.setExternalAnalysis = function(mode) {
@@ -7071,7 +7078,7 @@ window.showTab = function(el) {
         var warmByLabel = {};
         (data.comparisons || []).forEach(function(c){ warmByLabel[(c.label||c.entity)] = !!c.warming; });
         var traces = [
-            { x:ds, y:ov.actual||[], name:'Actual', type:'scatter', mode:'lines', line:{color:C_ACTUAL,width:2}, connectgaps:false },
+            { x:ds, y:ov.actual||[], name:'Actual', type:'scatter', mode:'lines', line:{color:C_ACTUAL,width:2.5,dash:'dot'}, connectgaps:false },
             { x:ds, y:ov.app||[], name:'ML Forecast Lab', type:'scatter', mode:'lines', line:{color:C_APP,width:2}, connectgaps:false },
         ];
         (ov.externals||[]).forEach(function(ex, i){
