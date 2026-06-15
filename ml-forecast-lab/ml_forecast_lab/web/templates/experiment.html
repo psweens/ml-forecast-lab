@@ -2083,13 +2083,13 @@
 <div class="tab-section" id="sec-external-comparison" style="display:none;">
 <section class="section">
     <h2>Forecast Comparison
-        <span class="info-tip">?<span class="tip-text">Head-to-head: this add-on's published forecast vs up to five third-party forecasts of this target (ones not produced by this add-on — Solcast, a utility day-ahead curve, another model), all scored against the actuals. Add the sensors below; data is captured each production forecast cycle and accrues going forward — there's no historical backfill, so a freshly-added forecast fills in over the coming days.</span></span>
+        <span class="info-tip">?<span class="tip-text">Head-to-head: ML Forecast Lab's published forecast vs up to five third-party forecasts of this target (ones not produced by ML Forecast Lab — Solcast, a utility day-ahead curve, another model), all scored against the actuals. Add the sensors below; data is captured each production forecast cycle and accrues going forward — there's no historical backfill, so a freshly-added forecast fills in over the coming days.</span></span>
     </h2>
 
     <!-- Manage the compared third-party forecasts (covariate-style) -->
     <div class="settings-group" id="external-manage">
         <h3 class="settings-group-title">Third-party forecasts to compare against
-            <span class="info-tip">?<span class="tip-text">Each entry is an HA entity holding a forecast of this same target, produced by something other than this add-on. Add up to five. <b>Sensor state</b> mode treats the entity's recorded value as its estimate for that moment; <b>Forecast attribute</b> mode reads a future trajectory from an attribute (Solcast, weather) for a per-horizon comparison.</span></span>
+            <span class="info-tip">?<span class="tip-text">Each entry is an HA entity holding a forecast of this same target, produced by something other than ML Forecast Lab. Add up to five. <b>Sensor state</b> mode treats the entity's recorded value as its estimate for that moment; <b>Forecast attribute</b> mode reads a future trajectory from an attribute (Solcast, weather) for a per-horizon comparison.</span></span>
         </h3>
         <div class="covariate-list" id="external-list">
             {% if _exts %}
@@ -2150,7 +2150,7 @@
             </div>
             <button type="button" class="btn btn-secondary" id="add-external-btn" onclick="addExternalForecast()">Add forecast</button>
         </div>
-        <p style="color:var(--text-secondary);font-size:0.8rem;margin:0.6rem 0 0 0;">Up to 5.{% if experiment.mode != 'production' %} <b>This experiment is in lab mode</b> — add forecasts now; scoring begins once you promote it to production (that's when this add-on logs its own forecasts to compare against).{% endif %}</p>
+        <p style="color:var(--text-secondary);font-size:0.8rem;margin:0.6rem 0 0 0;">Up to 5.{% if experiment.mode != 'production' %} <b>This experiment is in lab mode</b> — add forecasts now; scoring begins once you promote it to production (that's when ML Forecast Lab logs its own forecasts to compare against).{% endif %}</p>
     </div>
 
     <div class="acc-top-controls">
@@ -2173,13 +2173,13 @@
     <!-- Ranked head-to-head table -->
     <div id="external-ranktable-group" class="settings-group" style="display:none;">
         <h3 class="settings-group-title">Accuracy ranking
-            <span class="info-tip">?<span class="tip-text">Each forecaster's error vs the actuals. Each external row is scored on the samples where the actual, this add-on's forecast, AND that external all exist (so each head-to-head is like-for-like; "This add-on" MAE can differ row-to-row because each external covers a different set of moments). Lower MAE is better; the best in each row is highlighted.</span></span>
+            <span class="info-tip">?<span class="tip-text">Each forecaster's error vs the actuals. Each external row is scored on the samples where the actual, ML Forecast Lab's forecast, AND that external all exist (so each head-to-head is like-for-like; "ML Forecast Lab" MAE can differ row-to-row because each external covers a different set of moments). Lower MAE is better; the best in each row is highlighted.</span></span>
         </h3>
         <div class="table-container">
             <table class="metrics-table" id="external-ranktable">
                 <thead><tr>
                     <th>Forecast</th><th>MAE</th><th>RMSE</th><th>Bias</th>
-                    <th>vs this add-on</th><th>Samples</th>
+                    <th>vs ML Forecast Lab</th><th>Samples</th>
                 </tr></thead>
                 <tbody id="external-ranktable-body"></tbody>
             </table>
@@ -2195,14 +2195,14 @@
     <!-- Overlay chart -->
     <div class="settings-group">
         <h3 class="settings-group-title">Forecast vs actual
-            <span class="info-tip">?<span class="tip-text">The measured actuals overlaid with this add-on's latest forecast for each moment and each external forecast. For cumulative targets the series are shown as per-interval demand (the space the comparison is scored in).</span></span>
+            <span class="info-tip">?<span class="tip-text">The measured actuals overlaid with ML Forecast Lab's latest forecast for each moment and each external forecast. For cumulative targets the series are shown as per-interval demand (the space the comparison is scored in).</span></span>
         </h3>
         <div id="external-overlay-chart" style="width:100%;height:380px;"></div>
     </div>
 
     <!-- Lead-time curve (attribute-mode externals only) -->
     <div id="external-leadtime-group" class="settings-group" style="display:none;">
-        <h3 class="settings-group-title">Error by forecast horizon — this add-on vs externals
+        <h3 class="settings-group-title">Error by forecast horizon — ML Forecast Lab vs externals
             <span class="info-tip">?<span class="tip-text">Mean absolute error binned by lead time (how far ahead the forecast was looking). Available for trajectory (attribute-mode) externals. A lower line is the more accurate forecaster at that horizon.</span></span>
         </h3>
         <div id="external-leadtime-chart" style="width:100%;height:340px;"></div>
@@ -2213,7 +2213,7 @@
         <div class="empty-state">
             <span class="empty-state-icon">📊</span>
             <p id="external-empty-title">No comparison data yet.</p>
-            <p class="empty-state-hint" id="external-empty-hint">Each production forecast cycle captures the added forecasts alongside this add-on's; once the actuals arrive, this tab scores them head-to-head. Data accrues from when you add each — give it a few cycles.</p>
+            <p class="empty-state-hint" id="external-empty-hint">Each production forecast cycle captures the added forecasts alongside ML Forecast Lab's; once the actuals arrive, this tab scores them head-to-head. Data accrues from when you add each — give it a few cycles.</p>
         </div>
     </div>
 </section>
@@ -6707,7 +6707,7 @@ window.showTab = function(el) {
         });
         var appRef = comps[0].head_to_head.app;
         var headRow = '<tr style="border-bottom:2px solid var(--border);">'
-            + '<td><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+C_APP+';margin-right:6px;"></span><strong>This add-on</strong></td>'
+            + '<td><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+C_APP+';margin-right:6px;"></span><strong>ML Forecast Lab</strong></td>'
             + '<td>' + _fmt(appRef.mae, units) + '</td>'
             + '<td>' + _fmt(appRef.rmse, units) + '</td>'
             + '<td>' + _fmt(appRef.bias, units) + '</td>'
@@ -6728,11 +6728,11 @@ window.showTab = function(el) {
         var lostTo = comps.filter(function(c){ return c.head_to_head.winner === 'external'; });
         var total = comps.length;
         if (lostTo.length === 0) {
-            head.innerHTML = '✓ This add-on is the most accurate — beats all ' + total + ' external forecast' + (total!==1?'s':'') + ' (lower MAE vs actuals)';
+            head.innerHTML = '✓ ML Forecast Lab is the most accurate — beats all ' + total + ' external forecast' + (total!==1?'s':'') + ' (lower MAE vs actuals)';
             head.style.color = 'var(--success)';
         } else {
             var best = lostTo.slice().sort(function(a,b){ return (b.head_to_head.app_mae_improvement_pct||0) - (a.head_to_head.app_mae_improvement_pct||0); })[0];
-            head.innerHTML = '✗ ' + (best.label || best.entity) + ' beats this add-on (lower MAE); this add-on still beats ' + beaten + ' of ' + total;
+            head.innerHTML = '✗ ' + (best.label || best.entity) + ' beats ML Forecast Lab (lower MAE); ML Forecast Lab still beats ' + beaten + ' of ' + total;
             head.style.color = 'var(--warning)';
         }
         card.style.display = '';
@@ -6748,14 +6748,14 @@ window.showTab = function(el) {
         var anyState = comps.some(function(c){ return c.timing && c.timing.external_contemporaneous; });
         var anyAttr = comps.some(function(c){ return c.timing && !c.timing.external_contemporaneous; });
         var appLead = comps[0].timing ? _leadPhrase(comps[0].timing.app_median_lead_minutes) : null;
-        var parts = ['<strong>Comparison basis:</strong> aligned on target time, scored on common samples. This add-on’s forecast is a median ' + (appLead || '—') + '.'];
+        var parts = ['<strong>Comparison basis:</strong> aligned on target time, scored on common samples. ML Forecast Lab’s forecast is a median ' + (appLead || '—') + '.'];
         if (anyState) parts.push('State-mode externals are same-time snapshots (not lead-matched).');
         if (anyAttr) parts.push('Trajectory externals are lead-matched — see the horizon chart.');
         basis.innerHTML = parts.join(' ');
         var stale = comps.filter(function(c){ return c.timing && c.timing.external_stale; })
                          .map(function(c){ return c.label || c.entity; });
         if (stale.length) {
-            warn.style.display=''; warn.textContent = '⚠ Sparse/stale (far fewer samples than this add-on): ' + stale.join(', ') + ' — treat those head-to-heads as indicative.';
+            warn.style.display=''; warn.textContent = '⚠ Sparse/stale (far fewer samples than ML Forecast Lab): ' + stale.join(', ') + ' — treat those head-to-heads as indicative.';
         } else { warn.style.display='none'; }
         box.style.display = '';
     }
@@ -6769,7 +6769,7 @@ window.showTab = function(el) {
         var units = data.units || ''; var perBin = (data.evaluation_mode === 'increment');
         var traces = [
             { x:ds, y:ov.actual||[], name:'Actual', type:'scatter', mode:'lines', line:{color:C_ACTUAL,width:2}, connectgaps:false },
-            { x:ds, y:ov.app||[], name:'This add-on', type:'scatter', mode:'lines', line:{color:C_APP,width:2}, connectgaps:false },
+            { x:ds, y:ov.app||[], name:'ML Forecast Lab', type:'scatter', mode:'lines', line:{color:C_APP,width:2}, connectgaps:false },
         ];
         (ov.externals||[]).forEach(function(ex, i){
             traces.push({ x:ds, y:ex.values||[], name:ex.label||ex.entity, type:'scatter', mode:'lines',
@@ -6793,7 +6793,7 @@ window.showTab = function(el) {
         grp.style.display = '';
         var xHours = lt.lead_minutes.map(function(m){ return m/60; });
         var units = data.units || '';
-        var traces = [{ x:xHours, y:lt.app_mae, name:'This add-on', type:'scatter', mode:'lines+markers', line:{color:C_APP,width:2}, marker:{size:4}, connectgaps:false }];
+        var traces = [{ x:xHours, y:lt.app_mae, name:'ML Forecast Lab', type:'scatter', mode:'lines+markers', line:{color:C_APP,width:2}, marker:{size:4}, connectgaps:false }];
         (lt.externals||[]).forEach(function(ex, i){
             traces.push({ x:xHours, y:ex.mae, name:ex.label||ex.entity, type:'scatter', mode:'lines+markers',
                 line:{color:EXT_COLORS[i%EXT_COLORS.length], width:2, dash:'dot'}, marker:{size:4}, connectgaps:false });
