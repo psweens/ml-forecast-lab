@@ -2883,8 +2883,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception as e:
             return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
 
-        external_entity = getattr(exp_cfg, "external_forecast_entity", None)
-        if not external_entity:
+        externals_cfg = getattr(exp_cfg, "external_forecasts", None) or []
+        if not externals_cfg:
             # Tab is configured off — tell the frontend so it can show the
             # "configure an external sensor in Settings" empty state.
             return JSONResponse(content={"configured": False})
@@ -2895,18 +2895,27 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             days = 30
         days = max(1, min(365, days))
 
-        ext_mode = getattr(exp_cfg, "external_forecast_mode", "state") or "state"
         evaluation_mode = "increment" if exp_cfg.source_is_cumulative else "raw"
-        ext_is_cum = getattr(exp_cfg, "external_forecast_is_cumulative", None)
-        if ext_is_cum is None:
-            ext_is_cum = bool(exp_cfg.source_is_cumulative)
 
+        # Build the per-external spec list the DB layer consumes. State-mode
+        # entries resolve to their cached-history table; attribute-mode ones
+        # read from external_forecast_log (table=None). is_cumulative=None
+        # inherits the target's source_is_cumulative.
         try:
             actuals_table = db.safe_table_name(exp_cfg.target_entity)
-            external_table = (
-                db.safe_table_name(external_entity)
-                if ext_mode == "state" else None
-            )
+            specs = []
+            for e in externals_cfg:
+                is_cum = e.is_cumulative
+                if is_cum is None:
+                    is_cum = bool(exp_cfg.source_is_cumulative)
+                specs.append({
+                    "entity": e.entity_id,
+                    "table": db.safe_table_name(e.entity_id) if e.mode == "state" else None,
+                    "mode": e.mode,
+                    "scale": e.scale,
+                    "is_cumulative": bool(is_cum),
+                    "label": e.label or e.entity_id.split(".")[-1],
+                })
         except Exception as e:
             return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
 
@@ -2923,13 +2932,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 db.get_external_forecast_comparison,
                 name,
                 actuals_table,
-                external_table,
-                ext_mode,
+                specs,
                 days,
                 exp_cfg.interval_minutes,
                 evaluation_mode,
-                getattr(exp_cfg, "external_forecast_scale", None),
-                bool(ext_is_cum),
                 model_name,
                 model_version,
             )
@@ -2940,16 +2946,99 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             )
             return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
 
-        # Metadata the frontend uses for labels / units.
-        result["external_entity"] = external_entity
-        result["external_label"] = (
-            getattr(exp_cfg, "external_forecast_label", None)
-            or external_entity.split(".")[-1]
-        )
-        result["external_is_cumulative"] = bool(ext_is_cum)
         result["units"] = exp_cfg.units or ""
         result["days"] = days
         return JSONResponse(content=result)
+
+    @app.post("/experiment/{name}/add-external-forecast")
+    async def add_external_forecast(name: str, request: Request):
+        """Add a third-party forecast to an experiment's external_forecasts.
+
+        Body: {entity_id (required), mode?, attribute?, value_key?, scale?,
+               is_cumulative?, label?}. Capped at MAX_EXTERNAL_FORECASTS.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        entity = (body.get("entity_id") or body.get("entity") or "").strip()
+        if not entity:
+            return JSONResponse(content={"success": False, "error": "entity_id is required"})
+
+        ext = {"entity_id": entity}
+        for fld in ("mode", "attribute", "value_key", "label"):
+            if body.get(fld) not in (None, ""):
+                ext[fld] = str(body[fld]).strip()
+        if body.get("scale") not in (None, ""):
+            try:
+                ext["scale"] = float(body["scale"])
+            except (TypeError, ValueError):
+                return JSONResponse(content={"success": False, "error": "scale must be a number"})
+        if "is_cumulative" in body and body["is_cumulative"] not in (None, ""):
+            v = str(body["is_cumulative"]).lower()
+            if v in ("true", "1", "yes", "on"):
+                ext["is_cumulative"] = True
+            elif v in ("false", "0", "no", "off"):
+                ext["is_cumulative"] = False
+
+        from ml_forecast_lab.config import (
+            add_experiment_external_forecast, MAX_EXTERNAL_FORECASTS,
+        )
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+        try:
+            added = add_experiment_external_forecast(config_path, name, ext)
+            if added:
+                logger.info(f"Added external forecast {entity} to {name}")
+                return JSONResponse(content={"success": True, "entity_id": entity})
+            return JSONResponse(content={
+                "success": False,
+                "error": (
+                    f"Already configured, experiment not found, or at the "
+                    f"max of {MAX_EXTERNAL_FORECASTS} external forecasts."
+                ),
+            })
+        except ValueError as e:
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
+        except Exception as e:
+            logger.error(f"Failed to add external forecast: {e}", exc_info=True)
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
+
+    @app.post("/experiment/{name}/remove-external-forecast")
+    async def remove_external_forecast(name: str, request: Request):
+        """Remove a third-party forecast (by entity_id) from an experiment."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+        entity = (body.get("entity_id") or body.get("entity") or "").strip()
+        if not entity:
+            return JSONResponse(content={"success": False, "error": "entity_id is required"})
+
+        from ml_forecast_lab.config import remove_experiment_external_forecast
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+        try:
+            removed = remove_experiment_external_forecast(config_path, name, entity)
+            # Drop the captured trajectory rows for this source too (best
+            # effort) so a re-added sensor starts clean.
+            db = app.state.appstate.history_db
+            if removed and db:
+                try:
+                    db.delete_external_forecast_source(name, entity)
+                except Exception:
+                    pass
+            return JSONResponse(content={"success": bool(removed)})
+        except Exception as e:
+            logger.error(f"Failed to remove external forecast: {e}", exc_info=True)
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.get("/experiment/{name}/forecast-log-stats")
     async def forecast_log_stats(name: str, request: Request):
@@ -4434,31 +4523,13 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "output_activation": lambda v: v if v in (
                 "auto", "linear", "softplus", "relu", "exp", "sigmoid", "zscore"
             ) else None,
-            # External forecast comparison (per-experiment third-party forecast).
-            # Clearable text/number fields are nullable (empty → field removed).
-            "external_forecast_entity": lambda v: (str(v).strip() or None) if v is not None else None,
-            "external_forecast_mode": lambda v: v if v in ("state", "attribute") else None,
-            "external_forecast_attribute": lambda v: (str(v).strip() or None) if v is not None else None,
-            "external_forecast_value_key": lambda v: (str(v).strip() or None) if v is not None else None,
-            "external_forecast_scale": lambda v: (None if v is None or v == "" else float(v)),
-            "external_forecast_is_cumulative": lambda v: (
-                True if str(v).lower() in ("true", "1", "yes", "on")
-                else (False if str(v).lower() in ("false", "0", "no", "off") else None)
-            ),
-            "external_forecast_label": lambda v: (str(v).strip() or None) if v is not None else None,
+            # External forecasts are managed as a list via the dedicated
+            # /add-external-forecast and /remove-external-forecast endpoints,
+            # not through this scalar-field settings form.
         }
 
         # Fields where None/null means "use global default" (valid, not an error)
-        nullable_fields = {
-            "forecast_every_minutes", "retrain_every_hours", "max_increment",
-            "country", "patience",
-            # External-forecast fields: null clears the override (entity →
-            # hides the tab; is_cumulative → inherit the target's setting;
-            # attribute → falls back to the 'forecast' default).
-            "external_forecast_entity", "external_forecast_attribute",
-            "external_forecast_value_key", "external_forecast_scale",
-            "external_forecast_is_cumulative", "external_forecast_label",
-        }
+        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country", "patience"}
 
         updates = {}
         for field, validator in editable.items():

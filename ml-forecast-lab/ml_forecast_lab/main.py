@@ -4199,6 +4199,28 @@ class MLForecastLabApp:
                         f"  forecast_log retention prune failed for "
                         f"{exp_cfg.name}: {e}"
                     )
+                # Same age-based retention for the external forecast log
+                # (attribute-mode third-party trajectories). State-mode
+                # external caches are pruned at capture time alongside
+                # actuals; this bounds the trajectory log.
+                try:
+                    ext_pruned = await asyncio.to_thread(
+                        self.history_db.cleanup_external_forecast_log,
+                        exp_cfg.name,
+                        datetime.now(timezone.utc).replace(tzinfo=None)
+                        - timedelta(days=FORECAST_LOG_RETENTION_DAYS),
+                    )
+                    if ext_pruned:
+                        logger.info(
+                            f"  external_forecast_log retention: pruned "
+                            f"{ext_pruned} rows older than "
+                            f"{FORECAST_LOG_RETENTION_DAYS}d for {exp_cfg.name}"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"  external_forecast_log retention prune failed for "
+                        f"{exp_cfg.name}: {e}"
+                    )
         except Exception as e:
             logger.error(f"Retrain failed for {exp_cfg.name}: {e}", exc_info=True)
             # Surface the error in the web UI so the user doesn't have to
@@ -5045,98 +5067,108 @@ class MLForecastLabApp:
     async def _capture_external_forecast(
         self, exp_cfg, issued_at: datetime, ds_future: pd.DatetimeIndex,
     ) -> None:
-        """Snapshot the configured third-party forecast for head-to-head
+        """Snapshot each configured third-party forecast for head-to-head
         scoring on the experiment's "External Comparison" tab.
 
+        For every entry in ``exp_cfg.external_forecasts``:
+
         - ``state`` mode: read the external entity's current state and append
-          a single grid point to its cached-history table (``store_history``).
-          Accumulated over cycles this builds the external series the same way
-          actuals are cached — independent of HA recorder retention.
-        - ``attribute`` mode: resolve the external forecast trajectory onto
-          this cycle's forecast grid (reusing the covariate ``fetch_future``
-          resolver, which handles list-of-dict / date-dict attributes and the
-          ``weather.get_forecasts`` service shape) and log it to
-          ``external_forecast_log`` so a true per-lead-time comparison is
-          possible. Note: ``fetch_future`` interpolates / edge-fills onto the
-          grid, so targets beyond the external source's own horizon are
-          forward-filled; the comparison surfaces per-lead sample counts so
-          that fill is visible.
+          a single grid point to its cached-history table (``store_history``),
+          then prune that table to ``max_age`` days. Accumulated over cycles
+          this builds the external series the same way actuals are cached —
+          independent of HA recorder retention.
+        - ``attribute`` mode: resolve the trajectory onto this cycle's forecast
+          grid (reusing the covariate ``fetch_future`` resolver, which handles
+          list-of-dict / date-dict attributes and the ``weather.get_forecasts``
+          service shape) and log it to ``external_forecast_log`` under the
+          entity as ``source`` so a per-lead-time comparison is possible.
+          Note: ``fetch_future`` interpolates / edge-fills onto the grid, so
+          targets beyond the external source's own horizon are forward-filled;
+          the comparison surfaces per-lead sample counts so that fill is
+          visible.
         """
-        entity = getattr(exp_cfg, "external_forecast_entity", None)
-        if not entity or not self.ha_interface or not self.history_db:
+        externals = getattr(exp_cfg, "external_forecasts", None) or []
+        if not externals or not self.ha_interface or not self.history_db:
             return
-        mode = getattr(exp_cfg, "external_forecast_mode", "state") or "state"
 
-        if mode == "attribute":
-            attr_name = (
-                getattr(exp_cfg, "external_forecast_attribute", "forecast")
-                or "forecast"
-            )
-            value_key = getattr(exp_cfg, "external_forecast_value_key", None)
-            from ml_forecast_lab.covariates import CovariateResolver
+        issued_naive = (
+            issued_at.replace(tzinfo=None)
+            if issued_at.tzinfo is not None else issued_at
+        )
 
-            resolver = getattr(self, "covariate_resolver", None)
-            if resolver is None:
-                resolver = CovariateResolver(
-                    self.ha_interface, history_db=self.history_db,
-                )
-            cov_cfg = {
-                "entity_id": entity,
-                "future_attribute": attr_name,
-                "future_value_key": value_key,
-            }
-            series = await resolver.fetch_future(cov_cfg, ds_future)
-            if series is None or len(series) == 0:
-                logger.debug(
-                    f"  External forecast (attribute) for {exp_cfg.name}: "
-                    f"{entity}.{attr_name} returned no data"
-                )
-                return
-            series = series.dropna()
-            if series.empty:
-                return
-            targets = [pd.Timestamp(t).to_pydatetime() for t in series.index]
-            # Strip tz so the strftime in log_external_forecast matches the
-            # naive-UTC convention forecast_log / the actuals cache use.
-            targets = [
-                t.replace(tzinfo=None) if t.tzinfo is not None else t
-                for t in targets
-            ]
-            issued_naive = (
-                issued_at.replace(tzinfo=None)
-                if issued_at.tzinfo is not None else issued_at
-            )
-            values = [float(v) for v in series.values]
-            n = await asyncio.to_thread(
-                self.history_db.log_external_forecast,
-                experiment=exp_cfg.name,
-                issued_at=issued_naive,
-                targets=targets,
-                values=values,
-            )
-            if n:
-                logger.info(
-                    f"  Logged {n} external_forecast_log rows for "
-                    f"{exp_cfg.name} ({entity}.{attr_name})"
-                )
-        else:  # state mode
-            from ml_forecast_lab.ha_interface import state_to_float
+        for spec in externals:
+            entity = getattr(spec, "entity_id", None)
+            if not entity:
+                continue
+            mode = getattr(spec, "mode", "state") or "state"
+            try:
+                if mode == "attribute":
+                    attr_name = getattr(spec, "attribute", "forecast") or "forecast"
+                    value_key = getattr(spec, "value_key", None)
+                    from ml_forecast_lab.covariates import CovariateResolver
 
-            raw = await self.ha_interface.get_state(entity, default=None)
-            val = state_to_float(raw)
-            if val is None:
-                logger.debug(
-                    f"  External forecast (state) for {exp_cfg.name}: "
-                    f"{entity} state {raw!r} not numeric"
+                    resolver = getattr(self, "covariate_resolver", None)
+                    if resolver is None:
+                        resolver = CovariateResolver(
+                            self.ha_interface, history_db=self.history_db,
+                        )
+                    cov_cfg = {
+                        "entity_id": entity,
+                        "future_attribute": attr_name,
+                        "future_value_key": value_key,
+                    }
+                    series = await resolver.fetch_future(cov_cfg, ds_future)
+                    if series is None or len(series) == 0:
+                        continue
+                    series = series.dropna()
+                    if series.empty:
+                        continue
+                    targets = [
+                        pd.Timestamp(t).to_pydatetime() for t in series.index
+                    ]
+                    targets = [
+                        t.replace(tzinfo=None) if t.tzinfo is not None else t
+                        for t in targets
+                    ]
+                    values = [float(v) for v in series.values]
+                    n = await asyncio.to_thread(
+                        self.history_db.log_external_forecast,
+                        experiment=exp_cfg.name,
+                        source=entity,
+                        issued_at=issued_naive,
+                        targets=targets,
+                        values=values,
+                    )
+                    if n:
+                        logger.info(
+                            f"  Logged {n} external_forecast_log rows for "
+                            f"{exp_cfg.name} ({entity}.{attr_name})"
+                        )
+                else:  # state mode
+                    from ml_forecast_lab.ha_interface import state_to_float
+
+                    raw = await self.ha_interface.get_state(entity, default=None)
+                    val = state_to_float(raw)
+                    if val is None:
+                        logger.debug(
+                            f"  External forecast (state) for {exp_cfg.name}: "
+                            f"{entity} state {raw!r} not numeric"
+                        )
+                        continue
+                    table = self.history_db.safe_table_name(entity)
+                    df = pd.DataFrame({"ds": [issued_naive], "value": [float(val)]})
+                    await asyncio.to_thread(self.history_db.store_history, table, df)
+                    # Retention: keep the external cache bounded like actuals.
+                    oldest = datetime.now(timezone.utc).replace(tzinfo=None) \
+                        - timedelta(days=exp_cfg.max_age)
+                    await asyncio.to_thread(
+                        self.history_db.cleanup, table, oldest,
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"  External forecast capture failed for "
+                    f"{exp_cfg.name} / {entity}: {e}"
                 )
-                return
-            issued_naive = (
-                issued_at.replace(tzinfo=None)
-                if issued_at.tzinfo is not None else issued_at
-            )
-            table = self.history_db.safe_table_name(entity)
-            df = pd.DataFrame({"ds": [issued_naive], "value": [float(val)]})
-            await asyncio.to_thread(self.history_db.store_history, table, df)
 
     async def _publish_forecast_sensors(
         self,
@@ -5433,7 +5465,7 @@ class MLForecastLabApp:
         if (
             self.history_db
             and exp_cfg.mode == "production"
-            and getattr(exp_cfg, "external_forecast_entity", None)
+            and getattr(exp_cfg, "external_forecasts", None)
         ):
             try:
                 await self._capture_external_forecast(

@@ -166,19 +166,30 @@ When `include_clear_sky_irradiance` is on, the app also gates production forecas
 
 ### External forecast comparison
 
-Point an experiment at a **third-party forecast of the same target** — one *not* produced by this add-on (Solcast, a utility day-ahead curve, another model) — and the experiment page gains an **External Comparison** tab that scores this add-on's published forecast head-to-head against it, both against the actuals (verdict + MAE/RMSE/bias tiles + overlay chart + per-lead-time curve). Configure it from the experiment's **Settings** tab or directly in YAML.
+Compare this add-on's forecast against up to **five third-party forecasts of the same target** — ones *not* produced by this add-on (Solcast, a utility day-ahead curve, another model). The experiment page gains an **External Comparison** tab that scores this add-on head-to-head against each, all against the actuals (verdict + accuracy-ranking table + overlay chart + per-lead-time curve). Manage them from the experiment's **Settings** tab (add/remove) or in YAML via the `external_forecasts` list. Each entry:
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `external_forecast_entity` | string | `null` | HA entity holding the external forecast. Empty hides the tab. |
-| `external_forecast_mode` | `state` \| `attribute` | `state` | `state`: the entity's recorded value at each time is its estimate for that moment (cached each cycle like the actuals). `attribute`: read a forecast trajectory from an attribute and log it per cycle for a per-horizon comparison. |
-| `external_forecast_attribute` | string | `forecast` | `attribute` mode only — which attribute (or weather `hourly`/`daily`/`twice_daily` service type) holds the trajectory. |
-| `external_forecast_value_key` | string | `null` | `attribute` mode only — the value key inside each trajectory entry (e.g. `pv_estimate`). `null` auto-detects. |
-| `external_forecast_scale` | float | `null` | Optional multiplier to fix a unit mismatch against the target (e.g. Wh→kWh = `0.001`). |
-| `external_forecast_is_cumulative` | bool | `null` | Whether the external forecast must be differenced to per-interval demand before comparison. `null` inherits the target's `source_is_cumulative`. |
-| `external_forecast_label` | string | `null` | Friendly name for the external forecast in the tab's chart/legend. |
+| `entity_id` | string | **required** | HA entity holding the external forecast. |
+| `mode` | `state` \| `attribute` | `state` | `state`: the entity's recorded value at each time is its estimate for that moment (cached each cycle like the actuals). `attribute`: read a forecast trajectory from an attribute and log it per cycle (tagged by source) for a per-horizon comparison. |
+| `attribute` | string | `forecast` | `attribute` mode only — which attribute (or weather `hourly`/`daily`/`twice_daily` service type) holds the trajectory. |
+| `value_key` | string | `null` | `attribute` mode only — the value key inside each trajectory entry (e.g. `pv_estimate`). `null` auto-detects. |
+| `scale` | float | `null` | Optional multiplier to fix a unit mismatch against the target (e.g. Wh→kWh = `0.001`). |
+| `is_cumulative` | bool | `null` | Whether this forecast must be differenced to per-interval demand before comparison. `null` inherits the target's `source_is_cumulative`. |
+| `label` | string | `null` | Friendly name in the tab's chart/legend. |
 
-Only collects data while the experiment is in **production** (that's when this add-on logs its own forecasts), and data accrues from when you configure it — there's no historical backfill, so a freshly-configured comparison fills in over the coming days.
+```yaml
+external_forecasts:
+  - entity_id: sensor.solcast_pv_forecast
+    mode: attribute
+    attribute: detailedForecast
+    value_key: pv_estimate
+    label: Solcast
+  - entity_id: sensor.neighbour_model
+    mode: state
+```
+
+Only collects data while the experiment is in **production** (that's when this add-on logs its own forecasts), and data accrues from when you add each external — there's no historical backfill, so a freshly-added comparison fills in over the coming days. Storage is bounded: the trajectory log is pruned to 120 days and state-mode caches to the experiment's `max_age`. Legacy single-sensor configs using the flat `external_forecast_*` keys are auto-migrated into this list on load.
 
 ### Cross-validation
 

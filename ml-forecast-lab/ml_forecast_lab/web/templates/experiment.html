@@ -107,12 +107,12 @@
     {% else %}
     <a class="nav-disabled" title="Promote a model to production to see live forecast accuracy">Forecast Accuracy</a>
     {% endif %}
-    {% if exp_config and exp_config.external_forecast_entity and experiment.mode == 'production' %}
+    {% if exp_config and exp_config.external_forecasts and experiment.mode == 'production' %}
     <a data-tab="sec-external-comparison" onclick="showTab(this)">External Comparison</a>
-    {% elif exp_config and exp_config.external_forecast_entity %}
-    <a class="nav-disabled" title="Promote a model to production to compare your forecast against the external one">External Comparison</a>
+    {% elif exp_config and exp_config.external_forecasts %}
+    <a class="nav-disabled" title="Promote a model to production to compare your forecast against the external ones">External Comparison</a>
     {% else %}
-    <a class="nav-disabled" title="Set an external forecast sensor in this experiment's Settings tab to compare your forecast against it">External Comparison</a>
+    <a class="nav-disabled" title="Add an external forecast sensor in this experiment's Settings tab to compare your forecast against it">External Comparison</a>
     {% endif %}
 </nav>
 
@@ -416,68 +416,73 @@
         </div>
     </div>
 
-    <!-- External forecast comparison -->
+    <!-- External forecast comparison (up to 5 third-party forecasts) -->
     <div class="settings-group">
         <h3 class="settings-group-title">External forecast comparison
-            <span class="info-tip">?<span class="tip-text">Point this at a <b>third-party forecast of this same target</b> — one NOT produced by this add-on (e.g. Solcast, a utility day-ahead curve, another model). The experiment gets an <b>External Comparison</b> tab that scores this add-on's published forecast head-to-head against the external one, both against the actuals. Only collects data while the experiment is in <b>production</b> (that's when this add-on logs its own forecasts). Data accrues from when you set this — there's no historical backfill. Clear the entity to remove the tab.</span></span>
+            <span class="info-tip">?<span class="tip-text">Compare this add-on's forecast against up to <b>five third-party forecasts of the same target</b> — ones NOT produced by this add-on (e.g. Solcast, a utility day-ahead curve, another model). The experiment gets an <b>External Comparison</b> tab that scores this add-on head-to-head against each, all against the actuals. Only collects data while the experiment is in <b>production</b> (that's when this add-on logs its own forecasts). Data accrues from when you add each — there's no historical backfill.</span></span>
         </h3>
-        <div class="exp-field entity-search-wrapper" style="max-width:480px;">
-            <label class="field-label">External forecast entity</label>
-            <input type="text" class="setting-input" id="external-entity-input"
-                   data-field="external_forecast_entity"
-                   placeholder="Search HA entities (e.g. sensor.solcast_forecast)..."
-                   autocomplete="off" oninput="searchEntities(this)"
-                   value="{{ exp_config.external_forecast_entity or '' if exp_config else '' }}"
-                   onchange="saveSettingsField(this)">
-            <div class="entity-search-results" style="display:none;"></div>
+        {% set _exts = exp_config.external_forecasts if exp_config else [] %}
+        <div class="covariate-list" id="external-list">
+            {% if _exts %}
+            {% for ext in _exts %}
+            <div class="covariate-row" data-entity="{{ ext.entity_id }}">
+                <span class="cov-entity">{{ ext.label or ext.entity_id }}</span>
+                <span class="cov-meta monospace" style="font-size:0.75rem;color:var(--text-secondary);">{{ ext.entity_id }}</span>
+                <span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">{{ 'attribute' if ext.mode == 'attribute' else 'state' }}</span></span>
+                {% if ext.mode == 'attribute' and ext.attribute %}<span class="cov-meta" style="font-style:italic;">attr: {{ ext.attribute }}</span>{% endif %}
+                {% if ext.mode == 'attribute' and ext.value_key %}<span class="cov-meta" style="font-style:italic;">key: {{ ext.value_key }}</span>{% endif %}
+                {% if ext.scale is not none %}<span class="cov-meta">scale: {{ ext.scale }}</span>{% endif %}
+                {% if ext.is_cumulative is not none %}<span class="cov-meta">{{ 'cumulative' if ext.is_cumulative else 'per-interval' }}</span>{% endif %}
+                <button class="cov-remove-btn" onclick="removeExternalForecast(this)" title="Remove">&times;</button>
+            </div>
+            {% endfor %}
+            {% else %}
+            <p id="no-external-msg" style="color:var(--text-secondary);font-size:0.85rem;">No external forecasts configured.</p>
+            {% endif %}
         </div>
-        <div class="exp-field-grid" style="grid-template-columns:repeat(3, 1fr);margin-top:0.75rem;">
+
+        <div class="add-cov-form" id="add-external-form" style="margin-top:0.75rem;">
+            <div class="exp-field entity-search-wrapper">
+                <label class="field-label">Entity <span class="info-tip">?<span class="tip-text">The HA entity holding the third-party forecast. Start typing to search your live entity list.</span></span></label>
+                <input type="text" class="setting-input" id="ext-entity-input" placeholder="Search HA entities (e.g. sensor.solcast_forecast)..."
+                       autocomplete="off" oninput="searchEntities(this)">
+                <div class="entity-search-results" style="display:none;"></div>
+            </div>
             <div class="exp-field">
-                <label class="field-label">Read forecast from <span class="info-tip">?<span class="tip-text"><b>Sensor state</b>: the entity's recorded value at each time IS its estimate for that moment (a plain numeric / template sensor). Compared contemporaneously against the actuals. <b>Forecast attribute</b>: the entity exposes a trajectory of future <code>{datetime, value}</code> points in an attribute (Solcast, weather) — captured each cycle so a per-horizon comparison is possible.</span></span></label>
-                <select class="setting-input" data-field="external_forecast_mode"
-                        onchange="saveSettingsField(this); onExternalModeChanged()">
-                    <option value="state" {% if not exp_config or exp_config.external_forecast_mode != 'attribute' %}selected{% endif %}>Sensor state (time-series)</option>
-                    <option value="attribute" {% if exp_config and exp_config.external_forecast_mode == 'attribute' %}selected{% endif %}>Forecast attribute (trajectory)</option>
+                <label class="field-label">Read forecast from <span class="info-tip">?<span class="tip-text"><b>Sensor state</b>: the entity's recorded value at each time IS its estimate for that moment (compared contemporaneously). <b>Forecast attribute</b>: a trajectory of future <code>{datetime, value}</code> points in an attribute (Solcast, weather) — enables a per-horizon comparison.</span></span></label>
+                <select class="setting-input" id="ext-mode-input" onchange="onExternalModeChanged()">
+                    <option value="state">Sensor state (time-series)</option>
+                    <option value="attribute">Forecast attribute (trajectory)</option>
                 </select>
             </div>
             <div class="exp-field">
-                <label class="field-label">External is cumulative? <span class="info-tip">?<span class="tip-text">Whether the external forecast is a running total that must be differenced to per-interval demand before comparison (the same way the target is when its source is cumulative). <b>Inherit</b> uses the target's "Cumulative source" setting; override when the external sensor is already an instantaneous / per-period forecast.</span></span></label>
-                <select class="setting-input" data-field="external_forecast_is_cumulative"
-                        onchange="saveSettingsField(this)">
-                    <option value="" {% if not exp_config or exp_config.external_forecast_is_cumulative is none %}selected{% endif %}>Inherit from target</option>
-                    <option value="true" {% if exp_config and exp_config.external_forecast_is_cumulative == true %}selected{% endif %}>Yes — cumulative</option>
-                    <option value="false" {% if exp_config and exp_config.external_forecast_is_cumulative == false %}selected{% endif %}>No — per-interval</option>
+                <label class="field-label">Is cumulative? <span class="info-tip">?<span class="tip-text">Whether the forecast is a running total that must be differenced to per-interval demand. <b>Inherit</b> uses the target's "Cumulative source" setting.</span></span></label>
+                <select class="setting-input" id="ext-iscum-input">
+                    <option value="">Inherit from target</option>
+                    <option value="true">Yes — cumulative</option>
+                    <option value="false">No — per-interval</option>
                 </select>
             </div>
             <div class="exp-field">
-                <label class="field-label">Scale <span class="info-tip">?<span class="tip-text">Optional multiplier applied to the external forecast to fix a unit mismatch against the target (e.g. Wh→kWh = 0.001). Leave blank for none.</span></span></label>
-                <input type="number" class="setting-input" data-field="external_forecast_scale" step="any"
-                       value="{{ exp_config.external_forecast_scale if exp_config and exp_config.external_forecast_scale is not none else '' }}"
-                       placeholder="None" onchange="saveSettingsField(this)">
+                <label class="field-label">Scale <span class="info-tip">?<span class="tip-text">Optional multiplier to fix a unit mismatch (e.g. Wh→kWh = 0.001). Blank = none.</span></span></label>
+                <input type="number" class="setting-input" id="ext-scale-input" step="any" placeholder="None">
             </div>
-        </div>
-        <div class="exp-field-grid" id="external-attr-fields" style="grid-template-columns:repeat(3, 1fr);margin-top:0.75rem;{% if not exp_config or exp_config.external_forecast_mode != 'attribute' %}display:none;{% endif %}">
-            <div class="exp-field">
-                <label class="field-label">Forecast attribute <span class="info-tip">?<span class="tip-text">Which entity attribute (or weather forecast type) holds the trajectory. Common: <code>forecast</code> (default, Met.no weather), <code>detailedForecast</code> (Solcast / Forecast.Solar), or <code>hourly</code>/<code>daily</code> for modern weather entities. Blank = "forecast".</span></span></label>
-                <input type="text" class="setting-input" data-field="external_forecast_attribute"
-                       value="{{ exp_config.external_forecast_attribute if exp_config and exp_config.external_forecast_attribute else '' }}"
-                       placeholder="forecast" onchange="saveSettingsField(this)">
+            <div class="exp-field" id="ext-attr-field" style="display:none;">
+                <label class="field-label">Forecast attribute <span class="info-tip">?<span class="tip-text">Which attribute (or weather type) holds the trajectory: <code>forecast</code> (default), <code>detailedForecast</code> (Solcast), <code>hourly</code>/<code>daily</code>. Blank = "forecast".</span></span></label>
+                <input type="text" class="setting-input" id="ext-attr-input" placeholder="forecast">
+            </div>
+            <div class="exp-field" id="ext-key-field" style="display:none;">
+                <label class="field-label">Value key <span class="info-tip">?<span class="tip-text">Key inside each trajectory entry holding the value (e.g. <code>pv_estimate</code>). Blank = auto-detect.</span></span></label>
+                <input type="text" class="setting-input" id="ext-key-input" placeholder="Auto-detect">
             </div>
             <div class="exp-field">
-                <label class="field-label">Value key <span class="info-tip">?<span class="tip-text">The key inside each trajectory entry holding the value (e.g. <code>pv_estimate</code> for Solcast, <code>temperature</code> for weather). Blank = auto-detect among the common keys.</span></span></label>
-                <input type="text" class="setting-input" data-field="external_forecast_value_key"
-                       value="{{ exp_config.external_forecast_value_key or '' if exp_config else '' }}"
-                       placeholder="Auto-detect" onchange="saveSettingsField(this)">
+                <label class="field-label">Display label <span class="info-tip">?<span class="tip-text">Friendly name in the comparison tab. Blank uses the entity's short name.</span></span></label>
+                <input type="text" class="setting-input" id="ext-label-input" placeholder="e.g. Solcast">
             </div>
-            <div class="exp-field">
-                <label class="field-label">Display label <span class="info-tip">?<span class="tip-text">Friendly name for the external forecast in the comparison tab's legend and tiles. Blank uses the entity's short name.</span></span></label>
-                <input type="text" class="setting-input" data-field="external_forecast_label"
-                       value="{{ exp_config.external_forecast_label or '' if exp_config else '' }}"
-                       placeholder="e.g. Solcast" onchange="saveSettingsField(this)">
-            </div>
+            <button type="button" class="btn btn-secondary" id="add-external-btn" onclick="addExternalForecast()">Add external forecast</button>
         </div>
         <p style="color:var(--text-secondary);font-size:0.8rem;margin:0.6rem 0 0 0;">
-            After setting (or clearing) the entity, <b>reload the page</b> to show or hide the External Comparison tab.
+            Up to {{ 5 }} external forecasts. After adding or removing one, <b>reload the page</b> to show or hide the External Comparison tab.
         </p>
     </div>
 
@@ -2147,16 +2152,13 @@
 {% endif %}
 
 <!-- ====== TAB: External Comparison ====== -->
-{% if exp_config and exp_config.external_forecast_entity and experiment.mode == 'production' %}
-{% set _ext_label = exp_config.external_forecast_label or exp_config.external_forecast_entity.split('.')[-1] %}
+{% if exp_config and exp_config.external_forecasts and experiment.mode == 'production' %}
 <div class="tab-section" id="sec-external-comparison" style="display:none;">
 <section class="section">
     <h2>External Comparison
-        <span class="info-tip">?<span class="tip-text">Head-to-head: this add-on's published forecast vs <b>{{ exp_config.external_forecast_entity }}</b> (a forecast not produced by this add-on), both scored against the actuals over the selected window. Data is captured each production forecast cycle and accrues from when you configured it — there's no historical backfill, so a freshly-configured comparison fills in over the coming days.</span></span>
+        <span class="info-tip">?<span class="tip-text">Head-to-head: this add-on's published forecast vs up to five third-party forecasts of this target (ones not produced by this add-on), all scored against the actuals over the selected window. Data is captured each production forecast cycle and accrues from when you added each — there's no historical backfill, so a freshly-added forecast fills in over the coming days.</span></span>
     </h2>
-    <p class="subtitle" style="margin-top:-0.25rem;">vs <strong>{{ _ext_label }}</strong>
-        <span style="color:var(--text-secondary);">·
-        {% if exp_config.external_forecast_mode == 'attribute' %}forecast-attribute (trajectory){% else %}sensor-state (time-series){% endif %} mode</span></p>
+    <p class="subtitle" style="margin-top:-0.25rem;">vs {{ exp_config.external_forecasts | length }} external forecast{{ 's' if (exp_config.external_forecasts | length) != 1 else '' }}</p>
 
     <div class="acc-top-controls">
         <div class="acc-control">
@@ -2170,53 +2172,45 @@
         </div>
     </div>
 
-    <!-- Verdict -->
+    <!-- Verdict headline -->
     <div id="external-verdict-card" class="verdict-card" style="display:none;">
         <div class="verdict-headline" id="external-verdict-headline">Comparing forecasts…</div>
-        <div class="verdict-numbers">
-            <div class="vnum">
-                <div class="vnum-label">This add-on — typical error
-                    <span class="info-tip">?<span class="tip-text">Mean absolute error of this add-on's published forecast vs the actuals, over the samples where both forecasts and an actual exist (so the comparison is like-for-like). Smaller is better. Units match the target sensor.</span></span>
-                </div>
-                <div class="vnum-value" id="external-app-mae">—</div>
-                <div class="vnum-sub" id="external-app-sub">—</div>
-            </div>
-            <div class="vnum">
-                <div class="vnum-label" id="external-ext-label-tile">External — typical error
-                    <span class="info-tip">?<span class="tip-text">Mean absolute error of the external forecast vs the actuals, on the same samples. Smaller is better.</span></span>
-                </div>
-                <div class="vnum-value" id="external-ext-mae">—</div>
-                <div class="vnum-sub" id="external-ext-sub">—</div>
-            </div>
-            <div class="vnum">
-                <div class="vnum-label">Samples compared
-                    <span class="info-tip">?<span class="tip-text">Number of grid points where this add-on's forecast, the external forecast, AND an actual all exist — the common set the head-to-head is computed on.</span></span>
-                </div>
-                <div class="vnum-value" id="external-common-n">—</div>
-                <div class="vnum-sub">grid points</div>
-            </div>
+    </div>
+
+    <!-- Ranked head-to-head table -->
+    <div id="external-ranktable-group" class="settings-group" style="display:none;">
+        <h3 class="settings-group-title">Accuracy ranking
+            <span class="info-tip">?<span class="tip-text">Each forecaster's error vs the actuals. Each external row is scored on the samples where the actual, this add-on's forecast, AND that external all exist (so each head-to-head is like-for-like; "This add-on" MAE can differ row-to-row because each external covers a different set of moments). Lower MAE is better; the best in each row is highlighted.</span></span>
+        </h3>
+        <div class="table-container">
+            <table class="metrics-table" id="external-ranktable">
+                <thead><tr>
+                    <th>Forecast</th><th>MAE</th><th>RMSE</th><th>Bias</th>
+                    <th>vs this add-on</th><th>Samples</th>
+                </tr></thead>
+                <tbody id="external-ranktable-body"></tbody>
+            </table>
         </div>
     </div>
 
     <!-- Comparison basis / timing transparency -->
     <div id="external-timing" style="display:none;margin:0.25rem 0 0.75rem 0;font-size:0.85rem;color:var(--text-secondary);">
         <p id="external-timing-basis" style="margin:0;"></p>
-        <p id="external-timing-coverage" style="margin:0.2rem 0 0 0;"></p>
         <p id="external-timing-warning" style="margin:0.3rem 0 0 0;color:var(--warning);display:none;"></p>
     </div>
 
     <!-- Overlay chart -->
     <div class="settings-group">
         <h3 class="settings-group-title">Forecast vs actual
-            <span class="info-tip">?<span class="tip-text">The measured actuals overlaid with this add-on's latest forecast for each moment and the external forecast. For cumulative targets the series are shown as per-interval demand (the space the comparison is scored in).</span></span>
+            <span class="info-tip">?<span class="tip-text">The measured actuals overlaid with this add-on's latest forecast for each moment and each external forecast. For cumulative targets the series are shown as per-interval demand (the space the comparison is scored in).</span></span>
         </h3>
         <div id="external-overlay-chart" style="width:100%;height:380px;"></div>
     </div>
 
-    <!-- Lead-time curve (attribute mode only) -->
+    <!-- Lead-time curve (attribute-mode externals only) -->
     <div id="external-leadtime-group" class="settings-group" style="display:none;">
-        <h3 class="settings-group-title">Error by forecast horizon — this add-on vs external
-            <span class="info-tip">?<span class="tip-text">Mean absolute error binned by lead time (how far ahead the forecast was looking). Available because the external forecast is read as a trajectory. A lower line is the more accurate forecaster at that horizon.</span></span>
+        <h3 class="settings-group-title">Error by forecast horizon — this add-on vs externals
+            <span class="info-tip">?<span class="tip-text">Mean absolute error binned by lead time (how far ahead the forecast was looking). Available for trajectory (attribute-mode) externals. A lower line is the more accurate forecaster at that horizon.</span></span>
         </h3>
         <div id="external-leadtime-chart" style="width:100%;height:340px;"></div>
     </div>
@@ -2464,10 +2458,8 @@ window.showTab = function(el) {
         var field = el.getAttribute('data-field');
         var value = el.value;
         var intFields = ['days_history', 'interval_minutes', 'future_periods', 'forecast_every_minutes', 'cv_folds'];
-        var floatFields = ['recency_half_life_days', 'retrain_every_hours', 'max_increment', 'external_forecast_scale'];
-        var nullableFields = ['forecast_every_minutes', 'retrain_every_hours', 'max_increment',
-            'external_forecast_entity', 'external_forecast_attribute', 'external_forecast_value_key',
-            'external_forecast_scale', 'external_forecast_is_cumulative', 'external_forecast_label'];
+        var floatFields = ['recency_half_life_days', 'retrain_every_hours', 'max_increment'];
+        var nullableFields = ['forecast_every_minutes', 'retrain_every_hours', 'max_increment'];
 
         if ((value === '' || value === null) && nullableFields.indexOf(field) >= 0) {
             value = null;
@@ -6597,135 +6589,175 @@ window.showTab = function(el) {
 })();
 </script>
 
-<!-- ======== External Comparison tab ======== -->
+<!-- ======== External Comparison tab (multi-source) ======== -->
 <script>
 (function() {
     var BASE = {{ base_path | tojson }};
     var EXP = {{ experiment.name | tojson }};
 
-    var C_ACTUAL = '#e0e0e0', C_APP = '#22d3ee', C_EXT = '#f59e0b';
-    var DARK = {
-        plot_bgcolor: 'rgba(0,0,0,0)', paper_bgcolor: 'rgba(0,0,0,0)',
-        font: { color: '#e0e0e0' }, grid: '#2d3561', axis: '#b0b0b0',
-    };
+    var C_ACTUAL = '#e0e0e0', C_APP = '#22d3ee';
+    var EXT_COLORS = ['#f59e0b', '#a855f7', '#34d399', '#f43f5e', '#60a5fa'];
+    var DARK = { plot_bgcolor:'rgba(0,0,0,0)', paper_bgcolor:'rgba(0,0,0,0)', font:{color:'#e0e0e0'}, grid:'#2d3561', axis:'#b0b0b0' };
 
-    // Toggle the attribute-only Settings fields when the mode changes.
+    // ---- Settings add-form: toggle attribute-only fields by mode ----
     window.onExternalModeChanged = function() {
-        var sel = document.querySelector('select[data-field="external_forecast_mode"]');
-        var fields = document.getElementById('external-attr-fields');
-        if (sel && fields) {
-            fields.style.display = (sel.value === 'attribute') ? '' : 'none';
-        }
+        var sel = document.getElementById('ext-mode-input');
+        var attr = document.getElementById('ext-attr-field');
+        var key = document.getElementById('ext-key-field');
+        var isAttr = sel && sel.value === 'attribute';
+        if (attr) attr.style.display = isAttr ? '' : 'none';
+        if (key) key.style.display = isAttr ? '' : 'none';
     };
 
+    window.addExternalForecast = function() {
+        var get = function(id){ var el=document.getElementById(id); return el ? el.value.trim() : ''; };
+        var entity = get('ext-entity-input');
+        if (!entity) { mlfl.toast('Pick an entity first', 'error'); return; }
+        var payload = {
+            entity_id: entity,
+            mode: get('ext-mode-input') || 'state',
+            label: get('ext-label-input'),
+            scale: get('ext-scale-input'),
+            is_cumulative: get('ext-iscum-input'),
+            attribute: get('ext-attr-input'),
+            value_key: get('ext-key-input'),
+        };
+        var btn = document.getElementById('add-external-btn');
+        if (btn) btn.disabled = true;
+        fetch(BASE + '/experiment/' + EXP + '/add-external-forecast', {
+            method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload),
+        }).then(function(r){return r.json();}).then(function(res){
+            if (btn) btn.disabled = false;
+            if (res.success) {
+                mlfl.toast('Added ' + entity + ' — reloading', 'success');
+                setTimeout(function(){ window.location.reload(); }, 600);
+            } else {
+                mlfl.toast('Add failed: ' + (res.error || 'unknown'), 'error');
+            }
+        }).catch(function(err){ if(btn)btn.disabled=false; mlfl.toast('Add failed: '+err,'error'); });
+    };
+
+    window.removeExternalForecast = function(btn) {
+        var row = btn.closest('.covariate-row');
+        var entity = row ? row.getAttribute('data-entity') : '';
+        if (!entity) return;
+        if (!confirm('Remove external forecast ' + entity + '?')) return;
+        fetch(BASE + '/experiment/' + EXP + '/remove-external-forecast', {
+            method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({entity_id:entity}),
+        }).then(function(r){return r.json();}).then(function(res){
+            if (res.success) {
+                if (row) row.remove();
+                mlfl.toast('Removed ' + entity + ' — reloading', 'success');
+                setTimeout(function(){ window.location.reload(); }, 600);
+            } else {
+                mlfl.toast('Remove failed: ' + (res.error || 'unknown'), 'error');
+            }
+        }).catch(function(err){ mlfl.toast('Remove failed: '+err,'error'); });
+    };
+
+    // ---- Tab rendering ----
     function _fmt(v, units) {
         if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return '—';
-        var n = Number(v);
-        var s = (Math.abs(n) >= 100) ? n.toFixed(1) : n.toFixed(3);
+        var n = Number(v); var s = (Math.abs(n) >= 100) ? n.toFixed(1) : n.toFixed(3);
         return s + (units ? (' ' + units) : '');
     }
-
+    function _leadPhrase(mins) {
+        if (mins === null || mins === undefined) return null;
+        if (mins >= 90) return (mins/60).toFixed(1) + ' h ahead';
+        return Math.round(mins) + ' min ahead';
+    }
+    function _hide(id){ var el=document.getElementById(id); if(el) el.style.display='none'; }
     function _showEmpty(title, hint) {
-        var card = document.getElementById('external-verdict-card');
-        if (card) card.style.display = 'none';
-        var tm = document.getElementById('external-timing');
-        if (tm) tm.style.display = 'none';
-        var lg = document.getElementById('external-leadtime-group');
-        if (lg) lg.style.display = 'none';
+        ['external-verdict-card','external-ranktable-group','external-timing','external-leadtime-group'].forEach(_hide);
         var empty = document.getElementById('external-empty');
-        if (empty) {
-            empty.style.display = '';
-            if (title) { var t = document.getElementById('external-empty-title'); if (t) t.textContent = title; }
-            if (hint) { var h = document.getElementById('external-empty-hint'); if (h) h.textContent = hint; }
+        if (empty) { empty.style.display='';
+            if (title){var t=document.getElementById('external-empty-title'); if(t)t.textContent=title;}
+            if (hint){var h=document.getElementById('external-empty-hint'); if(h)h.textContent=hint;}
         }
-        var oc = document.getElementById('external-overlay-chart');
-        if (oc && window.Plotly) { try { Plotly.purge(oc); } catch (e) {} }
+        var oc=document.getElementById('external-overlay-chart'); if(oc&&window.Plotly){try{Plotly.purge(oc);}catch(e){}}
+    }
+
+    function _renderRankTable(data) {
+        var grp = document.getElementById('external-ranktable-group');
+        var body = document.getElementById('external-ranktable-body');
+        if (!grp || !body) return;
+        var units = data.units || '';
+        var comps = (data.comparisons || []).filter(function(c){ return c.head_to_head; });
+        if (!comps.length) { grp.style.display='none'; return; }
+        var rows = '';
+        comps.forEach(function(c, i) {
+            var h = c.head_to_head;
+            var deltaTxt;
+            if (h.app_mae_improvement_pct === null || h.app_mae_improvement_pct === undefined) {
+                deltaTxt = '—';
+            } else if (h.winner === 'app') {
+                deltaTxt = '<span style="color:var(--success);">add-on ' + Math.abs(h.app_mae_improvement_pct).toFixed(0) + '% better</span>';
+            } else if (h.winner === 'external') {
+                deltaTxt = '<span style="color:var(--warning);">' + Math.abs(h.app_mae_improvement_pct).toFixed(0) + '% better</span>';
+            } else { deltaTxt = '≈ tie'; }
+            var color = EXT_COLORS[i % EXT_COLORS.length];
+            rows += '<tr>'
+                + '<td><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+color+';margin-right:6px;"></span>'
+                + (c.label || c.entity) + ' <span style="color:var(--text-secondary);font-size:0.8rem;">(' + (c.mode === 'attribute' ? 'trajectory' : 'state') + ')</span></td>'
+                + '<td>' + _fmt(h.external.mae, units) + '</td>'
+                + '<td>' + _fmt(h.external.rmse, units) + '</td>'
+                + '<td>' + _fmt(h.external.bias, units) + '</td>'
+                + '<td>' + deltaTxt + '</td>'
+                + '<td>' + h.n + '</td>'
+                + '</tr>';
+        });
+        var appRef = comps[0].head_to_head.app;
+        var headRow = '<tr style="border-bottom:2px solid var(--border);">'
+            + '<td><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+C_APP+';margin-right:6px;"></span><strong>This add-on</strong></td>'
+            + '<td>' + _fmt(appRef.mae, units) + '</td>'
+            + '<td>' + _fmt(appRef.rmse, units) + '</td>'
+            + '<td>' + _fmt(appRef.bias, units) + '</td>'
+            + '<td style="color:var(--text-secondary);">reference</td>'
+            + '<td>' + comps[0].head_to_head.n + '</td>'
+            + '</tr>';
+        body.innerHTML = headRow + rows;
+        grp.style.display = '';
     }
 
     function _renderVerdict(data) {
         var card = document.getElementById('external-verdict-card');
-        if (!card) return;
-        var h2h = data.head_to_head;
-        var units = data.units || '';
-        var extLabel = data.external_label || 'External';
-        var labelTile = document.getElementById('external-ext-label-tile');
-        if (labelTile && labelTile.firstChild) {
-            labelTile.firstChild.textContent = extLabel + ' — typical error ';
-        }
-        if (!h2h) { card.style.display = 'none'; return; }
-        card.style.display = '';
-        document.getElementById('external-app-mae').textContent = _fmt(h2h.app.mae, units);
-        document.getElementById('external-app-sub').textContent =
-            'RMSE ' + _fmt(h2h.app.rmse, units) + ' · bias ' + _fmt(h2h.app.bias, units);
-        document.getElementById('external-ext-mae').textContent = _fmt(h2h.external.mae, units);
-        document.getElementById('external-ext-sub').textContent =
-            'RMSE ' + _fmt(h2h.external.rmse, units) + ' · bias ' + _fmt(h2h.external.bias, units);
-        document.getElementById('external-common-n').textContent = h2h.n;
         var head = document.getElementById('external-verdict-headline');
-        var impr = h2h.app_mae_improvement_pct;
-        if (h2h.winner === 'app' && impr !== null && impr !== undefined) {
-            head.innerHTML = '✓ This add-on is <strong>' + Math.abs(impr).toFixed(0)
-                + '% more accurate</strong> than ' + extLabel + ' (lower MAE vs actuals)';
+        if (!card || !head) return;
+        var comps = (data.comparisons || []).filter(function(c){ return c.head_to_head; });
+        if (!comps.length) { card.style.display='none'; return; }
+        var beaten = comps.filter(function(c){ return c.head_to_head.winner === 'app'; }).length;
+        var lostTo = comps.filter(function(c){ return c.head_to_head.winner === 'external'; });
+        var total = comps.length;
+        if (lostTo.length === 0) {
+            head.innerHTML = '✓ This add-on is the most accurate — beats all ' + total + ' external forecast' + (total!==1?'s':'') + ' (lower MAE vs actuals)';
             head.style.color = 'var(--success)';
-        } else if (h2h.winner === 'external' && impr !== null && impr !== undefined) {
-            head.innerHTML = '✗ ' + extLabel + ' is <strong>' + Math.abs(impr).toFixed(0)
-                + '% more accurate</strong> than this add-on (lower MAE vs actuals)';
-            head.style.color = 'var(--warning)';
         } else {
-            head.textContent = '≈ The two forecasts are within a rounding of each other';
-            head.style.color = 'var(--text-primary)';
+            var best = lostTo.slice().sort(function(a,b){ return (b.head_to_head.app_mae_improvement_pct||0) - (a.head_to_head.app_mae_improvement_pct||0); })[0];
+            head.innerHTML = '✗ ' + (best.label || best.entity) + ' beats this add-on (lower MAE); this add-on still beats ' + beaten + ' of ' + total;
+            head.style.color = 'var(--warning)';
         }
-    }
-
-    function _leadPhrase(mins) {
-        if (mins === null || mins === undefined) return null;
-        if (mins >= 90) return (mins / 60).toFixed(1) + ' h ahead';
-        return Math.round(mins) + ' min ahead';
+        card.style.display = '';
     }
 
     function _renderTiming(data) {
         var box = document.getElementById('external-timing');
         if (!box) return;
-        var t = data.timing;
-        if (!t) { box.style.display = 'none'; return; }
-        var extLabel = data.external_label || 'External';
+        var comps = data.comparisons || [];
+        if (!comps.length) { box.style.display='none'; return; }
         var basis = document.getElementById('external-timing-basis');
-        var cov = document.getElementById('external-timing-coverage');
         var warn = document.getElementById('external-timing-warning');
-        var appLead = _leadPhrase(t.app_median_lead_minutes);
-        if (t.external_contemporaneous) {
-            // State mode: same-time snapshot.
-            var upd = (t.external_update_minutes !== null && t.external_update_minutes !== undefined)
-                ? (' (' + extLabel + ' updates ≈ every '
-                   + (t.external_update_minutes >= 90
-                      ? (t.external_update_minutes / 60).toFixed(1) + ' h'
-                      : Math.round(t.external_update_minutes) + ' min') + ')')
-                : '';
-            basis.innerHTML = '<strong>Comparison basis:</strong> same-time snapshot — '
-                + 'this add-on’s forecast was a median ' + (appLead || '—')
-                + ', compared against ' + extLabel + '’s recorded value at each moment' + upd
-                + '. Not lead-matched.';
-        } else {
-            // Attribute mode: lead-matched.
-            var extLead = _leadPhrase(t.external_median_lead_minutes);
-            basis.innerHTML = '<strong>Comparison basis:</strong> lead-matched — '
-                + 'this add-on median ' + (appLead || '—') + ' · '
-                + extLabel + ' median ' + (extLead || '—')
-                + '. The horizon chart below compares them at equal lead times.';
-        }
-        var pct = (t.grid_points > 0)
-            ? Math.round(100 * t.external_points / t.grid_points) : 0;
-        cov.textContent = extLabel + ' covered ' + t.external_points + ' of '
-            + t.grid_points + ' grid points (' + pct + '%); this add-on covered '
-            + t.app_points + '.';
-        if (t.external_stale) {
-            warn.style.display = '';
-            warn.textContent = '⚠ ' + extLabel + ' has far fewer samples than this '
-                + 'add-on over this window — treat the head-to-head as indicative '
-                + '(the external forecast may update infrequently or have gaps).';
-        } else {
-            warn.style.display = 'none';
-        }
+        var anyState = comps.some(function(c){ return c.timing && c.timing.external_contemporaneous; });
+        var anyAttr = comps.some(function(c){ return c.timing && !c.timing.external_contemporaneous; });
+        var appLead = comps[0].timing ? _leadPhrase(comps[0].timing.app_median_lead_minutes) : null;
+        var parts = ['<strong>Comparison basis:</strong> aligned on target time, scored on common samples. This add-on’s forecast is a median ' + (appLead || '—') + '.'];
+        if (anyState) parts.push('State-mode externals are same-time snapshots (not lead-matched).');
+        if (anyAttr) parts.push('Trajectory externals are lead-matched — see the horizon chart.');
+        basis.innerHTML = parts.join(' ');
+        var stale = comps.filter(function(c){ return c.timing && c.timing.external_stale; })
+                         .map(function(c){ return c.label || c.entity; });
+        if (stale.length) {
+            warn.style.display=''; warn.textContent = '⚠ Sparse/stale (far fewer samples than this add-on): ' + stale.join(', ') + ' — treat those head-to-heads as indicative.';
+        } else { warn.style.display='none'; }
         box.style.display = '';
     }
 
@@ -6733,105 +6765,72 @@ window.showTab = function(el) {
         var oc = document.getElementById('external-overlay-chart');
         if (!oc || !window.Plotly) return;
         var ov = data.overlay || {};
-        if (!ov.ds || !ov.ds.length) { try { Plotly.purge(oc); } catch (e) {} return; }
-        var ds = ov.ds.map(function(s) { return new Date(s); });
-        var units = data.units || '';
-        var extLabel = data.external_label || 'External';
-        var perBin = (data.evaluation_mode === 'increment');
+        if (!ov.ds || !ov.ds.length) { try{Plotly.purge(oc);}catch(e){} return; }
+        var ds = ov.ds.map(function(s){ return new Date(s); });
+        var units = data.units || ''; var perBin = (data.evaluation_mode === 'increment');
         var traces = [
-            { x: ds, y: ov.actual || [], name: 'Actual', type: 'scatter', mode: 'lines',
-              line: { color: C_ACTUAL, width: 2 }, connectgaps: false },
-            { x: ds, y: ov.app || [], name: 'This add-on', type: 'scatter', mode: 'lines',
-              line: { color: C_APP, width: 2 }, connectgaps: false },
-            { x: ds, y: ov.external || [], name: extLabel, type: 'scatter', mode: 'lines',
-              line: { color: C_EXT, width: 2, dash: 'dot' }, connectgaps: false },
+            { x:ds, y:ov.actual||[], name:'Actual', type:'scatter', mode:'lines', line:{color:C_ACTUAL,width:2}, connectgaps:false },
+            { x:ds, y:ov.app||[], name:'This add-on', type:'scatter', mode:'lines', line:{color:C_APP,width:2}, connectgaps:false },
         ];
-        var yUnits = units ? (' (' + units + (perBin ? ' / interval' : '') + ')')
-                           : (perBin ? ' (per interval)' : '');
-        var layout = {
-            xaxis: { title: 'Time', color: DARK.axis, gridcolor: DARK.grid },
-            yaxis: { title: 'Value' + yUnits, color: DARK.axis, gridcolor: DARK.grid,
-                     zeroline: true, zerolinecolor: '#4a5178' },
-            plot_bgcolor: DARK.plot_bgcolor, paper_bgcolor: DARK.paper_bgcolor,
-            font: DARK.font, hovermode: 'x unified',
-            legend: { orientation: 'h', y: -0.2 },
-            margin: { t: 20, r: 20, b: 60 },
-        };
-        Plotly.newPlot(oc, traces, layout, { responsive: true });
+        (ov.externals||[]).forEach(function(ex, i){
+            traces.push({ x:ds, y:ex.values||[], name:ex.label||ex.entity, type:'scatter', mode:'lines',
+                line:{color:EXT_COLORS[i%EXT_COLORS.length], width:2, dash:'dot'}, connectgaps:false });
+        });
+        var yUnits = units ? (' (' + units + (perBin ? ' / interval' : '') + ')') : (perBin ? ' (per interval)' : '');
+        Plotly.newPlot(oc, traces, {
+            xaxis:{title:'Time', color:DARK.axis, gridcolor:DARK.grid},
+            yaxis:{title:'Value'+yUnits, color:DARK.axis, gridcolor:DARK.grid, zeroline:true, zerolinecolor:'#4a5178'},
+            plot_bgcolor:DARK.plot_bgcolor, paper_bgcolor:DARK.paper_bgcolor, font:DARK.font,
+            hovermode:'x unified', legend:{orientation:'h', y:-0.2}, margin:{t:20,r:20,b:60},
+        }, {responsive:true});
     }
 
     function _renderLeadtime(data) {
-        var group = document.getElementById('external-leadtime-group');
+        var grp = document.getElementById('external-leadtime-group');
         var lc = document.getElementById('external-leadtime-chart');
-        if (!group || !lc) return;
+        if (!grp || !lc) return;
         var lt = data.lead_time;
-        if (!lt || !lt.lead_minutes || !lt.lead_minutes.length || !window.Plotly) {
-            group.style.display = 'none';
-            return;
-        }
-        group.style.display = '';
-        var xHours = lt.lead_minutes.map(function(m) { return m / 60; });
+        if (!lt || !lt.lead_minutes || !lt.lead_minutes.length || !window.Plotly) { grp.style.display='none'; return; }
+        grp.style.display = '';
+        var xHours = lt.lead_minutes.map(function(m){ return m/60; });
         var units = data.units || '';
-        var extLabel = data.external_label || 'External';
-        var traces = [
-            { x: xHours, y: lt.app_mae, name: 'This add-on', type: 'scatter',
-              mode: 'lines+markers', line: { color: C_APP, width: 2 },
-              marker: { size: 4 }, connectgaps: false },
-            { x: xHours, y: lt.external_mae, name: extLabel, type: 'scatter',
-              mode: 'lines+markers', line: { color: C_EXT, width: 2, dash: 'dot' },
-              marker: { size: 4 }, connectgaps: false },
-        ];
-        var layout = {
-            xaxis: { title: 'Lead time (hours)', color: DARK.axis, gridcolor: DARK.grid },
-            yaxis: { title: 'MAE' + (units ? (' (' + units + ')') : ''),
-                     color: DARK.axis, gridcolor: DARK.grid },
-            plot_bgcolor: DARK.plot_bgcolor, paper_bgcolor: DARK.paper_bgcolor,
-            font: DARK.font, hovermode: 'x unified',
-            legend: { orientation: 'h', y: -0.25 },
-            margin: { t: 20, r: 20, b: 60 },
-        };
-        Plotly.newPlot(lc, traces, layout, { responsive: true });
+        var traces = [{ x:xHours, y:lt.app_mae, name:'This add-on', type:'scatter', mode:'lines+markers', line:{color:C_APP,width:2}, marker:{size:4}, connectgaps:false }];
+        (lt.externals||[]).forEach(function(ex, i){
+            traces.push({ x:xHours, y:ex.mae, name:ex.label||ex.entity, type:'scatter', mode:'lines+markers',
+                line:{color:EXT_COLORS[i%EXT_COLORS.length], width:2, dash:'dot'}, marker:{size:4}, connectgaps:false });
+        });
+        Plotly.newPlot(lc, traces, {
+            xaxis:{title:'Lead time (hours)', color:DARK.axis, gridcolor:DARK.grid},
+            yaxis:{title:'MAE'+(units?(' ('+units+')'):''), color:DARK.axis, gridcolor:DARK.grid},
+            plot_bgcolor:DARK.plot_bgcolor, paper_bgcolor:DARK.paper_bgcolor, font:DARK.font,
+            hovermode:'x unified', legend:{orientation:'h', y:-0.25}, margin:{t:20,r:20,b:60},
+        }, {responsive:true});
     }
 
     window.loadExternalComparison = function() {
         var winSel = document.getElementById('external-window');
         var days = winSel ? winSel.value : '30';
-        var url = BASE + '/experiment/' + EXP
-            + '/external-forecast-comparison?days=' + encodeURIComponent(days);
-        fetch(url)
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                if (!data || data.configured === false) {
-                    _showEmpty('No external forecast configured.',
-                        'Set an external forecast sensor in this experiment’s Settings tab.');
-                    return;
-                }
-                if (data.error) {
-                    _showEmpty('Could not load comparison.', String(data.error));
-                    return;
-                }
+        fetch(BASE + '/experiment/' + EXP + '/external-forecast-comparison?days=' + encodeURIComponent(days))
+            .then(function(r){ return r.json(); })
+            .then(function(data){
+                if (!data || data.configured === false) { _showEmpty('No external forecasts configured.', 'Add one in this experiment’s Settings tab.'); return; }
+                if (data.error) { _showEmpty('Could not load comparison.', String(data.error)); return; }
                 var hasOverlay = data.overlay && data.overlay.ds && data.overlay.ds.length;
-                if (!hasOverlay && !data.head_to_head) {
-                    _showEmpty();  // default copy: "give it a few cycles"
-                    return;
-                }
-                var empty = document.getElementById('external-empty');
-                if (empty) empty.style.display = 'none';
+                var hasH2H = (data.comparisons||[]).some(function(c){ return c.head_to_head; });
+                if (!hasOverlay && !hasH2H) { _showEmpty(); return; }
+                var empty = document.getElementById('external-empty'); if (empty) empty.style.display='none';
                 _renderVerdict(data);
+                _renderRankTable(data);
                 _renderTiming(data);
                 _renderOverlay(data);
                 _renderLeadtime(data);
             })
-            .catch(function(err) {
-                _showEmpty('Could not load comparison.', String(err));
-            });
+            .catch(function(err){ _showEmpty('Could not load comparison.', String(err)); });
     };
 
-    // Render on first activation of the tab (Plotly is loaded by then).
     if (typeof queueChart === 'function') {
         queueChart('sec-external-comparison', function() { loadExternalComparison(); });
     }
-    // Sync the Settings attribute-field visibility to the saved mode.
     try { window.onExternalModeChanged(); } catch (e) {}
 })();
 </script>

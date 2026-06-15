@@ -196,6 +196,66 @@ class CovariateCfg:
             )
 
 
+MAX_EXTERNAL_FORECASTS = 5
+"""Cap on the number of third-party forecasts compared per experiment.
+Keeps the comparison tab legible and bounds the per-cycle capture work."""
+
+
+@dataclass
+class ExternalForecastCfg:
+    """A single third-party forecast of an experiment's target, used by the
+    External Comparison tab. One entry per external sensor."""
+
+    entity_id: str
+    """Home Assistant entity holding the external forecast."""
+
+    mode: str = 'state'
+    """How the forecast is read:
+
+    - ``state``: the entity's recorded **state** at each timestamp IS its
+      estimate for that moment (a plain numeric sensor / template). Compared
+      contemporaneously against the actuals; no lead-time dimension.
+    - ``attribute``: the entity exposes a **forecast trajectory** in an
+      attribute (``forecast`` / ``detailedForecast`` / a weather
+      ``hourly``/``daily`` service type). Captured each production cycle into
+      ``external_forecast_log`` so a per-lead-time head-to-head is possible."""
+
+    attribute: str = 'forecast'
+    """For ``mode='attribute'``: the entity attribute (or weather forecast
+    type) holding the trajectory. Mirrors a covariate's ``future_attribute``.
+    Ignored in ``state`` mode."""
+
+    value_key: Optional[str] = None
+    """For ``mode='attribute'``: the key inside each trajectory entry that
+    holds the value (e.g. ``pv_estimate`` for Solcast). ``None`` auto-detects
+    among the common keys. Ignored in ``state`` mode."""
+
+    scale: Optional[float] = None
+    """Optional multiplier applied before comparison — use to fix a unit
+    mismatch against the target (e.g. Wh→kWh = 0.001). ``None`` = no scaling."""
+
+    is_cumulative: Optional[bool] = None
+    """Whether this forecast is a cumulative/running-total signal (so it must
+    be differenced to per-interval demand before comparison). ``None``
+    inherits the target's ``source_is_cumulative``. Set ``False`` when the
+    external sensor is already instantaneous / per-period even though the
+    target is a cumulative ``*_today`` sensor."""
+
+    label: Optional[str] = None
+    """Friendly name for this forecast in the comparison tab. ``None`` falls
+    back to the entity's short suffix."""
+
+    def __post_init__(self) -> None:
+        if not self.entity_id:
+            raise ValueError('external forecast entity_id must be non-empty')
+        valid_modes = {'state', 'attribute'}
+        if self.mode not in valid_modes:
+            raise ValueError(
+                f'external forecast mode must be one of {sorted(valid_modes)}, '
+                f'got {self.mode!r}'
+            )
+
+
 @dataclass
 class ExperimentCfg:
     """Configuration for a single sensor prediction experiment."""
@@ -566,58 +626,20 @@ class ExperimentCfg:
     forecasting — turns the problem into predicting cloud-cover-driven attenuation
     rather than raw generation."""
 
-    external_forecast_entity: Optional[str] = None
-    """Optional Home Assistant entity holding a *third-party* forecast of this
-    same target (one NOT produced by this add-on — e.g. Solcast, a utility's
-    day-ahead curve, a neighbour's model). When set, the experiment page shows
-    an **External Comparison** tab that scores this add-on's published forecast
-    head-to-head against the external one, both against the actuals.
+    external_forecasts: List["ExternalForecastCfg"] = field(default_factory=list)
+    """Up to ``MAX_EXTERNAL_FORECASTS`` *third-party* forecasts of this same
+    target (ones NOT produced by this add-on — e.g. Solcast, a utility's
+    day-ahead curve, a neighbour's model). When non-empty, the experiment
+    page shows an **External Comparison** tab that scores this add-on's
+    published forecast head-to-head against each of them, both against the
+    actuals.
 
     Only meaningful for ``mode='production'`` experiments — the comparison
     reads this add-on's logged forecasts from ``forecast_log``, which are only
-    written in production. ``None`` (default) hides the tab."""
+    written in production. Empty (default) hides the tab.
 
-    external_forecast_mode: str = 'state'
-    """How the external forecast is read from ``external_forecast_entity``:
-
-    - ``state``: the entity's recorded **state** at each timestamp IS its
-      estimate for that moment (a plain numeric sensor / template). Compared
-      contemporaneously against the actuals. No lead-time dimension.
-    - ``attribute``: the entity exposes a **forecast trajectory** in an
-      attribute (``forecast`` / ``detailedForecast`` / a weather
-      ``hourly``/``daily`` service type), a list of future ``{datetime,
-      value}`` points — same shape as this add-on's own forecast. Captured
-      each production cycle into ``external_forecast_log`` so a true
-      per-lead-time head-to-head is possible."""
-
-    external_forecast_attribute: str = 'forecast'
-    """For ``external_forecast_mode='attribute'``: the entity attribute (or
-    weather forecast type) holding the trajectory. Mirrors a covariate's
-    ``future_attribute``. Ignored in ``state`` mode."""
-
-    external_forecast_value_key: Optional[str] = None
-    """For ``external_forecast_mode='attribute'``: the key inside each
-    trajectory entry that holds the value (e.g. ``pv_estimate`` for Solcast).
-    ``None`` auto-detects among the common keys, exactly like a covariate's
-    ``future_value_key``. Ignored in ``state`` mode."""
-
-    external_forecast_scale: Optional[float] = None
-    """Optional multiplier applied to the external forecast before comparison
-    — use to fix a unit mismatch against the target (e.g. Wh→kWh = 0.001).
-    ``None`` = no scaling."""
-
-    external_forecast_is_cumulative: Optional[bool] = None
-    """Whether the external forecast is a cumulative/running-total signal (so
-    it must be differenced to per-interval demand before comparison, the same
-    way the target is when ``source_is_cumulative``). ``None`` (default)
-    inherits the target's ``source_is_cumulative``. Set ``False`` explicitly
-    when the external sensor is already an instantaneous / per-period forecast
-    even though the target is a cumulative ``*_today`` sensor."""
-
-    external_forecast_label: Optional[str] = None
-    """Optional friendly name for the external forecast in the comparison
-    tab's chart legend and tiles. ``None`` falls back to the entity's short
-    suffix."""
+    Legacy single-sensor configs using the flat ``external_forecast_*`` keys
+    are auto-migrated into this list on load."""
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -669,12 +691,6 @@ class ExperimentCfg:
             raise ValueError(
                 f'output_activation must be one of {sorted(valid_activations)}, '
                 f'got {self.output_activation!r}'
-            )
-        valid_ext_modes = {'state', 'attribute'}
-        if self.external_forecast_mode not in valid_ext_modes:
-            raise ValueError(
-                f'external_forecast_mode must be one of {sorted(valid_ext_modes)}, '
-                f'got {self.external_forecast_mode!r}'
             )
 
         # v2.37.6 added a warning here for nbeats / nhits / itransformer
@@ -821,7 +837,16 @@ def load_config(config_path: Path | str) -> AppConfig:
     exp_fields = {f.name for f in dataclasses.fields(ExperimentCfg)}
     cov_fields = {f.name for f in dataclasses.fields(CovariateCfg)}
     sub_fields = {f.name for f in dataclasses.fields(SubtractCfg)}
+    ext_fields = {f.name for f in dataclasses.fields(ExternalForecastCfg)}
     app_fields = {f.name for f in dataclasses.fields(AppConfig)} - {'experiments'}
+
+    # Legacy flat single-sensor keys → migrated into external_forecasts.
+    _LEGACY_EXT_KEYS = (
+        'external_forecast_entity', 'external_forecast_mode',
+        'external_forecast_attribute', 'external_forecast_value_key',
+        'external_forecast_scale', 'external_forecast_is_cumulative',
+        'external_forecast_label',
+    )
 
     # Track whether we need to rewrite the YAML to clean deprecated fields
     _needs_migrate = False
@@ -893,6 +918,50 @@ def load_config(config_path: Path | str) -> AppConfig:
                     f"with explicit source/on_missing per sensor."
                 )
 
+            # Parse external_forecasts (third-party forecast comparison).
+            external_forecasts = []
+            for ext in exp_data.pop('external_forecasts', []) or []:
+                if isinstance(ext, str):
+                    ext = {'entity_id': ext}
+                if not isinstance(ext, dict):
+                    logger.warning(
+                        'Ignoring malformed external_forecasts entry: %r', ext
+                    )
+                    continue
+                unknown_ext = set(ext) - ext_fields
+                if unknown_ext:
+                    logger.warning(
+                        f'Ignoring unknown external_forecasts fields: {unknown_ext}'
+                    )
+                    ext = {k: v for k, v in ext.items() if k in ext_fields}
+                external_forecasts.append(ExternalForecastCfg(**ext))
+
+            # Migrate legacy flat single-sensor keys into the list.
+            if exp_data.get('external_forecast_entity'):
+                external_forecasts.insert(0, ExternalForecastCfg(
+                    entity_id=exp_data.get('external_forecast_entity'),
+                    mode=exp_data.get('external_forecast_mode', 'state') or 'state',
+                    attribute=exp_data.get('external_forecast_attribute', 'forecast') or 'forecast',
+                    value_key=exp_data.get('external_forecast_value_key'),
+                    scale=exp_data.get('external_forecast_scale'),
+                    is_cumulative=exp_data.get('external_forecast_is_cumulative'),
+                    label=exp_data.get('external_forecast_label'),
+                ))
+            if any(k in exp_data for k in _LEGACY_EXT_KEYS):
+                for _k in _LEGACY_EXT_KEYS:
+                    exp_data.pop(_k, None)
+                _needs_migrate = True
+
+            # Enforce the cap (keep the first MAX, warn on the rest).
+            if len(external_forecasts) > MAX_EXTERNAL_FORECASTS:
+                logger.warning(
+                    'Experiment %r: %d external forecasts configured; keeping '
+                    'the first %d (the max).',
+                    exp_data.get('name', '?'), len(external_forecasts),
+                    MAX_EXTERNAL_FORECASTS,
+                )
+                external_forecasts = external_forecasts[:MAX_EXTERNAL_FORECASTS]
+
             # Filter unknown experiment fields
             unknown_exp = set(exp_data) - exp_fields
             if unknown_exp:
@@ -903,6 +972,7 @@ def load_config(config_path: Path | str) -> AppConfig:
                 **exp_data,
                 covariates=covariates,
                 load_subtract=load_subtract,
+                external_forecasts=external_forecasts,
             )
         except (ValueError, TypeError, KeyError) as e:
             # One bad experiment must not kill the whole add-on. The remaining
@@ -934,21 +1004,40 @@ def load_config(config_path: Path | str) -> AppConfig:
         f'Configuration loaded: {len(app_config.experiments)} experiment(s)'
     )
 
-    # Auto-migrate: rewrite YAML to strip deprecated fields
+    # Auto-migrate: rewrite YAML to strip deprecated fields and fold legacy
+    # flat external_forecast_* keys into the external_forecasts list.
     if _needs_migrate:
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 raw = yaml.safe_load(f)
             removed: list = []
             for exp in raw.get('experiments', []):
-                if isinstance(exp, dict):
-                    for fld in _DEPRECATED_EXPERIMENT_FIELDS:
-                        if exp.pop(fld, None) is not None and fld not in removed:
-                            removed.append(fld)
+                if not isinstance(exp, dict):
+                    continue
+                for fld in _DEPRECATED_EXPERIMENT_FIELDS:
+                    if exp.pop(fld, None) is not None and fld not in removed:
+                        removed.append(fld)
+                # Fold flat external_forecast_* keys into external_forecasts.
+                if exp.get('external_forecast_entity'):
+                    entry = {'entity_id': exp.get('external_forecast_entity')}
+                    for src, dst in (
+                        ('external_forecast_mode', 'mode'),
+                        ('external_forecast_attribute', 'attribute'),
+                        ('external_forecast_value_key', 'value_key'),
+                        ('external_forecast_scale', 'scale'),
+                        ('external_forecast_is_cumulative', 'is_cumulative'),
+                        ('external_forecast_label', 'label'),
+                    ):
+                        if exp.get(src) is not None:
+                            entry[dst] = exp.get(src)
+                    exp.setdefault('external_forecasts', []).insert(0, entry)
+                for _k in _LEGACY_EXT_KEYS:
+                    if exp.pop(_k, None) is not None and _k not in removed:
+                        removed.append(_k)
             atomic_yaml_write(config_path, raw)
             if removed:
                 logger.info(
-                    f'Migrated config: removed deprecated field(s): {", ".join(removed)}'
+                    f'Migrated config: removed/folded field(s): {", ".join(removed)}'
                 )
         except Exception as e:
             logger.warning(f'Config migration failed (non-fatal): {e}')
@@ -1400,6 +1489,109 @@ def clear_experiment_load_subtract(
     if removed > 0:
         atomic_yaml_write(config_path, data)
 
+    return removed
+
+
+def add_experiment_external_forecast(
+    config_path: Path | str,
+    experiment_name: str,
+    external: Dict[str, Any],
+) -> bool:
+    """
+    Add a third-party forecast to an experiment's ``external_forecasts``.
+
+    Parameters
+    ----------
+    external : dict
+        ``ExternalForecastCfg`` fields (must include ``entity_id``).
+
+    Returns
+    -------
+    bool
+        True if added; False if the experiment wasn't found, the entity is
+        already configured, or the per-experiment cap is reached.
+
+    Raises
+    ------
+    ValueError
+        If the dict has invalid fields or fails ``ExternalForecastCfg``
+        validation.
+    """
+    ext_fields = {f.name for f in dataclasses.fields(ExternalForecastCfg)}
+    unknown = set(external) - ext_fields
+    if unknown:
+        raise ValueError(f'Unknown external_forecasts fields: {unknown}')
+    if not external.get('entity_id'):
+        raise ValueError('external forecast must include a non-empty "entity_id"')
+    # Validate (raises on bad mode / empty entity).
+    ExternalForecastCfg(**external)
+
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    for exp in data.get('experiments', []):
+        if exp.get('name') != experiment_name:
+            continue
+        items = exp.setdefault('external_forecasts', [])
+        for existing in items:
+            existing_id = (
+                existing if isinstance(existing, str)
+                else (existing or {}).get('entity_id')
+            )
+            if existing_id == external['entity_id']:
+                return False
+        if len(items) >= MAX_EXTERNAL_FORECASTS:
+            logger.warning(
+                'add_experiment_external_forecast(%r): at the cap of %d',
+                experiment_name, MAX_EXTERNAL_FORECASTS,
+            )
+            return False
+        clean = {k: v for k, v in external.items() if v is not None}
+        items.append(clean)
+        atomic_yaml_write(config_path, data)
+        return True
+
+    return False
+
+
+def remove_experiment_external_forecast(
+    config_path: Path | str,
+    experiment_name: str,
+    entity_id: str,
+) -> bool:
+    """
+    Remove a third-party forecast from an experiment's ``external_forecasts``.
+
+    ``entity_id`` can be the full entity id or its short suffix. Returns True
+    if an entry was removed.
+    """
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    def _matches(item, target: str) -> bool:
+        ent = item if isinstance(item, str) else (item or {}).get('entity_id') or ''
+        if not ent:
+            return False
+        return ent == target or ent.split('.')[-1] == target
+
+    removed = False
+    for exp in data.get('experiments', []):
+        if exp.get('name') != experiment_name:
+            continue
+        items = exp.get('external_forecasts', [])
+        kept = [i for i in items if not _matches(i, entity_id)]
+        removed = len(kept) < len(items)
+        if removed:
+            if kept:
+                exp['external_forecasts'] = kept
+            else:
+                exp.pop('external_forecasts', None)
+        break
+
+    if removed:
+        atomic_yaml_write(config_path, data)
     return removed
 
 
