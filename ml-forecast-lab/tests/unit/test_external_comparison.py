@@ -176,6 +176,15 @@ class TestComparisonStateRaw:
         # state mode carries no lead-time dimension
         assert res["lead_time"] is None
         assert len(res["overlay"]["ds"]) >= 40
+        # timing transparency: state mode is a contemporaneous snapshot,
+        # the app forecast carries a ~30-min lead, external updates ~30min.
+        t = res["timing"]
+        assert t["external_contemporaneous"] is True
+        assert t["external_median_lead_minutes"] is None
+        assert abs(t["app_median_lead_minutes"] - 30.0) < 1e-6
+        assert abs(t["external_update_minutes"] - 30.0) < 1e-6
+        assert t["external_stale"] is False
+        assert t["external_points"] >= 40 and t["grid_points"] >= 40
 
     def test_scale_applied_to_external(self, db):
         # External stored in *1000 units; scale=0.001 should recover it so
@@ -233,6 +242,11 @@ class TestComparisonAttributeLeadTime:
         for am, em in zip(lt["app_mae"], lt["external_mae"]):
             if am is not None and em is not None:
                 assert am < em
+        # attribute mode is lead-matched: both sides expose a median lead.
+        t = res["timing"]
+        assert t["external_contemporaneous"] is False
+        assert t["external_median_lead_minutes"] is not None
+        assert t["app_median_lead_minutes"] is not None
 
 
 class TestComparisonIncrement:

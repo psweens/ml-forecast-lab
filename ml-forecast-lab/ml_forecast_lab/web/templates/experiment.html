@@ -2198,6 +2198,13 @@
         </div>
     </div>
 
+    <!-- Comparison basis / timing transparency -->
+    <div id="external-timing" style="display:none;margin:0.25rem 0 0.75rem 0;font-size:0.85rem;color:var(--text-secondary);">
+        <p id="external-timing-basis" style="margin:0;"></p>
+        <p id="external-timing-coverage" style="margin:0.2rem 0 0 0;"></p>
+        <p id="external-timing-warning" style="margin:0.3rem 0 0 0;color:var(--warning);display:none;"></p>
+    </div>
+
     <!-- Overlay chart -->
     <div class="settings-group">
         <h3 class="settings-group-title">Forecast vs actual
@@ -4870,17 +4877,20 @@ window.showTab = function(el) {
 
             var expName = {{ experiment.name | tojson }};
             var entityId = {{ experiment.target_entity | tojson }};
+            // Humanised (Title Case) name for axis labels so the y-axis
+            // reads "Solar Forecast (W)" rather than the raw slug.
+            var expDisplay = {{ experiment.name | humanise | tojson }};
             var yTitle;
             if (!EXP_UNITS) {
-                yTitle = expName + ' — ' + entityId;
+                yTitle = expDisplay + ' — ' + entityId;
             } else if (isCumulative) {
-                yTitle = expName + ' (cumulative ' + EXP_UNITS
+                yTitle = expDisplay + ' (cumulative ' + EXP_UNITS
                        + (EXP_RESET_DAILY ? ', resets daily' : '') + ')';
             } else if (EXP_SOURCE_CUMULATIVE) {
-                yTitle = expName + ' (' + EXP_UNITS + ' per '
+                yTitle = expDisplay + ' (' + EXP_UNITS + ' per '
                        + EXP_INTERVAL_MIN + '-min bucket)';
             } else {
-                yTitle = expName + ' (' + EXP_UNITS + ')';
+                yTitle = expDisplay + ' (' + EXP_UNITS + ')';
             }
 
             var xTitle = 'Target time' + _axisTzSuffix();
@@ -5361,7 +5371,11 @@ window.showTab = function(el) {
         var layout = {
             xaxis: stabXAxis,
             yaxis: {
-                title: { text: 'Run-to-run spread (std of predictions)', font: { size: 12 } },
+                title: {
+                    text: 'Run-to-run spread (std of predictions)'
+                        + (EXP_UNITS ? ' (' + EXP_UNITS + ')' : ''),
+                    font: { size: 12 },
+                },
                 color: '#b0b0b0', gridcolor: '#2d3561',
                 rangemode: 'tozero',
             },
@@ -5411,7 +5425,7 @@ window.showTab = function(el) {
             var barLayout = {
                 xaxis: { title: { text: 'Day', font: { size: 11 } },
                          color: '#b0b0b0', gridcolor: '#2d3561', type: 'category' },
-                yaxis: { title: { text: '± % of daily total', font: { size: 11 } },
+                yaxis: { title: { text: 'Daily-total spread (± %)', font: { size: 11 } },
                          color: '#b0b0b0', gridcolor: '#2d3561', rangemode: 'tozero' },
                 plot_bgcolor: 'rgba(0,0,0,0)',
                 paper_bgcolor: 'rgba(0,0,0,0)',
@@ -6614,6 +6628,8 @@ window.showTab = function(el) {
     function _showEmpty(title, hint) {
         var card = document.getElementById('external-verdict-card');
         if (card) card.style.display = 'none';
+        var tm = document.getElementById('external-timing');
+        if (tm) tm.style.display = 'none';
         var lg = document.getElementById('external-leadtime-group');
         if (lg) lg.style.display = 'none';
         var empty = document.getElementById('external-empty');
@@ -6661,6 +6677,58 @@ window.showTab = function(el) {
         }
     }
 
+    function _leadPhrase(mins) {
+        if (mins === null || mins === undefined) return null;
+        if (mins >= 90) return (mins / 60).toFixed(1) + ' h ahead';
+        return Math.round(mins) + ' min ahead';
+    }
+
+    function _renderTiming(data) {
+        var box = document.getElementById('external-timing');
+        if (!box) return;
+        var t = data.timing;
+        if (!t) { box.style.display = 'none'; return; }
+        var extLabel = data.external_label || 'External';
+        var basis = document.getElementById('external-timing-basis');
+        var cov = document.getElementById('external-timing-coverage');
+        var warn = document.getElementById('external-timing-warning');
+        var appLead = _leadPhrase(t.app_median_lead_minutes);
+        if (t.external_contemporaneous) {
+            // State mode: same-time snapshot.
+            var upd = (t.external_update_minutes !== null && t.external_update_minutes !== undefined)
+                ? (' (' + extLabel + ' updates ≈ every '
+                   + (t.external_update_minutes >= 90
+                      ? (t.external_update_minutes / 60).toFixed(1) + ' h'
+                      : Math.round(t.external_update_minutes) + ' min') + ')')
+                : '';
+            basis.innerHTML = '<strong>Comparison basis:</strong> same-time snapshot — '
+                + 'this add-on’s forecast was a median ' + (appLead || '—')
+                + ', compared against ' + extLabel + '’s recorded value at each moment' + upd
+                + '. Not lead-matched.';
+        } else {
+            // Attribute mode: lead-matched.
+            var extLead = _leadPhrase(t.external_median_lead_minutes);
+            basis.innerHTML = '<strong>Comparison basis:</strong> lead-matched — '
+                + 'this add-on median ' + (appLead || '—') + ' · '
+                + extLabel + ' median ' + (extLead || '—')
+                + '. The horizon chart below compares them at equal lead times.';
+        }
+        var pct = (t.grid_points > 0)
+            ? Math.round(100 * t.external_points / t.grid_points) : 0;
+        cov.textContent = extLabel + ' covered ' + t.external_points + ' of '
+            + t.grid_points + ' grid points (' + pct + '%); this add-on covered '
+            + t.app_points + '.';
+        if (t.external_stale) {
+            warn.style.display = '';
+            warn.textContent = '⚠ ' + extLabel + ' has far fewer samples than this '
+                + 'add-on over this window — treat the head-to-head as indicative '
+                + '(the external forecast may update infrequently or have gaps).';
+        } else {
+            warn.style.display = 'none';
+        }
+        box.style.display = '';
+    }
+
     function _renderOverlay(data) {
         var oc = document.getElementById('external-overlay-chart');
         if (!oc || !window.Plotly) return;
@@ -6681,7 +6749,7 @@ window.showTab = function(el) {
         var yUnits = units ? (' (' + units + (perBin ? ' / interval' : '') + ')')
                            : (perBin ? ' (per interval)' : '');
         var layout = {
-            xaxis: { color: DARK.axis, gridcolor: DARK.grid },
+            xaxis: { title: 'Time', color: DARK.axis, gridcolor: DARK.grid },
             yaxis: { title: 'Value' + yUnits, color: DARK.axis, gridcolor: DARK.grid,
                      zeroline: true, zerolinecolor: '#4a5178' },
             plot_bgcolor: DARK.plot_bgcolor, paper_bgcolor: DARK.paper_bgcolor,
@@ -6750,6 +6818,7 @@ window.showTab = function(el) {
                 var empty = document.getElementById('external-empty');
                 if (empty) empty.style.display = 'none';
                 _renderVerdict(data);
+                _renderTiming(data);
                 _renderOverlay(data);
                 _renderLeadtime(data);
             })

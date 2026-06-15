@@ -28,6 +28,15 @@ comparison*:
   cumulative setting) keep the two forecasts in the same evaluation space —
   raw for instantaneous targets, per-interval demand for cumulative ones.
 
+The comparison aligns both forecasts on the experiment's target grid and
+scores them on the **common samples** (where the actual, this add-on's
+forecast, and the external forecast all exist), so different update
+cadences never bias the result. A **comparison-basis** line makes the
+timing explicit — whether the external is a same-time snapshot (state
+mode) or lead-matched (attribute mode), each side's typical lead, the
+external's update interval, and a warning when the external is sparse or
+stale relative to this add-on's own forecasts.
+
 Notes: the tab only collects data while the experiment is in **production**
 (that's when this add-on logs its own forecasts), and data accrues from when
 you configure it — there's no historical backfill. New config keys:
@@ -35,6 +44,12 @@ you configure it — there's no historical backfill. New config keys:
 `external_forecast_attribute`, `external_forecast_value_key`,
 `external_forecast_scale`, `external_forecast_is_cumulative`,
 `external_forecast_label`.
+
+**Chart axis labels tidied up.** Every experiment chart now has a
+capitalised axis label with units where the quantity carries them — the
+forecast-evolution y-axis uses the humanised experiment name (e.g. "Solar
+Forecast (W)") instead of the raw slug, the run-to-run stability spread
+shows units, and a couple of lower-cased / unit-less labels were corrected.
 
 ## 2.43.1
 

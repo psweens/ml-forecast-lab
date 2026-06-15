@@ -3350,6 +3350,51 @@ class HistoryDB:
                     ],
                 }
 
+        # --- timing transparency -----------------------------------------
+        # Surface HOW the two forecasts are being aligned so a reader can
+        # judge fairness: each side's typical lead time, the external's
+        # update cadence (state mode), and a sparse/stale flag when the
+        # external has far fewer samples than the app over the same window.
+        def _median_lead(df: "pd.DataFrame"):
+            if df is None or df.empty or "lead_minutes" not in df.columns \
+                    or "grid" not in df.columns:
+                return None
+            rep = df.groupby("grid")["lead_minutes"].last().dropna()
+            return round(float(rep.median()), 1) if not rep.empty else None
+
+        app_points = int(app_latest.notna().sum()) if app_latest is not None else 0
+        ext_points = int(ext_eval.notna().sum()) if ext_eval is not None else 0
+        ext_update_min = None
+        if mode != "attribute":
+            try:
+                ts = pd.to_datetime(
+                    pd.DataFrame(srows, columns=["ds", "value"])["ds"],
+                    errors="coerce",
+                ).dropna().sort_values()
+                if len(ts) >= 2:
+                    diffs = ts.diff().dropna().dt.total_seconds() / 60.0
+                    if len(diffs):
+                        ext_update_min = round(float(diffs.median()), 1)
+            except Exception:
+                ext_update_min = None
+        result["timing"] = {
+            "grid_points": int(len(idx)),
+            "app_points": app_points,
+            "external_points": ext_points,
+            "app_median_lead_minutes": _median_lead(fdf),
+            # state mode has no lead dimension — the external value is read
+            # contemporaneously (≈ lead 0) for each target.
+            "external_median_lead_minutes": (
+                _median_lead(edf) if mode == "attribute" else None
+            ),
+            "external_contemporaneous": mode != "attribute",
+            "external_update_minutes": ext_update_min,
+            # Heuristic: external materially sparser than the app's own
+            # forecast over the same window → treat the head-to-head as
+            # indicative and flag it in the UI.
+            "external_stale": bool(app_points > 0 and ext_points < 0.5 * app_points),
+        }
+
         return result
 
     # ------------------------------------------------------------------
