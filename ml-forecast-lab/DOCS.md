@@ -171,7 +171,7 @@ Compare this add-on's forecast against up to **five third-party forecasts of the
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `entity_id` | string | **required** | HA entity holding the external forecast. |
-| `mode` | `state` \| `attribute` | `state` | `state`: the entity's recorded value at each time is its estimate for that moment (cached each cycle like the actuals). `attribute`: read a forecast trajectory from an attribute and log it per cycle (tagged by source) for a per-horizon comparison. |
+| `mode` | `state` \| `attribute` | `state` | `state`: the entity's recorded value at each time is its estimate for that moment (cached each cycle like the actuals; newly added sensors are backfilled from recorder history so the comparison shows immediately). `attribute`: read a forecast trajectory from an attribute and log it per cycle (tagged by source) for a per-horizon comparison. |
 | `attribute` | string | `forecast` | `attribute` mode only — which attribute (or weather `hourly`/`daily`/`twice_daily` service type) holds the trajectory. |
 | `value_key` | string | `null` | `attribute` mode only — the value key inside each trajectory entry (e.g. `pv_estimate`). `null` auto-detects. |
 | `scale` | float | `null` | Optional multiplier to fix a unit mismatch against the target (e.g. Wh→kWh = `0.001`). |

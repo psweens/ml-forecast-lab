@@ -2950,6 +2950,32 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         result["days"] = days
         return JSONResponse(content=result)
 
+    async def _backfill_external_state(entity: str, days: int = 90) -> int:
+        """Cache a state-mode external sensor's existing HA recorder history
+        so the comparison populates immediately rather than only accruing
+        from the next production cycle. Best-effort; returns rows stored.
+
+        Bounded by HA's recorder retention (it returns only what it kept);
+        the per-cycle capture extends the series forward beyond that.
+        """
+        db = app.state.appstate.history_db
+        if not db:
+            return 0
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        from ml_forecast_lab.ha_interface import HAInterface, normalise_history
+        end = _dt.now(_tz.utc)
+        start = end - _td(days=days)
+        iface = HAInterface()
+        try:
+            raw = await iface.get_history(entity, start, end)
+        finally:
+            await iface.close()
+        df = normalise_history(raw)
+        if df is None or df.empty:
+            return 0
+        table = db.safe_table_name(entity)
+        return await asyncio.to_thread(db.store_history, table, df)
+
     @app.post("/experiment/{name}/add-external-forecast")
     async def add_external_forecast(name: str, request: Request):
         """Add a third-party forecast to an experiment's external_forecasts.
@@ -2994,7 +3020,21 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             added = add_experiment_external_forecast(config_path, name, ext)
             if added:
                 logger.info(f"Added external forecast {entity} to {name}")
-                return JSONResponse(content={"success": True, "entity_id": entity})
+                backfilled = 0
+                # State-mode sensors have real recorder history — backfill it
+                # now so the comparison line + head-to-head show immediately
+                # instead of only accruing from the next production cycle.
+                # (Attribute/trajectory sensors can't be backfilled: HA
+                # doesn't retain past forecast attributes.)
+                if ext.get("mode", "state") == "state":
+                    try:
+                        backfilled = await _backfill_external_state(entity)
+                    except Exception as e:
+                        logger.debug(f"External backfill for {entity} failed: {e}")
+                return JSONResponse(content={
+                    "success": True, "entity_id": entity,
+                    "backfilled": backfilled,
+                })
             return JSONResponse(content={
                 "success": False,
                 "error": (

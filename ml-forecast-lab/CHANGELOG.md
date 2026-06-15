@@ -18,7 +18,9 @@ has:
 - A **mode**. *Sensor state (time-series)* treats the entity's recorded
   state at each timestamp as its estimate for that moment; the state is
   cached every production cycle (via the same history cache as the actuals),
-  so the comparison survives Home Assistant's recorder retention.
+  so the comparison survives Home Assistant's recorder retention. Newly
+  added state sensors are backfilled from recorder history so the comparison
+  populates immediately rather than only accruing going forward.
   *Forecast attribute (trajectory)* reads a forecast array from an attribute
   (`forecast`, `detailedForecast`, or a weather `hourly`/`daily` service
   type — the same resolver future covariates use) and logs the whole

@@ -6622,7 +6622,9 @@ window.showTab = function(el) {
         }).then(function(r){return r.json();}).then(function(res){
             if (btn) btn.disabled = false;
             if (res.success) {
-                mlfl.toast('Added ' + entity, 'success');
+                var msg = 'Added ' + entity;
+                if (res.backfilled) msg += ' — backfilled ' + res.backfilled + ' history points';
+                mlfl.toast(msg, 'success');
                 _reloadToThisTab();
             } else {
                 mlfl.toast('Add failed: ' + (res.error || 'unknown'), 'error');
