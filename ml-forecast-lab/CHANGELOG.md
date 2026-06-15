@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.43.2
+## 2.44.2
 
 **Solar forecasts no longer learn phantom night-time generation.** For
 non-negative solar targets the night-time rows are now forced to zero
@@ -28,6 +28,145 @@ them.
   surfaces via the dropna step instead of being masked as zero.
 - Non-solar targets are unchanged — without physics features the fill
   still only acts on `NaN` rows and only when `idle_value` is set.
+
+## 2.44.1
+
+**Forecast Comparison tab — completed against the agreed spec.** Builds on
+2.44.0 (which over-delivered on unit-aware conversion, the two
+state/attribute ingestion modes, on-tab management, auto-detect and the
+scale-mismatch guard — all kept) by adding the pieces that were still
+missing:
+
+- **Seasonal Naive baseline.** A "same time yesterday" do-nothing
+  reference is now computed and shown as its own row (kept out of the
+  five-competitor cap) plus a dashed line on the overlay, and folded into
+  the verdict ("· vs Seasonal Naive: ahead/behind").
+
+- **Warming-up / inconclusive warnings.** A source is "warming up" until
+  it has at least **7 days** of overlapping data
+  (`EXTERNAL_COMPARISON_WARMUP_DAYS`). Below that: a page-top **"Results
+  are provisional"** banner names the sources still warming (with their
+  `n/7` day counts), each table row shows an `n/7 ⏳` Days badge, warming
+  overlay/hour lines are drawn faded, and the verdict is prefixed
+  "Provisional ·" and de-emphasised. Previously a winner could be declared
+  off a single overlapping sample.
+
+- **Metric selector.** A "Rank by" dropdown (MAE default; RMSE, Bias,
+  % of typical, Daily MAE, Daily bias) drives the table's column emphasis,
+  the best-in-column highlighting, and the head-to-head verdict.
+
+- **Richer ranking table.** New **% of typical**, **Daily MAE**, **Daily
+  bias** and **Days** columns; the best value in each column is bolded
+  green (the tooltip already promised this); the app reference row uses a
+  standalone `app_self` accuracy block.
+
+- **Error-by-time-of-day chart.** Mean error grouped by hour of day, one
+  line per forecaster — surfaces regime-specific strengths the headline
+  numbers hide. Computed client-side from the overlay so it follows the
+  per-interval/cumulative view.
+
+- **Separate external retention.** New global
+  `external_forecast_retention_days` (default **60**, editable in the
+  System tab) prunes the captured third-party trajectory log on its own
+  window instead of sharing the add-on's 120-day `forecast_log` schedule.
+
+- **Add-time validation.** Adding an attribute-mode external now probes
+  the entity live and returns a non-fatal warning if the chosen
+  attribute / value key doesn't resolve — a typo surfaces immediately
+  instead of after days of empty logging (never blocks the add).
+
+Backend: `get_external_forecast_comparison` now returns per-source
+`% of typical`, daily MAE/bias, `days_logged`/`warming`, an `app_self`
+block, a `baseline` (Seasonal Naive) block, and top-level
+`warming_up`/`warmup_days`/`typical`. 13 new tests; full unit + smoke
+suites pass.
+
+*Not included (the one explicitly-optional item from the spec):* the
+multi-source forecast-convergence / small-multiples chart, which needs a
+new per-target multi-issuance payload — deferred as a follow-up.
+
+## 2.44.0
+
+**New per-experiment "Forecast Comparison" tab — benchmark the add-on's
+forecast against up to five third-party ones.** Add external forecast
+sensors (ones *not* produced by this add-on — Solcast, a utility day-ahead
+curve, another model) directly on the tab, and it scores the add-on's
+published forecast head-to-head against each, all against the actuals: a
+verdict, an accuracy-ranking table (MAE / RMSE / bias on the common
+samples, with the add-on as the reference row), an overlay chart of actual
+vs the add-on vs each external, and — for trajectory externals — a combined
+per-lead-time error curve.
+
+Sensors are added and removed on the tab itself (capped at five). Each one
+has:
+
+- A **mode**. *Sensor state (time-series)* treats the entity's recorded
+  state at each timestamp as its estimate for that moment; the state is
+  cached every production cycle (via the same history cache as the actuals),
+  so the comparison survives Home Assistant's recorder retention. Newly
+  added state sensors are backfilled from recorder history so the comparison
+  populates immediately rather than only accruing going forward.
+  *Forecast attribute (trajectory)* reads a forecast array from an attribute
+  (`forecast`, `detailedForecast`, a Predbat `results` dict, or a weather
+  `hourly`/`daily` service type — the same resolver future covariates use)
+  and logs the whole trajectory each cycle to the `external_forecast_log`
+  table (tagged by source), enabling the per-horizon comparison. The
+  attribute and value key are **auto-detected** from the chosen entity's live
+  attributes — you pick which data to compare from rather than typing names.
+- Optional overrides — a **scale** and an explicit **is-cumulative** — on
+  top of the automatic handling below.
+
+**Unit-aware conversion.** Each sensor's Home Assistant `unit_of_measurement`
+is read and used to put every series into a common space, so mismatched
+quantities line up automatically: a cumulative sensor's shape is detected and
+differenced, and power↔energy is reconciled via the interval length and base
+units (W/kW/MW, Wh/kWh/MWh). A cumulative **kWh** sensor can therefore be
+compared correctly against an instantaneous **kW** target without any manual
+setup. When a unit isn't a recognised power/energy unit the series is left in
+its raw space and a **scale-mismatch guard** flags it — replacing the
+meaningless "X% better" verdict with a warning and excluding that sensor from
+the head-to-head — rather than guessing.
+
+**Per-interval / cumulative analysis toggle.** Switch the whole tab between
+*per-interval* (per-bin demand in the target's native unit, e.g. kW) and
+*cumulative* (the running daily total in kWh, integrating power forecasts to
+energy). The cumulative view is what makes a daily-total energy sensor
+directly comparable. The horizon chart stays per-interval.
+
+Everything is aligned on the experiment's target grid and each external is
+scored on the **common samples** (where the actual, the add-on's forecast,
+and that external all exist), so differing update cadences don't bias the
+result. A comparison-basis line states the timing explicitly (same-time
+snapshot for state mode vs lead-matched for trajectory mode, plus each
+side's typical lead) and flags any external that is sparse or stale relative
+to the add-on's own forecasts.
+
+The tab only collects data while the experiment is in **production** (when
+the add-on logs its own forecasts), and data accrues going forward — there
+is no historical backfill. The internal stores stay bounded: the trajectory
+log is pruned on the same age-based schedule as `forecast_log` (120 days)
+and state-mode caches are pruned to the experiment's `max_age`. Configured
+via the `external_forecasts` list (each entry: `entity_id`, `mode`,
+`attribute`, `value_key`, `scale`, `is_cumulative`, `label`); configs using
+the older flat `external_forecast_*` keys are migrated to the list on load.
+
+**Chart axis labels tidied up.** Every experiment chart now carries a
+capitalised axis label with units where the quantity has them — the
+forecast-evolution y-axis uses the humanised experiment name (e.g. "Solar
+Forecast (W)") instead of the raw slug, the run-to-run stability spread
+shows units, and a few lower-cased or unit-less labels were corrected.
+
+**Fixed: auto-inherited forecast unit could reset to empty after a
+retrain.** The per-target unit cache is invalidated on each retrain so a
+genuine source-sensor unit change is picked up, but if the immediate
+re-resolve hit a transient Home Assistant fetch failure — or the source
+sensor was momentarily `unavailable` (its attributes absent) — the empty
+result was published, so Home Assistant flagged the forecast sensor's
+`unit_of_measurement` as having changed to "". The last successfully
+resolved unit is now remembered and reused whenever a fresh lookup comes
+back empty, so a transient miss can no longer clear a known unit; a real
+unit change is still adopted, and a genuinely unitless source still
+publishes empty.
 
 ## 2.43.1
 

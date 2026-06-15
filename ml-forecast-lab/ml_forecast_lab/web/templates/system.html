@@ -89,6 +89,12 @@
                 <input type="text" name="timezone" value="{{ config.timezone }}"
                        class="setting-input" style="width: 200px;" placeholder="e.g. Europe/London">
             </div>
+            <div>
+                <label class="field-label" style="display: block; margin-bottom: 0.5rem;">External-forecast retention (days) <span class="info-tip">?<span class="tip-text">How long captured third-party / external forecast trajectories (behind each experiment's <b>Forecast Comparison</b> tab) are kept before age-based pruning. Separate from the add-on's own forecast log (120 days) because external comparison data is higher-volume (up to 5 sources × the horizon, every cycle). A rolling ~2 months is plenty for a head-to-head. Default 60.</span></span></label>
+                <input type="number" name="external_forecast_retention_days" min="1" max="365" step="1"
+                       value="{{ config.external_forecast_retention_days }}"
+                       class="setting-input" style="width: 140px;">
+            </div>
         </div>
         <p style="color: var(--text-secondary); font-size: 0.85rem; margin-top: 0.75rem;">
             Forecast and retrain intervals are configured per experiment below.
@@ -286,6 +292,7 @@
             cpu_cores: parseInt(form.cpu_cores.value),
             nice_priority: parseInt(form.nice_priority.value),
             timezone: form.timezone.value,
+            external_forecast_retention_days: parseInt(form.external_forecast_retention_days.value),
         };
 
         fetch(BASE_PATH + '/api/settings', {

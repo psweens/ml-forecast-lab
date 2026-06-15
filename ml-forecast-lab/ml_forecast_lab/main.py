@@ -528,6 +528,13 @@ class MLForecastLabApp:
         # a restart re-resolves it). Keyed by target_entity so multiple
         # experiments on the same sensor share one lookup.
         self._source_unit_cache: Dict[str, str] = {}
+        # Last *successfully* resolved non-empty source unit per target
+        # entity. Unlike ``_source_unit_cache`` this is NEVER invalidated on
+        # retrain — it's the fallback that stops a transient HA fetch failure
+        # (or the source sensor being momentarily ``unavailable``) during the
+        # post-retrain re-resolve from republishing an empty unit and making
+        # HA flag a unit_of_measurement change.
+        self._source_unit_last_good: Dict[str, str] = {}
         # Resolved runtime-resource limits actually applied to this process
         # (CPU thread cap, nice value). Surfaced on the System page so the
         # user can verify their settings took effect.
@@ -689,6 +696,7 @@ class MLForecastLabApp:
             db_path = Path("/data/ml_forecast_lab/history.db")
             self.history_db = HistoryDB(db_path)
             self.history_db.ensure_forecast_log_table()
+            self.history_db.ensure_external_forecast_log_table()
             self.history_db.ensure_benchmark_table()
             logger.info(f"HistoryDB initialised at {db_path}")
 
@@ -1233,8 +1241,14 @@ class MLForecastLabApp:
              kWh stays kWh, °C stays °C). This is what makes units "just
              work" for experiments created through the web UI, which has
              no units field.
-          3. Empty string if the source has no unit or the fetch fails —
-             identical to the prior behaviour, never raises.
+          3. The last successfully-resolved unit if a fresh fetch comes back
+             empty or fails — so a transient HA hiccup (or the source sensor
+             being momentarily ``unavailable``) on the post-retrain
+             re-resolve doesn't republish an empty unit and make HA flag a
+             unit_of_measurement change.
+          4. Empty string only if the source genuinely has no unit and we've
+             never resolved one — identical to the prior cold-start
+             behaviour, never raises.
 
         The inherited value is cached per target entity so this costs at
         most one extra HA call per entity per process, not one per
@@ -1248,7 +1262,7 @@ class MLForecastLabApp:
         if cached is not None:
             return cached
 
-        unit = ""
+        unit = None
         if self.ha_interface:
             try:
                 fetched = await self.ha_interface.get_state(
@@ -1256,16 +1270,39 @@ class MLForecastLabApp:
                 )
                 if isinstance(fetched, str) and fetched.strip():
                     unit = fetched.strip()
-                    logger.info(
-                        f"  Auto-inherited unit '{unit}' from {entity} "
-                        f"for {exp_cfg.name} (no units set in config)"
-                    )
             except Exception as e:
                 logger.debug(
                     f"  Could not auto-resolve unit from {entity}: {e}"
                 )
-        self._source_unit_cache[entity] = unit
-        return unit
+
+        if unit:
+            # Successful resolve — remember it as the authoritative fallback.
+            prev_good = self._source_unit_last_good.get(entity)
+            if unit != prev_good:
+                logger.info(
+                    f"  Auto-inherited unit '{unit}' from {entity} "
+                    f"for {exp_cfg.name} (no units set in config)"
+                )
+            self._source_unit_cache[entity] = unit
+            self._source_unit_last_good[entity] = unit
+            return unit
+
+        # Fetch failed or the source reported no unit. Prefer the last known
+        # good unit over republishing "": a transient miss on the
+        # post-retrain re-resolve must not clobber a good value and make HA
+        # flag a unit_of_measurement change.
+        last_good = self._source_unit_last_good.get(entity)
+        if last_good:
+            logger.debug(
+                f"  Unit fetch for {entity} returned empty; keeping "
+                f"last-known unit '{last_good}' for {exp_cfg.name}"
+            )
+            self._source_unit_cache[entity] = last_good
+            return last_good
+
+        # Never resolved a unit for this entity — cold-start empty, as before.
+        self._source_unit_cache[entity] = ""
+        return ""
 
     async def _prepare_load_subtract_inputs(
         self,
@@ -4220,6 +4257,34 @@ class MLForecastLabApp:
                         f"  forecast_log retention prune failed for "
                         f"{exp_cfg.name}: {e}"
                     )
+                # Age-based retention for the external forecast log
+                # (attribute-mode third-party trajectories), on its OWN
+                # configurable window (default 60d, System tab) — separate
+                # from forecast_log's 120d because external data is
+                # higher-volume. State-mode external caches are pruned at
+                # capture time alongside actuals (to the experiment's
+                # max_age); this bounds the trajectory log.
+                ext_retention = int(getattr(
+                    self.config, "external_forecast_retention_days", 60,
+                ))
+                try:
+                    ext_pruned = await asyncio.to_thread(
+                        self.history_db.cleanup_external_forecast_log,
+                        exp_cfg.name,
+                        datetime.now(timezone.utc).replace(tzinfo=None)
+                        - timedelta(days=ext_retention),
+                    )
+                    if ext_pruned:
+                        logger.info(
+                            f"  external_forecast_log retention: pruned "
+                            f"{ext_pruned} rows older than "
+                            f"{ext_retention}d for {exp_cfg.name}"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"  external_forecast_log retention prune failed for "
+                        f"{exp_cfg.name}: {e}"
+                    )
         except Exception as e:
             logger.error(f"Retrain failed for {exp_cfg.name}: {e}", exc_info=True)
             # Surface the error in the web UI so the user doesn't have to
@@ -5063,6 +5128,112 @@ class MLForecastLabApp:
         except Exception as e:
             logger.error(f"Error in forecast cycle: {e}", exc_info=True)
 
+    async def _capture_external_forecast(
+        self, exp_cfg, issued_at: datetime, ds_future: pd.DatetimeIndex,
+    ) -> None:
+        """Snapshot each configured third-party forecast for head-to-head
+        scoring on the experiment's "External Comparison" tab.
+
+        For every entry in ``exp_cfg.external_forecasts``:
+
+        - ``state`` mode: read the external entity's current state and append
+          a single grid point to its cached-history table (``store_history``),
+          then prune that table to ``max_age`` days. Accumulated over cycles
+          this builds the external series the same way actuals are cached —
+          independent of HA recorder retention.
+        - ``attribute`` mode: resolve the trajectory onto this cycle's forecast
+          grid (reusing the covariate ``fetch_future`` resolver, which handles
+          list-of-dict / date-dict attributes and the ``weather.get_forecasts``
+          service shape) and log it to ``external_forecast_log`` under the
+          entity as ``source`` so a per-lead-time comparison is possible.
+          Note: ``fetch_future`` interpolates / edge-fills onto the grid, so
+          targets beyond the external source's own horizon are forward-filled;
+          the comparison surfaces per-lead sample counts so that fill is
+          visible.
+        """
+        externals = getattr(exp_cfg, "external_forecasts", None) or []
+        if not externals or not self.ha_interface or not self.history_db:
+            return
+
+        issued_naive = (
+            issued_at.replace(tzinfo=None)
+            if issued_at.tzinfo is not None else issued_at
+        )
+
+        for spec in externals:
+            entity = getattr(spec, "entity_id", None)
+            if not entity:
+                continue
+            mode = getattr(spec, "mode", "state") or "state"
+            try:
+                if mode == "attribute":
+                    attr_name = getattr(spec, "attribute", "forecast") or "forecast"
+                    value_key = getattr(spec, "value_key", None)
+                    from ml_forecast_lab.covariates import CovariateResolver
+
+                    resolver = getattr(self, "covariate_resolver", None)
+                    if resolver is None:
+                        resolver = CovariateResolver(
+                            self.ha_interface, history_db=self.history_db,
+                        )
+                    cov_cfg = {
+                        "entity_id": entity,
+                        "future_attribute": attr_name,
+                        "future_value_key": value_key,
+                    }
+                    series = await resolver.fetch_future(cov_cfg, ds_future)
+                    if series is None or len(series) == 0:
+                        continue
+                    series = series.dropna()
+                    if series.empty:
+                        continue
+                    targets = [
+                        pd.Timestamp(t).to_pydatetime() for t in series.index
+                    ]
+                    targets = [
+                        t.replace(tzinfo=None) if t.tzinfo is not None else t
+                        for t in targets
+                    ]
+                    values = [float(v) for v in series.values]
+                    n = await asyncio.to_thread(
+                        self.history_db.log_external_forecast,
+                        experiment=exp_cfg.name,
+                        source=spec.source_key,
+                        issued_at=issued_naive,
+                        targets=targets,
+                        values=values,
+                    )
+                    if n:
+                        logger.info(
+                            f"  Logged {n} external_forecast_log rows for "
+                            f"{exp_cfg.name} ({entity}.{attr_name})"
+                        )
+                else:  # state mode
+                    from ml_forecast_lab.ha_interface import state_to_float
+
+                    raw = await self.ha_interface.get_state(entity, default=None)
+                    val = state_to_float(raw)
+                    if val is None:
+                        logger.debug(
+                            f"  External forecast (state) for {exp_cfg.name}: "
+                            f"{entity} state {raw!r} not numeric"
+                        )
+                        continue
+                    table = self.history_db.safe_table_name(entity)
+                    df = pd.DataFrame({"ds": [issued_naive], "value": [float(val)]})
+                    await asyncio.to_thread(self.history_db.store_history, table, df)
+                    # Retention: keep the external cache bounded like actuals.
+                    oldest = datetime.now(timezone.utc).replace(tzinfo=None) \
+                        - timedelta(days=exp_cfg.max_age)
+                    await asyncio.to_thread(
+                        self.history_db.cleanup, table, oldest,
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"  External forecast capture failed for "
+                    f"{exp_cfg.name} / {entity}: {e}"
+                )
+
     async def _publish_forecast_sensors(
         self,
         exp_cfg,
@@ -5350,6 +5521,25 @@ class MLForecastLabApp:
                     )
             except Exception as e:
                 logger.warning(f"Failed to log forecast evolution: {e}")
+
+        # --- Capture the external (third-party) forecast ---------------------
+        # Logged at the SAME issuance instant as the app's own forecast so the
+        # External Comparison tab scores like-for-like cycles. Production-only
+        # and best-effort — a flaky external sensor never blocks publishing.
+        if (
+            self.history_db
+            and exp_cfg.mode == "production"
+            and getattr(exp_cfg, "external_forecasts", None)
+        ):
+            try:
+                await self._capture_external_forecast(
+                    exp_cfg, issued_at, ds_future_aware,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to capture external forecast for "
+                    f"{exp_cfg.name}: {e}"
+                )
 
         # Common attrs applied to every sensor in this cycle. Sharing
         # last_trained + issued_at lets the dashboard correlate bounds,
