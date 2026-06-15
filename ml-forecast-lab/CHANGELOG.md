@@ -37,7 +37,11 @@ and that external all exist), so differing update cadences don't bias the
 result. A comparison-basis line states the timing explicitly (same-time
 snapshot for state mode vs lead-matched for trajectory mode, plus each
 side's typical lead) and flags any external that is sparse or stale relative
-to the add-on's own forecasts.
+to the add-on's own forecasts. A scale-mismatch guard detects when an
+external sits on a very different magnitude to the target (e.g. a cumulative
+kWh sensor compared raw against instantaneous kW): the meaningless "X%
+better" verdict is replaced with a warning and that sensor is excluded from
+the head-to-head until its units / cumulative setting are corrected.
 
 The tab only collects data while the experiment is in **production** (when
 the add-on logs its own forecasts), and data accrues going forward — there

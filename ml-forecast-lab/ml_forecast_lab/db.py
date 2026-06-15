@@ -3393,6 +3393,8 @@ class HistoryDB:
             common = aligned.dropna(subset=["actual", "app", "external"])
             n_common = int(len(common))
             h2h = None
+            scale_ratio = None
+            scale_mismatch = False
             if n_common >= 1:
                 app_m = _err(common, "app")
                 ext_m = _err(common, "external")
@@ -3409,6 +3411,17 @@ class HistoryDB:
                     "n": n_common, "app": app_m, "external": ext_m,
                     "winner": winner, "app_mae_improvement_pct": impr,
                 }
+                # Scale-mismatch guard: if the external sits on a wildly
+                # different magnitude to the actuals, the head-to-head is
+                # measuring a unit / cumulative mismatch, not forecast skill
+                # (e.g. a cumulative kWh sensor compared raw against
+                # instantaneous kW). Use mean-abs (median is ~0 for
+                # night-heavy solar) on the common samples.
+                mean_actual = float(common["actual"].abs().mean())
+                mean_ext = float(common["external"].abs().mean())
+                if mean_actual > 1e-9 and mean_ext > 1e-9:
+                    scale_ratio = round(mean_ext / mean_actual, 2)
+                    scale_mismatch = scale_ratio > 4.0 or scale_ratio < 0.25
             ext_points = int(ext_eval.notna().sum()) if ext_eval is not None else 0
             timing = {
                 "app_median_lead_minutes": app_median_lead,
@@ -3425,6 +3438,7 @@ class HistoryDB:
             result["comparisons"].append({
                 "entity": it["entity"], "label": it["label"], "mode": it["mode"],
                 "head_to_head": h2h, "timing": timing, "n": n_common,
+                "scale_ratio": scale_ratio, "scale_mismatch": scale_mismatch,
             })
 
         # --- combined lead-time (app + each attribute-mode external) ---

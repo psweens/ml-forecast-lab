@@ -6689,7 +6689,10 @@ window.showTab = function(el) {
         comps.forEach(function(c, i) {
             var h = c.head_to_head;
             var deltaTxt;
-            if (h.app_mae_improvement_pct === null || h.app_mae_improvement_pct === undefined) {
+            if (c.scale_mismatch) {
+                // A unit / cumulative mismatch makes the % delta meaningless.
+                deltaTxt = '<span style="color:var(--warning);">⚠ scale mismatch (≈' + (c.scale_ratio || '?') + '×)</span>';
+            } else if (h.app_mae_improvement_pct === null || h.app_mae_improvement_pct === undefined) {
                 deltaTxt = '—';
             } else if (h.winner === 'app') {
                 deltaTxt = '<span style="color:var(--success);">add-on ' + Math.abs(h.app_mae_improvement_pct).toFixed(0) + '% better</span>';
@@ -6697,9 +6700,11 @@ window.showTab = function(el) {
                 deltaTxt = '<span style="color:var(--warning);">' + Math.abs(h.app_mae_improvement_pct).toFixed(0) + '% better</span>';
             } else { deltaTxt = '≈ tie'; }
             var color = EXT_COLORS[i % EXT_COLORS.length];
-            rows += '<tr>'
-                + '<td><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+color+';margin-right:6px;"></span>'
-                + (c.label || c.entity) + ' <span style="color:var(--text-secondary);font-size:0.8rem;">(' + (c.mode === 'attribute' ? 'trajectory' : 'state') + ')</span></td>'
+            var nameCell = '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+color+';margin-right:6px;"></span>'
+                + (c.label || c.entity) + ' <span style="color:var(--text-secondary);font-size:0.8rem;">(' + (c.mode === 'attribute' ? 'trajectory' : 'state') + ')</span>'
+                + (c.scale_mismatch ? ' <span title="On a very different scale to the target — likely a unit or cumulative mismatch" style="color:var(--warning);">⚠</span>' : '');
+            rows += '<tr' + (c.scale_mismatch ? ' style="opacity:0.7;"' : '') + '>'
+                + '<td>' + nameCell + '</td>'
                 + '<td>' + _fmt(h.external.mae, units) + '</td>'
                 + '<td>' + _fmt(h.external.rmse, units) + '</td>'
                 + '<td>' + _fmt(h.external.bias, units) + '</td>'
@@ -6724,17 +6729,27 @@ window.showTab = function(el) {
         var card = document.getElementById('external-verdict-card');
         var head = document.getElementById('external-verdict-headline');
         if (!card || !head) return;
-        var comps = (data.comparisons || []).filter(function(c){ return c.head_to_head; });
-        if (!comps.length) { card.style.display='none'; return; }
+        var all = (data.comparisons || []).filter(function(c){ return c.head_to_head; });
+        if (!all.length) { card.style.display='none'; return; }
+        // Only forecasts on a comparable scale count toward the verdict.
+        var comps = all.filter(function(c){ return !c.scale_mismatch; });
+        var mismatched = all.length - comps.length;
+        var mmNote = mismatched ? ' <span style="color:var(--warning);font-weight:400;">(' + mismatched + ' excluded — scale mismatch)</span>' : '';
+        if (!comps.length) {
+            head.innerHTML = '⚠ Can’t compare yet — the external forecast' + (all.length !== 1 ? 's are' : ' is') + ' on a different scale to the target (likely a unit or cumulative mismatch). Set <b>Is cumulative?</b> / <b>Scale</b> above, or pick a sensor in the target’s units.';
+            head.style.color = 'var(--warning)';
+            card.style.display = '';
+            return;
+        }
         var beaten = comps.filter(function(c){ return c.head_to_head.winner === 'app'; }).length;
         var lostTo = comps.filter(function(c){ return c.head_to_head.winner === 'external'; });
         var total = comps.length;
         if (lostTo.length === 0) {
-            head.innerHTML = '✓ ML Forecast Lab is the most accurate — beats all ' + total + ' external forecast' + (total!==1?'s':'') + ' (lower MAE vs actuals)';
+            head.innerHTML = '✓ ML Forecast Lab is the most accurate — beats all ' + total + ' external forecast' + (total!==1?'s':'') + ' (lower MAE vs actuals)' + mmNote;
             head.style.color = 'var(--success)';
         } else {
             var best = lostTo.slice().sort(function(a,b){ return (b.head_to_head.app_mae_improvement_pct||0) - (a.head_to_head.app_mae_improvement_pct||0); })[0];
-            head.innerHTML = '✗ ' + (best.label || best.entity) + ' beats ML Forecast Lab (lower MAE); ML Forecast Lab still beats ' + beaten + ' of ' + total;
+            head.innerHTML = '✗ ' + (best.label || best.entity) + ' beats ML Forecast Lab (lower MAE); ML Forecast Lab still beats ' + beaten + ' of ' + total + mmNote;
             head.style.color = 'var(--warning)';
         }
         card.style.display = '';
@@ -6754,11 +6769,19 @@ window.showTab = function(el) {
         if (anyState) parts.push('State-mode externals are same-time snapshots (not lead-matched).');
         if (anyAttr) parts.push('Trajectory externals are lead-matched — see the horizon chart.');
         basis.innerHTML = parts.join(' ');
-        var stale = comps.filter(function(c){ return c.timing && c.timing.external_stale; })
+        var msgs = [];
+        var mism = comps.filter(function(c){ return c.scale_mismatch; })
+                        .map(function(c){ return (c.label || c.entity) + ' (≈' + (c.scale_ratio || '?') + '×)'; });
+        if (mism.length) {
+            msgs.push('⚠ On a different scale to the target — likely a unit mismatch or a cumulative sensor read raw: ' + mism.join(', ') + '. Fix with Is cumulative? / Scale above, or pick a sensor in the target’s units.');
+        }
+        var stale = comps.filter(function(c){ return c.timing && c.timing.external_stale && !c.scale_mismatch; })
                          .map(function(c){ return c.label || c.entity; });
         if (stale.length) {
-            warn.style.display=''; warn.textContent = '⚠ Sparse/stale (far fewer samples than ML Forecast Lab): ' + stale.join(', ') + ' — treat those head-to-heads as indicative.';
-        } else { warn.style.display='none'; }
+            msgs.push('⚠ Sparse/stale (far fewer samples than ML Forecast Lab): ' + stale.join(', ') + ' — treat those head-to-heads as indicative.');
+        }
+        if (msgs.length) { warn.style.display=''; warn.innerHTML = msgs.join('<br>'); }
+        else { warn.style.display='none'; }
         box.style.display = '';
     }
 

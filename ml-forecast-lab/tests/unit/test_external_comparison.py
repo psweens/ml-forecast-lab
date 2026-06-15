@@ -245,6 +245,39 @@ class TestComparisonMulti:
         assert h is not None and h["app"]["mae"] < h["external"]["mae"]
         assert h["winner"] == "app"
 
+    def test_scale_mismatch_flagged(self, db):
+        # External on a ~15x larger scale than the target (e.g. a cumulative
+        # kWh sensor vs instantaneous power) must be flagged, not silently
+        # declared "96% worse".
+        grid = _grid(); actual = _actual_curve()
+        ttbl = db.safe_table_name("sensor.pv_power")
+        db.store_history(ttbl, pd.DataFrame({"ds": grid, "value": actual}))
+        for i, t in enumerate(grid):
+            db.log_forecast(experiment="e", issued_at=t - timedelta(minutes=INTERVAL),
+                            targets=[t], predictions=[actual[i]], model_name="lgb", model_version="v1")
+        e1 = db.safe_table_name("sensor.pv_today")
+        db.store_history(e1, pd.DataFrame({"ds": grid, "value": [actual[i] * 15.0 for i in range(48)]}))
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, [_spec("sensor.pv_today", "state", e1)],
+            GENEROUS_WINDOW, INTERVAL, "raw")
+        c = res["comparisons"][0]
+        assert c["scale_mismatch"] is True
+        assert c["scale_ratio"] is not None and c["scale_ratio"] > 4.0
+
+    def test_comparable_scale_not_flagged(self, db):
+        grid = _grid(); actual = _actual_curve()
+        ttbl = db.safe_table_name("sensor.pv_power")
+        db.store_history(ttbl, pd.DataFrame({"ds": grid, "value": actual}))
+        for i, t in enumerate(grid):
+            db.log_forecast(experiment="e", issued_at=t - timedelta(minutes=INTERVAL),
+                            targets=[t], predictions=[actual[i]], model_name="lgb", model_version="v1")
+        e1 = db.safe_table_name("sensor.other_pv")
+        db.store_history(e1, pd.DataFrame({"ds": grid, "value": [actual[i] + 0.5 for i in range(48)]}))
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, [_spec("sensor.other_pv", "state", e1)],
+            GENEROUS_WINDOW, INTERVAL, "raw")
+        assert res["comparisons"][0]["scale_mismatch"] is False
+
     def test_delete_source(self, db):
         ttbl, e1, _ = self._seed(db)
         assert db.delete_external_forecast_source("e", "sensor.solcast") > 0
