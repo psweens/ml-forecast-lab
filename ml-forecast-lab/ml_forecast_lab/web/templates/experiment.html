@@ -7101,6 +7101,14 @@ window.showTab = function(el) {
         var anyAttr = comps.some(function(c){ return c.timing && !c.timing.external_contemporaneous; });
         var appLead = comps[0].timing ? _leadPhrase(comps[0].timing.app_median_lead_minutes) : null;
         var parts = ['<strong>Comparison basis:</strong> aligned on target time, scored on common samples. ML Forecast Lab’s forecast is a median ' + (appLead || '—') + '.'];
+        // Show each trajectory external's median lead too, so the lead
+        // asymmetry is visible — a forecast scored at a longer lead has a
+        // tougher horizon (and a big gap means a source should update more
+        // often). State-mode externals are same-time, so no lead to show.
+        var extLeads = comps
+            .filter(function(c){ return c.timing && !c.timing.external_contemporaneous && c.timing.external_median_lead_minutes != null; })
+            .map(function(c){ return (c.label||c.entity) + ' ' + (_leadPhrase(c.timing.external_median_lead_minutes) || 'n/a'); });
+        if (extLeads.length) parts.push('Externals are a median ' + extLeads.join(', ') + '.');
         if (anyState) parts.push('State-mode externals are same-time snapshots (not lead-matched).');
         if (anyAttr) parts.push('Trajectory externals are lead-matched — see the horizon chart.');
         basis.innerHTML = parts.join(' ');
@@ -7142,8 +7150,17 @@ window.showTab = function(el) {
                 opacity: warmByLabel[nm] ? 0.45 : 1.0, connectgaps:false });
         });
         var yUnits = units ? (' (' + units + ')') : '';
+        // Limit the x-range to where we actually have comparison data (any
+        // forecast/external present). The actuals can span the whole window
+        // (e.g. 30 days) while only ~1 day has logged forecasts, so without
+        // this the comparison data is a sliver lost in a sea of actuals.
+        var lo = -1, hi = -1;
+        function _scan(arr){ if(!arr) return; for(var i=0;i<arr.length;i++){ var v=arr[i]; if(v!==null&&v!==undefined){ if(lo<0||i<lo)lo=i; if(i>hi)hi=i; } } }
+        _scan(ov.app); (ov.externals||[]).forEach(function(ex){ _scan(ex.values); });
+        var xaxis = {title:'Time', color:DARK.axis, gridcolor:DARK.grid};
+        if (lo >= 0 && hi > lo) { xaxis.range = [ov.ds[lo], ov.ds[hi]]; }
         Plotly.newPlot(oc, traces, {
-            xaxis:{title:'Time', color:DARK.axis, gridcolor:DARK.grid},
+            xaxis: xaxis,
             yaxis:{title:'Value'+yUnits, color:DARK.axis, gridcolor:DARK.grid, zeroline:true, zerolinecolor:'#4a5178'},
             plot_bgcolor:DARK.plot_bgcolor, paper_bgcolor:DARK.paper_bgcolor, font:DARK.font,
             hovermode:'x unified', legend:{orientation:'h', y:-0.2}, margin:{t:20,r:20,b:60},

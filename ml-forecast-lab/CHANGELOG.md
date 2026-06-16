@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.45.5
+
+**Forecast Comparison: clearer lead-time basis + tighter overlay window.**
+
+- The "Comparison basis" line now also reports **each trajectory external's
+  median lead** alongside ML Forecast Lab's, so the lead-time asymmetry is
+  visible at a glance — the headline table scores each forecaster at its
+  own median lead, and a forecast judged at a longer horizon has a tougher
+  job (a large gap is a hint a source should update more often; the horizon
+  chart remains the equal-lead comparison).
+- The **"Forecast vs Actual" chart now limits its x-axis to the window
+  where comparison data actually exists.** Actuals can span the whole
+  selected window (e.g. 30 days) while only a day of forecasts has been
+  logged; the chart no longer shows the comparison data as a sliver lost in
+  weeks of actuals.
+
 ## 2.45.4
 
 **Dropped the non-physical-value banner from the comparison tab.** With the
