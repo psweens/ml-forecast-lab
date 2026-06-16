@@ -8,6 +8,7 @@ experiments, model benchmarking, and production deployment.
 import asyncio
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -29,6 +30,28 @@ def _safe_error(exc: BaseException) -> str:
     """
     msg = str(exc).split("\n", 1)[0]
     return f"{type(exc).__name__}: {_PATH_REDACT_RE.sub('<path>', msg)}"
+
+
+def _json_safe(obj: Any) -> Any:
+    """Recursively replace non-finite floats (NaN / ±Infinity) with None.
+
+    Starlette's ``JSONResponse`` serialises with ``json.dumps(allow_nan=True)``,
+    which emits bare ``NaN`` / ``Infinity`` tokens. Those are valid Python but
+    invalid per the JSON spec, so a strict client parser rejects them — Safari's
+    ``response.json()`` throws ``SyntaxError: The string did not match the
+    expected pattern.`` and the whole payload is lost. Any endpoint that returns
+    computed floats (metrics, ratios, per-bin means over possibly-empty groups)
+    can produce a NaN, so we scrub the structure at the response boundary rather
+    than chasing every arithmetic site. ``None`` becomes JSON ``null``, which the
+    frontends already handle (the charts use ``connectgaps:false``).
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
 
 from ml_forecast_lab import __version__ as APP_VERSION
 
@@ -2976,7 +2999,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         result["units"] = exp_cfg.units or ""
         result["days"] = days
-        return JSONResponse(content=result)
+        # Scrub NaN/Inf so the body is spec-valid JSON (Safari's response.json()
+        # rejects bare NaN tokens with a SyntaxError and drops the whole tab).
+        return JSONResponse(content=_json_safe(result))
 
     _unit_cache: Dict[str, tuple] = {}  # entity -> (fetched_at, unit_or_None)
 

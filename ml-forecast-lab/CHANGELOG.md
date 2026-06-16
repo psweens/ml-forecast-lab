@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.44.4
+
+**Fix: Forecast Comparison tab failed to load with "SyntaxError: The
+string did not match the expected pattern."** The comparison endpoint
+computes floats (MAE, bias, scale ratios, per-lead-bin means over
+possibly-empty groups) that can come out `NaN`. Starlette's
+`JSONResponse` serialises with `json.dumps(allow_nan=True)`, so a `NaN`
+was emitted as the bare token `NaN` — valid Python but invalid JSON.
+Strict browser parsers reject it; on Safari/iOS `response.json()` threw
+the SyntaxError above and the whole tab showed "Could not load
+comparison." The endpoint now scrubs non-finite floats to `null` at the
+response boundary (`null` is what the charts already expect for gaps),
+so the payload is spec-valid JSON on every client.
+
 ## 2.44.3
 
 **Forecast Comparison plots now match the rest of the app.** The
