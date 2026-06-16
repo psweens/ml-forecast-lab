@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.45.4
+
+**Dropped the non-physical-value banner from the comparison tab.** With the
+publish-boundary clamp (2.45.3) preventing blow-ups at the source, the
+read-side guard still quietly excludes any already-logged corruption (so
+the charts stay readable) and logs it server-side, but no longer shows a
+banner in the UI.
+
 ## 2.45.3
 
 **Root-cause fix: blown-up forecasts can no longer be published.** When
