@@ -12,11 +12,15 @@
   charts. It was rendered into a still-hidden container, so Plotly
   measured zero width and never expanded; the container is now revealed
   before plotting.
-- **The "vs ML Forecast Lab" column says "MLFL N% better"** instead of
-  "add-on N% better", and a tooltip explains the number: it's the
-  relative reduction in **MAE** on the two forecasters' common samples
-  — `(external MAE − MLFL MAE) / external MAE` — always MAE-based,
-  regardless of the "Rank by" metric.
+- **The comparison column is now "vs MLFL"** (was "vs ML Forecast Lab"),
+  and its cells read "MLFL N% better" instead of "add-on N% better". A
+  tooltip explains the number: the relative reduction in **MAE** on the
+  two forecasters' common samples — `(external MAE − MLFL MAE) / external
+  MAE` — always MAE-based, regardless of the "Rank by" metric.
+- **Ambiguous metric columns now carry tooltips.** "% of Typical" (MAE ÷
+  mean |actual| — a unit-free accuracy read) and "Bias" (mean signed
+  error; positive = over-forecast) explain themselves on hover instead of
+  leaving the reader to guess.
 - **Chart palette tuned for the dark navy panel.** Plain blue/lavender
   legend colours read as "blue on blue"; externals now lead with
   high-contrast hues (cyan, amber, green, …) and the white dotted

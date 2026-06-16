@@ -2184,9 +2184,9 @@
                 <option value="mae" selected>MAE</option>
                 <option value="rmse">RMSE</option>
                 <option value="bias">Bias</option>
-                <option value="pct">% of typical</option>
+                <option value="pct">% of Typical</option>
                 <option value="daily_mae">Daily MAE</option>
-                <option value="daily_bias">Daily bias</option>
+                <option value="daily_bias">Daily Bias</option>
             </select>
             <span class="info-tip">?<span class="tip-text">Which metric ranks the table and decides the head-to-head verdict. <b>MAE</b> (default) is the average error; <b>% of typical</b> normalises it against typical demand so it's readable without knowing the units; <b>Daily MAE/bias</b> compare the running daily total (the headline for an energy sensor). The chosen metric's column is highlighted and the best value in each column is bolded.</span></span>
         </div>
@@ -2211,11 +2211,11 @@
                     <th>Forecast</th>
                     <th data-metric="mae">MAE</th>
                     <th data-metric="rmse">RMSE</th>
-                    <th data-metric="bias">Bias</th>
-                    <th data-metric="pct">% of typical</th>
+                    <th data-metric="bias">Bias <span class="info-tip">?<span class="tip-text">Mean signed error (forecast − actual). Positive = over-forecasting on average, negative = under-forecasting. Near zero is unbiased.</span></span></th>
+                    <th data-metric="pct">% of Typical <span class="info-tip">?<span class="tip-text">MAE as a percentage of typical demand — <code>MAE ÷ mean(|actual|)</code> over the window. Unit-free, so you can read accuracy without knowing the kW/kWh scale. Lower is better.</span></span></th>
                     <th data-metric="daily_mae">Daily MAE</th>
-                    <th data-metric="daily_bias">Daily bias</th>
-                    <th>vs ML Forecast Lab <span class="info-tip">?<span class="tip-text">How this external's <b>MAE</b> compares to ML Forecast Lab's on their common samples. "MLFL N% better" means MLFL's mean absolute error is N% lower than this external's: <code>(external MAE − MLFL MAE) / external MAE</code>. Always MAE-based, regardless of the "Rank by" metric.</span></span></th><th>Days</th><th>Samples</th>
+                    <th data-metric="daily_bias">Daily Bias</th>
+                    <th>vs MLFL <span class="info-tip">?<span class="tip-text">How this external's <b>MAE</b> compares to MLFL's (ML Forecast Lab) on their common samples. "MLFL N% better" means MLFL's mean absolute error is N% lower than this external's: <code>(external MAE − MLFL MAE) / external MAE</code>. Always MAE-based, regardless of the "Rank by" metric.</span></span></th><th>Days</th><th>Samples</th>
                 </tr></thead>
                 <tbody id="external-ranktable-body"></tbody>
             </table>
