@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.44.5
+
+**Forecast Comparison tab polish.**
+
+- **Removed the Seasonal Naive baseline** from the comparison (table row,
+  overlay/hour-of-day lines, verdict suffix, and its backend computation)
+  — it added noise without earning its place next to the real
+  forecasters.
+- **"Error by time of day" now fills the full width** like the other
+  charts. It was rendered into a still-hidden container, so Plotly
+  measured zero width and never expanded; the container is now revealed
+  before plotting.
+- **The "vs ML Forecast Lab" column says "MLFL N% better"** instead of
+  "add-on N% better", and a tooltip explains the number: it's the
+  relative reduction in **MAE** on the two forecasters' common samples
+  — `(external MAE − MLFL MAE) / external MAE` — always MAE-based,
+  regardless of the "Rank by" metric.
+- **Chart palette tuned for the dark navy panel.** Plain blue/lavender
+  legend colours read as "blue on blue"; externals now lead with
+  high-contrast hues (cyan, amber, green, …) and the white dotted
+  "Actual" / coral "ML Forecast Lab" lines are unchanged.
+- **Section titles use Title Case** (e.g. "Accuracy Ranking", "Error by
+  Time of Day", "Forecast vs Actual", "Data Sanity Check", "Sweep
+  Results").
+
 ## 2.44.4
 
 **Fix: data tabs failed to load with "SyntaxError: The string did not

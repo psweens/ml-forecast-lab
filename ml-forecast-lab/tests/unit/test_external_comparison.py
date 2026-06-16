@@ -443,8 +443,8 @@ class TestComparisonMulti:
 
 
 class TestComparisonBaselineAndWarmup:
-    """v2.44.x additions: Seasonal Naive baseline row, %-of-typical + daily
-    metrics, and the 7-day warming-up gate."""
+    """v2.44.x additions: %-of-typical + daily metrics, and the 7-day
+    warming-up gate."""
 
     def _seed_days(self, db, n_days=10, interval=INTERVAL, mae_app=4.0, mae_ext=12.0):
         """Seed n_days of a repeating diurnal actual + app forecast (lead 1)
@@ -465,34 +465,17 @@ class TestComparisonBaselineAndWarmup:
                                            "value": [actual[i] + mae_ext for i in range(len(grid))]}))
         return ttbl, e1, n_days
 
-    def test_seasonal_naive_baseline_present(self, db):
+    def test_no_seasonal_naive_baseline_emitted(self, db):
+        # Seasonal Naive was removed (v2.44.5): the response must not carry a
+        # baseline row or overlay line, and the only ranked row is the one
+        # configured external (plus the app reference, which is separate).
         ttbl, e1, _ = self._seed_days(db, n_days=10)
         res = db.get_external_forecast_comparison(
             "e", ttbl, [_spec("sensor.ext_state", "state", e1, label="Crude")],
             GENEROUS_WINDOW, INTERVAL, "raw")
-        base = res["baseline"]
-        assert base is not None, "Seasonal Naive baseline should be computed"
-        assert base["label"] == "Seasonal Naive"
-        assert base["is_baseline"] is True
-        # repeating-day actual → 'same time yesterday' is near-perfect
-        assert base["metrics"]["mae"] < 1.0
-        # baseline is NOT counted as a configured competitor row
+        assert "baseline" not in res
+        assert "baseline" not in res["overlay"]
         assert len(res["comparisons"]) == 1
-        # overlay carries a baseline line aligned to ds
-        assert res["overlay"]["baseline"] is not None
-        assert len(res["overlay"]["baseline"]) == len(res["overlay"]["ds"])
-        # naive should beat the +12 external on its head-to-head vs app? no —
-        # naive vs APP: app MAE ~4, naive MAE ~0 → naive wins (external='naive')
-        assert base["head_to_head"]["winner"] == "external"
-
-    def test_single_day_has_no_naive_baseline(self, db):
-        # < 1 day of data → 'same time yesterday' has no overlap → no baseline.
-        ttbl, e1, _ = self._seed_days(db, n_days=1)
-        res = db.get_external_forecast_comparison(
-            "e", ttbl, [_spec("sensor.ext_state", "state", e1)],
-            GENEROUS_WINDOW, INTERVAL, "raw")
-        assert res["baseline"] is None
-        assert res["overlay"]["baseline"] is None
 
     def test_pct_of_typical_and_daily_metrics(self, db):
         ttbl, e1, _ = self._seed_days(db, n_days=8, mae_app=4.0, mae_ext=12.0)

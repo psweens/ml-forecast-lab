@@ -1,6 +1,6 @@
 ---
 name: ML Forecast Lab
-version: 2.44.4
+version: 2.44.5
 slug: ml_forecast_lab
 description: Multi-model ML forecasting and benchmarking for Home Assistant
 url: https://github.com/psweens/ml-forecast-lab

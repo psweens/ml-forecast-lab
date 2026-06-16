@@ -3616,61 +3616,12 @@ class HistoryDB:
                 "warming": (ext_block["warming"] if ext_block else True),
             })
 
-        # --- app reference row (standalone), Seasonal Naive baseline, and
-        #     the top-level warming-up gate ---
+        # --- app reference row (standalone) + the top-level warming-up gate ---
         app_self = _metrics_block(app_disp, app_canon)
         result["app_self"] = app_self
         result["app_days_logged"] = app_self["days_logged"] if app_self else 0
         result["typical"] = typical
         result["warmup_days"] = EXTERNAL_COMPARISON_WARMUP_DAYS
-
-        # Seasonal Naive ("same time yesterday") as a default baseline row —
-        # the free do-nothing reference. Computed from the canonical actuals
-        # shifted one day; lands in its own `baseline` key (not `comparisons`)
-        # so it never occupies one of the five competitor slots.
-        result["baseline"] = None
-        result["overlay"]["baseline"] = None
-        if actual_canon is not None and not actual_canon.empty:
-            season_bins = max(1, int(round(1440.0 / bucket_min)))
-            full = pd.date_range(actual_canon.index.min(),
-                                 actual_canon.index.max(), freq=freq)
-            naive_canon = actual_canon.reindex(full).shift(season_bins).dropna()
-            if not naive_canon.empty:
-                naive_disp = _display(naive_canon)
-                nb = _metrics_block(naive_disp, naive_canon)
-                if nb is not None:
-                    al = pd.DataFrame(
-                        {"actual": actual_disp, "app": app_disp, "external": naive_disp}
-                    )
-                    if len(idx):
-                        al = al.reindex(idx)
-                    cb = al.dropna(subset=["actual", "app", "external"])
-                    h2h_b = None
-                    if len(cb) >= 1:
-                        a_m = _err(cb, "app")
-                        n_m = _err(cb, "external")
-                        if a_m["mae"] < n_m["mae"]:
-                            w = "app"
-                        elif n_m["mae"] < a_m["mae"]:
-                            w = "external"
-                        else:
-                            w = "tie"
-                        impr_b = (round((n_m["mae"] - a_m["mae"]) / n_m["mae"] * 100.0, 1)
-                                  if n_m["mae"] > 0 else None)
-                        h2h_b = {
-                            "n": int(len(cb)), "app": a_m, "external": n_m,
-                            "winner": w, "app_mae_improvement_pct": impr_b,
-                            "daily": {
-                                "app": _daily_err(app_canon, cb.index),
-                                "external": _daily_err(naive_canon, cb.index),
-                            },
-                        }
-                    result["baseline"] = {
-                        "label": "Seasonal Naive", "is_baseline": True,
-                        "metrics": nb, "head_to_head": h2h_b,
-                        "days_logged": nb["days_logged"], "warming": nb["warming"],
-                    }
-                    result["overlay"]["baseline"] = _col(naive_disp)
 
         # Top-level warming gate: inconclusive while the add-on OR any
         # configured external still lacks the threshold days of overlap.

@@ -123,7 +123,7 @@
          Backed by the /data-report endpoint which uses the same fetch
          path as the benchmark but skips the rest of the pipeline. -->
     <div class="settings-group">
-        <h3 class="settings-group-title">Data sanity check
+        <h3 class="settings-group-title">Data Sanity Check
             <span class="info-tip">?<span class="tip-text">Runs the same data fetch the benchmark would, then reports rows fetched vs expected, biggest gap, recorder freshness, missing-value rate, zero-run length, and (for cumulative sensors) max-increment hits. Use it before clicking Run Pipeline to avoid spending an hour benchmarking against broken data. The target is analysed in detail and every configured covariate gets its own compact verdict card below — a broken covariate (gap, dead sensor, wrong units) won't sneak into a benchmark.</span></span>
         </h3>
         <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
@@ -1203,7 +1203,7 @@
     <!-- Sweep results — populated by polling /tuning-all once a sweep is in
          flight. Hidden until at least one result is available. -->
     <div id="tune-all-results" style="display:none;margin-bottom:1.5rem;padding:0.75rem 1rem;background:var(--bg-tertiary);border-radius:0.5rem;border:1px solid var(--border);">
-        <h3 style="margin:0 0 0.5rem 0;font-size:1rem;">Sweep results <span class="info-tip">?<span class="tip-text">One row per model tuned during the latest 'Tune all enabled' run. Apply locks the model's tuned params into mlfl.yaml and promotes it to production — the same as the single-model Apply button.</span></span></h3>
+        <h3 style="margin:0 0 0.5rem 0;font-size:1rem;">Sweep Results <span class="info-tip">?<span class="tip-text">One row per model tuned during the latest 'Tune all enabled' run. Apply locks the model's tuned params into mlfl.yaml and promotes it to production — the same as the single-model Apply button.</span></span></h3>
         <table class="metrics-table" style="font-size:0.85rem;">
             <thead>
                 <tr><th>Model</th><th>Best composite</th><th>Default MAE</th><th>Tuned MAE</th><th>Δ MAE</th><th>Status</th><th></th></tr>
@@ -2088,7 +2088,7 @@
 
     <!-- Manage the compared third-party forecasts (covariate-style) -->
     <div class="settings-group" id="external-manage">
-        <h3 class="settings-group-title">Third-party forecasts to compare against
+        <h3 class="settings-group-title">Third-Party Forecasts to Compare Against
             <span class="info-tip">?<span class="tip-text">Each entry is an HA entity holding a forecast of this same target, produced by something other than ML Forecast Lab. Add up to five. <b>Sensor state</b> mode treats the entity's recorded value as its estimate for that moment; <b>Forecast attribute</b> mode reads a future trajectory from an attribute (Solcast, weather) for a per-horizon comparison.</span></span>
         </h3>
         <div class="covariate-list" id="external-list">
@@ -2202,7 +2202,7 @@
 
     <!-- Ranked head-to-head table -->
     <div id="external-ranktable-group" class="settings-group" style="display:none;">
-        <h3 class="settings-group-title">Accuracy ranking
+        <h3 class="settings-group-title">Accuracy Ranking
             <span class="info-tip">?<span class="tip-text">Each forecaster's error vs the actuals. Each external row is scored on the samples where the actual, ML Forecast Lab's forecast, AND that external all exist (so each head-to-head is like-for-like; "ML Forecast Lab" MAE can differ row-to-row because each external covers a different set of moments). Lower MAE is better; the best in each row is highlighted.</span></span>
         </h3>
         <div class="table-container">
@@ -2215,7 +2215,7 @@
                     <th data-metric="pct">% of typical</th>
                     <th data-metric="daily_mae">Daily MAE</th>
                     <th data-metric="daily_bias">Daily bias</th>
-                    <th>vs ML Forecast Lab</th><th>Days</th><th>Samples</th>
+                    <th>vs ML Forecast Lab <span class="info-tip">?<span class="tip-text">How this external's <b>MAE</b> compares to ML Forecast Lab's on their common samples. "MLFL N% better" means MLFL's mean absolute error is N% lower than this external's: <code>(external MAE − MLFL MAE) / external MAE</code>. Always MAE-based, regardless of the "Rank by" metric.</span></span></th><th>Days</th><th>Samples</th>
                 </tr></thead>
                 <tbody id="external-ranktable-body"></tbody>
             </table>
@@ -2230,7 +2230,7 @@
 
     <!-- Overlay chart -->
     <div class="settings-group">
-        <h3 class="settings-group-title">Forecast vs actual
+        <h3 class="settings-group-title">Forecast vs Actual
             <span class="info-tip">?<span class="tip-text">The measured actuals overlaid with ML Forecast Lab's latest forecast for each moment and each external forecast. For cumulative targets the series are shown as per-interval demand (the space the comparison is scored in).</span></span>
         </h3>
         <div id="external-overlay-chart" style="width:100%;height:380px;"></div>
@@ -2238,7 +2238,7 @@
 
     <!-- Error by hour-of-day (all sources; client-side from the overlay) -->
     <div id="external-hour-group" class="settings-group" style="display:none;">
-        <h3 class="settings-group-title">Error by time of day
+        <h3 class="settings-group-title">Error by Time of Day
             <span class="info-tip">?<span class="tip-text">Mean absolute error grouped by hour of day, one line per forecaster — catches regime-specific strengths the headline numbers hide (e.g. ML Forecast Lab wins mornings, an external wins afternoons). Computed in the current Analysis view (per-interval or cumulative). Provisional (warming) sources are drawn faded.</span></span>
         </h3>
         <div id="external-hour-chart" style="width:100%;height:320px;"></div>
@@ -2246,7 +2246,7 @@
 
     <!-- Lead-time curve (attribute-mode externals only) -->
     <div id="external-leadtime-group" class="settings-group" style="display:none;">
-        <h3 class="settings-group-title">Error by forecast horizon — ML Forecast Lab vs externals
+        <h3 class="settings-group-title">Error by Forecast Horizon — ML Forecast Lab vs Externals
             <span class="info-tip">?<span class="tip-text">Mean absolute error binned by lead time (how far ahead the forecast was looking). Available for trajectory (attribute-mode) externals. A lower line is the more accurate forecaster at that horizon.</span></span>
         </h3>
         <div id="external-leadtime-chart" style="width:100%;height:340px;"></div>
@@ -6632,19 +6632,13 @@ window.showTab = function(el) {
     var BASE = {{ base_path | tojson }};
     var EXP = {{ experiment.name | tojson }};
 
-    // Keep these in lockstep with the shared PLOT_COLORWAY / dark layout
-    // used by every other tab's charts (defined in the main chart script)
-    // so the comparison plots read as part of the same family. Actual is
-    // the white dotted reference line used app-wide; the app's own forecast
-    // takes the first palette colour and externals cycle through the rest.
-    // PLOT_COLORWAY lives in a different IIFE, so the values are mirrored
-    // here rather than referenced — both palettes must change together.
+    // Palette tuned for legibility on the dark navy panel: Actual is the
+    // white dotted reference line used app-wide; the app's own forecast is
+    // the coral accent, and externals cycle through high-contrast hues.
+    // Plain blues/lavenders read as "blue on blue" against the navy
+    // background, so they're deliberately omitted from the lead positions.
     var C_ACTUAL = '#ffffff', C_APP = '#ff6b6b';
-    // Seasonal Naive is the do-nothing reference: a soft lavender that
-    // harmonises with the dark blue-purple theme and reads as subordinate
-    // (thin dashed) without competing with the vivid forecaster accents.
-    var C_BASELINE = '#a5b4fc';
-    var EXT_COLORS = ['#4d96ff', '#ffd93d', '#6bcb77', '#c084fc', '#ff922b', '#22d3ee', '#f472b6', '#a3e635'];
+    var EXT_COLORS = ['#22d3ee', '#ffd93d', '#6bcb77', '#ff922b', '#f472b6', '#a3e635', '#fb923c', '#34d399'];
     var DARK = { plot_bgcolor:'#16213e', paper_bgcolor:'#1a1a2e', font:{color:'#e0e0e0'}, grid:'#2d3561', axis:'#b0b0b0' };
 
     var _externalAnalysis = 'per_interval';
@@ -6858,8 +6852,8 @@ window.showTab = function(el) {
         if (!comps.length) { grp.style.display='none'; return; }
         var warmDays = data.warmup_days || 7;
 
-        // Build a uniform row model: app reference, each external, Seasonal
-        // Naive baseline. Each carries the metric block + daily + warming.
+        // Build a uniform row model: app reference, then each external.
+        // Each carries the metric block + daily + warming.
         var R = [];
         var appBlock = data.app_self || comps[0].head_to_head.app;
         var appDaily = (data.app_self && data.app_self.daily)
@@ -6875,15 +6869,6 @@ window.showTab = function(el) {
                      days:(c.days_logged||0), warming:!!c.warming,
                      mismatch:!!c.scale_mismatch, ratio:c.scale_ratio, h:h, n:h.n });
         });
-        var base = data.baseline;
-        if (base && base.metrics) {
-            R.push({ kind:'baseline', label:'Seasonal Naive', color:C_BASELINE,
-                     block:base.metrics, daily:(base.metrics?base.metrics.daily:null),
-                     days:(base.days_logged||0), warming:!!base.warming,
-                     mismatch:false, ratio:null, h:base.head_to_head,
-                     n:(base.metrics?base.metrics.n:0) });
-        }
-
         // Winner per column: min over non-mismatch rows (abs for bias cols).
         var cols = ['mae','rmse','bias','pct','daily_mae','daily_bias'];
         function _cellVal(r, col) {
@@ -6927,7 +6912,7 @@ window.showTab = function(el) {
             if (r.mismatch) return '<td><span style="color:var(--warning);">⚠ scale mismatch (≈' + (r.ratio||'?') + '×)</span></td>';
             var h = r.h;
             if (!h || h.app_mae_improvement_pct === null || h.app_mae_improvement_pct === undefined) return '<td>—</td>';
-            if (h.winner === 'app') return '<td><span style="color:var(--success);">add-on ' + Math.abs(h.app_mae_improvement_pct).toFixed(0) + '% better</span></td>';
+            if (h.winner === 'app') return '<td><span style="color:var(--success);">MLFL ' + Math.abs(h.app_mae_improvement_pct).toFixed(0) + '% better</span></td>';
             if (h.winner === 'external') return '<td><span style="color:var(--warning);">' + Math.abs(h.app_mae_improvement_pct).toFixed(0) + '% better</span></td>';
             return '<td>≈ tie</td>';
         }
@@ -6938,8 +6923,7 @@ window.showTab = function(el) {
         }
 
         var rowsHtml = R.map(function(r){
-            var tag = r.kind === 'baseline' ? ' <span style="color:var(--text-secondary);font-size:0.8rem;">(baseline)</span>'
-                    : r.kind === 'ext' ? ' <span style="color:var(--text-secondary);font-size:0.8rem;">(' + (r.mode==='attribute'?'trajectory':'state') + ')</span>'
+            var tag = r.kind === 'ext' ? ' <span style="color:var(--text-secondary);font-size:0.8rem;">(' + (r.mode==='attribute'?'trajectory':'state') + ')</span>'
                     : '';
             var nameCell = '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+r.color+';margin-right:6px;"></span>'
                 + (r.kind === 'app' ? '<strong>' + r.label + '</strong>' : r.label) + tag
@@ -7022,19 +7006,12 @@ window.showTab = function(el) {
         var beaten = winners.filter(function(x){ return x.w === 'app'; }).length;
         var lostTo = winners.filter(function(x){ return x.w === 'external'; }).map(function(x){ return x.c; });
         var total = comps.length;
-        // Seasonal Naive line for the headline (the do-nothing baseline).
-        var baseTxt = '';
-        if (data.baseline && data.baseline.head_to_head) {
-            var bw = _winnerOn(data.baseline.head_to_head);
-            baseTxt = ' <span style="color:var(--text-secondary);font-weight:400;">· vs Seasonal Naive: '
-                + (bw === 'app' ? 'ahead' : bw === 'external' ? '<span style="color:var(--warning);">behind</span>' : 'level') + '</span>';
-        }
         if (lostTo.length === 0) {
-            head.innerHTML = prov + '✓ ML Forecast Lab is the most accurate on ' + mLabel + ' — beats all ' + total + ' external forecast' + (total!==1?'s':'') + mmNote + baseTxt;
+            head.innerHTML = prov + '✓ ML Forecast Lab is the most accurate on ' + mLabel + ' — beats all ' + total + ' external forecast' + (total!==1?'s':'') + mmNote;
             head.style.color = data.warming_up ? 'var(--text-primary)' : 'var(--success)';
         } else {
             var best = lostTo[0];
-            head.innerHTML = prov + '✗ ' + (best.label || best.entity) + ' beats ML Forecast Lab on ' + mLabel + '; ML Forecast Lab still beats ' + beaten + ' of ' + total + mmNote + baseTxt;
+            head.innerHTML = prov + '✗ ' + (best.label || best.entity) + ' beats ML Forecast Lab on ' + mLabel + '; ML Forecast Lab still beats ' + beaten + ' of ' + total + mmNote;
             head.style.color = 'var(--warning)';
         }
         card.style.display = '';
@@ -7091,11 +7068,6 @@ window.showTab = function(el) {
                 line:{color:EXT_COLORS[i%EXT_COLORS.length], width:2, dash:'dot'},
                 opacity: warmByLabel[nm] ? 0.45 : 1.0, connectgaps:false });
         });
-        // Seasonal Naive baseline line (the free do-nothing reference).
-        if (ov.baseline && ov.baseline.length) {
-            traces.push({ x:ds, y:ov.baseline, name:'Seasonal Naive', type:'scatter', mode:'lines',
-                line:{color:C_BASELINE, width:1.5, dash:'dash'}, opacity:0.8, connectgaps:false });
-        }
         var yUnits = units ? (' (' + units + ')') : '';
         Plotly.newPlot(oc, traces, {
             xaxis:{title:'Time', color:DARK.axis, gridcolor:DARK.grid},
@@ -7134,18 +7106,17 @@ window.showTab = function(el) {
                 line:{color:EXT_COLORS[i%EXT_COLORS.length], width:2, dash:'dot'}, marker:{size:4},
                 opacity: warmByLabel[nm] ? 0.45 : 1.0, connectgaps:false });
         });
-        if (ov.baseline && ov.baseline.length) {
-            traces.push({ x:hx, y:_hourMae(ov.baseline), name:'Seasonal Naive', type:'scatter', mode:'lines+markers',
-                line:{color:C_BASELINE, width:1.5, dash:'dash'}, marker:{size:3}, opacity:0.8, connectgaps:false });
-        }
         var units = data.display_unit || data.units || '';
+        // Reveal the container BEFORE plotting so Plotly measures its real
+        // (full) width. Rendering into a display:none group makes Plotly fall
+        // back to a default width that never fills out when the group is shown.
+        grp.style.display = '';
         Plotly.newPlot(hc, traces, {
             xaxis:{title:'Hour of day', color:DARK.axis, gridcolor:DARK.grid, dtick:3, range:[-0.5,23.5]},
             yaxis:{title:'MAE'+(units?(' ('+units+')'):''), color:DARK.axis, gridcolor:DARK.grid},
             plot_bgcolor:DARK.plot_bgcolor, paper_bgcolor:DARK.paper_bgcolor, font:DARK.font,
             hovermode:'x unified', legend:{orientation:'h', y:-0.25}, margin:{t:20,r:20,b:60},
         }, {responsive:true});
-        grp.style.display = '';
     }
 
     function _renderLeadtime(data) {
