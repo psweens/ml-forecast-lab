@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.45.0
+
+**Forecast Comparison now ranks like the Results tab.** The Accuracy
+Ranking table is a real leaderboard:
+
+- A **Rank** column with #1/#2/#3 badges (styled like the Results tab),
+  and the rows are sorted into rank order.
+- A new **"Overall (composite)"** mode — now the default "Rank by"
+  option — ranks forecasters by a composite **mean rank across MAE,
+  RMSE and Daily MAE** (the same Demšar-style averaging the Results tab
+  uses; bias is a calibration metric and % of typical is just rescaled
+  MAE, so both are excluded). The mean rank is shown under each badge.
+- Picking a **single metric** instead ranks, sorts, highlights and
+  computes the "vs MLFL" gap on *that* metric — so the head-to-head
+  number always matches what you're ranking by (it was previously
+  always MAE).
+- **MLFL is ranked inline**, taking its earned position among the
+  externals (still tinted as "you") rather than pinned on top — an
+  honest leaderboard.
+- The verdict follows suit: "ML Forecast Lab ranks #N of M overall / on
+  <metric>". Scale-mismatched sources stay unranked and excluded.
+
 ## 2.44.5
 
 **Forecast Comparison tab polish.**
