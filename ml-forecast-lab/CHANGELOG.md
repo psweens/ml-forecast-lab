@@ -2,17 +2,26 @@
 
 ## 2.44.4
 
-**Fix: Forecast Comparison tab failed to load with "SyntaxError: The
-string did not match the expected pattern."** The comparison endpoint
-computes floats (MAE, bias, scale ratios, per-lead-bin means over
-possibly-empty groups) that can come out `NaN`. Starlette's
-`JSONResponse` serialises with `json.dumps(allow_nan=True)`, so a `NaN`
-was emitted as the bare token `NaN` — valid Python but invalid JSON.
-Strict browser parsers reject it; on Safari/iOS `response.json()` threw
-the SyntaxError above and the whole tab showed "Could not load
-comparison." The endpoint now scrubs non-finite floats to `null` at the
-response boundary (`null` is what the charts already expect for gaps),
-so the payload is spec-valid JSON on every client.
+**Fix: data tabs failed to load with "SyntaxError: The string did not
+match the expected pattern."** Many endpoints compute floats — MAE,
+bias, scale ratios, the benchmark `mase`, per-bin means over possibly-
+empty groups — that can come out `NaN` or `Infinity`. Starlette renders
+JSON with `json.dumps(allow_nan=False)`, so a non-finite value raises
+*during render* — after the endpoint's own try/except has already
+returned — surfacing as an unhandled 500 with a non-JSON body. (Older
+Starlette instead emitted a bare `NaN` token, i.e. invalid JSON.) Either
+way a strict client parser chokes: WebKit — used by Safari **and the iOS
+Home Assistant companion app's WKWebView** — throws the SyntaxError above
+and the tab shows "Could not load…". This bit the Forecast Comparison tab
+first, but the Accuracy, Trajectory, Evolution, Stability and Results
+tabs were all exposed.
+
+The web app now renders every JSON response through a NaN-safe encoder
+(`SafeJSONResponse`) that replaces non-finite floats with `null` before
+serialising — a single chokepoint, so new endpoints are covered for free.
+`null` is what the charts already expect for gaps (they draw with
+`connectgaps:false`), so every payload is spec-valid JSON on every
+client.
 
 ## 2.44.3
 

@@ -15,7 +15,10 @@ from __future__ import annotations
 import json
 import math
 
-from ml_forecast_lab.web.app import _json_safe
+import pytest
+from starlette.responses import JSONResponse
+
+from ml_forecast_lab.web.app import SafeJSONResponse, _json_safe
 
 
 def _is_strict_json(obj) -> bool:
@@ -89,3 +92,67 @@ def test_round_trips_through_strict_parser():
         for v in [reparsed["x"][0], reparsed["x"][1], reparsed["y"]]
         if isinstance(v, float)
     )
+
+
+# ----------------------------------------------------------------------
+# SafeJSONResponse — the response class used by the data endpoints.
+# ----------------------------------------------------------------------
+
+def test_plain_jsonresponse_render_rejects_nan():
+    """Pin the failure we are fixing: Starlette renders with
+    allow_nan=False, so a NaN raises at render time (after the endpoint
+    has already returned) → unhandled 500 with a non-JSON body."""
+    with pytest.raises(ValueError):
+        JSONResponse(content={"x": float("nan")}).render({"x": float("nan")})
+
+
+def test_safe_jsonresponse_render_survives_nan_and_inf():
+    payload = {
+        "overlay": {"actual": [1.0, float("nan")], "app": [float("inf")]},
+        "mae": float("-inf"),
+        "label": "Solcast",
+        "n": 12,
+    }
+    body = SafeJSONResponse(content=payload).render(payload)
+    parsed = json.loads(body)  # strict parse, mirrors the browser
+    assert parsed["overlay"]["actual"] == [1.0, None]
+    assert parsed["overlay"]["app"] == [None]
+    assert parsed["mae"] is None
+    assert parsed["label"] == "Solcast"
+    assert parsed["n"] == 12
+
+
+def test_safe_jsonresponse_finite_payload_unchanged():
+    payload = {"a": 1.5, "b": [0.0, -2.0], "c": "ok", "d": None}
+    parsed = json.loads(SafeJSONResponse(content=payload).render(payload))
+    assert parsed == payload
+
+
+def test_full_request_cycle_nan_does_not_500():
+    """End-to-end through the ASGI stack: a route returning NaN via the
+    module's NaN-safe JSONResponse returns 200 with valid JSON (null),
+    while the unpatched Starlette response 500s during render — which is
+    what produced the client-side SyntaxError on WebKit."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from ml_forecast_lab.web.app import JSONResponse as SafeResponse
+
+    app = FastAPI()
+
+    @app.get("/safe")
+    def _safe():
+        return SafeResponse(content={"mae": float("nan"), "n": 3})
+
+    @app.get("/unsafe")
+    def _unsafe():
+        return JSONResponse(content={"mae": float("nan"), "n": 3})
+
+    client = TestClient(app, raise_server_exceptions=False)
+
+    r = client.get("/safe")
+    assert r.status_code == 200
+    assert r.json() == {"mae": None, "n": 3}
+
+    # The base Starlette response raises during render -> 500 (the bug).
+    assert client.get("/unsafe").status_code == 500

@@ -35,15 +35,17 @@ def _safe_error(exc: BaseException) -> str:
 def _json_safe(obj: Any) -> Any:
     """Recursively replace non-finite floats (NaN / ±Infinity) with None.
 
-    Starlette's ``JSONResponse`` serialises with ``json.dumps(allow_nan=True)``,
-    which emits bare ``NaN`` / ``Infinity`` tokens. Those are valid Python but
-    invalid per the JSON spec, so a strict client parser rejects them — Safari's
-    ``response.json()`` throws ``SyntaxError: The string did not match the
-    expected pattern.`` and the whole payload is lost. Any endpoint that returns
-    computed floats (metrics, ratios, per-bin means over possibly-empty groups)
-    can produce a NaN, so we scrub the structure at the response boundary rather
-    than chasing every arithmetic site. ``None`` becomes JSON ``null``, which the
-    frontends already handle (the charts use ``connectgaps:false``).
+    A non-finite float is not representable in spec-compliant JSON. Starlette
+    renders with ``json.dumps(allow_nan=False)``, so one raises ``ValueError``
+    during render (older Starlette emitted a bare ``NaN`` token instead — still
+    invalid JSON). Either way a strict client parser rejects the result: WebKit
+    (Safari and the iOS Home Assistant app's WKWebView) throws ``SyntaxError:
+    The string did not match the expected pattern.`` and the whole payload is
+    lost. Any endpoint returning computed floats (metrics, ratios, per-bin means
+    over possibly-empty groups) can produce a NaN, so we scrub the structure at
+    the response boundary rather than chasing every arithmetic site. ``None``
+    becomes JSON ``null``, which the frontends already handle (the charts use
+    ``connectgaps:false``). Used by ``SafeJSONResponse``.
     """
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else None
@@ -57,7 +59,8 @@ from ml_forecast_lab import __version__ as APP_VERSION
 
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse as _StarletteJSONResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -65,6 +68,41 @@ from starlette.background import BackgroundTask
 from starlette.requests import Request
 
 logger = logging.getLogger(__name__)
+
+
+class SafeJSONResponse(_StarletteJSONResponse):
+    """``JSONResponse`` that replaces NaN / ±Infinity with ``null``.
+
+    Endpoints that return computed floats (metrics, ratios, per-bin means
+    over possibly-empty groups) can produce a non-finite value. Starlette
+    renders with ``json.dumps(allow_nan=False)``, so such a value raises
+    ``ValueError`` *during render* — after the endpoint's own try/except has
+    already returned — surfacing as an unhandled 500 with a non-JSON body.
+    (Older Starlette instead emitted a bare ``NaN`` token, i.e. invalid
+    JSON.) Either way a strict client parser chokes: WebKit — used by Safari
+    **and the iOS Home Assistant companion app's WKWebView** — throws
+    ``SyntaxError: The string did not match the expected pattern.`` and the
+    whole tab fails to load.
+
+    Sanitising in ``render`` (rather than at each arithmetic site) guarantees
+    every payload is spec-valid JSON. ``null`` is what the frontends already
+    expect for gaps (the charts use ``connectgaps:false``).
+    """
+
+    def render(self, content: Any) -> bytes:
+        return super().render(_json_safe(content))
+
+
+# Bind the module-wide ``JSONResponse`` name to the NaN-safe subclass so EVERY
+# endpoint in this file (current and future) renders through it — a single
+# chokepoint, rather than remembering to opt in per-route. Non-finite floats
+# can appear in metric/results/report payloads from many endpoints (benchmark
+# results, forecast accuracy, the comparison tab, the data report), and any one
+# of them would otherwise 500 a strict WebKit client (Safari / the iOS HA app).
+# ``_StarletteJSONResponse`` remains available for anything that genuinely needs
+# the unmodified base.
+JSONResponse = SafeJSONResponse
+
 
 
 # Shared aiohttp session for short HA probes from request handlers
@@ -2999,9 +3037,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         result["units"] = exp_cfg.units or ""
         result["days"] = days
-        # Scrub NaN/Inf so the body is spec-valid JSON (Safari's response.json()
-        # rejects bare NaN tokens with a SyntaxError and drops the whole tab).
-        return JSONResponse(content=_json_safe(result))
+        # JSONResponse here is the module's NaN-safe subclass — the metric
+        # floats below can be non-finite and would otherwise fail a strict
+        # WebKit parser (Safari / the iOS HA app).
+        return JSONResponse(content=result)
 
     _unit_cache: Dict[str, tuple] = {}  # entity -> (fetched_at, unit_or_None)
 
