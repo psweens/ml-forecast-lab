@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.45.3
+
+**Root-cause fix: blown-up forecasts can no longer be published.** When
+`log_transform` is on, predictions are inverted with `np.expm1`; a model
+that diverged in log space (a value of ~70) explodes to ~1e30, and the
+publish boundary only clamped the lower side (>= 0), so that garbage was
+sent to Home Assistant sensors **and** logged — later surfacing as the
+1e30 spike on the comparison's lead-time chart.
+
+The inverted forecast is now capped to a generous multiple (10×) of the
+largest target value seen in training — real demand / PV is physically
+bounded, so anything beyond that is a divergence, not a forecast. The cap
+is applied at both publish paths and on the holdout-evaluation inversion,
+and a clamp logs a warning so a diverging model is visible. The cap is
+loose enough never to touch a plausible forecast — only a blow-up.
+
+(The comparison tab's read-side guard and data-quality banner from
+2.45.1–2.45.2 stay, so any values logged before this fix are still handled
+gracefully and flagged.)
+
 ## 2.45.2
 
 **A blown-up forecast is now flagged, not hidden.** v2.45.1 dropped

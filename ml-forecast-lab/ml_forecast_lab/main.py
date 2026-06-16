@@ -206,6 +206,49 @@ def _apply_idle_value_fill(result: 'pd.DataFrame', exp_cfg) -> int:
 _apply_solar_night_fill = _apply_idle_value_fill
 
 
+# A diverged model can emit a large value in log space; np.expm1 then
+# explodes it (expm1(70) ≈ 2.5e30). With only a lower (>= 0) clamp at the
+# publish boundary, that garbage was published to Home Assistant and logged
+# verbatim. Real demand / PV is physically bounded, so a forecast beyond a
+# generous multiple of the largest value ever observed is a divergence, not a
+# forecast — cap it. The cap is intentionally loose (10× the historical max)
+# so it never touches a plausible forecast, only a blow-up.
+FORECAST_BLOWUP_CAP_FACTOR = 10.0
+
+
+def _clamp_forecast_blowup(y_pred, ref_max_display, factor=FORECAST_BLOWUP_CAP_FACTOR):
+    """Cap an (already display-space) forecast array to ``factor`` × the
+    largest observed value so a log-inversion blow-up can't publish ~1e30.
+
+    Parameters
+    ----------
+    y_pred : array-like
+        Forecast values in display (published) units.
+    ref_max_display : float or None
+        Largest observed magnitude in display units (e.g. training/holdout
+        actual max). ``None`` / non-finite / <= 0 disables the cap.
+
+    Returns
+    -------
+    (clamped, n_clamped, cap) : (np.ndarray, int, float | None)
+    """
+    y = np.asarray(y_pred, dtype=np.float32)
+    if ref_max_display is None:
+        return y, 0, None
+    try:
+        ref = float(ref_max_display)
+    except (TypeError, ValueError):
+        return y, 0, None
+    if not np.isfinite(ref) or ref <= 0:
+        return y, 0, None
+    cap = float(factor) * ref
+    over = np.isfinite(y) & (y > cap)
+    n = int(np.count_nonzero(over))
+    if n:
+        y = np.minimum(y, np.float32(cap))
+    return y.astype(np.float32), n, cap
+
+
 def _cov_column_name(cov_cfg, all_covs: Optional[list] = None) -> str:
     """Canonical column name for a covariate's series in the
     ``combined`` dataframe.
@@ -3522,6 +3565,21 @@ class MLForecastLabApp:
                             np.expm1(_y_holdout_display), 0.0,
                         )
                         y_p_display = np.maximum(np.expm1(y_p_display), 0.0)
+                        # Cap a diverged prediction so one blown-up point
+                        # doesn't wreck the holdout chart / metrics. Reference
+                        # is the holdout actuals' max (already display space).
+                        try:
+                            _ref = float(np.nanmax(_y_holdout_display))
+                        except Exception:
+                            _ref = None
+                        y_p_display, _nb, _ = _clamp_forecast_blowup(y_p_display, _ref)
+                        if _nb:
+                            logger.warning(
+                                "  %s/%s: clamped %d holdout prediction(s) "
+                                "exceeding %.0f× the actual max (log-space "
+                                "divergence).",
+                                exp_cfg.name, m_name, _nb, FORECAST_BLOWUP_CAP_FACTOR,
+                            )
 
                     _model_predictions.append(ModelPrediction(
                         model_name=m_name,
@@ -4090,6 +4148,20 @@ class MLForecastLabApp:
         if exp_cfg.log_transform:
             y_pred = np.expm1(y_pred).astype(np.float32)
             y_pred = np.maximum(y_pred, 0.0)
+            # Upper clamp: stop a log-space divergence (expm1 → ~1e30) from
+            # being published to HA / logged. Reference is the training max.
+            try:
+                _ref = float(np.expm1(np.nanmax(combined["target"].values)))
+            except Exception:
+                _ref = None
+            y_pred, _nblow, _cap = _clamp_forecast_blowup(y_pred, _ref)
+            if _nblow:
+                logger.warning(
+                    "  %s: clamped %d forecast point(s) to %.4g (%.0f× the "
+                    "training max) — the model diverged in log space; "
+                    "published the cap rather than a blown-up value.",
+                    exp_cfg.name, _nblow, _cap, FORECAST_BLOWUP_CAP_FACTOR,
+                )
 
         # Publish-boundary non-negativity clamp — same rationale as in
         # _forecast_with_cached (v2.41.0 linear-head change).
@@ -6416,6 +6488,21 @@ class MLForecastLabApp:
         if exp_cfg.log_transform:
             y_pred = np.expm1(y_pred).astype(np.float32)
             y_pred = np.maximum(y_pred, 0.0)
+            # Upper clamp against a log-space divergence (expm1 → ~1e30) so a
+            # blown-up value is never published to HA / logged. The training
+            # target (combined["target"]) is in log space here.
+            try:
+                _ref = float(np.expm1(np.nanmax(combined["target"].values)))
+            except Exception:
+                _ref = None
+            y_pred, _nblow, _cap = _clamp_forecast_blowup(y_pred, _ref)
+            if _nblow:
+                logger.warning(
+                    "  %s: clamped %d forecast point(s) to %.4g (%.0f× the "
+                    "training max) — the model diverged in log space; "
+                    "published the cap rather than a blown-up value.",
+                    exp_cfg.name, _nblow, _cap, FORECAST_BLOWUP_CAP_FACTOR,
+                )
 
         # Publish-boundary non-negativity clamp (v2.41.0). With 'auto'
         # output_activation now resolving to a linear head, physically
