@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.45.1
+
+**Forecast Comparison no longer broken by a single corrupt forecast
+value.** A diverged forecast (e.g. a log-transform inversion that
+overflowed to ~1e30 and was logged verbatim) made the "Error by forecast
+horizon" chart unreadable — one point auto-scaled the axis to 1e30 and
+flattened every real line to zero — and skewed the MAE/ranking. The
+comparison now drops non-physical logged values (non-finite, or more than
+10,000× the largest actual seen / beyond an absolute sanity ceiling) at
+ingestion for both the add-on's forecast and the externals, with a
+server-side warning, so one bad point can't dominate the charts or
+metrics.
+
+Note: this guards the *comparison view* against already-logged corruption.
+The underlying cause — a log-transform forecast being published without
+an upper clamp — is a separate publish-path issue worth fixing so such
+values are never sent to Home Assistant in the first place.
+
 ## 2.45.0
 
 **Forecast Comparison now ranks like the Results tab.** The Accuracy

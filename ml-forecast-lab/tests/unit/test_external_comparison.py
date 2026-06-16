@@ -477,6 +477,28 @@ class TestComparisonBaselineAndWarmup:
         assert "baseline" not in res["overlay"]
         assert len(res["comparisons"]) == 1
 
+    def test_corrupt_forecast_value_is_dropped(self, db):
+        # A log-transform inversion overflow (~1e30) logged among normal
+        # forecasts must be dropped — otherwise one point dwarfs every real
+        # value, flattens the charts and explodes the MAE/ranking.
+        ttbl, e1, _ = self._seed_days(db, n_days=8)
+        bad_t = pd.Timestamp("2024-06-03 12:00")
+        # Log it LATER than the seeded row for that grid so, without the
+        # guard, groupby-last would pick the corrupt value.
+        db.log_forecast(experiment="e", issued_at=bad_t,
+                        targets=[bad_t], predictions=[5e30],
+                        model_name="lgb", model_version="v1")
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, [_spec("sensor.ext_state", "state", e1, label="Crude")],
+            GENEROUS_WINDOW, INTERVAL, "raw")
+        # App metrics stay finite and physical (the 5e30 point is gone).
+        assert res["app_self"] is not None
+        assert math.isfinite(res["app_self"]["mae"])
+        assert res["app_self"]["mae"] < 1e6
+        # The overlay app line carries no absurd value either.
+        app_overlay = [v for v in res["overlay"]["app"] if v is not None]
+        assert app_overlay and all(abs(v) < 1e9 for v in app_overlay)
+
     def test_pct_of_typical_and_daily_metrics(self, db):
         ttbl, e1, _ = self._seed_days(db, n_days=8, mae_app=4.0, mae_ext=12.0)
         res = db.get_external_forecast_comparison(

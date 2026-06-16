@@ -3312,6 +3312,30 @@ class HistoryDB:
             actual_canon = _legacy_eval(actual_raw, target_cumulative)
         actual_disp = _display(actual_canon)
 
+        # Guard against grossly non-physical logged forecast values. A
+        # log-transform inversion that overflows (np.expm1 of a diverged
+        # log-space prediction → ~1e30) gets logged verbatim; a single such
+        # point dwarfs every real value, flattening the charts and exploding
+        # the MAE/ranking. A forecast more than CORRUPT_FACTOR× the largest
+        # actual ever seen (or beyond an absolute sanity ceiling when there
+        # are no actuals to scale against) isn't a "big miss" — it's corrupt
+        # data, so drop it here. Legitimate unit/scale differences are handled
+        # separately by the scale-mismatch guard.
+        CORRUPT_FACTOR = 1e4
+        ABS_SANITY = 1e12
+        _amax = float(actual_raw.abs().max()) if (actual_raw is not None and len(actual_raw)) else 0.0
+        _corrupt_cap = min(_amax * CORRUPT_FACTOR, ABS_SANITY) if _amax > 0 else ABS_SANITY
+
+        def _drop_corrupt(df, col):
+            """Drop rows whose value is non-finite or beyond the sanity cap.
+            Returns (clean_df, n_dropped)."""
+            if df is None or df.empty or col not in df.columns:
+                return df, 0
+            v = pd.to_numeric(df[col], errors="coerce")
+            ok = np.isfinite(v) & (v.abs() <= _corrupt_cap)
+            n_bad = int((~ok).sum())
+            return df[ok], n_bad
+
         # --- app forecast: every logged row in the window ---
         _filt = ""
         _params: list = [experiment, cutoff_str, now_str]
@@ -3337,6 +3361,15 @@ class HistoryDB:
             fdf["predicted"] = pd.to_numeric(fdf["predicted"], errors="coerce")
             fdf["lead_minutes"] = pd.to_numeric(fdf["lead_minutes"], errors="coerce")
             fdf = fdf.dropna(subset=["target_dt", "issued_at", "predicted"])
+            fdf, _n_corrupt = _drop_corrupt(fdf, "predicted")
+            if _n_corrupt:
+                logger.warning(
+                    "external-comparison[%s]: dropped %d non-physical app "
+                    "forecast value(s) (|predicted| > %.3g — likely a "
+                    "log-transform inversion overflow); they would otherwise "
+                    "dominate the charts and MAE.",
+                    experiment, _n_corrupt, _corrupt_cap,
+                )
             fdf["grid"] = fdf["target_dt"].dt.floor(freq)
             fdf = fdf.sort_values("issued_at")
         app_raw = (
@@ -3391,6 +3424,12 @@ class HistoryDB:
                     edf = edf.dropna(subset=["target_dt", "issued_at", "value"])
                     if scale is not None:
                         edf["value"] = edf["value"] * float(scale)
+                    edf, _ne = _drop_corrupt(edf, "value")
+                    if _ne:
+                        logger.warning(
+                            "external-comparison[%s]: dropped %d non-physical "
+                            "value(s) from external %s.", experiment, _ne, source,
+                        )
                     edf["grid"] = edf["target_dt"].dt.floor(freq)
                     edf = edf.sort_values("issued_at")
                 ext_raw = (
