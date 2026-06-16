@@ -3328,13 +3328,35 @@ class HistoryDB:
 
         def _drop_corrupt(df, col):
             """Drop rows whose value is non-finite or beyond the sanity cap.
-            Returns (clean_df, n_dropped)."""
+
+            Returns (clean_df, info) where info is None when nothing was
+            dropped, else {count, max_value, last_ts} describing the dropped
+            points so the UI can SURFACE that a blow-up happened (rather than
+            silently hiding the only evidence)."""
             if df is None or df.empty or col not in df.columns:
-                return df, 0
+                return df, None
             v = pd.to_numeric(df[col], errors="coerce")
             ok = np.isfinite(v) & (v.abs() <= _corrupt_cap)
             n_bad = int((~ok).sum())
-            return df[ok], n_bad
+            if not n_bad:
+                return df, None
+            bad = df[~ok]
+            bv = pd.to_numeric(bad[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+            max_abs = float(bv.abs().max()) if bv.notna().any() else None
+            last_ts = None
+            if "target_dt" in bad.columns:
+                tt = pd.to_datetime(bad["target_dt"], errors="coerce").dropna()
+                if len(tt):
+                    last_ts = _iso_utc(tt.max())
+            info = {
+                "count": n_bad,
+                "max_value": (round(max_abs, 4) if (max_abs is not None and np.isfinite(max_abs)) else None),
+                "last_ts": last_ts,
+            }
+            return df[ok], info
+
+        # Accumulates dropped-corruption info so the response can flag it.
+        corrupt = {"app": None, "externals": []}
 
         # --- app forecast: every logged row in the window ---
         _filt = ""
@@ -3361,14 +3383,15 @@ class HistoryDB:
             fdf["predicted"] = pd.to_numeric(fdf["predicted"], errors="coerce")
             fdf["lead_minutes"] = pd.to_numeric(fdf["lead_minutes"], errors="coerce")
             fdf = fdf.dropna(subset=["target_dt", "issued_at", "predicted"])
-            fdf, _n_corrupt = _drop_corrupt(fdf, "predicted")
-            if _n_corrupt:
+            fdf, _capp = _drop_corrupt(fdf, "predicted")
+            if _capp:
+                corrupt["app"] = _capp
                 logger.warning(
                     "external-comparison[%s]: dropped %d non-physical app "
-                    "forecast value(s) (|predicted| > %.3g — likely a "
-                    "log-transform inversion overflow); they would otherwise "
-                    "dominate the charts and MAE.",
-                    experiment, _n_corrupt, _corrupt_cap,
+                    "forecast value(s) (max ≈ %s at %s, cap %.3g — likely a "
+                    "log-transform inversion overflow); flagged in the UI.",
+                    experiment, _capp["count"], _capp["max_value"],
+                    _capp["last_ts"], _corrupt_cap,
                 )
             fdf["grid"] = fdf["target_dt"].dt.floor(freq)
             fdf = fdf.sort_values("issued_at")
@@ -3424,11 +3447,14 @@ class HistoryDB:
                     edf = edf.dropna(subset=["target_dt", "issued_at", "value"])
                     if scale is not None:
                         edf["value"] = edf["value"] * float(scale)
-                    edf, _ne = _drop_corrupt(edf, "value")
-                    if _ne:
+                    edf, _ce = _drop_corrupt(edf, "value")
+                    if _ce:
+                        _ce["label"] = label
+                        corrupt["externals"].append(_ce)
                         logger.warning(
                             "external-comparison[%s]: dropped %d non-physical "
-                            "value(s) from external %s.", experiment, _ne, source,
+                            "value(s) from external %s (max ≈ %s).",
+                            experiment, _ce["count"], source, _ce["max_value"],
                         )
                     edf["grid"] = edf["target_dt"].dt.floor(freq)
                     edf = edf.sort_values("issued_at")
@@ -3661,6 +3687,11 @@ class HistoryDB:
         result["app_days_logged"] = app_self["days_logged"] if app_self else 0
         result["typical"] = typical
         result["warmup_days"] = EXTERNAL_COMPARISON_WARMUP_DAYS
+        # Surface any non-physical forecast values we excluded so the blowup
+        # is VISIBLE (a stale long-horizon blowup is otherwise masked by the
+        # latest-per-target / h=1 views and shows up nowhere else).
+        if corrupt["app"] or corrupt["externals"]:
+            result["corrupt"] = corrupt
 
         # Top-level warming gate: inconclusive while the add-on OR any
         # configured external still lacks the threshold days of overlap.

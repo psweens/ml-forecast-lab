@@ -498,6 +498,12 @@ class TestComparisonBaselineAndWarmup:
         # The overlay app line carries no absurd value either.
         app_overlay = [v for v in res["overlay"]["app"] if v is not None]
         assert app_overlay and all(abs(v) < 1e9 for v in app_overlay)
+        # ...but the blowup is SURFACED (not silently hidden) so the UI can
+        # flag it — the latest-per-target / h=1 views would otherwise mask it.
+        assert "corrupt" in res
+        assert res["corrupt"]["app"]["count"] == 1
+        assert res["corrupt"]["app"]["max_value"] >= 5e30 - 1
+        assert res["corrupt"]["app"]["last_ts"]
 
     def test_pct_of_typical_and_daily_metrics(self, db):
         ttbl, e1, _ = self._seed_days(db, n_days=8, mae_app=4.0, mae_ext=12.0)

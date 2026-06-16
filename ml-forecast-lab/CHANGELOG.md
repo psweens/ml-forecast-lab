@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.45.2
+
+**A blown-up forecast is now flagged, not hidden.** v2.45.1 dropped
+non-physical forecast values so they couldn't wreck the charts — but that
+risked erasing the *only* evidence a blowup happened: a stale long-horizon
+divergence is masked everywhere else (the overlay and Accuracy Ranking use
+the latest forecast per timestamp, and the Forecast Accuracy tab is
+next-step only), so the horizon-binned lead-time chart was the sole place
+it surfaced. The comparison now shows a red **data-quality banner** naming
+what was excluded, the magnitude (e.g. ≈ 5.1e30), and when — so the event
+is visible regardless of which view would otherwise mask it, and the
+reported magnitude doubles as proof it's a real logged value rather than a
+plotting artefact.
+
+(The root cause — a log-transform forecast published without an upper
+clamp — is still worth fixing so such values never reach Home Assistant.)
+
 ## 2.45.1
 
 **Forecast Comparison no longer broken by a single corrupt forecast

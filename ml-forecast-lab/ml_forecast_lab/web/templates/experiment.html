@@ -2196,6 +2196,11 @@
     <!-- Warming-up banner (results inconclusive below the threshold) -->
     <div id="external-warming-banner" style="display:none;margin:0.25rem 0 0.75rem 0;padding:0.6rem 0.9rem;border:1px solid var(--warning);border-radius:8px;background:rgba(245,158,11,0.08);color:var(--warning);font-size:0.9rem;"></div>
 
+    <!-- Data-quality banner: a non-physical (blown-up) forecast was found and
+         excluded. Surfaced here because a stale long-horizon blowup is masked
+         by the latest-per-target / h=1 views and would otherwise be invisible. -->
+    <div id="external-corrupt-banner" style="display:none;margin:0.25rem 0 0.75rem 0;padding:0.6rem 0.9rem;border:1px solid var(--error);border-radius:8px;background:rgba(231,76,60,0.10);color:var(--error);font-size:0.9rem;"></div>
+
     <!-- Verdict headline -->
     <div id="external-verdict-card" class="verdict-card" style="display:none;">
         <div class="verdict-headline" id="external-verdict-headline">Comparing forecasts…</div>
@@ -6888,7 +6893,7 @@ window.showTab = function(el) {
     }
     function _hide(id){ var el=document.getElementById(id); if(el) el.style.display='none'; }
     function _showEmpty(title, hint) {
-        ['external-verdict-card','external-ranktable-group','external-timing','external-leadtime-group','external-hour-group','external-warming-banner'].forEach(_hide);
+        ['external-verdict-card','external-ranktable-group','external-timing','external-leadtime-group','external-hour-group','external-warming-banner','external-corrupt-banner'].forEach(_hide);
         var empty = document.getElementById('external-empty');
         if (empty) { empty.style.display='';
             if (title){var t=document.getElementById('external-empty-title'); if(t)t.textContent=title;}
@@ -7051,6 +7056,38 @@ window.showTab = function(el) {
         b.innerHTML = '⏳ <b>Results are provisional</b> — a head-to-head needs at least ' + days
             + ' days of overlapping data to be reliable. Still warming up: ' + names.join(', ')
             + '. The ranking and verdict below will firm up as more cycles accrue.';
+        b.style.display = '';
+    }
+
+    // Surface excluded non-physical forecast values. These are dropped from
+    // the charts/metrics (one ~1e30 point would otherwise flatten everything),
+    // but flagged HERE so a blowup isn't invisible — the latest-per-target and
+    // h=1 views mask a stale long-horizon blowup, so without this it would show
+    // up nowhere.
+    function _fmtBig(v) {
+        if (v === null || v === undefined) return 'non-finite';
+        var a = Math.abs(v);
+        return (a >= 1e6 || (a > 0 && a < 1e-3)) ? Number(v).toExponential(1) : String(v);
+    }
+    function _renderCorruptBanner(data) {
+        var b = document.getElementById('external-corrupt-banner');
+        if (!b) return;
+        var c = data.corrupt;
+        if (!c || (!c.app && !(c.externals && c.externals.length))) { b.style.display = 'none'; return; }
+        var parts = [];
+        if (c.app) {
+            var when = c.app.last_ts ? (' (latest at ' + new Date(c.app.last_ts).toLocaleString() + ')') : '';
+            parts.push('<b>ML Forecast Lab</b>: ' + c.app.count + ' value' + (c.app.count !== 1 ? 's' : '')
+                + ' ≈ ' + _fmtBig(c.app.max_value) + when);
+        }
+        (c.externals || []).forEach(function(e){
+            parts.push('<b>' + (e.label || 'external') + '</b>: ' + e.count + ' value' + (e.count !== 1 ? 's' : '')
+                + ' ≈ ' + _fmtBig(e.max_value));
+        });
+        b.innerHTML = '⚠ <b>Non-physical forecast value(s) excluded.</b> ' + parts.join('; ')
+            + '. These were dropped from the charts and metrics (a single blown-up point would otherwise dominate them). '
+            + 'This is almost always a model divergence or a log-transform overflow at publish time — '
+            + 'worth checking that the published Home Assistant sensor wasn’t affected at those times.';
         b.style.display = '';
     }
 
@@ -7228,6 +7265,7 @@ window.showTab = function(el) {
                 var empty = document.getElementById('external-empty'); if (empty) empty.style.display='none';
                 _lastExternalData = data;
                 _renderWarmingBanner(data);
+                _renderCorruptBanner(data);
                 _renderVerdict(data);
                 _renderRankTable(data);
                 _renderTiming(data);
