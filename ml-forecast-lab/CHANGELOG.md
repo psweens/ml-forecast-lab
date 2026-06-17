@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.46.2
+
+**Forecast Comparison: the "% of Typical" column is now "Error %".** The old
+label was ambiguous about direction — it could read as coverage, where 100%
+looks good. It is an error ratio (`MAE ÷ typical demand`), so it now reads
+**Error %** in both leaderboards and the "Rank by" picker, and the tooltips
+state it plainly: **0% is a perfect forecast and lower is better; 100% means
+the average miss is as big as typical demand.** No change to how the value is
+computed or ranked.
+
 ## 2.46.1
 
 **Forecast Comparison: accurate lead times + full metrics at matched lead.**

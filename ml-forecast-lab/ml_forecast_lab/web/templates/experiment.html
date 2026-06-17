@@ -2195,11 +2195,11 @@
                 <option value="mae">MAE</option>
                 <option value="rmse">RMSE</option>
                 <option value="bias">Bias</option>
-                <option value="pct">% of Typical</option>
+                <option value="pct">Error %</option>
                 <option value="daily_mae">Daily MAE</option>
                 <option value="daily_bias">Daily Bias</option>
             </select>
-            <span class="info-tip">?<span class="tip-text">Which metric ranks the table and drives the verdict. <b>Overall</b> (default) is a composite mean rank across MAE, RMSE and Daily MAE — the same Demšar-style averaging the Results tab uses; lower is better. Pick a single metric to rank by it instead. <b>% of typical</b> normalises MAE against typical demand so it's readable without knowing the units; <b>Daily MAE/bias</b> compare the running daily total. The ranked order, the #1/#2/#3 badge, the highlighted column and the "vs MLFL" gap all follow this choice.</span></span>
+            <span class="info-tip">?<span class="tip-text">Which metric ranks the table and drives the verdict. <b>Overall</b> (default) is a composite mean rank across MAE, RMSE and Daily MAE — the same Demšar-style averaging the Results tab uses; lower is better. Pick a single metric to rank by it instead. <b>Error %</b> normalises MAE against typical demand so it's readable without knowing the units (0% = perfect, lower is better); <b>Daily MAE/bias</b> compare the running daily total. The ranked order, the #1/#2/#3 badge, the highlighted column and the "vs MLFL" gap all follow this choice.</span></span>
         </div>
     </div>
 
@@ -2225,7 +2225,7 @@
                     <th data-metric="mae">MAE</th>
                     <th data-metric="rmse">RMSE</th>
                     <th data-metric="bias">Bias <span class="info-tip">?<span class="tip-text">Mean signed error (forecast − actual). Positive = over-forecasting on average, negative = under-forecasting. Near zero is unbiased.</span></span></th>
-                    <th data-metric="pct">% of Typical <span class="info-tip">?<span class="tip-text">MAE as a percentage of typical demand — <code>MAE ÷ mean(|actual|)</code> over the window. Unit-free, so you can read accuracy without knowing the kW/kWh scale. Lower is better.</span></span></th>
+                    <th data-metric="pct">Error % <span class="info-tip">?<span class="tip-text">Error as a percentage of typical demand — <code>MAE ÷ mean(|actual|)</code> over the window. <b>0% is a perfect forecast; lower is better.</b> 100% means the average miss is as big as typical demand. Unit-free, so you can read accuracy without knowing the kW/kWh scale.</span></span></th>
                     <th data-metric="daily_mae">Daily MAE</th>
                     <th data-metric="daily_bias">Daily Bias</th>
                     <th>vs MLFL <span class="info-tip">?<span class="tip-text">How this external's <b>MAE</b> compares to MLFL's (ML Forecast Lab) on their common samples. "MLFL N% better" means MLFL's mean absolute error is N% lower than this external's: <code>(external MAE − MLFL MAE) / external MAE</code>. Always MAE-based, regardless of the "Rank by" metric.</span></span></th><th>Days</th><th>Samples</th>
@@ -2246,7 +2246,7 @@
                 <thead><tr>
                     <th>Rank</th><th>Forecast</th><th>MAE</th><th>RMSE</th>
                     <th>Bias <span class="info-tip">?<span class="tip-text">Mean signed error at matched lead (forecast − actual). Positive = over-forecasting, negative = under. Near zero is unbiased.</span></span></th>
-                    <th>% of Typical <span class="info-tip">?<span class="tip-text">Matched-lead MAE as a percentage of typical per-interval demand — unit-free, so you can read accuracy without knowing the kW/kWh scale.</span></span></th>
+                    <th>Error % <span class="info-tip">?<span class="tip-text">Matched-lead error as a percentage of typical per-interval demand. <b>0% is a perfect forecast; lower is better.</b> 100% means the average miss is as big as typical demand. Unit-free, so you can read accuracy without knowing the kW/kWh scale.</span></span></th>
                     <th>vs MLFL <span class="info-tip">?<span class="tip-text">How this forecaster's matched-lead MAE compares to ML Forecast Lab's over the same lead band: <code>(other − MLFL) / other</code>. Positive = MLFL better.</span></span></th>
                     <th>Samples</th>
                 </tr></thead>
@@ -7225,7 +7225,7 @@ window.showTab = function(el) {
         grp.setAttribute('data-has', '1');
     }
 
-    var _METRIC_LABEL = {overall:'overall standing', mae:'MAE', rmse:'RMSE', bias:'bias', pct:'% of typical', daily_mae:'daily MAE', daily_bias:'daily bias'};
+    var _METRIC_LABEL = {overall:'overall standing', mae:'MAE', rmse:'RMSE', bias:'bias', pct:'error %', daily_mae:'daily MAE', daily_bias:'daily bias'};
 
     function _renderWarmingBanner(data) {
         var b = document.getElementById('external-warming-banner');
