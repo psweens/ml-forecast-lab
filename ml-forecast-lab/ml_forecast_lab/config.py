@@ -1206,6 +1206,80 @@ def save_experiment_field(
     atomic_yaml_write(config_path, data)
 
 
+# Home Assistant entity_id format: ``domain.object_id``, both lowercase
+# letters / digits / underscores. Used to validate a replacement target so a
+# typo (missing domain, stray space, uppercase) is caught at the API boundary
+# instead of failing deep in the fetch/preprocess path with an opaque error.
+_ENTITY_ID_RE = re.compile(r'^[a-z0-9_]+\.[a-z0-9_]+$')
+
+
+def replace_experiment_target(
+    config_path: Path | str,
+    experiment_name: str,
+    new_target_entity: str,
+) -> Optional[str]:
+    """
+    Change an experiment's ``target_entity`` in the YAML config.
+
+    The target sensor is the signal an experiment predicts. Swapping it is a
+    legitimate experimental need (the original sensor was renamed, replaced by
+    better hardware, or you want to point the same model setup at a different
+    series) but it invalidates everything derived from the old sensor —
+    cached/trained models, logged forecasts, benchmark scores. This helper
+    only rewrites the YAML; the caller (the web route) is responsible for
+    clearing that stale state and reporting the previous target back to the
+    user.
+
+    Parameters
+    ----------
+    config_path : Path or str
+        Path to the YAML configuration file.
+    experiment_name : str
+        Experiment to update.
+    new_target_entity : str
+        The replacement Home Assistant entity_id (``domain.object_id``).
+
+    Returns
+    -------
+    Optional[str]
+        The *previous* ``target_entity`` on success (unchanged if the new
+        value equals the old one), or ``None`` if no experiment with that
+        name exists in the config.
+
+    Raises
+    ------
+    ValueError
+        If ``new_target_entity`` is empty or not a valid HA entity_id.
+    """
+    new_target = (new_target_entity or '').strip()
+    if not new_target:
+        raise ValueError('target_entity must be non-empty')
+    if not _ENTITY_ID_RE.match(new_target):
+        raise ValueError(
+            f'target_entity must be a Home Assistant entity_id of the form '
+            f'domain.object_id (lowercase letters, digits, underscores), '
+            f'got {new_target_entity!r}'
+        )
+
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    for exp in data.get('experiments', []):
+        if exp.get('name') != experiment_name:
+            continue
+        previous = exp.get('target_entity')
+        if previous == new_target:
+            # No-op: don't touch the file, but report the (unchanged) target
+            # so the caller can short-circuit the state-clearing work.
+            return previous
+        exp['target_entity'] = new_target
+        atomic_yaml_write(config_path, data)
+        return previous
+
+    return None
+
+
 def remove_experiment_covariate(
     config_path: Path | str,
     experiment_name: str,
