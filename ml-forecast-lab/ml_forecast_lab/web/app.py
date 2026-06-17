@@ -4776,7 +4776,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "mae", "rmse", "mase", "seasonal_mase",
                 "peak_weighted_mae", "pinball_q90", "auto",
             ) else None,
-            "loss_fn": lambda v: v if v in ("mse", "mae", "huber", "tweedie", "auto") else None,
+            "loss_fn": lambda v: v if v in ("mse", "mae", "huber", "tweedie", "dilate", "auto") else None,
             "optimiser": lambda v: v if v in ("adamw", "adam") else None,
             # v2.41.0: daily_loss_weight / loss_balance validators
             # removed. The fields were inert since v2.40.14 but the API

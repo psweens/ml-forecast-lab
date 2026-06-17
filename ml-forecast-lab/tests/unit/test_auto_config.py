@@ -110,8 +110,11 @@ def test_guided_priority_overrides_persona():
     rng = np.random.default_rng(5)
     prof = ac.characterize(_smooth_solar_like(rng), INTERVAL)
     res = ac.resolve(prof, answers={"priority": "peaks"})
-    # Even on a smooth signal, asking for peaks flips to peak-preserving.
-    assert res["loss_fn"].value == "tweedie"
+    # Even on a smooth signal, asking for peaks flips to peak-preserving:
+    # neural backends train with DILATE (trees fall back to Tweedie).
+    assert res["loss_fn"].value == "dilate"
+    assert res["loss_fn"].detail[ac._LOSS_FAMILY_LABELS["neural"]] == "dilate"
+    assert res["loss_fn"].detail[ac._LOSS_FAMILY_LABELS["tree"]] == "tweedie"
     assert res["outlier_method"].value == "off"
     # …and selects the champion on peak tracking too, so the loss change
     # isn't undone by a smoother-favouring selection metric.
@@ -273,3 +276,11 @@ def test_loss_family_helper_maps_tweedie_to_huber_for_neural():
     d2 = ac._loss_by_family("huber")
     assert d2[ac._LOSS_FAMILY_LABELS["tree"]] == "huber"
     assert d2[ac._LOSS_FAMILY_LABELS["neural"]] == "huber"
+
+
+def test_loss_family_helper_maps_dilate_to_tweedie_for_trees():
+    # DILATE is a neural shape+time loss; trees have no analogue and fall back
+    # to the peak-appropriate Tweedie objective.
+    d = ac._loss_by_family("dilate")
+    assert d[ac._LOSS_FAMILY_LABELS["neural"]] == "dilate"
+    assert d[ac._LOSS_FAMILY_LABELS["tree"]] == "tweedie"

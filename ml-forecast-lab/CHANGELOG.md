@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — Training for spiky targets (DILATE loss)
+
+**Neural backends can now be trained with DILATE** (`loss_fn: dilate`), the
+shape-and-time loss of Le Guen & Thome (NeurIPS 2019). A plain point loss
+(MSE/MAE/Huber) over a multi-step horizon double-penalises a spike predicted at
+the wrong time, so neural models learn to flatten peaks. DILATE scores **shape**
+(soft-DTW, alignment-invariant) and **timing** (soft-alignment distortion)
+separately, so a correctly-shaped but slightly mistimed spike is cheap — and the
+trained outputs are visibly sharper.
+
+- Pure-PyTorch, CPU-friendly soft-DTW with a Sakoe-Chiba band (O(H·band)),
+  wired into the shared `_composite_horizon_loss` chokepoint so **every neural
+  backend** gets it without a per-backend edit (`ml_forecast_lab/models/dilate_loss.py`).
+- `loss_fn: dilate` flows through all propagation paths: neural backends use
+  DILATE; tree backends (no analogue) map it to their peak-appropriate Tweedie
+  objective. Degrades to MAE when the horizon has <2 steps.
+- Smart Setup wires it to the Guided **"catching the peaks"** answer (neural →
+  DILATE, trees → Tweedie) and exposes it in the Advanced loss dropdown, with a
+  per-family breakdown and a note about the extra training cost. The *automatic*
+  persona default stays Tweedie (cheap on a Pi); DILATE is the deliberate opt-in.
+- Tests: soft-DTW shift-tolerance, "prefers sharp-shifted over flat where MSE
+  prefers flat", finite gradients, single-step degeneration, per-family mapping.
+
 ## Unreleased — Smart Setup (Automatic settings) — prototype
 
 **The data-dependent training settings can now be left on _Automatic_.** Instead

@@ -273,14 +273,25 @@ _LOSS_FAMILY_LABELS = {
 def _loss_by_family(preferred: str) -> Dict[str, str]:
     """Resolve one loss *intent* into the concrete loss each family trains with.
 
-    ``preferred`` is the best loss for this data (e.g. ``tweedie`` for a spiky
-    target). Trees use it directly; neural backends use it too unless it's
-    ``tweedie`` (which has no native torch loss) in which case they use
-    ``huber``; classical and zero-shot backends train by their own objective.
+    ``preferred`` is the best loss for this data. The split is necessary
+    because the families don't share objectives:
+
+    - ``tweedie`` (zero-inflated spiky) has no native torch loss → neural
+      backends fall back to ``huber``; trees use it directly.
+    - ``dilate`` (soft-DTW shape+time) is a *neural* loss → trees have no
+      analogue and use the peak-appropriate ``tweedie`` instead.
+    - everything else applies uniformly to trees and neural.
+
+    Classical and zero-shot backends train by their own objective regardless.
     """
-    neural = "huber" if preferred == "tweedie" else preferred
+    if preferred == "tweedie":
+        tree, neural = "tweedie", "huber"
+    elif preferred == "dilate":
+        tree, neural = "tweedie", "dilate"
+    else:
+        tree = neural = preferred
     return {
-        _LOSS_FAMILY_LABELS["tree"]: preferred,
+        _LOSS_FAMILY_LABELS["tree"]: tree,
         _LOSS_FAMILY_LABELS["neural"]: neural,
         _LOSS_FAMILY_LABELS["classical"]: "own objective (MLE / AIC)",
         _LOSS_FAMILY_LABELS["foundation"]: "pretrained (no training loss)",
@@ -392,8 +403,12 @@ def resolve(
     priority = answers.get("priority")
     if priority == "peaks":
         out["loss_fn"] = Resolution(
-            "tweedie", "You chose to prioritise catching the peaks — Tweedie "
-            "lets the model reach toward the spikes.", source="automatic",
+            "dilate", "You chose to prioritise catching the peaks — neural "
+            "backends train with DILATE (soft-DTW shape+time), so a "
+            "correctly-shaped but slightly mistimed spike isn't "
+            "double-penalised and the model is pushed to reach the highs; "
+            "trees use Tweedie. (DILATE adds training time.)",
+            source="automatic",
         )
         out["outlier_method"] = Resolution(
             "off", "Prioritising peaks — outlier clipping is disabled so real "
@@ -435,6 +450,12 @@ def resolve(
                 " Applied per family: the tree backends use Tweedie; the "
                 "neural backends fall back to Huber (no native Tweedie loss); "
                 "classical and zero-shot backends use their own objective."
+            )
+        elif loss_res.value == "dilate":
+            loss_res.reason += (
+                " Applied per family: neural backends use DILATE (soft-DTW "
+                "shape+time); trees use Tweedie (no tree analogue); classical "
+                "and zero-shot backends use their own objective."
             )
 
     return out

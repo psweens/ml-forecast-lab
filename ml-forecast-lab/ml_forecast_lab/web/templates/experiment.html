@@ -384,6 +384,7 @@
                     <option value="mse" {% if exp_config and exp_config.loss_fn == 'mse' %}selected{% endif %}>MSE</option>
                     <option value="mae" {% if exp_config and exp_config.loss_fn == 'mae' %}selected{% endif %}>MAE</option>
                     <option value="tweedie" {% if exp_config and exp_config.loss_fn == 'tweedie' %}selected{% endif %}>Tweedie (tree backends only)</option>
+                    <option value="dilate" {% if exp_config and exp_config.loss_fn == 'dilate' %}selected{% endif %}>DILATE — neural shape+time, sharper peaks (slower)</option>
                 </select>
                 <span class="managed-pill" data-pill="loss_fn" style="display:none;font-size:0.82rem;margin-top:0.3rem;"></span>
             </div>
@@ -2879,7 +2880,7 @@ window.showTab = function(el) {
     window.applyPriority = function(priority, btn) {
         // Guided shortcut: pin a small bundle that matches the user's priority.
         var bundle;
-        if (priority === 'peaks') bundle = { loss_fn: 'tweedie', outlier_method: 'off' };
+        if (priority === 'peaks') bundle = { loss_fn: 'dilate', outlier_method: 'off' };
         else if (priority === 'average') bundle = { loss_fn: 'huber', outlier_method: 'quantile' };
         else if (priority === 'total') bundle = { production_metric: 'seasonal_mase' };
         else bundle = { loss_fn: 'auto', outlier_method: 'auto', production_metric: 'auto' };
