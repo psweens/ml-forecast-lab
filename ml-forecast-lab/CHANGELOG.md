@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.45.8
+
+**Forecast Comparison tab — results-first layout.** The tab now opens on the
+verdict, leaderboard and "Forecast vs Actual" chart instead of the setup form:
+
+- The **"Third-party forecasts to compare against"** panel (the source list +
+  add form) is now a collapsible section — collapsed once at least one source
+  is configured (with a count in its header) and open on first run, so setup
+  is still obvious but doesn't sit above the results on every visit.
+- The **"Error by Time of Day"** and **"Error by Forecast Horizon"** charts
+  are grouped under a collapsible **Diagnostics** section, keeping the first
+  screen focused on the headline comparison. They resize correctly when the
+  section is expanded (Plotly otherwise measures zero width inside a closed
+  panel).
+
+No behavioural change — same data, metrics and charts, reorganised.
+
 ## 2.45.7
 
 **External forecast lead times now reflect the source's real freshness.**

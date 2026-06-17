@@ -2086,11 +2086,12 @@
         <span class="info-tip">?<span class="tip-text">Head-to-head: ML Forecast Lab's published forecast vs up to five third-party forecasts of this target (ones not produced by ML Forecast Lab — Solcast, a utility day-ahead curve, another model), all scored against the actuals. Add the sensors below; data is captured each production forecast cycle and accrues going forward — there's no historical backfill, so a freshly-added forecast fills in over the coming days.</span></span>
     </h2>
 
-    <!-- Manage the compared third-party forecasts (covariate-style) -->
-    <div class="settings-group" id="external-manage">
-        <h3 class="settings-group-title">Third-Party Forecasts to Compare Against
+    <!-- Manage the compared third-party forecasts (collapsible; open on first run) -->
+    <details class="diag-accordion" id="external-manage"{% if not _exts %} open{% endif %}>
+        <summary>Third-party forecasts to compare against{% if _exts %} · {{ _exts | length }}{% endif %}
             <span class="info-tip">?<span class="tip-text">Each entry is an HA entity holding a forecast of this same target, produced by something other than ML Forecast Lab. Add up to five. <b>Sensor state</b> mode treats the entity's recorded value as its estimate for that moment; <b>Forecast attribute</b> mode reads a future trajectory from an attribute (Solcast, weather) for a per-horizon comparison.</span></span>
-        </h3>
+        </summary>
+        <div class="settings-group">
         <div class="covariate-list" id="external-list">
             {% if _exts %}
             {% for ext in _exts %}
@@ -2158,7 +2159,8 @@
             <button type="button" class="btn btn-secondary" id="add-external-btn" onclick="addExternalForecast()">Add forecast</button>
         </div>
         <p style="color:var(--text-secondary);font-size:0.8rem;margin:0.6rem 0 0 0;">Up to 5.{% if experiment.mode != 'production' %} <b>This experiment is in lab mode</b> — add forecasts now; scoring begins once you promote it to production (that's when ML Forecast Lab logs its own forecasts to compare against).{% endif %}</p>
-    </div>
+        </div>
+    </details>
 
     <div class="acc-top-controls">
         <div class="acc-control">
@@ -2238,21 +2240,26 @@
         <div id="external-overlay-chart" style="width:100%;height:380px;"></div>
     </div>
 
-    <!-- Error by hour-of-day (all sources; client-side from the overlay) -->
-    <div id="external-hour-group" class="settings-group" style="display:none;">
-        <h3 class="settings-group-title">Error by Time of Day
-            <span class="info-tip">?<span class="tip-text">Mean absolute error grouped by hour of day, one line per forecaster — catches regime-specific strengths the headline numbers hide (e.g. ML Forecast Lab wins mornings, an external wins afternoons). Computed in the current Analysis view (per-interval or cumulative). Provisional (warming) sources are drawn faded.</span></span>
-        </h3>
-        <div id="external-hour-chart" style="width:100%;height:320px;"></div>
-    </div>
+    <!-- Diagnostics: deeper per-regime charts, collapsed to keep the first screen tight -->
+    <details class="diag-accordion" id="external-diagnostics" style="display:none;">
+        <summary>Diagnostics <span style="color:var(--text-secondary);font-size:0.85rem;font-weight:400;">— error by time of day &amp; forecast horizon</span></summary>
 
-    <!-- Lead-time curve (attribute-mode externals only) -->
-    <div id="external-leadtime-group" class="settings-group" style="display:none;">
-        <h3 class="settings-group-title">Error by Forecast Horizon — ML Forecast Lab vs Externals
-            <span class="info-tip">?<span class="tip-text">Mean absolute error binned by lead time (how far ahead the forecast was looking). Available for trajectory (attribute-mode) externals. A lower line is the more accurate forecaster at that horizon.</span></span>
-        </h3>
-        <div id="external-leadtime-chart" style="width:100%;height:340px;"></div>
-    </div>
+        <!-- Error by hour-of-day (all sources; client-side from the overlay) -->
+        <div id="external-hour-group" class="settings-group" style="display:none;">
+            <h3 class="settings-group-title">Error by Time of Day
+                <span class="info-tip">?<span class="tip-text">Mean absolute error grouped by hour of day, one line per forecaster — catches regime-specific strengths the headline numbers hide (e.g. ML Forecast Lab wins mornings, an external wins afternoons). Computed in the current Analysis view (per-interval or cumulative). Provisional (warming) sources are drawn faded.</span></span>
+            </h3>
+            <div id="external-hour-chart" style="width:100%;height:320px;"></div>
+        </div>
+
+        <!-- Lead-time curve (attribute-mode externals only) -->
+        <div id="external-leadtime-group" class="settings-group" style="display:none;">
+            <h3 class="settings-group-title">Error by Forecast Horizon — ML Forecast Lab vs Externals
+                <span class="info-tip">?<span class="tip-text">Mean absolute error binned by lead time (how far ahead the forecast was looking). Available for trajectory (attribute-mode) externals. A lower line is the more accurate forecaster at that horizon.</span></span>
+            </h3>
+            <div id="external-leadtime-chart" style="width:100%;height:340px;"></div>
+        </div>
+    </details>
 
     <!-- Empty / status -->
     <div id="external-empty" style="display:none;">
@@ -6888,7 +6895,7 @@ window.showTab = function(el) {
     }
     function _hide(id){ var el=document.getElementById(id); if(el) el.style.display='none'; }
     function _showEmpty(title, hint) {
-        ['external-verdict-card','external-ranktable-group','external-timing','external-leadtime-group','external-hour-group','external-warming-banner'].forEach(_hide);
+        ['external-verdict-card','external-ranktable-group','external-timing','external-diagnostics','external-leadtime-group','external-hour-group','external-warming-banner'].forEach(_hide);
         var empty = document.getElementById('external-empty');
         if (empty) { empty.style.display='';
             if (title){var t=document.getElementById('external-empty-title'); if(t)t.textContent=title;}
@@ -7234,13 +7241,38 @@ window.showTab = function(el) {
         }, {responsive:true});
     }
 
+    // Plotly measures zero width inside a collapsed <details>, so resize the
+    // diagnostics charts whenever the panel is opened.
+    function _resizeExternalDiagnostics() {
+        var det = document.getElementById('external-diagnostics');
+        if (!det || !window.Plotly) return;
+        setTimeout(function(){
+            det.querySelectorAll('.js-plotly-plot').forEach(function(c){
+                try { Plotly.Plots.resize(c); } catch (e) {}
+            });
+        }, 50);
+    }
+
+    // Show the Diagnostics accordion only when at least one of its charts has
+    // data; resize on demand if it's already open.
+    function _syncExternalDiagnostics() {
+        var det = document.getElementById('external-diagnostics');
+        if (!det) return;
+        var hour = document.getElementById('external-hour-group');
+        var lead = document.getElementById('external-leadtime-group');
+        var any = (hour && hour.style.display !== 'none') ||
+                  (lead && lead.style.display !== 'none');
+        det.style.display = any ? '' : 'none';
+        if (any && det.open) _resizeExternalDiagnostics();
+    }
+
     window.loadExternalComparison = function() {
         var winSel = document.getElementById('external-window');
         var days = winSel ? winSel.value : '30';
         fetch(BASE + '/experiment/' + EXP + '/external-forecast-comparison?days=' + encodeURIComponent(days) + '&analysis=' + encodeURIComponent(_externalAnalysis))
             .then(function(r){ return r.json(); })
             .then(function(data){
-                if (!data || data.configured === false) { _showEmpty('No third-party forecasts added yet.', 'Use the form above to add a forecast sensor to compare against.'); return; }
+                if (!data || data.configured === false) { _showEmpty('No third-party forecasts added yet.', 'Open “Third-party forecasts to compare against” above to add a forecast sensor.'); return; }
                 if (data.error) { _showEmpty('Could not load comparison.', String(data.error)); return; }
                 var hasOverlay = data.overlay && data.overlay.ds && data.overlay.ds.length;
                 var hasH2H = (data.comparisons||[]).some(function(c){ return c.head_to_head; });
@@ -7254,6 +7286,7 @@ window.showTab = function(el) {
                 _renderOverlay(data);
                 _renderHourly(data);
                 _renderLeadtime(data);
+                _syncExternalDiagnostics();
             })
             .catch(function(err){ _showEmpty('Could not load comparison.', String(err)); });
     };
@@ -7261,6 +7294,10 @@ window.showTab = function(el) {
     if (typeof queueChart === 'function') {
         queueChart('sec-external-comparison', function() { loadExternalComparison(); });
     }
+    (function(){
+        var det = document.getElementById('external-diagnostics');
+        if (det) det.addEventListener('toggle', function(){ if (det.open) _resizeExternalDiagnostics(); });
+    })();
     try { window.onExternalModeChanged(); } catch (e) {}
 })();
 </script>
