@@ -2952,8 +2952,91 @@ class HistoryDB:
             "CREATE INDEX IF NOT EXISTS idx_extflog_exp_issued "
             "ON external_forecast_log(experiment, issued_at)"
         )
+        # One-time cleanup of trajectories logged before content-change
+        # detection: each forecast cycle used to re-log an unchanged external
+        # trajectory as a fresh issuance, so every target had a ~one-cycle-old
+        # "latest" issuance and the reported lead collapsed to a single cycle
+        # (e.g. a source that refreshes a few times a day reading as 15 min).
+        # Collapse runs of identical issuances down to their earliest one —
+        # exactly what the capture-time de-duplication now produces — so
+        # existing data reports true leads without losing history or restarting
+        # the warming-up window. Guarded by schema_versions so it runs once.
+        if 2 not in self._applied_versions():
+            try:
+                removed = self._collapse_external_duplicates(cursor)
+                if removed:
+                    logger.info(
+                        "Collapsed %d duplicate external forecast issuance "
+                        "row(s) to their original issue time", removed,
+                    )
+            except sqlite3.Error as e:
+                logger.error(
+                    "External forecast de-duplication migration failed: %s",
+                    e, exc_info=True,
+                )
+            self._record_version(2)
         self.conn.commit()
         logger.debug("Ensured external_forecast_log table")
+
+    def _collapse_external_duplicates(self, cursor) -> int:
+        """Collapse consecutive identical external-forecast issuances to the
+        earliest of each run, returning the number of rows deleted.
+
+        Mirrors the capture-time content-change test (see
+        ``main._capture_external_forecast``): an issuance whose values match
+        the last *kept* trajectory over their overlapping targets — within the
+        same tolerance, ``max(1e-4, 0.005·|value|)`` — is a re-log of the same
+        forecast, not a new one, so it is dropped. The earliest issuance of a
+        run is kept, preserving the true (longest) lead.
+        """
+        cursor.execute(
+            "SELECT DISTINCT experiment, source FROM external_forecast_log"
+        )
+        total_removed = 0
+        for experiment, source in cursor.fetchall():
+            total_removed += self._collapse_source_duplicates(
+                cursor, experiment, source,
+            )
+        return total_removed
+
+    def _collapse_source_duplicates(self, cursor, experiment, source) -> int:
+        """De-duplicate one source's logged issuances in place. See
+        ``_collapse_external_duplicates`` for the matching rule."""
+        cursor.execute(
+            "SELECT DISTINCT issued_at FROM external_forecast_log "
+            "WHERE experiment = ? AND source = ? ORDER BY issued_at ASC",
+            (experiment, source),
+        )
+        issuances = [r[0] for r in cursor.fetchall()]
+        if len(issuances) < 2:
+            return 0
+        kept: Optional[dict] = None  # last kept issuance, target_dt → value
+        duplicates: list = []
+        for iss in issuances:
+            cursor.execute(
+                "SELECT target_dt, value FROM external_forecast_log "
+                "WHERE experiment = ? AND source = ? AND issued_at = ?",
+                (experiment, source, iss),
+            )
+            traj = {r[0]: round(float(r[1]), 4) for r in cursor.fetchall()}
+            if kept is not None:
+                overlap = [k for k in traj if k in kept]
+                if overlap and all(
+                    abs(traj[k] - kept[k]) <= max(1e-4, 0.005 * abs(traj[k]))
+                    for k in overlap
+                ):
+                    duplicates.append(iss)
+                    continue
+            kept = traj
+        removed = 0
+        for iss in duplicates:
+            cursor.execute(
+                "DELETE FROM external_forecast_log "
+                "WHERE experiment = ? AND source = ? AND issued_at = ?",
+                (experiment, source, iss),
+            )
+            removed += cursor.rowcount
+        return removed
 
     @_locked
     def get_last_external_issued_at(

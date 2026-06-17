@@ -10,6 +10,15 @@ state it plainly: **0% is a perfect forecast and lower is better; 100% means
 the average miss is as big as typical demand.** No change to how the value is
 computed or ranked.
 
+**Lead times for already-logged forecasts are corrected on upgrade.** The
+v2.46.1 content-change detection only applied to new captures, so leads
+recorded under earlier builds — where every cycle re-logged an unchanged
+trajectory as a fresh issuance — stayed stuck at one cycle (e.g. a source
+refreshing a few times a day still reading 15 min). A one-time migration now
+collapses each run of identical issuances down to its earliest one, applying
+the same content-change rule retroactively. Existing sources report their true
+leads without losing history or restarting the warming-up window.
+
 ## 2.46.1
 
 **Forecast Comparison: accurate lead times + full metrics at matched lead.**

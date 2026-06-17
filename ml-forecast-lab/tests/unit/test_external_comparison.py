@@ -652,6 +652,73 @@ class TestComparisonSkill:
         assert sk is None or sk.get("available") is False
 
 
+class TestExternalDedupeMigration:
+    """v2.46.2: one-time collapse of trajectories that were re-logged unchanged
+    every forecast cycle (before capture-time content-change detection). Each
+    run of identical issuances folds into its earliest, restoring true leads."""
+
+    def _seed_dupes(self, db, source="sensor.solcast"):
+        # Three targets, fixed across issuances so they fully overlap.
+        T = [datetime(2024, 6, 15, 8, 0) + timedelta(hours=h) for h in range(3)]
+        # 06:00 issuance, then two unchanged re-logs (06:15 / 06:30).
+        for m in (0, 15, 30):
+            db.log_external_forecast(
+                "e", source, datetime(2024, 6, 15, 6, m), T, [2.0, 3.0, 4.0])
+        # 07:00 genuine refresh (values changed), re-logged unchanged at 07:15.
+        for m in (0, 15):
+            db.log_external_forecast(
+                "e", source, datetime(2024, 6, 15, 7, m), T, [2.5, 3.0, 4.0])
+        return T
+
+    def _issuances(self, db, source="sensor.solcast"):
+        cur = db.conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT issued_at FROM external_forecast_log "
+            "WHERE source = ? ORDER BY issued_at", (source,))
+        return [r[0] for r in cur.fetchall()]
+
+    def test_helper_collapses_identical_runs_to_earliest(self, db):
+        T = self._seed_dupes(db)
+        assert len(self._issuances(db)) == 5
+        # A neighbouring source with a single issuance must be left untouched.
+        db.log_external_forecast("e", "sensor.other",
+                                 datetime(2024, 6, 15, 6, 0), T, [9.0, 9.0, 9.0])
+        removed = db._collapse_external_duplicates(db.conn.cursor())
+        db.conn.commit()
+        # 2 dupes in the 06:00 run + 1 in the 07:00 run, 3 rows each.
+        assert removed == 9
+        assert self._issuances(db) == [
+            "2024-06-15 06:00:00", "2024-06-15 07:00:00"]
+        assert len(self._issuances(db, "sensor.other")) == 1
+        # The surviving earliest issuance carries the true (long) lead: 06:00
+        # → 08:00 is 120 min, not the ~15 min the per-cycle re-logs implied.
+        cur = db.conn.cursor()
+        cur.execute("SELECT MIN(lead_minutes) FROM external_forecast_log "
+                    "WHERE source='sensor.solcast' "
+                    "AND issued_at='2024-06-15 06:00:00'")
+        assert cur.fetchone()[0] == 120
+        # The latest kept trajectory is the genuine 07:00 refresh.
+        traj = db.get_last_external_trajectory("e", "sensor.solcast")
+        assert sorted(traj.values()) == [2.5, 3.0, 4.0]
+
+    def test_migration_is_gated_and_runs_once(self, db):
+        # Seed first (the table-ensure inside log_external_forecast records the
+        # migration as a no-op on the empty table); then simulate a pre-fix
+        # install by clearing the marker so the populated data is migrated.
+        self._seed_dupes(db)
+        assert len(self._issuances(db)) == 5
+        cur = db.conn.cursor()
+        cur.execute("DELETE FROM schema_versions WHERE version = 2")
+        db.conn.commit()
+        assert 2 not in db._applied_versions()
+        db.ensure_external_forecast_log_table()      # triggers the migration
+        assert 2 in db._applied_versions()
+        assert len(self._issuances(db)) == 2
+        # Idempotent: with the marker set, a further ensure changes nothing.
+        db.ensure_external_forecast_log_table()
+        assert len(self._issuances(db)) == 2
+
+
 class TestComparisonEmptyStates:
     def test_missing_actuals_table(self, db):
         res = db.get_external_forecast_comparison(
