@@ -2213,6 +2213,7 @@
                 <thead><tr>
                     <th>Rank <span class="info-tip">?<span class="tip-text">Standing on the selected "Rank by" metric. <b>Overall</b> is a composite mean rank across MAE, RMSE and Daily MAE (the metric on which a forecaster ranks best counts the same as the others; lower mean rank = better) — the small number is that mean rank. Mirrors the Results tab. Forecasters on a different scale (⚠) aren't ranked.</span></span></th>
                     <th>Forecast</th>
+                    <th>Lead <span class="info-tip">?<span class="tip-text">How far ahead each forecaster's scored prediction was issued (its median lead). ML Forecast Lab re-forecasts every cycle, so its lead is short; a third-party that refreshes only a few times a day is judged at a much longer lead — a harder task. "Best available" scores each at its own lead (operationally what you can act on); switch to "Same lead time" for an equal-horizon skill comparison.</span></span></th>
                     <th data-metric="mae">MAE</th>
                     <th data-metric="rmse">RMSE</th>
                     <th data-metric="bias">Bias <span class="info-tip">?<span class="tip-text">Mean signed error (forecast − actual). Positive = over-forecasting on average, negative = under-forecasting. Near zero is unbiased.</span></span></th>
@@ -6893,6 +6894,14 @@ window.showTab = function(el) {
         if (mins >= 90) return (mins/60).toFixed(1) + ' h ahead';
         return Math.round(mins) + ' min ahead';
     }
+    // Compact lead for the table column: "now" for contemporaneous state
+    // sources, "15 min" / "8.0 h" otherwise.
+    function _leadShort(mins, contemporaneous) {
+        if (contemporaneous) return 'now';
+        if (mins === null || mins === undefined) return '—';
+        if (mins >= 90) return (mins/60).toFixed(1) + ' h';
+        return Math.round(mins) + ' min';
+    }
     function _hide(id){ var el=document.getElementById(id); if(el) el.style.display='none'; }
     function _showEmpty(title, hint) {
         ['external-verdict-card','external-ranktable-group','external-timing','external-diagnostics','external-leadtime-group','external-hour-group','external-warming-banner'].forEach(_hide);
@@ -6911,16 +6920,22 @@ window.showTab = function(el) {
         var appBlock = data.app_self || comps[0].head_to_head.app;
         var appDaily = (data.app_self && data.app_self.daily)
             || (comps[0].head_to_head.daily && comps[0].head_to_head.daily.app) || null;
+        var appLead = (comps[0].timing && comps[0].timing.app_median_lead_minutes != null)
+            ? comps[0].timing.app_median_lead_minutes : null;
         var R = [{ kind:'app', label:'ML Forecast Lab', color:C_APP,
                    block:appBlock, daily:appDaily,
                    days:(data.app_days_logged||0), warming:!!(appBlock && appBlock.warming),
-                   mismatch:false, ratio:null, h:null, n:(appBlock?appBlock.n:0) }];
+                   mismatch:false, ratio:null, h:null, n:(appBlock?appBlock.n:0),
+                   lead:appLead, contemporaneous:false }];
         comps.forEach(function(c, i) {
             var h = c.head_to_head;
+            var t = c.timing || {};
             R.push({ kind:'ext', label:(c.label||c.entity), color:EXT_COLORS[i%EXT_COLORS.length],
                      mode:c.mode, block:h.external, daily:(h.daily?h.daily.external:null),
                      days:(c.days_logged||0), warming:!!c.warming,
-                     mismatch:!!c.scale_mismatch, ratio:c.scale_ratio, h:h, n:h.n });
+                     mismatch:!!c.scale_mismatch, ratio:c.scale_ratio, h:h, n:h.n,
+                     lead: t.external_contemporaneous ? 0 : (t.external_median_lead_minutes != null ? t.external_median_lead_minutes : null),
+                     contemporaneous: !!t.external_contemporaneous });
         });
         return R;
     }
@@ -7022,9 +7037,14 @@ window.showTab = function(el) {
             var op = r.mismatch ? 'opacity:0.6;' : (r.warming ? 'opacity:0.78;' : '');
             // Tint MLFL's own row so "you" stands out without pinning it.
             var hl = r.kind === 'app' ? 'background:rgba(255,107,107,0.07);' : '';
+            var leadTxt = _leadShort(r.lead, r.contemporaneous);
+            var leadCell = '<td style="color:var(--text-secondary);white-space:nowrap;"'
+                + (r.contemporaneous ? ' title="State-mode sensor: a same-time (lead 0) reading, not a forward forecast"' : '')
+                + '>' + leadTxt + '</td>';
             return '<tr style="' + op + hl + '">'
                 + _rankCell(r)
                 + '<td>' + nameCell + '</td>'
+                + leadCell
                 + cols.map(function(col){ return _cell(r, col); }).join('')
                 + _vsCell(r) + _daysCell(r)
                 + '<td>' + (r.n||0) + '</td>'
