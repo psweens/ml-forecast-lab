@@ -2173,6 +2173,14 @@
             <span class="info-tip">?<span class="tip-text">Time range for every chart and number below. Shorter reflects recent behaviour; longer gives more samples.</span></span>
         </div>
         <div class="acc-control">
+            <label>Compare:</label>
+            <div class="toggle-group" style="display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+                <button type="button" id="external-cmp-operational" class="toggle-btn active" onclick="setExternalCompare('operational')" style="padding:0.35rem 0.75rem;background:var(--accent-secondary);color:#fff;border:none;cursor:pointer;font-size:0.85rem;">Best available</button>
+                <button type="button" id="external-cmp-skill" class="toggle-btn" onclick="setExternalCompare('skill')" style="padding:0.35rem 0.75rem;background:transparent;color:var(--text-secondary);border:none;cursor:pointer;font-size:0.85rem;">Same lead time</button>
+            </div>
+            <span class="info-tip">?<span class="tip-text"><b>Best available</b> (operational): each forecaster's most recent prediction for each moment — what you could act on right now, so a faster-updating source is rewarded for its freshness. <b>Same lead time</b> (skill): every trajectory forecaster scored over the lead band they all cover, isolating model skill from update frequency. State-mode (nowcast) sources only appear in Best available.</span></span>
+        </div>
+        <div class="acc-control">
             <label>Analysis:</label>
             <div class="toggle-group" style="display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
                 <button type="button" id="external-mode-per-interval" class="toggle-btn active" onclick="setExternalAnalysis('per_interval')" style="padding:0.35rem 0.75rem;background:var(--accent-secondary);color:#fff;border:none;cursor:pointer;font-size:0.85rem;">Per-interval</button>
@@ -2225,6 +2233,26 @@
                 <tbody id="external-ranktable-body"></tbody>
             </table>
         </div>
+    </div>
+
+    <!-- Skill leaderboard (same lead time) -->
+    <div id="external-skilltable-group" class="settings-group" style="display:none;">
+        <h3 class="settings-group-title">Accuracy at Matched Lead
+            <span class="info-tip">?<span class="tip-text">Every trajectory forecaster scored over the lead band they all cover, so the ranking reflects model skill rather than how often each source refreshes. MAE is in the per-interval space. State-mode (nowcast) and scale-mismatched sources can't be matched on lead and are listed under the table.</span></span>
+        </h3>
+        <p id="external-skill-band" style="color:var(--text-secondary);font-size:0.85rem;margin:0 0 0.5rem 0;"></p>
+        <div class="table-container">
+            <table class="metrics-table" id="external-skilltable">
+                <thead><tr>
+                    <th>Rank</th><th>Forecast</th><th>MAE</th>
+                    <th>vs MLFL <span class="info-tip">?<span class="tip-text">How this forecaster's matched-lead MAE compares to ML Forecast Lab's over the same lead band: <code>(other − MLFL) / other</code>. Positive = MLFL better.</span></span></th>
+                    <th>Samples</th>
+                </tr></thead>
+                <tbody id="external-skilltable-body"></tbody>
+            </table>
+        </div>
+        <p id="external-skill-excluded" style="color:var(--text-secondary);font-size:0.8rem;margin:0.5rem 0 0 0;"></p>
+        <p id="external-skill-unavailable" style="color:var(--warning);font-size:0.9rem;display:none;"></p>
     </div>
 
     <!-- Comparison basis / timing transparency -->
@@ -6666,6 +6694,7 @@ window.showTab = function(el) {
     // v2.44.x: ranking metric + cached payload so the selector re-renders the
     // table/verdict client-side without a re-fetch.
     var _externalMetric = 'overall';
+    var _externalCompare = 'operational';   // 'operational' (best available) | 'skill' (same lead time)
     var _lastExternalData = null;
     // Metrics averaged for the "Overall" composite mean rank (lower better).
     // MAE/RMSE/Daily-MAE mirror the Results tab's MAE/RMSE/MASE trio; bias is
@@ -6741,6 +6770,113 @@ window.showTab = function(el) {
 
     // The metric the "vs MLFL" gap is expressed on (MAE when ranking Overall).
     function _gapMetric() { return _externalMetric === 'overall' ? 'mae' : _externalMetric; }
+
+    // ---- Compare mode: Best available (operational) <-> Same lead time (skill) ----
+    function _bandPhrase(lo, hi) {
+        function f(m) { return m >= 90 ? (m / 60).toFixed(m % 60 ? 1 : 0) + ' h' : Math.round(m) + ' min'; }
+        return f(lo) + ' – ' + f(hi);
+    }
+
+    window.setExternalCompare = function(mode) {
+        if (mode !== 'operational' && mode !== 'skill') return;
+        _externalCompare = mode;
+        var op = document.getElementById('external-cmp-operational');
+        var sk = document.getElementById('external-cmp-skill');
+        [op, sk].forEach(function(b){ if(!b) return; b.classList.remove('active'); b.style.background='transparent'; b.style.color='var(--text-secondary)'; });
+        var on = (mode === 'skill') ? sk : op;
+        if (on) { on.classList.add('active'); on.style.background='var(--accent-secondary)'; on.style.color='#fff'; }
+        if (_lastExternalData) { _renderVerdict(_lastExternalData); _applyCompareMode(); }
+    };
+
+    // Show the leaderboard for the active mode; hide the other. The "Rank by"
+    // selector only applies operationally (skill is MAE-at-matched-lead).
+    function _applyCompareMode() {
+        var skillMode = _externalCompare === 'skill';
+        var opGrp = document.getElementById('external-ranktable-group');
+        var skGrp = document.getElementById('external-skilltable-group');
+        function _has(el){ return el && el.getAttribute('data-has') === '1'; }
+        if (skillMode) {
+            if (opGrp) opGrp.style.display = 'none';
+            if (skGrp) skGrp.style.display = _has(skGrp) ? '' : 'none';
+        } else {
+            if (skGrp) skGrp.style.display = 'none';
+            if (opGrp) opGrp.style.display = _has(opGrp) ? '' : 'none';
+        }
+        var mc = document.getElementById('external-metric');
+        var ctl = mc && mc.closest ? mc.closest('.acc-control') : null;
+        if (ctl) ctl.style.display = skillMode ? 'none' : '';
+    }
+
+    function _renderSkillTable(data) {
+        var grp = document.getElementById('external-skilltable-group');
+        var body = document.getElementById('external-skilltable-body');
+        var bandP = document.getElementById('external-skill-band');
+        var exclP = document.getElementById('external-skill-excluded');
+        var unavP = document.getElementById('external-skill-unavailable');
+        if (!grp || !body) return;
+        var sk = data.skill;
+        var unit = data.lead_unit || data.display_unit || '';
+        var hasData = (data.comparisons || []).some(function(c){ return c.head_to_head; });
+        grp.setAttribute('data-has', hasData ? '1' : '0');
+        body.innerHTML = '';
+        if (bandP) bandP.innerHTML = '';
+        if (exclP) exclP.textContent = '';
+        if (unavP) { unavP.style.display = 'none'; unavP.textContent = ''; }
+
+        var excludedTxt = (sk && sk.excluded && sk.excluded.length)
+            ? 'Not comparable at matched lead: ' + sk.excluded.map(function(e){ return e.label + ' (' + e.reason + ')'; }).join(', ') + '.'
+            : '';
+
+        if (!sk || !sk.available) {
+            if (unavP) {
+                unavP.style.display = '';
+                unavP.textContent = (sk && sk.reason)
+                    ? ('Same-lead comparison unavailable — ' + sk.reason + '. Use “Best available”, or add a trajectory (attribute-mode) forecast.')
+                    : 'Same-lead comparison needs a trajectory (attribute-mode) forecast. Use “Best available”.';
+            }
+            if (exclP) exclP.textContent = excludedTxt;
+            return;
+        }
+
+        var lo = sk.lead_band_minutes[0], hi = sk.lead_band_minutes[1];
+        if (bandP) bandP.innerHTML = 'Scored over the <b>' + _bandPhrase(lo, hi)
+            + '</b> lead band covered by all trajectory forecasters — equal-horizon, so update frequency doesn’t count.';
+
+        // Keep swatch colours consistent with the operational table.
+        var colorByLabel = {};
+        _buildRows(data).forEach(function(r){ colorByLabel[r.label] = r.color; });
+
+        var rows = (sk.rows || []).filter(function(r){ return r.mae !== null && r.mae !== undefined && !isNaN(r.mae); }).slice();
+        rows.sort(function(a, b){ return a.mae - b.mae; });
+        var appMae = (rows.filter(function(r){ return r.app; })[0] || {}).mae;
+
+        body.innerHTML = rows.map(function(r, i) {
+            var color = colorByLabel[r.label] || (r.app ? C_APP : EXT_COLORS[i % EXT_COLORS.length]);
+            var name = '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:' + color + ';margin-right:6px;"></span>'
+                + (r.app ? '<strong>' + r.label + '</strong> <span style="color:var(--text-secondary);font-size:0.8rem;">(you)</span>' : r.label);
+            var vs;
+            if (r.app) {
+                vs = '<td style="color:var(--text-secondary);">reference</td>';
+            } else if (appMae === null || appMae === undefined || !r.mae) {
+                vs = '<td>—</td>';
+            } else if (Math.abs(r.mae - appMae) < 1e-9) {
+                vs = '<td>≈ tie</td>';
+            } else if (appMae < r.mae) {
+                vs = '<td><span style="color:var(--success);">MLFL ' + Math.abs((r.mae - appMae) / r.mae * 100).toFixed(0) + '% better</span></td>';
+            } else {
+                vs = '<td><span style="color:var(--warning);">' + Math.abs((appMae - r.mae) / appMae * 100).toFixed(0) + '% better</span></td>';
+            }
+            var hl = r.app ? 'background:rgba(255,107,107,0.07);' : '';
+            return '<tr style="' + hl + '">'
+                + '<td style="text-align:center;"><span class="rank-badge rank-' + (i + 1) + '">' + (i + 1) + '</span></td>'
+                + '<td>' + name + '</td>'
+                + '<td>' + _fmt(r.mae, unit) + '</td>'
+                + vs
+                + '<td>' + (r.n || 0) + '</td>'
+                + '</tr>';
+        }).join('');
+        if (exclP) exclP.textContent = excludedTxt;
+    }
 
     // ---- Settings add-form: toggle attribute-only fields by mode ----
     window.onExternalModeChanged = function() {
@@ -6946,7 +7082,7 @@ window.showTab = function(el) {
         if (!grp || !body) return;
         var units = data.display_unit || data.units || '';
         var R = _buildRows(data);
-        if (!R.length) { grp.style.display='none'; return; }
+        if (!R.length) { grp.style.display='none'; grp.setAttribute('data-has','0'); return; }
         var warmDays = data.warmup_days || 7;
 
         // Rank (and reorder) on the selected metric / Overall composite.
@@ -7060,6 +7196,7 @@ window.showTab = function(el) {
             th.style.fontWeight = on ? '700' : '';
         });
         grp.style.display = '';
+        grp.setAttribute('data-has', '1');
     }
 
     var _METRIC_LABEL = {overall:'overall standing', mae:'MAE', rmse:'RMSE', bias:'bias', pct:'% of typical', daily_mae:'daily MAE', daily_bias:'daily bias'};
@@ -7085,6 +7222,36 @@ window.showTab = function(el) {
         var card = document.getElementById('external-verdict-card');
         var head = document.getElementById('external-verdict-headline');
         if (!card || !head) return;
+        // Skill mode: rank at matched lead, off the skill block.
+        if (_externalCompare === 'skill') {
+            var sk = data.skill;
+            if (!sk || !sk.available) {
+                head.innerHTML = '⚠ No equal-lead comparison yet — '
+                    + ((sk && sk.reason) ? sk.reason : 'add a trajectory (attribute-mode) forecast')
+                    + '. Or switch to “Best available”.';
+                head.style.color = 'var(--warning)';
+                card.style.display = '';
+                return;
+            }
+            var srows = (sk.rows || []).filter(function(r){ return r.mae != null && !isNaN(r.mae); })
+                                       .slice().sort(function(a, b){ return a.mae - b.mae; });
+            if (!srows.length) { card.style.display = 'none'; return; }
+            var ai = 0; for (var si = 0; si < srows.length; si++) { if (srows[si].app) { ai = si; break; } }
+            var nn = srows.length, nnExt = nn - 1;
+            var bandTxt = _bandPhrase(sk.lead_band_minutes[0], sk.lead_band_minutes[1]);
+            var prov2 = data.warming_up ? '<span style="color:var(--warning);">Provisional · </span>' : '';
+            if (ai === 0) {
+                head.innerHTML = prov2 + '✓ At matched lead (' + bandTxt + '), ML Forecast Lab ranks #1'
+                    + (nnExt ? ' — ahead of all ' + nnExt + ' trajectory forecast' + (nnExt !== 1 ? 's' : '') : '');
+                head.style.color = data.warming_up ? 'var(--text-primary)' : 'var(--success)';
+            } else {
+                head.innerHTML = prov2 + '✗ At matched lead (' + bandTxt + '), ' + srows[0].label
+                    + ' leads; ML Forecast Lab is #' + (ai + 1) + ' of ' + nn;
+                head.style.color = 'var(--warning)';
+            }
+            card.style.display = '';
+            return;
+        }
         var all = (data.comparisons || []).filter(function(c){ return c.head_to_head; });
         if (!all.length) { card.style.display='none'; return; }
         // Can't-compare: every external is on a different scale to the target.
@@ -7302,6 +7469,8 @@ window.showTab = function(el) {
                 _renderWarmingBanner(data);
                 _renderVerdict(data);
                 _renderRankTable(data);
+                _renderSkillTable(data);
+                _applyCompareMode();
                 _renderTiming(data);
                 _renderOverlay(data);
                 _renderHourly(data);

@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.46.0
+
+**Forecast Comparison: fair, lead-aware accuracy.** A faster-updating source
+was being credited for its update frequency, not just its skill — its
+"latest available" forecast for a moment is issued minutes ahead, while a
+source that refreshes a few times a day is judged hours ahead (a much harder
+task). The comparison now separates the two questions:
+
+- A **Lead column** in the Accuracy Ranking shows each forecaster's median
+  lead (`now` for state-mode/nowcast sources, `15 min` / `8.0 h` otherwise),
+  so a "best available" win is read in context inline.
+- A **Compare toggle** — **Best available** vs **Same lead time**:
+  - *Best available* (operational, default): each forecaster's most recent
+    prediction for each moment — what you could act on now, so freshness
+    counts. This is the existing leaderboard.
+  - *Same lead time* (skill): every trajectory forecaster scored over the
+    lead band they all cover, isolating model skill from update frequency.
+    The matched-lead MAE is the sample-weighted mean of the per-bucket lead
+    errors. State-mode (nowcast-only) and scale-mismatched sources can't be
+    matched on lead and are listed as excluded; with no trajectory source the
+    skill view explains it isn't available.
+
+The verdict and the basis line follow the chosen mode, so the headline never
+implies a skill ranking the data can't support.
+
 ## 2.45.8
 
 **Forecast Comparison tab — results-first layout.** The tab now opens on the
