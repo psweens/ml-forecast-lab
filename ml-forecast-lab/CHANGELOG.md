@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.45.7
+
+**External forecast lead times now reflect the source's real freshness.**
+Previously every external forecast was stamped with the *add-on's capture
+time*, so a source the add-on re-read each cycle always looked ~15 min
+ahead — even a Solcast sensor whose API was last polled hours ago (HA keeps
+the stale trajectory in the attribute, and we re-snapshotted it every
+cycle). The lead reported the snapshot cadence, not the forecast's age, so
+the basis line showed everything at ~15 min even when it shouldn't.
+
+The capture now:
+
+1. **Stamps each external snapshot with the source's own update time**
+   (HA `last_updated`), so `lead_minutes = target − source_issue_time` — a
+   source last polled 2 h ago correctly shows a ~2 h+ lead, and the
+   head-to-head / horizon comparison judges it at its true horizon.
+2. **Skips re-logging when the source hasn't changed**, so the log isn't
+   bloated with identical stale trajectories and the lead isn't reset to a
+   fresh value every cycle.
+
+If a source exposes no update timestamp, it falls back to the capture time
+(the previous behaviour).
+
 ## 2.45.6
 
 **Cleaner "Comparison basis" wording.** The median-lead line now reads as

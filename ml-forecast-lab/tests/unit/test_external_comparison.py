@@ -210,6 +210,34 @@ class TestLogExternalForecast:
         targets = [issued + timedelta(minutes=INTERVAL * (i + 1)) for i in range(3)]
         assert db.log_external_forecast("e", "s", issued, targets, [1.0, float("nan"), None]) == 1
 
+    def test_last_issued_at_drives_dedup(self, db):
+        # None before anything is logged.
+        assert db.get_last_external_issued_at("e", "sensor.solcast") is None
+        i1 = datetime(2024, 6, 15, 8, 0, 0)
+        i2 = datetime(2024, 6, 15, 10, 0, 0)
+        targets1 = [i1 + timedelta(minutes=INTERVAL * (k + 1)) for k in range(3)]
+        targets2 = [i2 + timedelta(minutes=INTERVAL * (k + 1)) for k in range(3)]
+        db.log_external_forecast("e", "sensor.solcast", i1, targets1, [1.0, 2.0, 3.0])
+        assert db.get_last_external_issued_at("e", "sensor.solcast") == i1
+        db.log_external_forecast("e", "sensor.solcast", i2, targets2, [1.0, 2.0, 3.0])
+        # Tracks the most recent issue (the de-dup high-water mark).
+        assert db.get_last_external_issued_at("e", "sensor.solcast") == i2
+        # Per-source, not cross-contaminated.
+        assert db.get_last_external_issued_at("e", "sensor.other") is None
+
+    def test_lead_reflects_source_issue_time_not_capture(self, db):
+        # A trajectory stamped with a 2h-old issue time yields ~2h+ leads,
+        # not the ~15 min you'd get from a capture-time stamp. This is the
+        # whole point of using the source's last_updated as issued_at.
+        issued_2h_ago = datetime(2024, 6, 15, 8, 0, 0)
+        # Targets are "now" (10:00) onward — 2h+ after the source issued.
+        targets = [datetime(2024, 6, 15, 10, 0, 0) + timedelta(minutes=INTERVAL * k)
+                   for k in range(3)]
+        db.log_external_forecast("e", "sensor.solcast", issued_2h_ago, targets, [1.0, 2.0, 3.0])
+        cur = db.conn.cursor()
+        cur.execute("SELECT MIN(lead_minutes) FROM external_forecast_log WHERE source='sensor.solcast'")
+        assert cur.fetchone()[0] == 120  # 10:00 − 08:00 = 2h, not ~15 min
+
 
 # ---------------------------------------------------------------------
 # get_external_forecast_comparison (multi-source)

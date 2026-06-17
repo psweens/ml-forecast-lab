@@ -2956,6 +2956,35 @@ class HistoryDB:
         logger.debug("Ensured external_forecast_log table")
 
     @_locked
+    def get_last_external_issued_at(
+        self, experiment: str, source: str,
+    ) -> Optional[datetime]:
+        """Most recent ``issued_at`` already logged for an external source,
+        or ``None`` if none. Used to de-duplicate captures: if the source's
+        update time hasn't advanced past this, the trajectory is unchanged
+        and re-logging it would just bloat the log and misreport its lead."""
+        try:
+            self.ensure_external_forecast_log_table()
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT MAX(issued_at) FROM external_forecast_log "
+                "WHERE experiment = ? AND source = ?",
+                (experiment, source),
+            )
+            row = cursor.fetchone()
+        except sqlite3.Error as e:
+            logger.error(
+                "Error reading last external issued_at for %s/%s: %s",
+                experiment, source, e,
+            )
+            return None
+        if not row or not row[0]:
+            return None
+        try:
+            return datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            return None
+
     def log_external_forecast(
         self,
         experiment: str,
@@ -2970,7 +2999,9 @@ class HistoryDB:
         Same shape as ``log_forecast`` minus the model columns: each row is
         one (source, issued_at, target_dt, lead_minutes, value). Non-finite
         values are skipped so a partially-NaN external trajectory doesn't
-        poison the comparison join.
+        poison the comparison join. ``issued_at`` should be the source's own
+        update time (HA ``last_updated``) so ``lead_minutes`` reflects the
+        forecast's true age, not when the add-on snapshotted it.
 
         Returns the number of rows inserted.
         """

@@ -5253,6 +5253,38 @@ class MLForecastLabApp:
                         "future_attribute": attr_name,
                         "future_value_key": value_key,
                     }
+                    # Stamp the snapshot with the SOURCE's own update time
+                    # (HA last_updated), not the add-on's capture time, so
+                    # lead_minutes reflects the forecast's true age. A source
+                    # polled hours ago must not look like a fresh 15-min-ahead
+                    # forecast just because we re-read its (unchanged) attribute
+                    # every cycle.
+                    src_issued = await self.ha_interface.get_last_updated(
+                        entity, default=None,
+                    )
+                    src_issued_naive = (
+                        src_issued.astimezone(timezone.utc).replace(tzinfo=None)
+                        if isinstance(src_issued, datetime)
+                        else issued_naive  # fall back to capture time
+                    )
+                    # De-duplicate: if the source hasn't updated since the last
+                    # logged snapshot, re-logging would just bloat the table
+                    # and misreport the lead. Skip it.
+                    last_logged = await asyncio.to_thread(
+                        self.history_db.get_last_external_issued_at,
+                        exp_cfg.name, spec.source_key,
+                    )
+                    if (
+                        last_logged is not None
+                        and src_issued_naive <= last_logged
+                    ):
+                        logger.debug(
+                            "  External forecast (attr) for %s: %s unchanged "
+                            "since %s — skipping re-log.",
+                            exp_cfg.name, entity, last_logged,
+                        )
+                        continue
+
                     series = await resolver.fetch_future(cov_cfg, ds_future)
                     if series is None or len(series) == 0:
                         continue
@@ -5271,14 +5303,15 @@ class MLForecastLabApp:
                         self.history_db.log_external_forecast,
                         experiment=exp_cfg.name,
                         source=spec.source_key,
-                        issued_at=issued_naive,
+                        issued_at=src_issued_naive,
                         targets=targets,
                         values=values,
                     )
                     if n:
                         logger.info(
                             f"  Logged {n} external_forecast_log rows for "
-                            f"{exp_cfg.name} ({entity}.{attr_name})"
+                            f"{exp_cfg.name} ({entity}.{attr_name}); "
+                            f"source issued {src_issued_naive}"
                         )
                 else:  # state mode
                     from ml_forecast_lab.ha_interface import state_to_float
