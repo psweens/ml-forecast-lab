@@ -574,6 +574,63 @@ class TestComparisonBaselineAndWarmup:
         assert res["comparisons"][0]["days_logged"] == 9
 
 
+class TestComparisonSkill:
+    """v2.46: 'Same lead time' (skill) scoring — match forecasters at a common
+    lead band so update frequency doesn't masquerade as accuracy."""
+
+    def _seed_multilead(self, db, exp="e"):
+        grid = _grid(); actual = _actual_curve()
+        ttbl = db.safe_table_name("sensor.pv")
+        db.store_history(ttbl, pd.DataFrame({"ds": grid, "value": actual}))
+        for issue_idx in range(0, 48, 4):
+            issued = grid[issue_idx] - timedelta(minutes=INTERVAL)
+            targets = grid[issue_idx:issue_idx + 8]
+            if not targets:
+                continue
+            db.log_forecast(experiment=exp, issued_at=issued, targets=targets,
+                            predictions=[actual[issue_idx + k] + 3.0 for k in range(len(targets))],
+                            model_name="lgb", model_version="v1")
+            db.log_external_forecast(exp, "sensor.solcast", issued, targets,
+                                     [actual[issue_idx + k] + 10.0 for k in range(len(targets))])
+        return ttbl, actual, grid
+
+    def test_skill_band_ranking_and_exclusions(self, db):
+        ttbl, actual, grid = self._seed_multilead(db)
+        e_state = db.safe_table_name("sensor.crude")
+        db.store_history(e_state, pd.DataFrame({"ds": grid, "value": [actual[i] + 5.0 for i in range(48)]}))
+        specs = [
+            {"entity": "sensor.solcast", "source": "sensor.solcast", "mode": "attribute",
+             "table": None, "scale": None, "is_cumulative": False, "label": "Solcast"},
+            _spec("sensor.crude", "state", e_state, label="Crude"),
+        ]
+        res = db.get_external_forecast_comparison("e", ttbl, specs, GENEROUS_WINDOW, INTERVAL, "raw")
+        sk = res["skill"]
+        assert sk and sk["available"] is True, sk
+        lo, hi = sk["lead_band_minutes"]
+        assert 0 <= lo <= hi
+        by = {r["label"]: r for r in sk["rows"]}
+        assert "ML Forecast Lab" in by and "Solcast" in by
+        # At matched lead the app (offset 3) beats the external (offset 10).
+        assert by["ML Forecast Lab"]["mae"] < by["Solcast"]["mae"]
+        # The state-mode source can't do equal-lead → excluded as nowcast-only.
+        reasons = {e["label"]: e["reason"] for e in sk["excluded"]}
+        assert reasons.get("Crude", "").startswith("state-mode")
+
+    def test_skill_unavailable_without_trajectory(self, db):
+        grid = _grid(); actual = _actual_curve()
+        ttbl = db.safe_table_name("sensor.pv")
+        db.store_history(ttbl, pd.DataFrame({"ds": grid, "value": actual}))
+        for i, t in enumerate(grid):
+            db.log_forecast(experiment="e", issued_at=t - timedelta(minutes=INTERVAL),
+                            targets=[t], predictions=[actual[i]], model_name="lgb", model_version="v1")
+        e_state = db.safe_table_name("sensor.crude")
+        db.store_history(e_state, pd.DataFrame({"ds": grid, "value": [actual[i] + 2.0 for i in range(48)]}))
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, [_spec("sensor.crude", "state", e_state)], GENEROUS_WINDOW, INTERVAL, "raw")
+        sk = res["skill"]
+        assert sk is None or sk.get("available") is False
+
+
 class TestComparisonEmptyStates:
     def test_missing_actuals_table(self, db):
         res = db.get_external_forecast_comparison(

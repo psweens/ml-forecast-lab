@@ -3321,6 +3321,7 @@ class HistoryDB:
             "overlay": {"ds": [], "actual": [], "app": [], "externals": []},
             "comparisons": [],
             "lead_time": None,
+            "skill": None,
             "date_range": {},
             "app_points": 0,
             "grid_points": 0,
@@ -3701,6 +3702,7 @@ class HistoryDB:
             # warming-up gate. days_logged counts distinct calendar days with
             # overlapping data; below EXTERNAL_COMPARISON_WARMUP_DAYS the row
             # is flagged provisional/inconclusive.
+            it["scale_mismatch"] = scale_mismatch  # consumed by the skill block
             ext_block = _metrics_block(it["disp"], it["canon"])
             result["comparisons"].append({
                 "entity": it["entity"], "label": it["label"], "mode": it["mode"],
@@ -3785,6 +3787,59 @@ class HistoryDB:
                          "mae": _ser(c, "mae"), "n": _ser(c, "n")}
                         for it, c in ext_curves
                     ],
+                }
+
+            # --- "Same lead time" (skill) scoring ----------------------------
+            # Score the app + each trajectory external over the lead band they
+            # all cover, so the head-to-head isolates model skill from update
+            # frequency. The MAE over the band is the sample-weighted mean of
+            # the per-bucket MAEs: Σ(mae_b·n_b) / Σ(n_b). State-mode sources
+            # (lead 0 only) and scale-mismatched ones can't take part and are
+            # listed as excluded.
+            excluded = []
+            for it, c in ext_curves:
+                if it.get("scale_mismatch"):
+                    excluded.append({"label": it["label"], "reason": "scale mismatch"})
+                elif c.empty:
+                    excluded.append({"label": it["label"], "reason": "no overlapping forecasts yet"})
+            for it in ext_items:
+                if it["mode"] != "attribute":
+                    excluded.append({"label": it["label"], "reason": "state-mode (nowcast only)"})
+            eligible = [(it, c) for it, c in ext_curves
+                        if not it.get("scale_mismatch") and not c.empty]
+            band = set(app_curve.index)
+            for it, c in eligible:
+                band &= set(c.index)
+            band = sorted(band)
+            if eligible and band:
+                def _band_mae(curve):
+                    num, den = 0.0, 0
+                    for b in band:
+                        if b in curve.index:
+                            nb = int(curve.loc[b, "count"])
+                            num += float(curve.loc[b, "mean"]) * nb
+                            den += nb
+                    return (round(num / den, 4), den) if den > 0 else (None, 0)
+                am, an = _band_mae(app_curve)
+                skill_rows = [{"entity": None, "label": "ML Forecast Lab",
+                               "app": True, "mae": am, "n": an}]
+                for it, c in eligible:
+                    m, n = _band_mae(c)
+                    skill_rows.append({"entity": it["entity"], "label": it["label"],
+                                       "app": False, "mae": m, "n": n})
+                result["skill"] = {
+                    "available": True,
+                    "lead_band_minutes": [int(band[0]), int(band[-1])],
+                    "unit": result.get("lead_unit", ""),
+                    "rows": skill_rows,
+                    "excluded": excluded,
+                }
+            elif excluded:
+                result["skill"] = {
+                    "available": False,
+                    "reason": ("no common lead band" if eligible else
+                               "needs a trajectory (attribute-mode) source"),
+                    "excluded": excluded,
                 }
 
         return result
