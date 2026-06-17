@@ -136,6 +136,50 @@
         <div id="data-report-detail" style="display:none;margin-top:0.75rem;font-size:0.85rem;"></div>
     </div>
 
+    <!-- Smart Setup — Automatic tiers (Simple / Guided / Advanced).
+         Each data-dependent setting can be left on Automatic (resolved from
+         the sensor's history with a plain-English reason), pinned to an
+         explicit value, or reset back to Automatic. The depth control only
+         changes how much you see — it never changes or loses a setting. -->
+    <div class="settings-group" id="smart-setup">
+        <h3 class="settings-group-title">Smart Setup
+            <span class="info-tip">?<span class="tip-text">Leave the data-dependent settings on <b>Automatic</b> and the add-on picks them from your sensor's history — with a plain-English reason. Pin any setting to override it; reset it to go back to Automatic. <b>Simple</b> shows just what was chosen; <b>Guided</b> asks what matters most to you; <b>Advanced</b> exposes every dropdown. Switching depth never changes or loses a setting.</span></span>
+        </h3>
+
+        <div class="depth-control" role="group" aria-label="Setup depth"
+             style="display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:0.75rem;">
+            <button type="button" class="depth-btn" data-depth="simple" onclick="setSettingsDepth('simple')"
+                    style="padding:0.4rem 0.95rem;background:none;border:none;color:var(--text);cursor:pointer;">Simple</button>
+            <button type="button" class="depth-btn" data-depth="guided" onclick="setSettingsDepth('guided')"
+                    style="padding:0.4rem 0.95rem;background:none;border:none;color:var(--text);cursor:pointer;border-left:1px solid var(--border);">Guided</button>
+            <button type="button" class="depth-btn" data-depth="advanced" onclick="setSettingsDepth('advanced')"
+                    style="padding:0.4rem 0.95rem;background:none;border:none;color:var(--text);cursor:pointer;border-left:1px solid var(--border);">Advanced</button>
+        </div>
+
+        <div style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap;margin-bottom:0.5rem;">
+            <button type="button" class="btn btn-secondary" id="btn-auto-detect" onclick="loadAutoConfig(true)">Detect from my data</button>
+            <span id="auto-setup-chip" class="status-badge" style="background:rgba(0,212,255,0.12);color:var(--accent-secondary);">Setup: Automatic</span>
+            <button type="button" class="btn" id="btn-reset-auto" onclick="resetAllAuto()" style="background:var(--bg);border:1px solid var(--border);">↩ Reset all to Automatic</button>
+            <span id="auto-setup-status" style="color:var(--text-secondary);font-size:0.85rem;"></span>
+        </div>
+
+        <div id="auto-persona" style="display:none;margin:0.5rem 0;padding:0.75rem 1rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);"></div>
+
+        <div id="guided-questions" style="display:none;margin:0.5rem 0;">
+            <label class="field-label" style="display:block;margin-bottom:0.4rem;">What matters most for this sensor?</label>
+            <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+                <button type="button" class="btn" onclick="applyPriority('peaks', this)" style="background:var(--bg);border:1px solid var(--border);">Catching the peaks</button>
+                <button type="button" class="btn" onclick="applyPriority('average', this)" style="background:var(--bg);border:1px solid var(--border);">Being right on average</button>
+                <button type="button" class="btn" onclick="applyPriority('total', this)" style="background:var(--bg);border:1px solid var(--border);">The daily total</button>
+                <button type="button" class="btn" onclick="applyPriority('auto', this)" style="background:var(--bg);border:1px solid var(--border);">Let the app decide</button>
+            </div>
+            <p style="color:var(--text-secondary);font-size:0.8rem;margin-top:0.4rem;">This pins a couple of settings to match your priority — you can fine-tune them under Advanced.</p>
+        </div>
+
+        <div id="auto-resolutions" style="display:none;margin-top:0.5rem;"></div>
+        <div id="auto-hints" style="display:none;margin-top:0.5rem;font-size:0.85rem;color:var(--text-secondary);"></div>
+    </div>
+
     <!-- Target -->
     <div class="settings-group">
         <h3 class="settings-group-title">Target</h3>
@@ -256,11 +300,13 @@
             <div class="exp-field"></div>
             <div class="exp-field">
                 <label class="field-label">Outlier method <span class="info-tip">?<span class="tip-text"><b>Quantile</b> (default): clip the upper tail at the chosen quantile. <b>MAD</b>: robust median ± 3.5 · MAD clip — less aggressive on heavy-tailed but legitimate data like rainfall or occupancy. <b>Off</b>: no clipping — pair with a robust loss (mae / huber) if your sensor has legitimate unbounded values.</span></span></label>
-                <select class="setting-input" data-field="outlier_method" onchange="saveSettingsField(this)">
+                <select class="setting-input managed-select" data-managed="outlier_method" data-field="outlier_method" onchange="saveSettingsField(this)">
+                    <option value="auto" {% if exp_config and exp_config.outlier_method == 'auto' %}selected{% endif %}>Automatic (recommended)</option>
                     <option value="quantile" {% if not exp_config or exp_config.outlier_method == 'quantile' %}selected{% endif %}>Quantile</option>
                     <option value="mad" {% if exp_config and exp_config.outlier_method == 'mad' %}selected{% endif %}>MAD (robust)</option>
                     <option value="off" {% if exp_config and exp_config.outlier_method == 'off' %}selected{% endif %}>Off</option>
                 </select>
+                <span class="managed-pill" data-pill="outlier_method" style="display:none;font-size:0.82rem;margin-top:0.3rem;"></span>
             </div>
             <div class="exp-field">
                 <label class="field-label">Outlier quantile <span class="info-tip">?<span class="tip-text">Upper-tail cutoff for the <b>Quantile</b> outlier method (ignored in MAD / Off modes). Values above this percentile of the training data are clipped. Default <code>0.999</code> = clip the top 0.1 %. Lower it (e.g. <code>0.99</code>) if your sensor occasionally spikes to obviously-wrong values; raise it (e.g. <code>0.9999</code>) if real peaks matter for forecasting and you don't want them softened.</span></span></label>
@@ -305,21 +351,25 @@
             </div>
             <div class="exp-field">
                 <label class="field-label">Production metric <span class="info-tip">?<span class="tip-text">Which error metric the composite mean rank weighs most heavily when picking the winner (Demšar-style averaging step only; see <code>docs/RANKING_NOTES.md</code>). <b>Seasonal MASE</b> (default): error relative to "same time yesterday" — handles diurnal patterns gracefully; usually the right pick for household sensors. <b>MAE</b>: raw absolute error, easy to read in your sensor's units. <b>RMSE</b>: penalises large misses more — pick if a few big errors hurt much more than many small ones. <b>MASE</b>: vs 1-step naive — only beats seasonal MASE on signals without daily seasonality.</span></span></label>
-                <select class="setting-input" data-field="production_metric" onchange="saveSettingsField(this)">
+                <select class="setting-input managed-select" data-managed="production_metric" data-field="production_metric" onchange="saveSettingsField(this)">
+                    <option value="auto" {% if exp_config and exp_config.production_metric == 'auto' %}selected{% endif %}>Automatic (recommended)</option>
                     <option value="seasonal_mase" {% if not exp_config or exp_config.production_metric == 'seasonal_mase' %}selected{% endif %}>Seasonal MASE (vs same time yesterday)</option>
                     <option value="mae" {% if exp_config and exp_config.production_metric == 'mae' %}selected{% endif %}>MAE</option>
                     <option value="rmse" {% if exp_config and exp_config.production_metric == 'rmse' %}selected{% endif %}>RMSE</option>
                     <option value="mase" {% if exp_config and exp_config.production_metric == 'mase' %}selected{% endif %}>MASE (vs 1-step naive)</option>
                 </select>
+                <span class="managed-pill" data-pill="production_metric" style="display:none;font-size:0.82rem;margin-top:0.3rem;"></span>
             </div>
             <div class="exp-field">
                 <label class="field-label">Loss function <span class="info-tip">?<span class="tip-text"><b>Huber</b> (default): smooth-L1 — quadratic near zero, linear in the tails. Right default for the typical HA sensor (power, occupancy, intermittent loads) because peak spikes don't dominate the loss. <b>MSE</b>: squared error — choose only when peaks matter more than baseline accuracy. <b>MAE</b>: absolute error — for very clean signals. <b>Tweedie</b>: compound Poisson-Gamma loss for zero-inflated right-skewed targets (rainfall, occupancy count, intermittent EV draw). Honoured by tree backends (LightGBM / XGBoost / CatBoost); neural backends fall back to Huber.</span></span></label>
-                <select class="setting-input" data-field="loss_fn" onchange="saveSettingsField(this)">
+                <select class="setting-input managed-select" data-managed="loss_fn" data-field="loss_fn" onchange="saveSettingsField(this)">
+                    <option value="auto" {% if exp_config and exp_config.loss_fn == 'auto' %}selected{% endif %}>Automatic (recommended)</option>
                     <option value="huber" {% if not exp_config or exp_config.loss_fn == 'huber' %}selected{% endif %}>Huber (default)</option>
                     <option value="mse" {% if exp_config and exp_config.loss_fn == 'mse' %}selected{% endif %}>MSE</option>
                     <option value="mae" {% if exp_config and exp_config.loss_fn == 'mae' %}selected{% endif %}>MAE</option>
                     <option value="tweedie" {% if exp_config and exp_config.loss_fn == 'tweedie' %}selected{% endif %}>Tweedie (tree backends only)</option>
                 </select>
+                <span class="managed-pill" data-pill="loss_fn" style="display:none;font-size:0.82rem;margin-top:0.3rem;"></span>
             </div>
             <div class="exp-field">
                 <label class="field-label">Optimiser (neural) <span class="info-tip">?<span class="tip-text"><b>AdamW</b> (default): decoupled weight decay — every parameter receives the same effective regularisation regardless of its gradient history. This is what every published time-series transformer paper uses. <b>Adam</b>: classic Adam with tied weight decay — decay is divided by the adaptive per-parameter learning rate, so frequently-updated weights receive less effective regularisation than bias terms / layer-norm scales. Both share the same learning rate, cosine schedule, and weight_decay=1e-4. Use Adam to investigate how the tied-vs-decoupled choice affects your models; leave on AdamW unless you have a reason.</span></span></label>
@@ -2606,6 +2656,197 @@ window.showTab = function(el) {
             mlfl.toast('Save failed: ' + err, 'error');
         });
     };
+
+    // ======== Smart Setup (Automatic tiers) ========
+    // The depth control (Simple / Guided / Advanced) is progressive
+    // disclosure only — it shows/hides controls but never changes or loses a
+    // setting. Each managed setting is either on the 'auto' sentinel (tracks
+    // the data) or pinned to a value; "Detect from my data" previews what
+    // Automatic resolves to, with a plain-English reason.
+    var AUTO_SENTINEL = 'auto';
+    var MANAGED = ['loss_fn', 'outlier_method', 'production_metric'];
+    var _autoReport = null;
+
+    function _depthKey() { return 'mlfl_depth_' + (typeof EXP_NAME !== 'undefined' ? EXP_NAME : ''); }
+    function _esc(s) {
+        return String(s).replace(/[&<>"]/g, function(c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+        });
+    }
+
+    window.setSettingsDepth = function(depth) {
+        try { localStorage.setItem(_depthKey(), depth); } catch (e) {}
+        document.querySelectorAll('#smart-setup .depth-btn').forEach(function(b) {
+            var on = b.getAttribute('data-depth') === depth;
+            b.style.background = on ? 'var(--accent-secondary)' : 'none';
+            b.style.color = on ? '#04121a' : 'var(--text)';
+            b.style.fontWeight = on ? '600' : '400';
+        });
+        var showDropdowns = (depth === 'advanced');
+        document.querySelectorAll('.managed-select').forEach(function(s) {
+            s.style.display = showDropdowns ? '' : 'none';
+        });
+        var gq = document.getElementById('guided-questions');
+        if (gq) gq.style.display = (depth === 'guided') ? '' : 'none';
+    };
+
+    window.loadAutoConfig = function(force) {
+        var status = document.getElementById('auto-setup-status');
+        var btn = document.getElementById('btn-auto-detect');
+        if (status) status.textContent = 'Analysing your data…';
+        if (btn) btn.disabled = true;
+        fetch(BASE + '/experiment/' + encodeURIComponent(EXP_NAME) + '/auto-config-preview')
+            .then(function(r) { return r.json(); })
+            .then(function(rep) {
+                if (btn) btn.disabled = false;
+                if (!rep || !rep.available) {
+                    if (status) status.textContent = (rep && rep.error) ? rep.error : 'No data yet.';
+                    return;
+                }
+                if (status) status.textContent = '';
+                _autoReport = rep;
+                _renderAutoConfig(rep);
+            })
+            .catch(function(err) {
+                if (btn) btn.disabled = false;
+                if (status) status.textContent = 'Detection failed: ' + err;
+            });
+    };
+
+    function _renderAutoConfig(rep) {
+        var p = rep.profile || {};
+        var card = document.getElementById('auto-persona');
+        if (card) {
+            card.style.display = '';
+            card.innerHTML =
+                '<div style="font-weight:600;color:var(--accent-secondary);margin-bottom:0.2rem;">Detected: ' +
+                _esc(p.persona_label || 'General signal') + '</div>' +
+                '<div style="font-size:0.85rem;color:var(--text-secondary);">' + _esc(p.persona_blurb || '') + '</div>' +
+                '<div style="font-size:0.78rem;color:var(--text-muted,#9ca3af);margin-top:0.35rem;">' +
+                Math.round((p.zero_fraction || 0) * 100) + '% near-zero · spikiness ' + (p.spikiness || 0) +
+                ' · daily-repeat ' + (p.daily_autocorr || 0) + ' · ' + (p.n || 0) + ' samples</div>';
+        }
+        var fields = rep.fields || {};
+        MANAGED.forEach(function(f) { _renderPill(f, fields[f]); });
+
+        var res = document.getElementById('auto-resolutions');
+        if (res) {
+            res.style.display = '';
+            var labels = {
+                loss_fn: 'Loss function', outlier_method: 'Outlier handling',
+                production_metric: 'Model-selection metric', log_transform: 'Log transform',
+                outlier_lower: 'Lower clip'
+            };
+            var rows = '';
+            Object.keys(labels).forEach(function(f) {
+                var fr = fields[f]; if (!fr) return;
+                var badge = fr.source === 'pinned'
+                    ? '<span style="color:var(--warning);">pinned</span>'
+                    : '<span style="color:var(--accent-secondary);">auto</span>';
+                rows += '<div style="padding:0.35rem 0;border-bottom:1px solid var(--border);">'
+                    + '<span style="display:inline-block;min-width:180px;font-weight:600;">' + _esc(labels[f]) + '</span> '
+                    + '<code>' + _esc(String(fr.value)) + '</code> ' + badge
+                    + '<div style="font-size:0.8rem;color:var(--text-secondary);">' + _esc(fr.reason || '') + '</div>'
+                    + '</div>';
+            });
+            res.innerHTML = rows;
+        }
+
+        var hints = document.getElementById('auto-hints');
+        if (hints) {
+            if (rep.hints && rep.hints.length) {
+                hints.style.display = '';
+                hints.innerHTML = '<b>Suggestions:</b><ul style="margin:0.3rem 0 0 1rem;">' +
+                    rep.hints.map(function(h) { return '<li>' + _esc(h) + '</li>'; }).join('') + '</ul>';
+            } else { hints.style.display = 'none'; }
+        }
+        _updateChip(rep.n_pinned || 0);
+    }
+
+    function _renderPill(field, fr) {
+        var pill = document.querySelector('.managed-pill[data-pill="' + field + '"]');
+        if (!pill) return;
+        pill.style.display = '';
+        if (fr && fr.source === 'pinned') {
+            pill.innerHTML = '<span style="color:var(--warning);">Pinned: <code>' + _esc(String(fr.value)) +
+                '</code></span> · <a href="#" onclick="resetField(\'' + field + '\');return false;" style="color:var(--accent-secondary);">↩ Automatic</a>';
+        } else if (fr && fr.value && fr.value !== AUTO_SENTINEL) {
+            pill.innerHTML = '<span style="color:var(--accent-secondary);">Automatic → <code>' + _esc(String(fr.value)) + '</code></span>';
+        } else {
+            pill.innerHTML = '<span style="color:var(--text-muted,#9ca3af);">Automatic — click “Detect from my data” to preview the choice</span>';
+        }
+    }
+
+    window.resetField = function(field) {
+        var sel = document.querySelector('.managed-select[data-managed="' + field + '"]');
+        if (sel) sel.value = AUTO_SENTINEL;
+        _saveManaged(field, AUTO_SENTINEL, function() { loadAutoConfig(true); });
+        mlfl.toast(field + ' reset to Automatic', 'success');
+    };
+
+    window.resetAllAuto = function() {
+        var done = 0;
+        MANAGED.forEach(function(f) {
+            var sel = document.querySelector('.managed-select[data-managed="' + f + '"]');
+            if (sel) sel.value = AUTO_SENTINEL;
+            _saveManaged(f, AUTO_SENTINEL, function() { if (++done === MANAGED.length) loadAutoConfig(true); });
+        });
+        mlfl.toast('All Smart Setup settings reset to Automatic', 'success');
+    };
+
+    window.applyPriority = function(priority, btn) {
+        // Guided shortcut: pin a small bundle that matches the user's priority.
+        var bundle;
+        if (priority === 'peaks') bundle = { loss_fn: 'tweedie', outlier_method: 'off' };
+        else if (priority === 'average') bundle = { loss_fn: 'huber', outlier_method: 'quantile' };
+        else if (priority === 'total') bundle = { production_metric: 'seasonal_mase' };
+        else bundle = { loss_fn: 'auto', outlier_method: 'auto', production_metric: 'auto' };
+        Object.keys(bundle).forEach(function(f) {
+            var sel = document.querySelector('.managed-select[data-managed="' + f + '"]');
+            if (sel) sel.value = bundle[f];
+            _saveManaged(f, bundle[f]);
+        });
+        setTimeout(function() { loadAutoConfig(true); }, 350);
+        mlfl.toast('Applied: ' + (priority === 'auto' ? 'Automatic' : priority), 'success');
+    };
+
+    function _saveManaged(field, value, cb) {
+        var data = { experiment: EXP_NAME }; data[field] = value;
+        fetch(BASE + '/api/experiment-settings', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data)
+        }).then(function(r) { return r.json(); }).then(function(res) {
+            if (!res.success) mlfl.toast('Save failed: ' + (res.error || '?'), 'error');
+            if (cb) cb();
+        }).catch(function(e) { mlfl.toast('Save failed: ' + e, 'error'); });
+    }
+
+    function _updateChip(nPinned) {
+        var chip = document.getElementById('auto-setup-chip');
+        if (!chip) return;
+        chip.textContent = nPinned === 0 ? 'Setup: Automatic' : ('Setup: Automatic + ' + nPinned + ' custom');
+    }
+
+    function _initSmartSetup() {
+        if (!document.getElementById('smart-setup')) return;
+        // Seed pills + chip from the current select values (before detection).
+        var pinned = 0;
+        MANAGED.forEach(function(f) {
+            var sel = document.querySelector('.managed-select[data-managed="' + f + '"]');
+            if (!sel) return;
+            var v = sel.value;
+            _renderPill(f, { value: v, source: (v === AUTO_SENTINEL ? 'automatic' : 'pinned'), reason: '' });
+            if (v !== AUTO_SENTINEL) pinned++;
+        });
+        _updateChip(pinned);
+        var d = 'simple';
+        try { d = localStorage.getItem(_depthKey()) || 'simple'; } catch (e) {}
+        setSettingsDepth(d);
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', _initSmartSetup);
+    } else {
+        _initSmartSetup();
+    }
 
     // --- Covariate management ---
     var _entitySearchTimer = null;

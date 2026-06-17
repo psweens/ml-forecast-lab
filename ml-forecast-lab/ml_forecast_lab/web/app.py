@@ -437,6 +437,10 @@ class AppState:
         self.cached_model_dir = None
         # Pre-flight data sanity check — see /experiment/{name}/data-report.
         self.data_report_callback = None
+        # Smart Setup preview — see /experiment/{name}/auto-config-preview.
+        # Resolves any 'auto' settings from the sensor's data and reports the
+        # detected persona + chosen value/reason per setting.
+        self.auto_config_callback = None
         # Strong references to fire-and-forget tasks. asyncio holds only a
         # weak reference to running tasks; without this set a coroutine
         # scheduled via create_task can be garbage-collected before its
@@ -2199,6 +2203,29 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception as e:
             logger.error("data-report failed for %s: %s", name, e, exc_info=True)
             return JSONResponse(content={"verdict": "alert", "warnings": [_safe_error(e)], "ok": False}, status_code=500)
+
+    @app.get("/experiment/{name}/auto-config-preview")
+    async def auto_config_preview(name: str):
+        """Smart Setup preview: detect the sensor's persona and show what the
+        Automatic settings resolve to (value + plain-English reason).
+
+        Runs the same fetch the benchmark would, so it takes a few seconds.
+        Used by the Settings tab to drive the depth control, persona card, and
+        the per-setting Auto pills.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        cb = app.state.appstate.auto_config_callback
+        if not cb:
+            return JSONResponse(content={"available": False,
+                                         "error": "Smart Setup unavailable"})
+        try:
+            report = await cb(name)
+            return JSONResponse(content=report)
+        except Exception as e:
+            logger.error("auto-config-preview failed for %s: %s", name, e, exc_info=True)
+            return JSONResponse(content={"available": False, "error": _safe_error(e)},
+                                status_code=500)
 
     @app.get("/experiment/{name}/rollback-available")
     async def rollback_available(name: str):
@@ -4743,8 +4770,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "log_transform": lambda v: bool(v),
             "forecast_every_minutes": lambda v: int(v) if int(v) >= 1 else None,
             "retrain_every_hours": lambda v: float(v) if float(v) >= 0.1 else None,
-            "production_metric": lambda v: v if v in ("mae", "rmse", "mase", "seasonal_mase") else None,
-            "loss_fn": lambda v: v if v in ("mse", "mae", "huber", "tweedie") else None,
+            # "auto" is the Smart Setup sentinel — the concrete value is
+            # resolved from the data at training time (see auto_config.py).
+            "production_metric": lambda v: v if v in ("mae", "rmse", "mase", "seasonal_mase", "auto") else None,
+            "loss_fn": lambda v: v if v in ("mse", "mae", "huber", "tweedie", "auto") else None,
             "optimiser": lambda v: v if v in ("adamw", "adam") else None,
             # v2.41.0: daily_loss_weight / loss_balance validators
             # removed. The fields were inert since v2.40.14 but the API
@@ -4760,7 +4789,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "country": lambda v: (str(v).strip().upper() or None) if v else None,
             "gap_handling": lambda v: v if v in ("ffill", "interpolate", "mask") else None,
             "gap_max_minutes": lambda v: int(v) if int(v) >= 1 else None,
-            "outlier_method": lambda v: v if v in ("quantile", "mad", "off") else None,
+            "outlier_method": lambda v: v if v in ("quantile", "mad", "off", "auto") else None,
             "outlier_quantile": lambda v: float(v) if 0.5 < float(v) < 1.0 else None,
             "outlier_lower": lambda v: v if v in ("auto", "zero", "symmetric", "off") else None,
             "include_sun_elevation": lambda v: bool(v),

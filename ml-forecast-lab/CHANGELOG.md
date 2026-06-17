@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased — Smart Setup (Automatic settings) — prototype
+
+**The data-dependent training settings can now be left on _Automatic_.** Instead
+of asking a non-ML user to choose `loss_fn: tweedie` or `outlier_method: off`,
+the experiment **Settings → Smart Setup** panel characterises the sensor's own
+history and picks each setting for them, with a plain-English reason.
+
+- **Three managed settings** (`loss_fn`, `outlier_method`, `production_metric`)
+  accept the literal `auto` sentinel. The concrete value is resolved at training
+  time from the data — so it tracks the sensor as its behaviour drifts rather
+  than being frozen at config time (mirrors the existing `output_activation:
+  auto` / `outlier_lower: auto` convention).
+- **Persona detection.** The series is fingerprinted (zero-fraction, peak-to-mean
+  spikiness, daily autocorrelation) and mapped to a persona — *Smooth daily
+  cycle* (solar, temperature), *Bursts on and off* (hot water, EV, appliances),
+  *Steady baseline with occasional spikes*, *Counts/occupancy*. A bursty load
+  resolves to peak-preserving settings (Tweedie loss, outlier clipping off); a
+  smooth cycle keeps the gentle defaults. This is what stops a spiky hot-water
+  target being treated like a smooth solar one.
+- **Tier model via progressive disclosure, not a mode switch.** A
+  **Simple / Guided / Advanced** depth control shows more or less of the panel
+  but never changes or loses a setting. Guided asks "what matters most?"
+  (catching the peaks / accuracy on average / the daily total) and pins a small
+  bundle; Advanced exposes the raw dropdowns. Each managed setting shows an
+  *Automatic → value* (or *Pinned*) chip with a one-click **↩ Automatic** reset,
+  plus a **Reset all to Automatic** escape hatch and a status chip
+  ("Setup: Automatic + N custom").
+- New endpoint `GET /experiment/{name}/auto-config-preview` powers the panel;
+  pure resolver lives in `ml_forecast_lab/auto_config.py` with unit tests.
+
+Prototype scope: the sentinel + runtime resolution covers the three managed
+settings; `log_transform` / `outlier_lower` / `outlier_quantile` are surfaced as
+recommendations. A peak-aware selection metric is noted as the next step.
+
 ## 2.46.2
 
 **Forecast Comparison: the "% of Typical" column is now "Error %".** The old

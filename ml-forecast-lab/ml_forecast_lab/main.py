@@ -1134,6 +1134,29 @@ class MLForecastLabApp:
                 return await self.compute_data_report(exp_cfg)
             self.web_app.state.appstate.data_report_callback = _data_report_trigger
 
+            # Smart Setup preview callback for the Settings tab. Runs the same
+            # fetch+preprocess the benchmark would (which resolves any 'auto'
+            # settings and stashes the report on exp_cfg._auto_resolution),
+            # then returns that report so the UI can show the detected persona
+            # and the resolved value + reason for each Automatic setting.
+            async def _auto_config_trigger(experiment_name: str) -> dict:
+                exp_cfg = next(
+                    (e for e in self.config.experiments if e.name == experiment_name),
+                    None,
+                )
+                if exp_cfg is None:
+                    return {"available": False, "error": "Experiment not found"}
+                try:
+                    await self._fetch_and_preprocess(exp_cfg)
+                except Exception as e:
+                    return {"available": False, "error": str(e)}
+                report = getattr(exp_cfg, "_auto_resolution", None)
+                if not report:
+                    return {"available": False,
+                            "error": "Not enough history yet to detect a profile."}
+                return {"available": True, **report}
+            self.web_app.state.appstate.auto_config_callback = _auto_config_trigger
+
             # Cached-model directory accessor — lets the web layer check
             # whether a "previous" version exists for the rollback button
             # without duplicating the slugify logic.
@@ -2040,6 +2063,21 @@ class MLForecastLabApp:
                         f"{exp_cfg.name}: {e}"
                     )
                     raise
+
+        # --- Smart Setup: resolve any 'auto' settings from the data ---
+        #
+        # Runs on the pre-clip per-interval signal so the data fingerprint
+        # reflects the true sensor (not a clipped / log-squashed version).
+        # Mutates exp_cfg in place: every managed field left on the 'auto'
+        # sentinel (loss_fn, outlier_method, production_metric) is replaced
+        # with its concrete resolved value, so the clip call below and all
+        # downstream readers pick it up with no further changes. No-op when
+        # nothing is on Automatic. Never raises (falls back to safe defaults).
+        try:
+            from ml_forecast_lab.auto_config import apply_to_experiment
+            apply_to_experiment(exp_cfg, series)
+        except Exception as e:  # defensive: profiling must never break training
+            logger.warning(f"  {exp_cfg.name}: auto-config resolution skipped: {e}")
 
         # --- Clip outliers ---
         series = clip_outliers(
