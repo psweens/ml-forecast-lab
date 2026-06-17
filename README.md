@@ -22,7 +22,7 @@ Train, benchmark, and deploy time-series models for any HA sensor — with acade
 
 ## What this repository is
 
-A Home Assistant app for HA power users who want to forecast a sensor — not data scientists who want a fresh framework. Plug in any sensor, the app benchmarks 28 model backends on your data, picks the winner, retrains it on schedule, and publishes forecasts back to HA with calibrated 80% bands. Designed for the Pi 5 sweet spot: 8 GB RAM, no GPU, ARM64.
+A Home Assistant app for HA power users who want to forecast a sensor — not data scientists who want a fresh framework. Plug in any sensor, the app benchmarks 29 model backends on your data, picks the winner, retrains it on schedule, and publishes forecasts back to HA with calibrated 80% bands. Designed for the Pi 5 sweet spot: 8 GB RAM, no GPU, ARM64.
 
 The intended mindset is **benchmark once, run forever**. After the first benchmark you click Promote, and the app takes care of retraining + publishing — re-benchmark only when your sensor's behaviour drifts or you want to try newer architectures.
 
@@ -50,7 +50,7 @@ First build takes 10–15 minutes on a Raspberry Pi 5. Subsequent updates use th
 
 ML Forecast Lab trains every enabled forecasting backend on your sensor's history, ranks them on identical cross-validation folds with a composite mean rank across MAE / RMSE / MASE (the Demšar 2006 averaging step — see [`docs/RANKING_NOTES.md`](docs/RANKING_NOTES.md) for the caveat on what the rank does and does not claim), and shows you which one wins. Each rank ships with a 95% bootstrap CI over fold resamples so genuine ties are flagged rather than papered over with a single-winner badge. You promote the winner to **production**, and the app retrains it on schedule and publishes forecasts back to Home Assistant as companion sensors with calibrated 80% conformal prediction bands (split conformal with a rolling residual buffer; not adaptive — see [`DOCS.md`](ml-forecast-lab/DOCS.md#how-the-conformal-bands-are-calibrated) for the calibration semantics across retrains).
 
-28 backends are wired in: tree (LightGBM, XGBoost, CatBoost), recurrent (LSTM, GRU), convolutional (CNN, TimesNet, ModernTCN), linear / MLP (DLinear, NLinear, TSMixer, TimeMixer, TiDE, SparseTSF), N-BEATS family (N-BEATS, N-HiTS), transformers (PatchTST, iTransformer, Crossformer, TFT, TimeXer), zero-shot foundation models (Chronos-Bolt, Granite TTM — pretrained, forecast with no training on your data), classical (AutoARIMA, AutoETS, AutoTheta), frequency-domain (FITS), and a Seasonal Naive baseline. See [`docs/MODEL_GUIDE.md`](docs/MODEL_GUIDE.md) for picking the right ones.
+29 backends are wired in: tree (LightGBM, XGBoost, CatBoost), recurrent (LSTM, GRU), convolutional (CNN, TimesNet, ModernTCN), linear / MLP (DLinear, NLinear, TSMixer, TimeMixer, TiDE, SparseTSF), N-BEATS family (N-BEATS, N-HiTS), transformers (PatchTST, iTransformer, Crossformer, TFT, TimeXer), zero-shot foundation models (Chronos-Bolt, Granite TTM — pretrained, forecast with no training on your data), classical (AutoARIMA, AutoETS, AutoTheta), frequency-domain (FITS), and baselines (Seasonal Naive + Daily Profile, a hierarchical daily-total × shape model). See [`docs/MODEL_GUIDE.md`](docs/MODEL_GUIDE.md) for picking the right ones.
 
 <details>
 <summary><b>Architecture</b></summary>
@@ -75,7 +75,7 @@ ML Forecast Lab trains every enabled forecasting backend on your sensor's histor
                 ▼                    ▼                     │
        ┌─────────────────┐   ┌─────────────────┐           │
        │ Cross-Validator │   │ Model Registry  │           │
-       │ walk-fwd or SW  │   │ 28 backends     │           │
+       │ walk-fwd or SW  │   │ 29 backends     │           │
        └────────┬────────┘   │ tree+neural+cls │           │
                 │            └─────────────────┘           │
                 ▼                                          │
@@ -107,7 +107,7 @@ Retrain (default 24 h) trains all enabled models from scratch and refreshes the 
 | [`ml-forecast-lab/README.md`](ml-forecast-lab/README.md) | HA store **Info** tab — what the app is, hardware requirements, install, minimal `mlfl.yaml`, first forecast. |
 | [`ml-forecast-lab/DOCS.md`](ml-forecast-lab/DOCS.md) | HA store **Documentation** tab — full configuration reference, published sensors, web-UI tour, operations, troubleshooting. |
 | [`ml-forecast-lab/CHANGELOG.md`](ml-forecast-lab/CHANGELOG.md) | HA store **Changelog** tab — per-version release notes. |
-| [`docs/MODEL_GUIDE.md`](docs/MODEL_GUIDE.md) | Practical "which of the 28 backends should I enable?" with starter sets keyed to data volume, target shape, and Pi compute budget. |
+| [`docs/MODEL_GUIDE.md`](docs/MODEL_GUIDE.md) | Practical "which of the 29 backends should I enable?" with starter sets keyed to data volume, target shape, and Pi compute budget. |
 
 ## Development
 
@@ -132,7 +132,7 @@ This is a side project with one maintainer, so contribution paths are narrower t
 - **Bug reports.** Include the app version, the relevant slice of `mlfl.yaml`, and the last 50 lines of the app log. The phase tags (`[BENCH]`, `[MODEL]`, `[HA]`, `[PUB]`, …) make triage quick.
 - **Documentation gaps.** If something in DOCS / MODEL_GUIDE didn't prepare you for what you hit, that's a first-class issue.
 - **Tested model configurations.** Which backend won on what kind of HA sensor, with how much history, on which hardware. The current guidance in `docs/MODEL_GUIDE.md` is grounded in a narrow set of household sensors; broader data sharpens it.
-- **Better defaults for the 28 backends on Pi-scale data.** The benchmark harness in `ml_forecast_lab/benchmark/` is already built; results that beat the current defaults are welcome as PRs to `model_overrides`.
+- **Better defaults for the 29 backends on Pi-scale data.** The benchmark harness in `ml_forecast_lab/benchmark/` is already built; results that beat the current defaults are welcome as PRs to `model_overrides`.
 
 **Discuss scope before opening a PR:**
 
@@ -151,7 +151,7 @@ Stable codebase, first public release. The project was developed in a private re
 
 ## Acknowledgements
 
-The 28 model backends are implementations of published architectures by their respective authors; `docs/MODEL_GUIDE.md` lists each one by paper. Standing on the shoulders of:
+The 29 model backends are implementations of published architectures by their respective authors; `docs/MODEL_GUIDE.md` lists each one by paper. Standing on the shoulders of:
 
 - [Nixtla `statsforecast`](https://github.com/Nixtla/statsforecast) for the classical baselines (AutoARIMA / AutoETS / AutoTheta).
 - [Amazon `chronos-forecasting`](https://github.com/amazon-science/chronos-forecasting) and [IBM `granite-tsfm`](https://github.com/ibm-granite/granite-tsfm) for the zero-shot foundation-model backends (Chronos-Bolt / Granite TTM) and their pretrained weights.

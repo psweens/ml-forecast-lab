@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased — Daily-profile (hierarchical) backend
+
+**New `daily_profile` backend** — a 29th model that forecasts the *recent day's
+shape scaled toward a projected daily total*. For event-driven loads (hot
+water, EV) the within-day spike timing is largely unpredictable but the daily
+total is not, and is usually what the user cares about; this backend predicts at
+the level where the signal lives and distributes it.
+
+- `ŷ[t+h] = profile[t+h] × (projected_daily_total / reference_daily_total)`,
+  where the profile is the look-back-one-period shape (phase-correct, like
+  Seasonal-Naive) and the scale reconciles it toward a level estimated from the
+  recent trailing daily totals. Reduces to Seasonal-Naive when the level is
+  flat; scales the day up/down when it isn't.
+- Registered like any backend (competes in the benchmark, gets conformal bands
+  and publishing for free); shown under **Baselines** on the Models page and in
+  the model guide. No training, trivially cheap. v1 uses a recent-level
+  projection; a covariate-conditioned daily-total model is the natural
+  follow-up.
+- Tests: reduces to Seasonal-Naive on a flat level, scales up when the
+  reference day is below the recent level, scale-clamped on a near-zero day,
+  registry create + save/load roundtrip.
+
 ## Unreleased — Training for spiky targets (DILATE loss)
 
 **Neural backends can now be trained with DILATE** (`loss_fn: dilate`), the

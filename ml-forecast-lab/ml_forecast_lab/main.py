@@ -785,6 +785,7 @@ class MLForecastLabApp:
                 ("timexer", "timexer_backend", "TimeXerModel"),
                 ("moderntcn", "moderntcn_backend", "ModernTCNModel"),
                 ("seasonal_naive", "seasonal_naive_backend", "SeasonalNaiveModel"),
+                ("daily_profile", "daily_profile_backend", "DailyProfileModel"),
                 ("arima", "statsforecast_backend", "ARIMAModel"),
                 ("ets", "statsforecast_backend", "ETSModel"),
                 ("theta", "statsforecast_backend", "ThetaModel"),

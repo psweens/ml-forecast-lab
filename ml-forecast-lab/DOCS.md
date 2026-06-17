@@ -1,6 +1,6 @@
 # ML Forecast Lab — Documentation
 
-This is the full reference for users running the app. For a quick install and a first forecast, see [README.md](README.md). For picking which of the 28 backends to enable, see [`docs/MODEL_GUIDE.md`](https://github.com/psweens/ml-forecast-lab/blob/main/docs/MODEL_GUIDE.md) in the repository.
+This is the full reference for users running the app. For a quick install and a first forecast, see [README.md](README.md). For picking which of the 29 backends to enable, see [`docs/MODEL_GUIDE.md`](https://github.com/psweens/ml-forecast-lab/blob/main/docs/MODEL_GUIDE.md) in the repository.
 
 ## Contents
 
@@ -247,7 +247,7 @@ experiment's **Settings → Smart Setup** panel is the front door.
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `models_enabled` | list | `[lightgbm, xgboost, lstm, cnn]` | Backends to train. Names match the registry slugs in `docs/MODEL_GUIDE.md` (`seasonal_naive`, `lightgbm`, `xgboost`, `catboost`, `lstm`, `gru`, `cnn`, `dlinear`, `nlinear`, `tsmixer`, `timemixer`, `tide`, `sparsetsf`, `fits`, `nbeats`, `nhits`, `patchtst`, `itransformer`, `crossformer`, `timesnet`, `tft`, `timexer`, `moderntcn`, `arima`, `ets`, `theta`, `chronos_bolt`, `ttm`). The zero-shot foundation backends (`chronos_bolt`, `ttm`) download pretrained weights from the Hugging Face Hub on first use (cached afterwards) and are unavailable on `armv7`. |
+| `models_enabled` | list | `[lightgbm, xgboost, lstm, cnn]` | Backends to train. Names match the registry slugs in `docs/MODEL_GUIDE.md` (`seasonal_naive`, `daily_profile`, `lightgbm`, `xgboost`, `catboost`, `lstm`, `gru`, `cnn`, `dlinear`, `nlinear`, `tsmixer`, `timemixer`, `tide`, `sparsetsf`, `fits`, `nbeats`, `nhits`, `patchtst`, `itransformer`, `crossformer`, `timesnet`, `tft`, `timexer`, `moderntcn`, `arima`, `ets`, `theta`, `chronos_bolt`, `ttm`). The zero-shot foundation backends (`chronos_bolt`, `ttm`) download pretrained weights from the Hugging Face Hub on first use (cached afterwards) and are unavailable on `armv7`. |
 | `model_params` | mapping | `{}` | Per-experiment hyperparameter overrides; keys are model names. Takes precedence over global `model_overrides`. Easier path: tune in the UI and use **Apply Tuned Params, Promote & Retrain**. |
 | `loss_fn` | `auto` \| `mse` \| `mae` \| `huber` \| `tweedie` \| `dilate` | `auto` | Training loss. `auto` (Smart Setup) resolves it from the data — `tweedie` for spiky/intermittent targets, `huber` for smooth ones. `huber` is quadratic near zero and linear in the tails; `tweedie` (tree backends; neural fall back to Huber) suits zero-inflated spiky series. `dilate` is a **neural shape+time loss** (soft-DTW, Le Guen & Thome 2019) that scores shape and timing separately so a correctly-shaped but slightly mistimed spike isn't double-penalised — it produces sharper peak forecasts but costs more training time; trees fall back to Tweedie. Selectable directly or via the Guided **"catching the peaks"** answer. |
 | `optimiser` | `adam` \| `adamw` | `adamw` | Neural optimiser. `adamw` (decoupled weight decay) matches every published time-series transformer paper; `adam` is the classic. Ignored by tree models. |
