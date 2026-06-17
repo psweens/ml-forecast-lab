@@ -1,6 +1,6 @@
 # Model Guide — Picking Backends to Benchmark
 
-ML Forecast Lab ships with 28 model backends. You don't need all of them — that's a lot of compute for a Pi, and many overlap in behaviour. This guide is a practical "which should I enable?" pre-flight that takes about 5 minutes to read.
+ML Forecast Lab ships with 29 model backends. You don't need all of them — that's a lot of compute for a Pi, and many overlap in behaviour. This guide is a practical "which should I enable?" pre-flight that takes about 5 minutes to read.
 
 The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add more once you've seen how those do on your data. If you have almost no history yet, add `chronos_bolt` — it forecasts zero-shot from pretrained weights and needs no training data at all.
 
@@ -36,6 +36,7 @@ The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add 
 | Classical | `ets` (statsforecast) | Exponential smoothing, good seasonal decomposition | Univariate only | Medium |
 | Classical | `theta` (statsforecast) | M3 competition winner, low-complexity | Univariate only | Fast |
 | Baseline | `seasonal_naive` | "Tomorrow looks like last week" — sanity check | Trivial — but if it wins, your sophisticated models are wasted | Trivial |
+| Baseline | `daily_profile` | Hierarchical: the recent day's shape scaled toward a projected daily total — nails day-level amplitude | Within-day timing is still seasonal-naive's; no covariates yet | Trivial |
 
 ## Decision flow
 
@@ -51,7 +52,8 @@ The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add 
 **Then pick by target characteristics:**
 
 - **Strong daily / weekly seasonality** (e.g. household load, water demand): trees + `nhits` + `fits` are usually winners.
-- **Noisy, sparse, low SNR** (e.g. EV charging, intermittent appliances): trees + `seasonal_naive`. Neural models often struggle here — the noise overwhelms the signal.
+- **Noisy, sparse, low SNR** (e.g. EV charging, intermittent appliances): trees + `seasonal_naive`. Neural models often struggle here — the noise overwhelms the signal. To train the neural backends to keep their peaks instead of flattening them, set `loss_fn: dilate` (or the Guided **"catching the peaks"** answer) — it scores shape and timing separately so a slightly-mistimed spike isn't double-penalised (costs more training time).
+- **Daily total matters more than within-day timing** (e.g. hot-water / heat energy, daily demand): add `daily_profile` — it forecasts the recent day's shape scaled toward a projected daily total, so it tracks big-vs-small days where a flat seasonal-naive can't.
 - **Covariate-driven** (e.g. heating ~ outside temp, solar ~ irradiance): `tide`, `tft`, `tsmixer`, `timexer` shine when the target is mostly explained by external features — `timexer` is the only transformer in the catalogue designed *specifically* around exogenous variables.
 - **Univariate, no good covariates**: `arima` and `ets` (statsforecast) are surprisingly hard to beat, and `chronos_bolt` / `ttm` bring modern zero-shot accuracy to exactly this setting. Don't underestimate classical baselines.
 - **Solar generation specifically**: tree models with the built-in solar-physics covariates (`include_clear_sky_irradiance`, `include_sun_elevation`) typically win. Pure neural backends without those covariates struggle to learn the day/night structure.

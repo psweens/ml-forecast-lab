@@ -46,6 +46,7 @@ _optional_imports = {
     'TimeXerModel': 'timexer_backend',
     'ModernTCNModel': 'moderntcn_backend',
     'SeasonalNaiveModel': 'seasonal_naive_backend',
+    'DailyProfileModel': 'daily_profile_backend',
     'ARIMAModel': 'statsforecast_backend',
     'ETSModel': 'statsforecast_backend',
     'ThetaModel': 'statsforecast_backend',
