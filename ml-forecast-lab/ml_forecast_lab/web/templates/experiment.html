@@ -143,15 +143,13 @@
          changes how much you see — it never changes or loses a setting. -->
     <div class="settings-group" id="smart-setup">
         <h3 class="settings-group-title">Smart Setup
-            <span class="info-tip">?<span class="tip-text">Leave the data-dependent settings on <b>Automatic</b> and the add-on picks them from your sensor's history — with a plain-English reason. Pin any setting to override it; reset it to go back to Automatic. <b>Simple</b> shows just what was chosen; <b>Guided</b> asks what matters most to you; <b>Advanced</b> exposes every dropdown. Switching depth never changes or loses a setting.</span></span>
+            <span class="info-tip">?<span class="tip-text">Leave the data-dependent settings on <b>Automatic</b> and the add-on picks them from your sensor's history — with a plain-English reason. Pin any setting to override it; reset it to go back to Automatic. <b>Guided</b> asks what matters most to you and shows what was chosen; <b>Advanced</b> exposes every dropdown. Switching depth never changes or loses a setting.</span></span>
         </h3>
 
         <div class="depth-control" role="group" aria-label="Setup depth"
              style="display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:0.75rem;">
-            <button type="button" class="depth-btn" data-depth="simple" onclick="setSettingsDepth('simple')"
-                    style="padding:0.4rem 0.95rem;background:none;border:none;color:var(--text);cursor:pointer;">Simple</button>
             <button type="button" class="depth-btn" data-depth="guided" onclick="setSettingsDepth('guided')"
-                    style="padding:0.4rem 0.95rem;background:none;border:none;color:var(--text);cursor:pointer;border-left:1px solid var(--border);">Guided</button>
+                    style="padding:0.4rem 0.95rem;background:none;border:none;color:var(--text);cursor:pointer;">Guided</button>
             <button type="button" class="depth-btn" data-depth="advanced" onclick="setSettingsDepth('advanced')"
                     style="padding:0.4rem 0.95rem;background:none;border:none;color:var(--text);cursor:pointer;border-left:1px solid var(--border);">Advanced</button>
         </div>
@@ -301,8 +299,8 @@
             <div class="exp-field">
                 <label class="field-label">Outlier method <span class="info-tip">?<span class="tip-text"><b>Quantile</b> (default): clip the upper tail at the chosen quantile. <b>MAD</b>: robust median ± 3.5 · MAD clip — less aggressive on heavy-tailed but legitimate data like rainfall or occupancy. <b>Off</b>: no clipping — pair with a robust loss (mae / huber) if your sensor has legitimate unbounded values.</span></span></label>
                 <select class="setting-input managed-select" data-managed="outlier_method" data-field="outlier_method" onchange="saveSettingsField(this)">
-                    <option value="auto" {% if exp_config and exp_config.outlier_method == 'auto' %}selected{% endif %}>Automatic (recommended)</option>
-                    <option value="quantile" {% if not exp_config or exp_config.outlier_method == 'quantile' %}selected{% endif %}>Quantile</option>
+                    <option value="auto" {% if not exp_config or exp_config.outlier_method == 'auto' %}selected{% endif %}>Automatic (recommended)</option>
+                    <option value="quantile" {% if exp_config and exp_config.outlier_method == 'quantile' %}selected{% endif %}>Quantile</option>
                     <option value="mad" {% if exp_config and exp_config.outlier_method == 'mad' %}selected{% endif %}>MAD (robust)</option>
                     <option value="off" {% if exp_config and exp_config.outlier_method == 'off' %}selected{% endif %}>Off</option>
                 </select>
@@ -352,8 +350,8 @@
             <div class="exp-field">
                 <label class="field-label">Production metric <span class="info-tip">?<span class="tip-text">Which error metric the composite mean rank weighs most heavily when picking the winner (Demšar-style averaging step only; see <code>docs/RANKING_NOTES.md</code>). <b>Seasonal MASE</b> (default): error relative to "same time yesterday" — handles diurnal patterns gracefully; usually the right pick for household sensors. <b>MAE</b>: raw absolute error, easy to read in your sensor's units. <b>RMSE</b>: penalises large misses more — pick if a few big errors hurt much more than many small ones. <b>MASE</b>: vs 1-step naive — only beats seasonal MASE on signals without daily seasonality.</span></span></label>
                 <select class="setting-input managed-select" data-managed="production_metric" data-field="production_metric" onchange="saveSettingsField(this)">
-                    <option value="auto" {% if exp_config and exp_config.production_metric == 'auto' %}selected{% endif %}>Automatic (recommended)</option>
-                    <option value="seasonal_mase" {% if not exp_config or exp_config.production_metric == 'seasonal_mase' %}selected{% endif %}>Seasonal MASE (vs same time yesterday)</option>
+                    <option value="auto" {% if not exp_config or exp_config.production_metric == 'auto' %}selected{% endif %}>Automatic (recommended)</option>
+                    <option value="seasonal_mase" {% if exp_config and exp_config.production_metric == 'seasonal_mase' %}selected{% endif %}>Seasonal MASE (vs same time yesterday)</option>
                     <option value="mae" {% if exp_config and exp_config.production_metric == 'mae' %}selected{% endif %}>MAE</option>
                     <option value="rmse" {% if exp_config and exp_config.production_metric == 'rmse' %}selected{% endif %}>RMSE</option>
                     <option value="mase" {% if exp_config and exp_config.production_metric == 'mase' %}selected{% endif %}>MASE (vs 1-step naive)</option>
@@ -363,8 +361,8 @@
             <div class="exp-field">
                 <label class="field-label">Loss function <span class="info-tip">?<span class="tip-text"><b>Huber</b> (default): smooth-L1 — quadratic near zero, linear in the tails. Right default for the typical HA sensor (power, occupancy, intermittent loads) because peak spikes don't dominate the loss. <b>MSE</b>: squared error — choose only when peaks matter more than baseline accuracy. <b>MAE</b>: absolute error — for very clean signals. <b>Tweedie</b>: compound Poisson-Gamma loss for zero-inflated right-skewed targets (rainfall, occupancy count, intermittent EV draw). Honoured by tree backends (LightGBM / XGBoost / CatBoost); neural backends fall back to Huber.</span></span></label>
                 <select class="setting-input managed-select" data-managed="loss_fn" data-field="loss_fn" onchange="saveSettingsField(this)">
-                    <option value="auto" {% if exp_config and exp_config.loss_fn == 'auto' %}selected{% endif %}>Automatic (recommended)</option>
-                    <option value="huber" {% if not exp_config or exp_config.loss_fn == 'huber' %}selected{% endif %}>Huber (default)</option>
+                    <option value="auto" {% if not exp_config or exp_config.loss_fn == 'auto' %}selected{% endif %}>Automatic (recommended)</option>
+                    <option value="huber" {% if exp_config and exp_config.loss_fn == 'huber' %}selected{% endif %}>Huber</option>
                     <option value="mse" {% if exp_config and exp_config.loss_fn == 'mse' %}selected{% endif %}>MSE</option>
                     <option value="mae" {% if exp_config and exp_config.loss_fn == 'mae' %}selected{% endif %}>MAE</option>
                     <option value="tweedie" {% if exp_config and exp_config.loss_fn == 'tweedie' %}selected{% endif %}>Tweedie (tree backends only)</option>
@@ -2658,11 +2656,11 @@ window.showTab = function(el) {
     };
 
     // ======== Smart Setup (Automatic tiers) ========
-    // The depth control (Simple / Guided / Advanced) is progressive
-    // disclosure only — it shows/hides controls but never changes or loses a
-    // setting. Each managed setting is either on the 'auto' sentinel (tracks
-    // the data) or pinned to a value; "Detect from my data" previews what
-    // Automatic resolves to, with a plain-English reason.
+    // The depth control (Guided / Advanced) is progressive disclosure only —
+    // it shows/hides controls but never changes or loses a setting. Each
+    // managed setting is either on the 'auto' sentinel (tracks the data) or
+    // pinned to a value; "Detect from my data" previews what Automatic
+    // resolves to, with a plain-English reason.
     var AUTO_SENTINEL = 'auto';
     var MANAGED = ['loss_fn', 'outlier_method', 'production_metric'];
     var _autoReport = null;
@@ -2743,10 +2741,22 @@ window.showTab = function(el) {
                 var badge = fr.source === 'pinned'
                     ? '<span style="color:var(--warning);">pinned</span>'
                     : '<span style="color:var(--accent-secondary);">auto</span>';
+                var detailHtml = '';
+                if (fr.detail) {
+                    // Per-model-family breakdown (loss_fn): show what each
+                    // backend family actually trains with, since the single
+                    // value means different things to trees vs neural nets.
+                    detailHtml = '<div style="font-size:0.78rem;color:var(--text-muted,#9ca3af);margin-top:0.25rem;padding-left:0.5rem;border-left:2px solid var(--border);">';
+                    Object.keys(fr.detail).forEach(function(fam) {
+                        detailHtml += '<div>' + _esc(fam) + ' → <code>' + _esc(String(fr.detail[fam])) + '</code></div>';
+                    });
+                    detailHtml += '</div>';
+                }
                 rows += '<div style="padding:0.35rem 0;border-bottom:1px solid var(--border);">'
                     + '<span style="display:inline-block;min-width:180px;font-weight:600;">' + _esc(labels[f]) + '</span> '
                     + '<code>' + _esc(String(fr.value)) + '</code> ' + badge
                     + '<div style="font-size:0.8rem;color:var(--text-secondary);">' + _esc(fr.reason || '') + '</div>'
+                    + detailHtml
                     + '</div>';
             });
             res.innerHTML = rows;
@@ -2838,8 +2848,9 @@ window.showTab = function(el) {
             if (v !== AUTO_SENTINEL) pinned++;
         });
         _updateChip(pinned);
-        var d = 'simple';
-        try { d = localStorage.getItem(_depthKey()) || 'simple'; } catch (e) {}
+        var d = 'guided';
+        try { d = localStorage.getItem(_depthKey()) || 'guided'; } catch (e) {}
+        if (d !== 'guided' && d !== 'advanced') d = 'guided';  // migrate legacy 'simple'
         setSettingsDepth(d);
     }
     if (document.readyState === 'loading') {

@@ -271,6 +271,13 @@ def clip_outliers(
         Lower-bound policy for ``method='quantile'``. ``auto`` uses zero
         when ``positive_only`` is True else the symmetric (1-q) quantile.
     """
+    # 'auto' is the Smart Setup sentinel; it is normally resolved to a concrete
+    # method before this call (auto_config.apply_to_experiment runs ahead of
+    # clip_outliers in the preprocessing chokepoint). Coerce defensively so any
+    # path that bypasses resolution falls back to the gentle quantile trim
+    # rather than raising.
+    if method == 'auto':
+        method = 'quantile'
     if method == 'off':
         return series.copy()
     if method not in ('quantile', 'mad'):

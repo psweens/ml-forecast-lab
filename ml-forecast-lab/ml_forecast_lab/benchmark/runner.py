@@ -227,6 +227,14 @@ class BenchmarkRunner:
         self.cv_strategy = experiment_cfg.get('cv_strategy', 'walk_forward')
         self.cv_folds = experiment_cfg.get('cv_folds', 5)
         self.production_metric = experiment_cfg.get('production_metric', 'mae')
+        # Smart Setup resolves the 'auto' sentinel to a concrete metric before
+        # the runner is built (auto_config.apply_to_experiment, called in the
+        # preprocessing chokepoint). This coercion is a belt-and-suspenders
+        # guard for any path that reaches the runner without resolution — the
+        # metric registry has no 'auto' entry, so an unresolved sentinel would
+        # otherwise rank every model as NaN.
+        if self.production_metric in ('auto', None):
+            self.production_metric = 'seasonal_mase'
         self.metrics = experiment_cfg.get('metrics', ['mae', 'rmse', 'mase'])
 
         logger.info(

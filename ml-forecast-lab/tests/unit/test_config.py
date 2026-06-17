@@ -12,9 +12,13 @@ class TestExperimentCfg:
         cfg = ExperimentCfg(name="test", target_entity="sensor.test")
         assert cfg.interval_minutes == 30
         assert cfg.cv_folds == 5
-        # production_metric is seasonal_mase post-H-1 (vs same-time-yesterday
-        # baseline, matching the daily seasonality of typical HA sensors).
-        assert cfg.production_metric == "seasonal_mase"
+        # The three Smart Setup managed settings default to the 'auto' sentinel
+        # — resolved from the sensor's own history at training time
+        # (auto_config.py), so an untouched experiment is fully Automatic
+        # rather than silently pinned to a one-size-fits-all default.
+        assert cfg.production_metric == "auto"
+        assert cfg.loss_fn == "auto"
+        assert cfg.outlier_method == "auto"
         assert not cfg.source_is_cumulative
 
     def test_models_enabled_default(self):

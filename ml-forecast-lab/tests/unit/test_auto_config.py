@@ -191,3 +191,37 @@ def test_apply_is_safe_on_garbage_series():
     ac.apply_to_experiment(cfg, pd.Series([np.nan] * 10, index=_index(10)))
     assert cfg.loss_fn in ("huber", "mse", "mae", "tweedie")
     assert cfg.outlier_method in ("quantile", "mad", "off")
+
+
+# --------------------------------------------------------------------------- #
+# Model-dependent loss — the resolved loss carries a per-family breakdown so
+# the UI can show that the same intent means different things to each backend.
+# --------------------------------------------------------------------------- #
+def test_loss_resolution_is_model_dependent():
+    rng = np.random.default_rng(12)
+    prof = ac.characterize(_bursty_load(rng), INTERVAL)
+    res = ac.resolve(prof)["loss_fn"]
+    # Single applied value stays Tweedie (what trees + the config plumbing use)…
+    assert res.value == "tweedie"
+    # …but the breakdown spells out that neural backends fall back to Huber and
+    # classical / zero-shot backends don't use a point loss at all.
+    assert res.detail is not None
+    fams = res.detail
+    tree = fams[ac._LOSS_FAMILY_LABELS["tree"]]
+    neural = fams[ac._LOSS_FAMILY_LABELS["neural"]]
+    assert tree == "tweedie"
+    assert neural == "huber"          # no native torch Tweedie loss
+    assert "objective" in fams[ac._LOSS_FAMILY_LABELS["classical"]].lower()
+    assert fams[ac._LOSS_FAMILY_LABELS["foundation"]]  # non-empty note
+    # And it survives serialisation for the web preview.
+    assert "detail" in res.to_dict()
+
+
+def test_loss_family_helper_maps_tweedie_to_huber_for_neural():
+    d = ac._loss_by_family("tweedie")
+    assert d[ac._LOSS_FAMILY_LABELS["tree"]] == "tweedie"
+    assert d[ac._LOSS_FAMILY_LABELS["neural"]] == "huber"
+    # A non-Tweedie intent applies uniformly to trees and neural.
+    d2 = ac._loss_by_family("huber")
+    assert d2[ac._LOSS_FAMILY_LABELS["tree"]] == "huber"
+    assert d2[ac._LOSS_FAMILY_LABELS["neural"]] == "huber"

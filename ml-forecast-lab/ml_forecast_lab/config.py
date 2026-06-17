@@ -400,12 +400,16 @@ class ExperimentCfg:
     whichever model the next benchmark cycle ranked first, which
     appeared to users as "I chose XGBoost but the page forgets"."""
 
-    production_metric: str = 'seasonal_mase'
-    """Metric to use for automatic model selection. Default ``seasonal_mase``
-    (MAE scaled by the same-time-yesterday baseline at the configured
-    ``interval_minutes``) is the right comparison for the daily-seasonal HA
-    sensors most users forecast. ``mase`` (1-step naive) is retained for
-    backwards compatibility but understates skill on seasonal series."""
+    production_metric: str = 'auto'
+    """Metric for automatic model selection. Default ``auto`` resolves from the
+    target's own history at training time (see ``auto_config.py``): a
+    daily-seasonal sensor gets ``seasonal_mase`` (MAE scaled by the
+    same-time-yesterday baseline), a non-seasonal one gets ``mae``. Pin an
+    explicit value to override: ``seasonal_mase``, ``mae``, ``rmse`` or
+    ``mase`` (1-step naive — retained for backwards compatibility but
+    understates skill on seasonal series). The sentinel is resolved before the
+    benchmark runner reads it; if it ever leaks through the runner coerces it
+    to ``seasonal_mase``."""
 
     publish_prefix: str = 'mlfl_'
     """Prefix for published Home Assistant sensor entities."""
@@ -535,14 +539,21 @@ class ExperimentCfg:
     """How often to retrain the model from scratch for this experiment.
     Falls back to AppConfig.retrain_every_hours if None."""
 
-    loss_fn: str = 'huber'
-    """Training loss: 'mse', 'mae', 'huber', or 'tweedie' (tree backends).
-    Default ``huber`` (smooth-L1) is appropriate for the typical HA target —
-    quadratic near zero so gradients flow on small errors, linear in the
-    tails so sensor spikes don't dominate. MSE is preserved for backwards
-    compatibility but is rarely the right choice for spiky, near-zero
-    series (power, occupancy, rainfall). ``tweedie`` is honoured only by
-    LightGBM / XGBoost / CatBoost — neural backends fall back to Huber."""
+    loss_fn: str = 'auto'
+    """Training loss. Default ``auto`` resolves **per model family** from the
+    target's own history at training time (see ``auto_config.py``): a spiky,
+    mostly-zero target routes the tree backends to ``tweedie`` (which models
+    the off-state and the spike size together) while the neural backends use
+    ``huber`` (no native Tweedie loss in torch); a smooth target uses
+    ``huber`` everywhere. Classical (ARIMA/ETS/Theta) and zero-shot
+    (Chronos/TTM) backends have no point-loss knob and ignore this field.
+
+    Pin an explicit value to override across all families: ``mse``, ``mae``,
+    ``huber``, or ``tweedie``. ``huber`` (smooth-L1) is the conservative
+    fallback — quadratic near zero, linear in the tails. ``tweedie`` is
+    honoured only by LightGBM / XGBoost / CatBoost; neural backends handed
+    ``tweedie`` fall back to ``huber`` (so a pinned ``tweedie`` already
+    behaves per-family)."""
 
     optimiser: str = 'adamw'
     """Optimiser for neural models: 'adamw' (default, decoupled weight decay as
@@ -622,9 +633,13 @@ class ExperimentCfg:
     """Maximum gap (minutes) eligible for ``gap_handling='interpolate'``.
     Gaps longer than this are left as NaN regardless of method."""
 
-    outlier_method: str = 'quantile'
-    """Outlier-handling method:
-    - ``quantile`` (default): clip upper tail at ``outlier_quantile``, lower
+    outlier_method: str = 'auto'
+    """Outlier-handling method. Default ``auto`` resolves from the target's
+    history at training time (see ``auto_config.py``): a smooth signal gets a
+    gentle ``quantile`` trim, a bursty / spiky target gets ``off`` (its peaks
+    are real signal, not glitches, and must not be clipped), and an
+    ambiguous one gets ``mad``. Pin an explicit value to override:
+    - ``quantile``: clip upper tail at ``outlier_quantile``, lower
       tail per ``outlier_lower``.
     - ``mad``: Iglewicz-Hoaglin robust clip at ``median ± k · MAD`` with
       k=3.5. Less aggressive than the quantile clip on heavy-tailed but

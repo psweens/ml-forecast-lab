@@ -129,14 +129,26 @@ class DataProfile:
 
 @dataclass
 class Resolution:
-    """A resolved (or pinned) setting value with a human-readable reason."""
+    """A resolved (or pinned) setting value with a human-readable reason.
+
+    ``detail`` optionally carries a per-model-family breakdown (used by
+    ``loss_fn``, which is applied differently across backend families — see
+    :func:`_loss_by_family`). It is display-only: ``value`` remains the single
+    value the existing config/training plumbing consumes, while ``detail``
+    lets the Settings tab show *what each family actually trains with* instead
+    of one misleading number.
+    """
 
     value: Any
     reason: str
     source: str = "automatic"   # "automatic" | "pinned"
+    detail: Optional[Dict[str, str]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"value": self.value, "reason": self.reason, "source": self.source}
+        d = {"value": self.value, "reason": self.reason, "source": self.source}
+        if self.detail:
+            d["detail"] = self.detail
+        return d
 
 
 # Thresholds — deliberately gentle. These are the knobs a maintainer would
@@ -241,6 +253,38 @@ def _pick_persona(p: DataProfile) -> str:
     if p.spikiness >= _SPIKY:
         return "baseline_plus_spikes"
     return "general"
+
+
+# How a single resolved point-loss intent maps onto each backend FAMILY. The
+# loss is necessarily model-dependent: only the tree backends have a native
+# Tweedie objective, neural backends fall back to Huber (no torch Tweedie loss
+# — mirrored at main.py where exp_cfg.loss_fn='tweedie' is remapped to 'huber'
+# for neural models), and classical / zero-shot backends have no point-loss
+# knob at all. This makes that split explicit and visible rather than hiding
+# it behind one experiment-level value.
+_LOSS_FAMILY_LABELS = {
+    "tree": "Trees (LightGBM / XGBoost / CatBoost)",
+    "neural": "Neural (LSTM / CNN / TiDE / transformers)",
+    "classical": "Classical (ARIMA / ETS / Theta)",
+    "foundation": "Zero-shot (Chronos / TTM)",
+}
+
+
+def _loss_by_family(preferred: str) -> Dict[str, str]:
+    """Resolve one loss *intent* into the concrete loss each family trains with.
+
+    ``preferred`` is the best loss for this data (e.g. ``tweedie`` for a spiky
+    target). Trees use it directly; neural backends use it too unless it's
+    ``tweedie`` (which has no native torch loss) in which case they use
+    ``huber``; classical and zero-shot backends train by their own objective.
+    """
+    neural = "huber" if preferred == "tweedie" else preferred
+    return {
+        _LOSS_FAMILY_LABELS["tree"]: preferred,
+        _LOSS_FAMILY_LABELS["neural"]: neural,
+        _LOSS_FAMILY_LABELS["classical"]: "own objective (MLE / AIC)",
+        _LOSS_FAMILY_LABELS["foundation"]: "pretrained (no training loss)",
+    }
 
 
 def resolve(
@@ -355,6 +399,20 @@ def resolve(
             "seasonal_mase", "You care about the running/daily total — this "
             "scores the cumulative-shape skill best of the available metrics.",
         )
+
+    # The loss is applied per model family — attach that breakdown to whatever
+    # loss_fn we settled on (persona default OR guided override) so the UI can
+    # show "trees → Tweedie, neural → Huber, …" instead of one value that
+    # silently means different things to different backends.
+    loss_res = out.get("loss_fn")
+    if loss_res is not None:
+        loss_res.detail = _loss_by_family(loss_res.value)
+        if loss_res.value == "tweedie":
+            loss_res.reason += (
+                " Applied per family: the tree backends use Tweedie; the "
+                "neural backends fall back to Huber (no native Tweedie loss); "
+                "classical and zero-shot backends use their own objective."
+            )
 
     return out
 
