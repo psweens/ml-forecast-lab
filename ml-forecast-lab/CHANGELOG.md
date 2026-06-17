@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.45.6
+
+**Cleaner "Comparison basis" wording.** The median-lead line now reads as
+one labelled list — "Each forecast is scored at its median lead: ML
+Forecast Lab 15 min ahead, Predbat … 15 min ahead, Solcast … 15 min
+ahead." — instead of the awkward "Externals are a median <name> …" phrasing.
+When the leads match, it's immediately clear the comparison is like-for-like.
+
 ## 2.45.5
 
 **Forecast Comparison: clearer lead-time basis + tighter overlay window.**

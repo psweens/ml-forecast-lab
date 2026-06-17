@@ -7099,16 +7099,19 @@ window.showTab = function(el) {
         var warn = document.getElementById('external-timing-warning');
         var anyState = comps.some(function(c){ return c.timing && c.timing.external_contemporaneous; });
         var anyAttr = comps.some(function(c){ return c.timing && !c.timing.external_contemporaneous; });
-        var appLead = comps[0].timing ? _leadPhrase(comps[0].timing.app_median_lead_minutes) : null;
-        var parts = ['<strong>Comparison basis:</strong> aligned on target time, scored on common samples. ML Forecast Lab’s forecast is a median ' + (appLead || '—') + '.'];
-        // Show each trajectory external's median lead too, so the lead
-        // asymmetry is visible — a forecast scored at a longer lead has a
-        // tougher horizon (and a big gap means a source should update more
-        // often). State-mode externals are same-time, so no lead to show.
-        var extLeads = comps
-            .filter(function(c){ return c.timing && !c.timing.external_contemporaneous && c.timing.external_median_lead_minutes != null; })
-            .map(function(c){ return (c.label||c.entity) + ' ' + (_leadPhrase(c.timing.external_median_lead_minutes) || 'n/a'); });
-        if (extLeads.length) parts.push('Externals are a median ' + extLeads.join(', ') + '.');
+        var parts = ['<strong>Comparison basis:</strong> aligned on target time, scored on common samples.'];
+        // List each forecaster's median lead so the lead-time basis is
+        // explicit. When they match, the comparison is like-for-like; a large
+        // gap means a forecast is judged at a tougher horizon (and hints a
+        // source should update more often). State-mode externals are
+        // same-time snapshots, so they have no lead to list.
+        var leadBits = [];
+        if (comps[0].timing && comps[0].timing.app_median_lead_minutes != null) {
+            leadBits.push('ML Forecast Lab ' + _leadPhrase(comps[0].timing.app_median_lead_minutes));
+        }
+        comps.filter(function(c){ return c.timing && !c.timing.external_contemporaneous && c.timing.external_median_lead_minutes != null; })
+             .forEach(function(c){ leadBits.push((c.label||c.entity) + ' ' + (_leadPhrase(c.timing.external_median_lead_minutes) || 'n/a')); });
+        if (leadBits.length) parts.push('Each forecast is scored at its median lead: ' + leadBits.join(', ') + '.');
         if (anyState) parts.push('State-mode externals are same-time snapshots (not lead-matched).');
         if (anyAttr) parts.push('Trajectory externals are lead-matched — see the horizon chart.');
         basis.innerHTML = parts.join(' ');
