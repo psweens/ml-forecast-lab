@@ -106,10 +106,14 @@ def _apply_idle_value_fill(result: 'pd.DataFrame', exp_cfg) -> int:
 
     1. **Solar / irradiance** (``clear_sky_ghi`` or ``sun_elevation``
        in result columns): use solar physics to identify night-time
-       slots and fill ONLY those with ``exp_cfg.idle_value`` (default
-       0.0). Daytime NaN is preserved — a clear_sky_ghi > 0 row with
-       a NaN target is a real sensor outage worth surfacing via the
-       dropna step rather than silently masking.
+       slots and force ALL of them to ``exp_cfg.idle_value`` (default
+       0.0) — not just the NaN ones. PV output is physically ~zero
+       when the sun is below the horizon, so a non-zero night row is
+       always a gap-fill artefact (see the note on interpolation
+       below), never real data. Daytime NaN is preserved — a
+       clear_sky_ghi > 0 row with a NaN target is a real sensor
+       outage worth surfacing via the dropna step rather than
+       silently masking.
 
     2. **Non-solar non-negative** (no physics features present, but
        ``idle_value`` explicitly set): fill ALL remaining NaN slots
@@ -140,14 +144,17 @@ def _apply_idle_value_fill(result: 'pd.DataFrame', exp_cfg) -> int:
         return 0
     if "y" not in result.columns:
         return 0
-    if result["y"].isna().sum() == 0:
-        return 0
 
     idle_value = getattr(exp_cfg, "idle_value", None)
     has_physics = (
         "clear_sky_ghi" in result.columns
         or "sun_elevation" in result.columns
     )
+
+    # NOTE: there is deliberately no "return early if no NaN" guard here.
+    # The solar path below also has to correct non-NaN night rows that
+    # gap-fill interpolation planted with spurious generation, so a frame
+    # with zero NaNs can still have work to do.
 
     if has_physics:
         # Solar path: use physics to gate the fill so daytime outages
@@ -160,7 +167,22 @@ def _apply_idle_value_fill(result: 'pd.DataFrame', exp_cfg) -> int:
             # -0.833° is the standard astronomical horizon (accounts
             # for atmospheric refraction). Anything below is night.
             night_mask = result["sun_elevation"].fillna(-90) < -0.833
-        fill_mask = result["y"].isna() & night_mask
+        # Force EVERY night row to the idle value, not just the NaN ones.
+        # PV generation is physically ~zero whenever the sun is at or
+        # below the horizon, so a non-zero night row is never real data —
+        # it is a gap-fill artefact. With the default
+        # ``gap_handling='interpolate'`` the resample step linearly
+        # interpolates the first slots after dusk toward the next
+        # morning's value and back-fills the rest of the overnight gap
+        # with a neighbouring daytime reading, so the night ends up
+        # non-NaN AND non-zero. The old ``isna() & night_mask`` mask
+        # skipped those rows and the model trained on a non-zero night,
+        # predicting phantom 23:00 generation. Overwriting the whole
+        # night removes the artefact. Daytime NaN is still preserved
+        # (``night_mask`` is False there) so a genuine daylight outage
+        # surfaces via the dropna step.
+        y = result["y"]
+        fill_mask = night_mask & (y.isna() | (y != fill_value))
     else:
         # Non-solar path: ALL NaN → idle_value, but only when the
         # user has explicitly declared what idle means. No physics
@@ -182,6 +204,49 @@ def _apply_idle_value_fill(result: 'pd.DataFrame', exp_cfg) -> int:
 # it. Keep the old name as an alias so external imports / pinned
 # tests don't break.
 _apply_solar_night_fill = _apply_idle_value_fill
+
+
+# A diverged model can emit a large value in log space; np.expm1 then
+# explodes it (expm1(70) ≈ 2.5e30). With only a lower (>= 0) clamp at the
+# publish boundary, that garbage was published to Home Assistant and logged
+# verbatim. Real demand / PV is physically bounded, so a forecast beyond a
+# generous multiple of the largest value ever observed is a divergence, not a
+# forecast — cap it. The cap is intentionally loose (10× the historical max)
+# so it never touches a plausible forecast, only a blow-up.
+FORECAST_BLOWUP_CAP_FACTOR = 10.0
+
+
+def _clamp_forecast_blowup(y_pred, ref_max_display, factor=FORECAST_BLOWUP_CAP_FACTOR):
+    """Cap an (already display-space) forecast array to ``factor`` × the
+    largest observed value so a log-inversion blow-up can't publish ~1e30.
+
+    Parameters
+    ----------
+    y_pred : array-like
+        Forecast values in display (published) units.
+    ref_max_display : float or None
+        Largest observed magnitude in display units (e.g. training/holdout
+        actual max). ``None`` / non-finite / <= 0 disables the cap.
+
+    Returns
+    -------
+    (clamped, n_clamped, cap) : (np.ndarray, int, float | None)
+    """
+    y = np.asarray(y_pred, dtype=np.float32)
+    if ref_max_display is None:
+        return y, 0, None
+    try:
+        ref = float(ref_max_display)
+    except (TypeError, ValueError):
+        return y, 0, None
+    if not np.isfinite(ref) or ref <= 0:
+        return y, 0, None
+    cap = float(factor) * ref
+    over = np.isfinite(y) & (y > cap)
+    n = int(np.count_nonzero(over))
+    if n:
+        y = np.minimum(y, np.float32(cap))
+    return y.astype(np.float32), n, cap
 
 
 def _cov_column_name(cov_cfg, all_covs: Optional[list] = None) -> str:
@@ -506,6 +571,13 @@ class MLForecastLabApp:
         # a restart re-resolves it). Keyed by target_entity so multiple
         # experiments on the same sensor share one lookup.
         self._source_unit_cache: Dict[str, str] = {}
+        # Last *successfully* resolved non-empty source unit per target
+        # entity. Unlike ``_source_unit_cache`` this is NEVER invalidated on
+        # retrain — it's the fallback that stops a transient HA fetch failure
+        # (or the source sensor being momentarily ``unavailable``) during the
+        # post-retrain re-resolve from republishing an empty unit and making
+        # HA flag a unit_of_measurement change.
+        self._source_unit_last_good: Dict[str, str] = {}
         # Resolved runtime-resource limits actually applied to this process
         # (CPU thread cap, nice value). Surfaced on the System page so the
         # user can verify their settings took effect.
@@ -667,6 +739,7 @@ class MLForecastLabApp:
             db_path = Path("/data/ml_forecast_lab/history.db")
             self.history_db = HistoryDB(db_path)
             self.history_db.ensure_forecast_log_table()
+            self.history_db.ensure_external_forecast_log_table()
             self.history_db.ensure_benchmark_table()
             logger.info(f"HistoryDB initialised at {db_path}")
 
@@ -1211,8 +1284,14 @@ class MLForecastLabApp:
              kWh stays kWh, °C stays °C). This is what makes units "just
              work" for experiments created through the web UI, which has
              no units field.
-          3. Empty string if the source has no unit or the fetch fails —
-             identical to the prior behaviour, never raises.
+          3. The last successfully-resolved unit if a fresh fetch comes back
+             empty or fails — so a transient HA hiccup (or the source sensor
+             being momentarily ``unavailable``) on the post-retrain
+             re-resolve doesn't republish an empty unit and make HA flag a
+             unit_of_measurement change.
+          4. Empty string only if the source genuinely has no unit and we've
+             never resolved one — identical to the prior cold-start
+             behaviour, never raises.
 
         The inherited value is cached per target entity so this costs at
         most one extra HA call per entity per process, not one per
@@ -1226,7 +1305,7 @@ class MLForecastLabApp:
         if cached is not None:
             return cached
 
-        unit = ""
+        unit = None
         if self.ha_interface:
             try:
                 fetched = await self.ha_interface.get_state(
@@ -1234,16 +1313,39 @@ class MLForecastLabApp:
                 )
                 if isinstance(fetched, str) and fetched.strip():
                     unit = fetched.strip()
-                    logger.info(
-                        f"  Auto-inherited unit '{unit}' from {entity} "
-                        f"for {exp_cfg.name} (no units set in config)"
-                    )
             except Exception as e:
                 logger.debug(
                     f"  Could not auto-resolve unit from {entity}: {e}"
                 )
-        self._source_unit_cache[entity] = unit
-        return unit
+
+        if unit:
+            # Successful resolve — remember it as the authoritative fallback.
+            prev_good = self._source_unit_last_good.get(entity)
+            if unit != prev_good:
+                logger.info(
+                    f"  Auto-inherited unit '{unit}' from {entity} "
+                    f"for {exp_cfg.name} (no units set in config)"
+                )
+            self._source_unit_cache[entity] = unit
+            self._source_unit_last_good[entity] = unit
+            return unit
+
+        # Fetch failed or the source reported no unit. Prefer the last known
+        # good unit over republishing "": a transient miss on the
+        # post-retrain re-resolve must not clobber a good value and make HA
+        # flag a unit_of_measurement change.
+        last_good = self._source_unit_last_good.get(entity)
+        if last_good:
+            logger.debug(
+                f"  Unit fetch for {entity} returned empty; keeping "
+                f"last-known unit '{last_good}' for {exp_cfg.name}"
+            )
+            self._source_unit_cache[entity] = last_good
+            return last_good
+
+        # Never resolved a unit for this entity — cold-start empty, as before.
+        self._source_unit_cache[entity] = ""
+        return ""
 
     async def _prepare_load_subtract_inputs(
         self,
@@ -3463,6 +3565,21 @@ class MLForecastLabApp:
                             np.expm1(_y_holdout_display), 0.0,
                         )
                         y_p_display = np.maximum(np.expm1(y_p_display), 0.0)
+                        # Cap a diverged prediction so one blown-up point
+                        # doesn't wreck the holdout chart / metrics. Reference
+                        # is the holdout actuals' max (already display space).
+                        try:
+                            _ref = float(np.nanmax(_y_holdout_display))
+                        except Exception:
+                            _ref = None
+                        y_p_display, _nb, _ = _clamp_forecast_blowup(y_p_display, _ref)
+                        if _nb:
+                            logger.warning(
+                                "  %s/%s: clamped %d holdout prediction(s) "
+                                "exceeding %.0f× the actual max (log-space "
+                                "divergence).",
+                                exp_cfg.name, m_name, _nb, FORECAST_BLOWUP_CAP_FACTOR,
+                            )
 
                     _model_predictions.append(ModelPrediction(
                         model_name=m_name,
@@ -4031,6 +4148,20 @@ class MLForecastLabApp:
         if exp_cfg.log_transform:
             y_pred = np.expm1(y_pred).astype(np.float32)
             y_pred = np.maximum(y_pred, 0.0)
+            # Upper clamp: stop a log-space divergence (expm1 → ~1e30) from
+            # being published to HA / logged. Reference is the training max.
+            try:
+                _ref = float(np.expm1(np.nanmax(combined["target"].values)))
+            except Exception:
+                _ref = None
+            y_pred, _nblow, _cap = _clamp_forecast_blowup(y_pred, _ref)
+            if _nblow:
+                logger.warning(
+                    "  %s: clamped %d forecast point(s) to %.4g (%.0f× the "
+                    "training max) — the model diverged in log space; "
+                    "published the cap rather than a blown-up value.",
+                    exp_cfg.name, _nblow, _cap, FORECAST_BLOWUP_CAP_FACTOR,
+                )
 
         # Publish-boundary non-negativity clamp — same rationale as in
         # _forecast_with_cached (v2.41.0 linear-head change).
@@ -4196,6 +4327,34 @@ class MLForecastLabApp:
                 except Exception as e:
                     logger.warning(
                         f"  forecast_log retention prune failed for "
+                        f"{exp_cfg.name}: {e}"
+                    )
+                # Age-based retention for the external forecast log
+                # (attribute-mode third-party trajectories), on its OWN
+                # configurable window (default 60d, System tab) — separate
+                # from forecast_log's 120d because external data is
+                # higher-volume. State-mode external caches are pruned at
+                # capture time alongside actuals (to the experiment's
+                # max_age); this bounds the trajectory log.
+                ext_retention = int(getattr(
+                    self.config, "external_forecast_retention_days", 60,
+                ))
+                try:
+                    ext_pruned = await asyncio.to_thread(
+                        self.history_db.cleanup_external_forecast_log,
+                        exp_cfg.name,
+                        datetime.now(timezone.utc).replace(tzinfo=None)
+                        - timedelta(days=ext_retention),
+                    )
+                    if ext_pruned:
+                        logger.info(
+                            f"  external_forecast_log retention: pruned "
+                            f"{ext_pruned} rows older than "
+                            f"{ext_retention}d for {exp_cfg.name}"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"  external_forecast_log retention prune failed for "
                         f"{exp_cfg.name}: {e}"
                     )
         except Exception as e:
@@ -5041,6 +5200,147 @@ class MLForecastLabApp:
         except Exception as e:
             logger.error(f"Error in forecast cycle: {e}", exc_info=True)
 
+    async def _capture_external_forecast(
+        self, exp_cfg, issued_at: datetime, ds_future: pd.DatetimeIndex,
+    ) -> None:
+        """Snapshot each configured third-party forecast for head-to-head
+        scoring on the experiment's "External Comparison" tab.
+
+        For every entry in ``exp_cfg.external_forecasts``:
+
+        - ``state`` mode: read the external entity's current state and append
+          a single grid point to its cached-history table (``store_history``),
+          then prune that table to ``max_age`` days. Accumulated over cycles
+          this builds the external series the same way actuals are cached —
+          independent of HA recorder retention.
+        - ``attribute`` mode: resolve the trajectory onto this cycle's forecast
+          grid (reusing the covariate ``fetch_future`` resolver, which handles
+          list-of-dict / date-dict attributes and the ``weather.get_forecasts``
+          service shape) and log it to ``external_forecast_log`` under the
+          entity as ``source`` so a per-lead-time comparison is possible.
+          Note: ``fetch_future`` interpolates / edge-fills onto the grid, so
+          targets beyond the external source's own horizon are forward-filled;
+          the comparison surfaces per-lead sample counts so that fill is
+          visible.
+        """
+        externals = getattr(exp_cfg, "external_forecasts", None) or []
+        if not externals or not self.ha_interface or not self.history_db:
+            return
+
+        issued_naive = (
+            issued_at.replace(tzinfo=None)
+            if issued_at.tzinfo is not None else issued_at
+        )
+
+        for spec in externals:
+            entity = getattr(spec, "entity_id", None)
+            if not entity:
+                continue
+            mode = getattr(spec, "mode", "state") or "state"
+            try:
+                if mode == "attribute":
+                    attr_name = getattr(spec, "attribute", "forecast") or "forecast"
+                    value_key = getattr(spec, "value_key", None)
+                    from ml_forecast_lab.covariates import CovariateResolver
+
+                    resolver = getattr(self, "covariate_resolver", None)
+                    if resolver is None:
+                        resolver = CovariateResolver(
+                            self.ha_interface, history_db=self.history_db,
+                        )
+                    cov_cfg = {
+                        "entity_id": entity,
+                        "future_attribute": attr_name,
+                        "future_value_key": value_key,
+                    }
+                    series = await resolver.fetch_future(cov_cfg, ds_future)
+                    if series is None or len(series) == 0:
+                        continue
+                    series = series.dropna()
+                    if series.empty:
+                        continue
+                    targets = [
+                        pd.Timestamp(t).to_pydatetime() for t in series.index
+                    ]
+                    targets = [
+                        t.replace(tzinfo=None) if t.tzinfo is not None else t
+                        for t in targets
+                    ]
+                    values = [float(v) for v in series.values]
+
+                    # Determine the forecast's TRUE issue time by content, not
+                    # by HA ``last_updated`` (which on many integrations — e.g.
+                    # Solcast recomputing "now" every few minutes — bumps far
+                    # more often than the forecast refreshes, making the lead
+                    # look short). A forecast is a *new issuance* only when its
+                    # values for the targets it shares with the last logged
+                    # trajectory have changed; otherwise it's the same forecast
+                    # and we keep its original issued_at (skip re-logging). So
+                    # issued_at = this capture time only when the content is new
+                    # — accurate to within the capture cadence.
+                    new_traj = {
+                        t.strftime("%Y-%m-%d %H:%M:%S"): round(v, 4)
+                        for t, v in zip(targets, values)
+                    }
+                    last_traj = await asyncio.to_thread(
+                        self.history_db.get_last_external_trajectory,
+                        exp_cfg.name, spec.source_key,
+                    )
+                    if last_traj:
+                        overlap = [k for k in new_traj if k in last_traj]
+                        unchanged = bool(overlap) and all(
+                            abs(new_traj[k] - round(float(last_traj[k]), 4))
+                            <= max(1e-4, 0.005 * abs(new_traj[k]))
+                            for k in overlap
+                        )
+                        if unchanged:
+                            logger.debug(
+                                "  External forecast (attr) for %s: %s content "
+                                "unchanged — same issuance, skipping re-log.",
+                                exp_cfg.name, entity,
+                            )
+                            continue
+
+                    n = await asyncio.to_thread(
+                        self.history_db.log_external_forecast,
+                        experiment=exp_cfg.name,
+                        source=spec.source_key,
+                        issued_at=issued_naive,
+                        targets=targets,
+                        values=values,
+                    )
+                    if n:
+                        logger.info(
+                            f"  Logged {n} external_forecast_log rows for "
+                            f"{exp_cfg.name} ({entity}.{attr_name}); "
+                            f"new issuance at {issued_naive}"
+                        )
+                else:  # state mode
+                    from ml_forecast_lab.ha_interface import state_to_float
+
+                    raw = await self.ha_interface.get_state(entity, default=None)
+                    val = state_to_float(raw)
+                    if val is None:
+                        logger.debug(
+                            f"  External forecast (state) for {exp_cfg.name}: "
+                            f"{entity} state {raw!r} not numeric"
+                        )
+                        continue
+                    table = self.history_db.safe_table_name(entity)
+                    df = pd.DataFrame({"ds": [issued_naive], "value": [float(val)]})
+                    await asyncio.to_thread(self.history_db.store_history, table, df)
+                    # Retention: keep the external cache bounded like actuals.
+                    oldest = datetime.now(timezone.utc).replace(tzinfo=None) \
+                        - timedelta(days=exp_cfg.max_age)
+                    await asyncio.to_thread(
+                        self.history_db.cleanup, table, oldest,
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"  External forecast capture failed for "
+                    f"{exp_cfg.name} / {entity}: {e}"
+                )
+
     async def _publish_forecast_sensors(
         self,
         exp_cfg,
@@ -5328,6 +5628,25 @@ class MLForecastLabApp:
                     )
             except Exception as e:
                 logger.warning(f"Failed to log forecast evolution: {e}")
+
+        # --- Capture the external (third-party) forecast ---------------------
+        # Logged at the SAME issuance instant as the app's own forecast so the
+        # External Comparison tab scores like-for-like cycles. Production-only
+        # and best-effort — a flaky external sensor never blocks publishing.
+        if (
+            self.history_db
+            and exp_cfg.mode == "production"
+            and getattr(exp_cfg, "external_forecasts", None)
+        ):
+            try:
+                await self._capture_external_forecast(
+                    exp_cfg, issued_at, ds_future_aware,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to capture external forecast for "
+                    f"{exp_cfg.name}: {e}"
+                )
 
         # Common attrs applied to every sensor in this cycle. Sharing
         # last_trained + issued_at lets the dashboard correlate bounds,
@@ -6204,6 +6523,21 @@ class MLForecastLabApp:
         if exp_cfg.log_transform:
             y_pred = np.expm1(y_pred).astype(np.float32)
             y_pred = np.maximum(y_pred, 0.0)
+            # Upper clamp against a log-space divergence (expm1 → ~1e30) so a
+            # blown-up value is never published to HA / logged. The training
+            # target (combined["target"]) is in log space here.
+            try:
+                _ref = float(np.expm1(np.nanmax(combined["target"].values)))
+            except Exception:
+                _ref = None
+            y_pred, _nblow, _cap = _clamp_forecast_blowup(y_pred, _ref)
+            if _nblow:
+                logger.warning(
+                    "  %s: clamped %d forecast point(s) to %.4g (%.0f× the "
+                    "training max) — the model diverged in log space; "
+                    "published the cap rather than a blown-up value.",
+                    exp_cfg.name, _nblow, _cap, FORECAST_BLOWUP_CAP_FACTOR,
+                )
 
         # Publish-boundary non-negativity clamp (v2.41.0). With 'auto'
         # output_activation now resolving to a linear head, physically

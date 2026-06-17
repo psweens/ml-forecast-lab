@@ -8,6 +8,7 @@ experiments, model benchmarking, and production deployment.
 import asyncio
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -30,11 +31,36 @@ def _safe_error(exc: BaseException) -> str:
     msg = str(exc).split("\n", 1)[0]
     return f"{type(exc).__name__}: {_PATH_REDACT_RE.sub('<path>', msg)}"
 
+
+def _json_safe(obj: Any) -> Any:
+    """Recursively replace non-finite floats (NaN / ±Infinity) with None.
+
+    A non-finite float is not representable in spec-compliant JSON. Starlette
+    renders with ``json.dumps(allow_nan=False)``, so one raises ``ValueError``
+    during render (older Starlette emitted a bare ``NaN`` token instead — still
+    invalid JSON). Either way a strict client parser rejects the result: WebKit
+    (Safari and the iOS Home Assistant app's WKWebView) throws ``SyntaxError:
+    The string did not match the expected pattern.`` and the whole payload is
+    lost. Any endpoint returning computed floats (metrics, ratios, per-bin means
+    over possibly-empty groups) can produce a NaN, so we scrub the structure at
+    the response boundary rather than chasing every arithmetic site. ``None``
+    becomes JSON ``null``, which the frontends already handle (the charts use
+    ``connectgaps:false``). Used by ``SafeJSONResponse``.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
 from ml_forecast_lab import __version__ as APP_VERSION
 
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse as _StarletteJSONResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -42,6 +68,41 @@ from starlette.background import BackgroundTask
 from starlette.requests import Request
 
 logger = logging.getLogger(__name__)
+
+
+class SafeJSONResponse(_StarletteJSONResponse):
+    """``JSONResponse`` that replaces NaN / ±Infinity with ``null``.
+
+    Endpoints that return computed floats (metrics, ratios, per-bin means
+    over possibly-empty groups) can produce a non-finite value. Starlette
+    renders with ``json.dumps(allow_nan=False)``, so such a value raises
+    ``ValueError`` *during render* — after the endpoint's own try/except has
+    already returned — surfacing as an unhandled 500 with a non-JSON body.
+    (Older Starlette instead emitted a bare ``NaN`` token, i.e. invalid
+    JSON.) Either way a strict client parser chokes: WebKit — used by Safari
+    **and the iOS Home Assistant companion app's WKWebView** — throws
+    ``SyntaxError: The string did not match the expected pattern.`` and the
+    whole tab fails to load.
+
+    Sanitising in ``render`` (rather than at each arithmetic site) guarantees
+    every payload is spec-valid JSON. ``null`` is what the frontends already
+    expect for gaps (the charts use ``connectgaps:false``).
+    """
+
+    def render(self, content: Any) -> bytes:
+        return super().render(_json_safe(content))
+
+
+# Bind the module-wide ``JSONResponse`` name to the NaN-safe subclass so EVERY
+# endpoint in this file (current and future) renders through it — a single
+# chokepoint, rather than remembering to opt in per-route. Non-finite floats
+# can appear in metric/results/report payloads from many endpoints (benchmark
+# results, forecast accuracy, the comparison tab, the data report), and any one
+# of them would otherwise 500 a strict WebKit client (Safari / the iOS HA app).
+# ``_StarletteJSONResponse`` remains available for anything that genuinely needs
+# the unmodified base.
+JSONResponse = SafeJSONResponse
+
 
 
 # Shared aiohttp session for short HA probes from request handlers
@@ -2239,6 +2300,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if db:
             try:
                 db.delete_forecast_log(name)
+                db.delete_external_forecast_log(name)
                 db.delete_benchmark_result(name)
             except Exception:
                 pass
@@ -2851,6 +2913,368 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception as e:
             result["calibration"] = {"error": _safe_error(e)}
         return JSONResponse(content=result)
+
+    @app.get("/experiment/{name}/external-forecast-comparison")
+    async def external_forecast_comparison(name: str, request: Request):
+        """Head-to-head: this add-on's forecast vs a third-party (external)
+        forecast sensor, both scored against the actuals.
+
+        Reads only local SQLite (the cached actuals, this add-on's
+        ``forecast_log``, and — for ``attribute`` mode — the captured
+        ``external_forecast_log``); the external data is ingested by the
+        production forecast cycle, not fetched live here.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        db = app.state.appstate.history_db
+        if not db:
+            return JSONResponse(content={"error": "Database not available"}, status_code=503)
+
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"error": "Config not found"}, status_code=503)
+
+        from ml_forecast_lab.config import load_config
+        try:
+            cfg = load_config(config_path)
+            exp_cfg = next((e for e in cfg.experiments if e.name == name), None)
+            if not exp_cfg:
+                return JSONResponse(content={"error": "Experiment not in config"}, status_code=404)
+        except Exception as e:
+            return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
+
+        externals_cfg = getattr(exp_cfg, "external_forecasts", None) or []
+        if not externals_cfg:
+            # Tab is configured off — tell the frontend so it can show the
+            # "configure an external sensor in Settings" empty state.
+            return JSONResponse(content={"configured": False})
+
+        try:
+            days = int(request.query_params.get("days", "30"))
+        except (TypeError, ValueError):
+            days = 30
+        days = max(1, min(365, days))
+
+        evaluation_mode = "increment" if exp_cfg.source_is_cumulative else "raw"
+
+        # Per-sensor HA units for unit-aware conversion (cached). Target unit
+        # prefers the experiment's explicit ``units``, else the source
+        # sensor's HA unit_of_measurement.
+        try:
+            units_map = await _entity_units(
+                [exp_cfg.target_entity] + [e.entity_id for e in externals_cfg]
+            )
+        except Exception:
+            units_map = {}
+        target_unit = exp_cfg.units or units_map.get(exp_cfg.target_entity)
+
+        # Build the per-external spec list the DB layer consumes. State-mode
+        # entries resolve to their cached-history table; attribute-mode ones
+        # read from external_forecast_log (table=None). is_cumulative is
+        # passed through as-is: None lets the DB auto-detect a cumulative
+        # shape; True/False is an explicit override.
+        def _default_ext_label(e):
+            base = e.entity_id.split(".")[-1]
+            if e.mode == "attribute":
+                extra = e.value_key or (
+                    e.attribute if e.attribute and e.attribute != "forecast" else None
+                )
+                if extra:
+                    return base + " · " + extra
+            return base
+
+        try:
+            actuals_table = db.safe_table_name(exp_cfg.target_entity)
+            specs = []
+            for e in externals_cfg:
+                specs.append({
+                    "entity": e.entity_id,
+                    # Composite identity so the same entity can supply several
+                    # distinct forecasts (different attribute / value key).
+                    "source": e.source_key,
+                    "table": db.safe_table_name(e.entity_id) if e.mode == "state" else None,
+                    "mode": e.mode,
+                    "scale": e.scale,
+                    "is_cumulative": e.is_cumulative,
+                    "label": e.label or _default_ext_label(e),
+                    "unit": units_map.get(e.entity_id),
+                })
+        except Exception as e:
+            return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
+
+        analysis = request.query_params.get("analysis")
+        analysis_mode = analysis if analysis in ("per_interval", "cumulative") else "per_interval"
+
+        # Optional model pin (default: compare against everything the
+        # add-on actually published, latest-per-target — that's the deployed
+        # forecast the user is comparing). ?model=/?version= narrow it.
+        model_param = request.query_params.get("model")
+        version_param = request.query_params.get("version")
+        model_name = model_param if model_param and model_param != "all" else None
+        model_version = version_param if version_param and version_param != "all" else None
+
+        try:
+            result = await asyncio.to_thread(
+                db.get_external_forecast_comparison,
+                name,
+                actuals_table,
+                specs,
+                days,
+                exp_cfg.interval_minutes,
+                evaluation_mode,
+                model_name,
+                model_version,
+                analysis_mode,
+                target_unit,
+            )
+        except Exception as e:
+            logger.error(
+                "external-forecast-comparison failed for %s: %s",
+                name, e, exc_info=True,
+            )
+            return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
+
+        result["units"] = exp_cfg.units or ""
+        result["days"] = days
+        # JSONResponse here is the module's NaN-safe subclass — the metric
+        # floats below can be non-finite and would otherwise fail a strict
+        # WebKit parser (Safari / the iOS HA app).
+        return JSONResponse(content=result)
+
+    _unit_cache: Dict[str, tuple] = {}  # entity -> (fetched_at, unit_or_None)
+
+    async def _entity_units(entities: list) -> Dict[str, Optional[str]]:
+        """Resolve each entity's HA unit_of_measurement, cached 5 min, for
+        unit-aware comparison conversion. One HA session for all misses;
+        failures resolve to None (→ the comparison falls back to raw + the
+        scale-mismatch guard)."""
+        import time as _t
+        out: Dict[str, Optional[str]] = {}
+        missing = []
+        for e in entities:
+            if not e:
+                continue
+            c = _unit_cache.get(e)
+            if c and (_t.time() - c[0]) < 300:
+                out[e] = c[1]
+            else:
+                missing.append(e)
+        if missing:
+            from ml_forecast_lab.ha_interface import HAInterface
+            iface = HAInterface()
+            try:
+                for e in missing:
+                    try:
+                        u = await iface.get_state(
+                            e, attribute="unit_of_measurement", default=None,
+                        )
+                        u = u.strip() if isinstance(u, str) and u.strip() else None
+                    except Exception:
+                        u = None
+                    _unit_cache[e] = (_t.time(), u)
+                    out[e] = u
+            finally:
+                await iface.close()
+        return out
+
+    async def _backfill_external_state(entity: str, days: int = 90) -> int:
+        """Cache a state-mode external sensor's existing HA recorder history
+        so the comparison populates immediately rather than only accruing
+        from the next production cycle. Best-effort; returns rows stored.
+
+        Bounded by HA's recorder retention (it returns only what it kept);
+        the per-cycle capture extends the series forward beyond that.
+        """
+        db = app.state.appstate.history_db
+        if not db:
+            return 0
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        from ml_forecast_lab.ha_interface import HAInterface, normalise_history
+        end = _dt.now(_tz.utc)
+        start = end - _td(days=days)
+        iface = HAInterface()
+        try:
+            raw = await iface.get_history(entity, start, end)
+        finally:
+            await iface.close()
+        df = normalise_history(raw)
+        if df is None or df.empty:
+            return 0
+        table = db.safe_table_name(entity)
+        return await asyncio.to_thread(db.store_history, table, df)
+
+    async def _probe_external_attribute(entity, attribute, value_key):
+        """Best-effort live check that an attribute-mode external resolves.
+        Returns a warning string if the chosen attribute is missing/empty or
+        the value_key doesn't appear in the forecast entries — so a typo is
+        caught at add time instead of silently logging zero rows for days.
+        Returns None when it looks fine OR when HA is unreachable (we never
+        block the add on a transient fetch failure)."""
+        import aiohttp as _aiohttp
+        attr = (attribute or "forecast").strip()
+        ha_url = os.environ.get("HA_URL", "http://supervisor/core")
+        ha_token = os.environ.get("SUPERVISOR_TOKEN", "")
+        try:
+            async with _aiohttp.ClientSession() as sess:
+                async with sess.get(
+                    f"{ha_url}/api/states/{entity}",
+                    headers={"Authorization": f"Bearer {ha_token}"},
+                    timeout=_aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status != 200:
+                        return None  # can't confirm — don't block the add
+                    state_obj = await resp.json()
+        except Exception:
+            return None
+        attrs = (state_obj or {}).get("attributes", {}) or {}
+        if attr not in attrs:
+            avail = [a for a in attrs if isinstance(attrs[a], (list, dict))]
+            return (
+                f"Attribute '{attr}' not found on {entity} right now. "
+                + (f"Forecast-shaped attributes available: {', '.join(avail[:6])}. "
+                   if avail else "")
+                + "The comparison will stay empty until it appears."
+            )
+        val = attrs.get(attr)
+        if not val:
+            return f"Attribute '{attr}' on {entity} is currently empty."
+        if value_key and isinstance(val, list) and val and isinstance(val[0], dict):
+            if value_key not in val[0]:
+                keys = [k for k in val[0].keys()]
+                return (
+                    f"Value key '{value_key}' not in '{attr}' entries "
+                    f"(keys: {', '.join(str(k) for k in keys[:8])}). "
+                    "Check the value key."
+                )
+        return None
+
+    @app.post("/experiment/{name}/add-external-forecast")
+    async def add_external_forecast(name: str, request: Request):
+        """Add a third-party forecast to an experiment's external_forecasts.
+
+        Body: {entity_id (required), mode?, attribute?, value_key?, scale?,
+               is_cumulative?, label?}. Capped at MAX_EXTERNAL_FORECASTS.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        entity = (body.get("entity_id") or body.get("entity") or "").strip()
+        if not entity:
+            return JSONResponse(content={"success": False, "error": "entity_id is required"})
+
+        ext = {"entity_id": entity}
+        for fld in ("mode", "attribute", "value_key", "label"):
+            if body.get(fld) not in (None, ""):
+                ext[fld] = str(body[fld]).strip()
+        if body.get("scale") not in (None, ""):
+            try:
+                ext["scale"] = float(body["scale"])
+            except (TypeError, ValueError):
+                return JSONResponse(content={"success": False, "error": "scale must be a number"})
+        if "is_cumulative" in body and body["is_cumulative"] not in (None, ""):
+            v = str(body["is_cumulative"]).lower()
+            if v in ("true", "1", "yes", "on"):
+                ext["is_cumulative"] = True
+            elif v in ("false", "0", "no", "off"):
+                ext["is_cumulative"] = False
+
+        from ml_forecast_lab.config import (
+            add_experiment_external_forecast, MAX_EXTERNAL_FORECASTS,
+        )
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+        try:
+            added = add_experiment_external_forecast(config_path, name, ext)
+            if added:
+                logger.info(f"Added external forecast {entity} to {name}")
+                backfilled = 0
+                warning = None
+                # State-mode sensors have real recorder history — backfill it
+                # now so the comparison line + head-to-head show immediately
+                # instead of only accruing from the next production cycle.
+                # (Attribute/trajectory sensors can't be backfilled: HA
+                # doesn't retain past forecast attributes.)
+                if ext.get("mode", "state") == "state":
+                    try:
+                        backfilled = await _backfill_external_state(entity)
+                    except Exception as e:
+                        logger.debug(f"External backfill for {entity} failed: {e}")
+                else:
+                    # Attribute mode: confirm the chosen attribute/value_key
+                    # resolves live (non-fatal — a typo shouldn't only surface
+                    # after days of empty logging).
+                    try:
+                        warning = await _probe_external_attribute(
+                            entity, ext.get("attribute"), ext.get("value_key"),
+                        )
+                    except Exception:
+                        warning = None
+                return JSONResponse(content={
+                    "success": True, "entity_id": entity,
+                    "backfilled": backfilled, "warning": warning,
+                })
+            return JSONResponse(content={
+                "success": False,
+                "error": (
+                    f"Already configured, experiment not found, or at the "
+                    f"max of {MAX_EXTERNAL_FORECASTS} external forecasts."
+                ),
+            })
+        except ValueError as e:
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
+        except Exception as e:
+            logger.error(f"Failed to add external forecast: {e}", exc_info=True)
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
+
+    @app.post("/experiment/{name}/remove-external-forecast")
+    async def remove_external_forecast(name: str, request: Request):
+        """Remove a third-party forecast from an experiment. The full identity
+        (entity_id + mode + attribute + value_key) is used so the right one is
+        removed when an entity is configured more than once."""
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+        entity = (body.get("entity_id") or body.get("entity") or "").strip()
+        if not entity:
+            return JSONResponse(content={"success": False, "error": "entity_id is required"})
+        mode = (body.get("mode") or None)
+        attribute = body.get("attribute") if body.get("attribute") not in (None, "") else None
+        value_key = body.get("value_key") if body.get("value_key") not in (None, "") else None
+
+        from ml_forecast_lab.config import (
+            remove_experiment_external_forecast, external_source_key,
+        )
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+        try:
+            removed = remove_experiment_external_forecast(
+                config_path, name, entity, mode=mode,
+                attribute=attribute, value_key=value_key,
+            )
+            # Drop the captured trajectory rows for this exact source too
+            # (best effort) so a re-added forecast starts clean.
+            db = app.state.appstate.history_db
+            if removed and db:
+                try:
+                    db.delete_external_forecast_source(
+                        name, external_source_key(entity, mode or "state", attribute, value_key),
+                    )
+                except Exception:
+                    pass
+            return JSONResponse(content={"success": bool(removed)})
+        except Exception as e:
+            logger.error(f"Failed to remove external forecast: {e}", exc_info=True)
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
 
     @app.get("/experiment/{name}/forecast-log-stats")
     async def forecast_log_stats(name: str, request: Request):
@@ -3831,6 +4255,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "timezone": cfg.timezone,
                 "cpu_cores": cfg.cpu_cores,
                 "nice_priority": cfg.nice_priority,
+                "external_forecast_retention_days": cfg.external_forecast_retention_days,
             }
             experiment_configs = cfg.experiments
         except Exception:
@@ -3903,6 +4328,14 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 yaml_data["cpu_cores"] = int(data["cpu_cores"])
             if "nice_priority" in data:
                 yaml_data["nice_priority"] = int(data["nice_priority"])
+            if "external_forecast_retention_days" in data:
+                _r = int(data["external_forecast_retention_days"])
+                if _r < 1:
+                    return JSONResponse(content={
+                        "success": False,
+                        "error": "external_forecast_retention_days must be >= 1",
+                    })
+                yaml_data["external_forecast_retention_days"] = _r
 
             atomic_yaml_write(config_path, yaml_data)
 
@@ -4335,6 +4768,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "output_activation": lambda v: v if v in (
                 "auto", "linear", "softplus", "relu", "exp", "sigmoid", "zscore"
             ) else None,
+            # External forecasts are managed as a list via the dedicated
+            # /add-external-forecast and /remove-external-forecast endpoints,
+            # not through this scalar-field settings form.
         }
 
         # Fields where None/null means "use global default" (valid, not an error)

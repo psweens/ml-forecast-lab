@@ -18,6 +18,13 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# v2.44.x: the Forecast Comparison tab treats a source as "warming up"
+# (results inconclusive) until it has at least this many distinct days of
+# overlapping data. Surfaced per-source and as a top-level flag so the UI
+# can grey provisional lines, badge "n/7 days", and suppress the headline
+# verdict until the comparison clears the gate.
+EXTERNAL_COMPARISON_WARMUP_DAYS = 7
+
 
 def _locked(fn):
     """Serialise SQLite access via ``self._lock``.
@@ -2895,6 +2902,1095 @@ class HistoryDB:
             logger.error(f"Error deleting forecast_log for {experiment}: {e}", exc_info=True)
             self.conn.rollback()
             return 0
+
+    # ------------------------------------------------------------------
+    # External forecast log (third-party forecast trajectories)
+    # ------------------------------------------------------------------
+    # Mirrors forecast_log but for a forecast NOT produced by this add-on
+    # (an external HA sensor — Solcast, a utility curve, etc.). Used by the
+    # per-experiment "External Comparison" tab to score this add-on's
+    # forecast head-to-head against the external one. Only the
+    # ``attribute`` external-forecast mode writes here (it has a real
+    # lead-time / trajectory shape); the ``state`` mode reuses the ordinary
+    # cached-history table (store_history) since it is just a time-series.
+
+    @_locked
+    def ensure_external_forecast_log_table(self) -> None:
+        """Create the external_forecast_log table if it doesn't exist.
+
+        ``source`` is the external entity_id, so a single experiment can be
+        compared against several third-party forecasts at once (each is its
+        own cohort in this table).
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS external_forecast_log (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                experiment   TEXT    NOT NULL,
+                source       TEXT    NOT NULL DEFAULT '',
+                issued_at    TEXT    NOT NULL,
+                target_dt    TEXT    NOT NULL,
+                lead_minutes INTEGER NOT NULL,
+                value        REAL    NOT NULL,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # Migrate pre-existing tables (created before multi-source support)
+        # that lack the ``source`` column.
+        cursor.execute("PRAGMA table_info(external_forecast_log)")
+        cols = {row[1] for row in cursor.fetchall()}
+        if "source" not in cols:
+            cursor.execute(
+                "ALTER TABLE external_forecast_log "
+                "ADD COLUMN source TEXT NOT NULL DEFAULT ''"
+            )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_extflog_exp_src_target "
+            "ON external_forecast_log(experiment, source, target_dt)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_extflog_exp_issued "
+            "ON external_forecast_log(experiment, issued_at)"
+        )
+        # One-time cleanup of trajectories logged before content-change
+        # detection: each forecast cycle used to re-log an unchanged external
+        # trajectory as a fresh issuance, so every target had a ~one-cycle-old
+        # "latest" issuance and the reported lead collapsed to a single cycle
+        # (e.g. a source that refreshes a few times a day reading as 15 min).
+        # Collapse runs of identical issuances down to their earliest one —
+        # exactly what the capture-time de-duplication now produces — so
+        # existing data reports true leads without losing history or restarting
+        # the warming-up window. Guarded by schema_versions so it runs once.
+        if 2 not in self._applied_versions():
+            try:
+                removed = self._collapse_external_duplicates(cursor)
+                if removed:
+                    logger.info(
+                        "Collapsed %d duplicate external forecast issuance "
+                        "row(s) to their original issue time", removed,
+                    )
+            except sqlite3.Error as e:
+                logger.error(
+                    "External forecast de-duplication migration failed: %s",
+                    e, exc_info=True,
+                )
+            self._record_version(2)
+        self.conn.commit()
+        logger.debug("Ensured external_forecast_log table")
+
+    def _collapse_external_duplicates(self, cursor) -> int:
+        """Collapse consecutive identical external-forecast issuances to the
+        earliest of each run, returning the number of rows deleted.
+
+        Mirrors the capture-time content-change test (see
+        ``main._capture_external_forecast``): an issuance whose values match
+        the last *kept* trajectory over their overlapping targets — within the
+        same tolerance, ``max(1e-4, 0.005·|value|)`` — is a re-log of the same
+        forecast, not a new one, so it is dropped. The earliest issuance of a
+        run is kept, preserving the true (longest) lead.
+        """
+        cursor.execute(
+            "SELECT DISTINCT experiment, source FROM external_forecast_log"
+        )
+        total_removed = 0
+        for experiment, source in cursor.fetchall():
+            total_removed += self._collapse_source_duplicates(
+                cursor, experiment, source,
+            )
+        return total_removed
+
+    def _collapse_source_duplicates(self, cursor, experiment, source) -> int:
+        """De-duplicate one source's logged issuances in place. See
+        ``_collapse_external_duplicates`` for the matching rule."""
+        cursor.execute(
+            "SELECT DISTINCT issued_at FROM external_forecast_log "
+            "WHERE experiment = ? AND source = ? ORDER BY issued_at ASC",
+            (experiment, source),
+        )
+        issuances = [r[0] for r in cursor.fetchall()]
+        if len(issuances) < 2:
+            return 0
+        kept: Optional[dict] = None  # last kept issuance, target_dt → value
+        duplicates: list = []
+        for iss in issuances:
+            cursor.execute(
+                "SELECT target_dt, value FROM external_forecast_log "
+                "WHERE experiment = ? AND source = ? AND issued_at = ?",
+                (experiment, source, iss),
+            )
+            traj = {r[0]: round(float(r[1]), 4) for r in cursor.fetchall()}
+            if kept is not None:
+                overlap = [k for k in traj if k in kept]
+                if overlap and all(
+                    abs(traj[k] - kept[k]) <= max(1e-4, 0.005 * abs(traj[k]))
+                    for k in overlap
+                ):
+                    duplicates.append(iss)
+                    continue
+            kept = traj
+        removed = 0
+        for iss in duplicates:
+            cursor.execute(
+                "DELETE FROM external_forecast_log "
+                "WHERE experiment = ? AND source = ? AND issued_at = ?",
+                (experiment, source, iss),
+            )
+            removed += cursor.rowcount
+        return removed
+
+    @_locked
+    def get_last_external_issued_at(
+        self, experiment: str, source: str,
+    ) -> Optional[datetime]:
+        """Most recent ``issued_at`` already logged for an external source,
+        or ``None`` if none. Used to de-duplicate captures: if the source's
+        update time hasn't advanced past this, the trajectory is unchanged
+        and re-logging it would just bloat the log and misreport its lead."""
+        try:
+            self.ensure_external_forecast_log_table()
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT MAX(issued_at) FROM external_forecast_log "
+                "WHERE experiment = ? AND source = ?",
+                (experiment, source),
+            )
+            row = cursor.fetchone()
+        except sqlite3.Error as e:
+            logger.error(
+                "Error reading last external issued_at for %s/%s: %s",
+                experiment, source, e,
+            )
+            return None
+        if not row or not row[0]:
+            return None
+        try:
+            return datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            return None
+
+    @_locked
+    def get_last_external_trajectory(
+        self, experiment: str, source: str,
+    ) -> dict:
+        """The most-recently-issued trajectory for an external source as a
+        ``{target_dt_str: value}`` map. Used to detect whether the source's
+        forecast *content* has changed (a new issuance) — a robust,
+        source-agnostic alternative to trusting HA ``last_updated``, which on
+        many integrations bumps far more often than the forecast actually
+        refreshes."""
+        try:
+            self.ensure_external_forecast_log_table()
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT MAX(issued_at) FROM external_forecast_log "
+                "WHERE experiment = ? AND source = ?",
+                (experiment, source),
+            )
+            row = cursor.fetchone()
+            if not row or not row[0]:
+                return {}
+            cursor.execute(
+                "SELECT target_dt, value FROM external_forecast_log "
+                "WHERE experiment = ? AND source = ? AND issued_at = ?",
+                (experiment, source, row[0]),
+            )
+            return {r[0]: r[1] for r in cursor.fetchall()}
+        except sqlite3.Error as e:
+            logger.error(
+                "Error reading last external trajectory for %s/%s: %s",
+                experiment, source, e,
+            )
+            return {}
+
+    def log_external_forecast(
+        self,
+        experiment: str,
+        source: str,
+        issued_at: datetime,
+        targets: list,
+        values: list,
+    ) -> int:
+        """Bulk-insert an external forecast trajectory snapshot.
+
+        ``source`` is the external entity_id (which third-party forecast).
+        Same shape as ``log_forecast`` minus the model columns: each row is
+        one (source, issued_at, target_dt, lead_minutes, value). Non-finite
+        values are skipped so a partially-NaN external trajectory doesn't
+        poison the comparison join. ``issued_at`` should be the source's own
+        update time (HA ``last_updated``) so ``lead_minutes`` reflects the
+        forecast's true age, not when the add-on snapshotted it.
+
+        Returns the number of rows inserted.
+        """
+        import math
+        self.ensure_external_forecast_log_table()
+        issued_str = issued_at.strftime("%Y-%m-%d %H:%M:%S")
+        rows = []
+        for ts, val in zip(targets, values):
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(fval):
+                continue
+            target_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+            lead_min = int((ts - issued_at).total_seconds() / 60)
+            rows.append((experiment, source, issued_str, target_str, lead_min, fval))
+        if not rows:
+            return 0
+        cursor = self.conn.cursor()
+        try:
+            cursor.executemany(
+                "INSERT INTO external_forecast_log "
+                "(experiment, source, issued_at, target_dt, lead_minutes, value) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            self.conn.commit()
+            return cursor.rowcount
+        except sqlite3.Error as e:
+            logger.error(
+                f"Error logging external forecast for {experiment}: {e}",
+                exc_info=True,
+            )
+            self.conn.rollback()
+            return 0
+
+    @_locked
+    def cleanup_external_forecast_log(
+        self, experiment: str, oldest_datetime: datetime,
+    ) -> int:
+        """Delete external_forecast_log rows issued before *oldest_datetime*."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='external_forecast_log'"
+        )
+        if not cursor.fetchone():
+            return 0
+        oldest_str = oldest_datetime.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            cursor.execute(
+                "DELETE FROM external_forecast_log "
+                "WHERE experiment = ? AND issued_at < ?",
+                (experiment, oldest_str),
+            )
+            self.conn.commit()
+            deleted = cursor.rowcount
+            if deleted:
+                logger.info(
+                    f"Pruned {deleted} old external_forecast_log rows "
+                    f"for {experiment}"
+                )
+            return deleted
+        except sqlite3.Error as e:
+            logger.error(
+                f"Error pruning external_forecast_log for {experiment}: {e}",
+                exc_info=True,
+            )
+            self.conn.rollback()
+            return 0
+
+    @_locked
+    def delete_external_forecast_log(self, experiment: str) -> int:
+        """Delete all external_forecast_log entries for an experiment."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='external_forecast_log'"
+        )
+        if not cursor.fetchone():
+            return 0
+        try:
+            cursor.execute(
+                "DELETE FROM external_forecast_log WHERE experiment = ?",
+                (experiment,),
+            )
+            self.conn.commit()
+            return cursor.rowcount
+        except sqlite3.Error as e:
+            logger.error(
+                f"Error deleting external_forecast_log for {experiment}: {e}",
+                exc_info=True,
+            )
+            self.conn.rollback()
+            return 0
+
+    @_locked
+    def delete_external_forecast_source(self, experiment: str, source: str) -> int:
+        """Delete external_forecast_log rows for one source (entity) of an
+        experiment — used when a third-party forecast is removed so a later
+        re-add starts clean."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='external_forecast_log'"
+        )
+        if not cursor.fetchone():
+            return 0
+        try:
+            cursor.execute(
+                "DELETE FROM external_forecast_log "
+                "WHERE experiment = ? AND source = ?",
+                (experiment, source),
+            )
+            self.conn.commit()
+            return cursor.rowcount
+        except sqlite3.Error as e:
+            logger.error(
+                f"Error deleting external_forecast_log source {source} "
+                f"for {experiment}: {e}", exc_info=True,
+            )
+            self.conn.rollback()
+            return 0
+
+    @_locked
+    def get_external_forecast_comparison(
+        self,
+        experiment: str,
+        actuals_table: str,
+        externals: list,
+        max_age_days: int = 30,
+        interval_minutes: int = 30,
+        evaluation_mode: str = "raw",
+        model_name: Optional[str] = None,
+        model_version: Optional[str] = None,
+        analysis_mode: str = "per_interval",
+        target_unit: Optional[str] = None,
+    ) -> dict:
+        """Score this add-on's forecast against one or more external forecasts.
+
+        ``externals`` is a list of specs, each a dict with ``entity``,
+        ``table`` (state-mode cached-history table or None), ``mode``,
+        ``scale``, ``is_cumulative`` (None = auto-detect), ``label`` and
+        ``unit`` (HA unit_of_measurement, for unit-aware conversion).
+
+        Unit-aware: each series is converted to a common per-interval ENERGY
+        canonical using its HA unit (power → ×interval_hours; cumulative
+        energy → differenced) so a cumulative kWh sensor lines up with an
+        instantaneous kW target. When a unit isn't a recognised power/energy
+        unit the series is left in its raw evaluation space and the
+        scale-mismatch guard flags it.
+
+        ``analysis_mode``: ``per_interval`` (per-bin demand, in the target's
+        native unit) or ``cumulative`` (running daily total in kWh / the
+        target unit). The lead-time curve is always per-interval.
+        """
+        import numpy as np
+
+        now = datetime.utcnow()
+        cutoff = now - pd.Timedelta(days=max_age_days)
+        cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+        now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        bucket_min = max(1, int(interval_minutes))
+        freq = f"{bucket_min}min"
+        interval_hours = bucket_min / 60.0
+        target_cumulative = evaluation_mode == "increment"
+        if analysis_mode not in ("per_interval", "cumulative"):
+            analysis_mode = "per_interval"
+
+        # Unit dimension classification → (dimension, scale-to-base) where
+        # base power = kW and base energy = kWh.
+        _POWER = {"w": 0.001, "watt": 0.001, "watts": 0.001, "kw": 1.0, "mw": 1000.0}
+        _ENERGY = {"wh": 0.001, "kwh": 1.0, "mwh": 1000.0}
+
+        def _classify_unit(u):
+            if not u:
+                return ("unknown", 1.0)
+            k = str(u).strip().lower()
+            if k in _POWER:
+                return ("power", _POWER[k])
+            if k in _ENERGY:
+                return ("energy", _ENERGY[k])
+            return ("other", 1.0)
+
+        t_dim, t_base = _classify_unit(target_unit)
+        unit_aware = t_dim in ("power", "energy")
+
+        cursor = self.conn.cursor()
+
+        def _table_exists(name: Optional[str]) -> bool:
+            if not name:
+                return False
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (name,),
+            )
+            return cursor.fetchone() is not None
+
+        def _iso_utc(ts) -> str:
+            ts = pd.Timestamp(ts)
+            ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+            return ts.isoformat()
+
+        def _raw_grid(rows) -> "pd.Series":
+            """Grid-align a (ds, value) frame to a Series (last value per bin);
+            NO differencing — canonicalisation handles that."""
+            df = pd.DataFrame(rows, columns=["ds", "value"])
+            if df.empty:
+                return pd.Series(dtype="float64")
+            df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
+            df["value"] = pd.to_numeric(df["value"], errors="coerce")
+            df = df.dropna(subset=["ds"]).sort_values("ds")
+            if df.empty:
+                return pd.Series(dtype="float64")
+            df["grid"] = df["ds"].dt.floor(freq)
+            return df.groupby("grid")["value"].last().sort_index()
+
+        def _looks_cumulative(s) -> bool:
+            """Heuristic: a running total is (almost) monotonic non-decreasing
+            between resets, so the vast majority of consecutive diffs are >= 0.
+            A per-interval signal has ~50% negative diffs."""
+            sd = s.dropna() if s is not None else None
+            if sd is None or len(sd) < 6:
+                return False
+            d = sd.diff().dropna()
+            if d.empty:
+                return False
+            return float((d >= 0).mean()) >= 0.8
+
+        def _diff_reset(s):
+            full = pd.date_range(s.index.min(), s.index.max(), freq=freq)
+            d = s.reindex(full).diff()
+            d[d < 0] = np.nan  # daily-reset / rollover guard
+            return d
+
+        def _to_canon(s, dim, base, is_cum):
+            """Raw grid series → per-interval ENERGY (kWh/interval) when the
+            unit is power/energy; else returns the series unchanged (best
+            effort) so the scale guard can flag it."""
+            if s is None or s.empty:
+                return s
+            s = s.astype(float)
+            if base and base != 1.0:
+                s = s * base
+            if dim == "power":
+                return s * interval_hours
+            if dim == "energy":
+                return _diff_reset(s) if is_cum else s
+            return s  # unknown dimension — left raw
+
+        def _legacy_eval(s, is_cum):
+            """Pre-unit-aware behaviour: per-interval deltas for cumulative
+            sources, raw otherwise."""
+            if s is None or s.empty:
+                return s
+            return _diff_reset(s.astype(float)) if is_cum else s
+
+        def _cumsum_daily(s):
+            if s is None or s.empty:
+                return s
+            df = s.to_frame("v")
+            df["day"] = df.index.normalize()
+            df["c"] = df["v"].fillna(0.0).groupby(df["day"]).cumsum()
+            return df["c"]
+
+        def _native_pi(canon):
+            """Per-interval canonical → the target's native per-interval unit
+            for display (kW for a power target; kWh/interval otherwise)."""
+            if unit_aware and t_dim == "power" and canon is not None and not canon.empty:
+                return canon / interval_hours
+            return canon
+
+        def _display(canon):
+            if analysis_mode == "cumulative":
+                return _cumsum_daily(canon)
+            return _native_pi(canon)
+
+        def _canon_factor(dim, base):
+            """Multiplier turning a per-interval VALUE into per-interval energy
+            (power values still need ×interval_hours)."""
+            if not unit_aware:
+                return 1.0
+            if dim == "power":
+                return base * interval_hours
+            if dim == "energy":
+                return base
+            return 1.0
+
+        def _median_lead(df):
+            if df is None or df.empty or "lead_minutes" not in df.columns \
+                    or "grid" not in df.columns:
+                return None
+            rep = df.groupby("grid")["lead_minutes"].last().dropna()
+            return round(float(rep.median()), 1) if not rep.empty else None
+
+        externals = externals or []
+        # Display unit label for the axes.
+        if analysis_mode == "cumulative":
+            display_unit = "kWh" if unit_aware else (
+                ((target_unit or "") + " (cumulative)").strip()
+            )
+        else:
+            if unit_aware:
+                display_unit = (target_unit or "kW") if t_dim == "power" else "kWh/interval"
+            else:
+                display_unit = target_unit or ""
+
+        result: dict = {
+            "configured": bool(externals),
+            "evaluation_mode": evaluation_mode,
+            "analysis_mode": analysis_mode,
+            "interval_minutes": bucket_min,
+            "unit_aware": unit_aware,
+            "display_unit": display_unit,
+            "lead_unit": "kWh/interval" if unit_aware else (target_unit or ""),
+            "overlay": {"ds": [], "actual": [], "app": [], "externals": []},
+            "comparisons": [],
+            "lead_time": None,
+            "skill": None,
+            "date_range": {},
+            "app_points": 0,
+            "grid_points": 0,
+        }
+
+        if not _table_exists(actuals_table):
+            result["error"] = "No actuals data available yet"
+            result["empty_reason"] = "no_actuals"
+            return result
+
+        # --- actuals → canonical per-interval ---
+        cursor.execute(
+            f"SELECT ds, value FROM {actuals_table} WHERE ds >= ? ORDER BY ds",
+            (cutoff_str,),
+        )
+        actual_raw = _raw_grid(cursor.fetchall())
+        if unit_aware:
+            actual_canon = _to_canon(actual_raw, t_dim, t_base, target_cumulative)
+        else:
+            actual_canon = _legacy_eval(actual_raw, target_cumulative)
+        actual_disp = _display(actual_canon)
+
+        # Guard against grossly non-physical logged forecast values. A
+        # log-transform inversion that overflows (np.expm1 of a diverged
+        # log-space prediction → ~1e30) gets logged verbatim; a single such
+        # point dwarfs every real value, flattening the charts and exploding
+        # the MAE/ranking. A forecast more than CORRUPT_FACTOR× the largest
+        # actual ever seen (or beyond an absolute sanity ceiling when there
+        # are no actuals to scale against) isn't a "big miss" — it's corrupt
+        # data, so drop it here. Legitimate unit/scale differences are handled
+        # separately by the scale-mismatch guard.
+        CORRUPT_FACTOR = 1e4
+        ABS_SANITY = 1e12
+        _amax = float(actual_raw.abs().max()) if (actual_raw is not None and len(actual_raw)) else 0.0
+        _corrupt_cap = min(_amax * CORRUPT_FACTOR, ABS_SANITY) if _amax > 0 else ABS_SANITY
+
+        def _drop_corrupt(df, col):
+            """Drop rows whose value is non-finite or beyond the sanity cap.
+
+            Returns (clean_df, info) where info is None when nothing was
+            dropped, else {count, max_value, last_ts} describing the dropped
+            points so the UI can SURFACE that a blow-up happened (rather than
+            silently hiding the only evidence)."""
+            if df is None or df.empty or col not in df.columns:
+                return df, None
+            v = pd.to_numeric(df[col], errors="coerce")
+            ok = np.isfinite(v) & (v.abs() <= _corrupt_cap)
+            n_bad = int((~ok).sum())
+            if not n_bad:
+                return df, None
+            bad = df[~ok]
+            bv = pd.to_numeric(bad[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+            max_abs = float(bv.abs().max()) if bv.notna().any() else None
+            last_ts = None
+            if "target_dt" in bad.columns:
+                tt = pd.to_datetime(bad["target_dt"], errors="coerce").dropna()
+                if len(tt):
+                    last_ts = _iso_utc(tt.max())
+            info = {
+                "count": n_bad,
+                "max_value": (round(max_abs, 4) if (max_abs is not None and np.isfinite(max_abs)) else None),
+                "last_ts": last_ts,
+            }
+            return df[ok], info
+
+        # Accumulates dropped-corruption info so the response can flag it.
+        corrupt = {"app": None, "externals": []}
+
+        # --- app forecast: every logged row in the window ---
+        _filt = ""
+        _params: list = [experiment, cutoff_str, now_str]
+        if model_name:
+            _filt += " AND model_name = ?"
+            _params.append(model_name)
+        if model_version:
+            _filt += " AND model_version = ?"
+            _params.append(model_version)
+        cursor.execute(
+            "SELECT target_dt, issued_at, lead_minutes, predicted "
+            "FROM forecast_log "
+            "WHERE experiment = ? AND issued_at >= ? AND target_dt <= ?" + _filt,
+            _params,
+        )
+        fdf = pd.DataFrame(
+            cursor.fetchall(),
+            columns=["target_dt", "issued_at", "lead_minutes", "predicted"],
+        )
+        if not fdf.empty:
+            fdf["target_dt"] = pd.to_datetime(fdf["target_dt"], errors="coerce")
+            fdf["issued_at"] = pd.to_datetime(fdf["issued_at"], errors="coerce")
+            fdf["predicted"] = pd.to_numeric(fdf["predicted"], errors="coerce")
+            fdf["lead_minutes"] = pd.to_numeric(fdf["lead_minutes"], errors="coerce")
+            fdf = fdf.dropna(subset=["target_dt", "issued_at", "predicted"])
+            fdf, _capp = _drop_corrupt(fdf, "predicted")
+            if _capp:
+                corrupt["app"] = _capp
+                logger.warning(
+                    "external-comparison[%s]: dropped %d non-physical app "
+                    "forecast value(s) (max ≈ %s at %s, cap %.3g — likely a "
+                    "log-transform inversion overflow); flagged in the UI.",
+                    experiment, _capp["count"], _capp["max_value"],
+                    _capp["last_ts"], _corrupt_cap,
+                )
+            fdf["grid"] = fdf["target_dt"].dt.floor(freq)
+            fdf = fdf.sort_values("issued_at")
+        app_raw = (
+            fdf.groupby("grid")["predicted"].last().sort_index()
+            if not fdf.empty else pd.Series(dtype="float64")
+        )
+        # The app forecast is already per-interval (delta for cumulative
+        # targets; the instantaneous value otherwise) → never differenced.
+        app_factor = _canon_factor(t_dim, t_base)
+        app_canon = (app_raw * app_factor) if (unit_aware and not app_raw.empty) else app_raw
+        app_disp = _display(app_canon)
+        app_points = int(app_disp.notna().sum()) if app_disp is not None else 0
+        app_median_lead = _median_lead(fdf)
+
+        ext_table_exists = _table_exists("external_forecast_log")
+
+        # --- resolve each external → canonical + display ---
+        ext_items = []
+        for spec in externals:
+            entity = spec.get("entity")
+            if not entity:
+                continue
+            mode = spec.get("mode", "state") or "state"
+            scale = spec.get("scale")
+            # Composite source key (entity + attribute + value_key) so the
+            # same entity can supply several distinct forecasts.
+            source = spec.get("source") or entity
+            label = spec.get("label") or (entity.split(".")[-1] if entity else "External")
+            e_dim, e_base = _classify_unit(spec.get("unit"))
+            edf = pd.DataFrame(
+                columns=["target_dt", "issued_at", "lead_minutes", "value", "grid"]
+            )
+            update_min = None
+            if mode == "attribute":
+                if ext_table_exists:
+                    cursor.execute(
+                        "SELECT target_dt, issued_at, lead_minutes, value "
+                        "FROM external_forecast_log "
+                        "WHERE experiment = ? AND source = ? "
+                        "AND issued_at >= ? AND target_dt <= ?",
+                        (experiment, source, cutoff_str, now_str),
+                    )
+                    edf = pd.DataFrame(
+                        cursor.fetchall(),
+                        columns=["target_dt", "issued_at", "lead_minutes", "value"],
+                    )
+                if not edf.empty:
+                    edf["target_dt"] = pd.to_datetime(edf["target_dt"], errors="coerce")
+                    edf["issued_at"] = pd.to_datetime(edf["issued_at"], errors="coerce")
+                    edf["value"] = pd.to_numeric(edf["value"], errors="coerce")
+                    edf["lead_minutes"] = pd.to_numeric(edf["lead_minutes"], errors="coerce")
+                    edf = edf.dropna(subset=["target_dt", "issued_at", "value"])
+                    if scale is not None:
+                        edf["value"] = edf["value"] * float(scale)
+                    edf, _ce = _drop_corrupt(edf, "value")
+                    if _ce:
+                        _ce["label"] = label
+                        corrupt["externals"].append(_ce)
+                        logger.warning(
+                            "external-comparison[%s]: dropped %d non-physical "
+                            "value(s) from external %s (max ≈ %s).",
+                            experiment, _ce["count"], source, _ce["max_value"],
+                        )
+                    edf["grid"] = edf["target_dt"].dt.floor(freq)
+                    edf = edf.sort_values("issued_at")
+                ext_raw = (
+                    edf.groupby("grid")["value"].last().sort_index()
+                    if not edf.empty else pd.Series(dtype="float64")
+                )
+            else:  # state mode
+                table = spec.get("table")
+                srows = []
+                if _table_exists(table):
+                    cursor.execute(
+                        f"SELECT ds, value FROM {table} WHERE ds >= ? ORDER BY ds",
+                        (cutoff_str,),
+                    )
+                    srows = cursor.fetchall()
+                ext_raw = _raw_grid(srows)
+                if scale is not None and not ext_raw.empty:
+                    ext_raw = ext_raw * float(scale)
+                try:
+                    ts = pd.to_datetime(
+                        pd.DataFrame(srows, columns=["ds", "value"])["ds"],
+                        errors="coerce",
+                    ).dropna().sort_values()
+                    if len(ts) >= 2:
+                        diffs = ts.diff().dropna().dt.total_seconds() / 60.0
+                        if len(diffs):
+                            update_min = round(float(diffs.median()), 1)
+                except Exception:
+                    update_min = None
+
+            # Resolve cumulative: explicit override wins; else auto-detect.
+            override = spec.get("is_cumulative")
+            if override is None:
+                is_cum = _looks_cumulative(ext_raw) if e_dim != "power" else False
+                auto_cumulative = bool(is_cum)
+            else:
+                is_cum = bool(override)
+                auto_cumulative = False
+
+            if unit_aware and e_dim in ("power", "energy"):
+                ext_canon = _to_canon(ext_raw, e_dim, e_base, is_cum)
+                ext_convertible = True
+            else:
+                # Unknown unit (or non-unit-aware target): best-effort eval
+                # space; the scale guard flags if it doesn't line up.
+                ext_canon = _legacy_eval(ext_raw, is_cum)
+                ext_convertible = unit_aware is False
+            ext_disp = _display(ext_canon)
+            ext_items.append({
+                "entity": entity, "label": label, "mode": mode,
+                "is_cumulative": is_cum, "auto_cumulative": auto_cumulative,
+                "dim": e_dim, "base": e_base, "convertible": ext_convertible,
+                "canon": ext_canon, "disp": ext_disp, "edf": edf,
+                "update_min": update_min,
+            })
+
+        # --- shared overlay grid (union within the window) ---
+        idx = pd.DatetimeIndex([])
+        for s in [actual_disp, app_disp] + [it["disp"] for it in ext_items]:
+            if s is not None and not s.empty:
+                idx = idx.union(s.index)
+        if len(idx):
+            lo, hi = pd.Timestamp(cutoff), pd.Timestamp(now)
+            idx = idx[(idx >= lo) & (idx <= hi)].sort_values()
+
+        def _col(s) -> list:
+            if s is None or s.empty or len(idx) == 0:
+                return [None] * len(idx)
+            r = s.reindex(idx)
+            return [None if pd.isna(v) else round(float(v), 4) for v in r.values]
+
+        result["grid_points"] = int(len(idx))
+        result["app_points"] = app_points
+        result["overlay"] = {
+            "ds": [_iso_utc(t) for t in idx],
+            "actual": _col(actual_disp),
+            "app": _col(app_disp),
+            "externals": [
+                {"entity": it["entity"], "label": it["label"],
+                 "mode": it["mode"], "values": _col(it["disp"])}
+                for it in ext_items
+            ],
+        }
+        if len(idx):
+            result["date_range"] = {"start": _iso_utc(idx.min()), "end": _iso_utc(idx.max())}
+
+        # --- typical magnitude (for "% of typical") in the display space ---
+        # Mean |actual| over the window; the same normaliser for every source
+        # so "% of typical" is comparable across rows.
+        _ad_win = actual_disp.reindex(idx) if (actual_disp is not None and len(idx)) else actual_disp
+        typical = (
+            round(float(_ad_win.abs().mean()), 4)
+            if (_ad_win is not None and _ad_win.notna().any()) else 0.0
+        )
+
+        def _pct(mae):
+            return round(mae / typical * 100.0, 1) if typical and typical > 1e-9 else None
+
+        def _err(df, col):
+            e = (df[col] - df["actual"]).astype(float)
+            mae = float(e.abs().mean())
+            return {
+                "mae": round(mae, 4),
+                "rmse": round(float(np.sqrt((e ** 2).mean())), 4),
+                "bias": round(float(e.mean()), 4),
+                "pct": _pct(mae),
+            }
+
+        def _daily_err(pred_canon, common_index):
+            """Daily-total MAE/bias on the CANONICAL per-interval energy,
+            restricted to the supplied (already 2- or 3-way intersected)
+            index so every series sums over identical bins each day — no
+            partial-day coverage bias."""
+            if pred_canon is None or actual_canon is None or len(common_index) == 0:
+                return None
+            m = pd.DataFrame({
+                "a": actual_canon.reindex(common_index),
+                "p": pred_canon.reindex(common_index),
+            }).dropna()
+            if m.empty:
+                return None
+            day = m.index.normalize()
+            a_d = m["a"].groupby(day).sum()
+            p_d = m["p"].groupby(day).sum()
+            de = (p_d - a_d).astype(float)
+            return {
+                "mae": round(float(de.abs().mean()), 4),
+                "bias": round(float(de.mean()), 4),
+                "days": int(de.shape[0]),
+            }
+
+        def _metrics_block(pred_disp, pred_canon):
+            """Standalone accuracy of one source vs the actual on their OWN
+            2-way overlap (for the row display): mae/rmse/bias/% of typical,
+            daily MAE/bias, distinct days logged, and the warming-up flag."""
+            al = pd.DataFrame({"actual": actual_disp, "pred": pred_disp})
+            if len(idx):
+                al = al.reindex(idx)
+            common = al.dropna(subset=["actual", "pred"])
+            if common.empty:
+                return None
+            e = (common["pred"] - common["actual"]).astype(float)
+            mae = float(e.abs().mean())
+            day = common.index.normalize()
+            days_logged = int(len(set(day)))
+            return {
+                "mae": round(mae, 4),
+                "rmse": round(float(np.sqrt((e ** 2).mean())), 4),
+                "bias": round(float(e.mean()), 4),
+                "pct": _pct(mae),
+                "n": int(len(common)),
+                "daily": _daily_err(pred_canon, common.index),
+                "days_logged": days_logged,
+                "warming": days_logged < EXTERNAL_COMPARISON_WARMUP_DAYS,
+            }
+
+        # --- per-external head-to-head + timing (on the display series) ---
+        for it in ext_items:
+            aligned = pd.DataFrame(
+                {"actual": actual_disp, "app": app_disp, "external": it["disp"]}
+            )
+            if len(idx):
+                aligned = aligned.reindex(idx)
+            common = aligned.dropna(subset=["actual", "app", "external"])
+            n_common = int(len(common))
+            h2h = None
+            scale_ratio = None
+            scale_mismatch = False
+            if n_common >= 1:
+                app_m = _err(common, "app")
+                ext_m = _err(common, "external")
+                if app_m["mae"] < ext_m["mae"]:
+                    winner = "app"
+                elif ext_m["mae"] < app_m["mae"]:
+                    winner = "external"
+                else:
+                    winner = "tie"
+                impr = None
+                if ext_m["mae"] > 0:
+                    impr = round((ext_m["mae"] - app_m["mae"]) / ext_m["mae"] * 100.0, 1)
+                h2h = {
+                    "n": n_common, "app": app_m, "external": ext_m,
+                    "winner": winner, "app_mae_improvement_pct": impr,
+                    "daily": {
+                        "app": _daily_err(app_canon, common.index),
+                        "external": _daily_err(it["canon"], common.index),
+                    },
+                }
+                # Scale-mismatch guard: after unit-aware conversion a genuine
+                # like-for-like sits near ratio 1; a large gap means the units
+                # couldn't be reconciled (unknown unit, or a quantity we can't
+                # bridge) — the head-to-head isn't meaningful.
+                mean_actual = float(common["actual"].abs().mean())
+                mean_ext = float(common["external"].abs().mean())
+                if mean_actual > 1e-9 and mean_ext > 1e-9:
+                    scale_ratio = round(mean_ext / mean_actual, 2)
+                    scale_mismatch = scale_ratio > 4.0 or scale_ratio < 0.25
+            ext_points = int(it["disp"].notna().sum()) if it["disp"] is not None else 0
+            timing = {
+                "app_median_lead_minutes": app_median_lead,
+                "external_median_lead_minutes": (
+                    _median_lead(it["edf"]) if it["mode"] == "attribute" else None
+                ),
+                "external_contemporaneous": it["mode"] != "attribute",
+                "external_update_minutes": it["update_min"],
+                "external_points": ext_points,
+                "app_points": app_points,
+                "grid_points": int(len(idx)),
+                "external_stale": bool(app_points > 0 and ext_points < 0.5 * app_points),
+            }
+            # Standalone row metrics (own 2-way overlap with actual) + the
+            # warming-up gate. days_logged counts distinct calendar days with
+            # overlapping data; below EXTERNAL_COMPARISON_WARMUP_DAYS the row
+            # is flagged provisional/inconclusive.
+            it["scale_mismatch"] = scale_mismatch  # consumed by the skill block
+            ext_block = _metrics_block(it["disp"], it["canon"])
+            result["comparisons"].append({
+                "entity": it["entity"], "label": it["label"], "mode": it["mode"],
+                "head_to_head": h2h, "timing": timing, "n": n_common,
+                "scale_ratio": scale_ratio, "scale_mismatch": scale_mismatch,
+                "auto_cumulative": it["auto_cumulative"],
+                "metrics": ext_block,
+                "days_logged": (ext_block["days_logged"] if ext_block else 0),
+                "warming": (ext_block["warming"] if ext_block else True),
+            })
+
+        # --- app reference row (standalone) + the top-level warming-up gate ---
+        app_self = _metrics_block(app_disp, app_canon)
+        result["app_self"] = app_self
+        result["app_days_logged"] = app_self["days_logged"] if app_self else 0
+        result["typical"] = typical
+        result["warmup_days"] = EXTERNAL_COMPARISON_WARMUP_DAYS
+        # Surface any non-physical forecast values we excluded so the blowup
+        # is VISIBLE (a stale long-horizon blowup is otherwise masked by the
+        # latest-per-target / h=1 views and shows up nowhere else).
+        if corrupt["app"] or corrupt["externals"]:
+            result["corrupt"] = corrupt
+
+        # Top-level warming gate: inconclusive while the add-on OR any
+        # configured external still lacks the threshold days of overlap.
+        _warm = [bool(app_self and app_self["warming"])]
+        for _c in result["comparisons"]:
+            if _c.get("metrics"):
+                _warm.append(bool(_c["warming"]))
+        result["warming_up"] = any(_warm) if (app_self or result["comparisons"]) else False
+
+        # --- combined lead-time (app + attribute externals), always
+        #     per-interval canonical energy so horizons are comparable ---
+        def _leadcurve(traj, value_col, is_cum, factor):
+            # Per-bucket error SUMS (abs / squared / signed) + count, so the
+            # skill block can aggregate exact MAE / RMSE / bias over any band
+            # via Σ/Σn (the per-bucket means alone can't be re-pooled).
+            empty = pd.DataFrame(columns=["abs_sum", "sq_sum", "signed_sum", "count"])
+            if traj is None or traj.empty or value_col not in traj.columns:
+                return empty
+            t = traj[["grid", "issued_at", "lead_minutes", value_col]].copy()
+            if is_cum:
+                t = t.sort_values(["issued_at", "grid"])
+                t["val"] = t.groupby("issued_at")[value_col].diff()
+                t.loc[t["val"] < 0, "val"] = np.nan
+                t = t.dropna(subset=["val"])
+                vcol = "val"
+            else:
+                vcol = value_col
+            t = t.join(actual_canon.rename("actual"), on="grid")
+            t = t.dropna(subset=["actual", vcol])
+            if t.empty:
+                return empty
+            t["err"] = t[vcol] * factor - t["actual"]
+            t["abs_e"] = t["err"].abs()
+            t["sq_e"] = t["err"] * t["err"]
+            t["bucket"] = (t["lead_minutes"] // bucket_min) * bucket_min
+            return t.groupby("bucket").agg(
+                abs_sum=("abs_e", "sum"),
+                sq_sum=("sq_e", "sum"),
+                signed_sum=("err", "sum"),
+                count=("err", "size"),
+            )
+
+        attr_items = [it for it in ext_items if it["mode"] == "attribute"]
+        if attr_items:
+            app_curve = _leadcurve(fdf, "predicted", False, _canon_factor(t_dim, t_base))
+            ext_curves = [
+                (it, _leadcurve(it["edf"], "value", it["is_cumulative"],
+                                _canon_factor(it["dim"], it["base"])))
+                for it in attr_items
+            ]
+            buckets = set(app_curve.index)
+            for _it, c in ext_curves:
+                buckets |= set(c.index)
+            buckets = sorted(buckets)
+            if buckets:
+                def _ser(curve, key):
+                    out = []
+                    for b in buckets:
+                        if b in curve.index:
+                            cnt = int(curve.loc[b, "count"])
+                            if key == "mae":
+                                out.append(round(float(curve.loc[b, "abs_sum"]) / cnt, 4) if cnt else None)
+                            else:
+                                out.append(cnt)
+                        else:
+                            out.append(None if key == "mae" else 0)
+                    return out
+                result["lead_time"] = {
+                    "lead_minutes": [int(b) for b in buckets],
+                    "app_mae": _ser(app_curve, "mae"),
+                    "app_n": _ser(app_curve, "n"),
+                    "externals": [
+                        {"entity": it["entity"], "label": it["label"],
+                         "mae": _ser(c, "mae"), "n": _ser(c, "n")}
+                        for it, c in ext_curves
+                    ],
+                }
+
+            # --- "Same lead time" (skill) scoring ----------------------------
+            # Score the app + each trajectory external over the lead band they
+            # all cover, so the head-to-head isolates model skill from update
+            # frequency. The MAE over the band is the sample-weighted mean of
+            # the per-bucket MAEs: Σ(mae_b·n_b) / Σ(n_b). State-mode sources
+            # (lead 0 only) and scale-mismatched ones can't take part and are
+            # listed as excluded.
+            excluded = []
+            for it, c in ext_curves:
+                if it.get("scale_mismatch"):
+                    excluded.append({"label": it["label"], "reason": "scale mismatch"})
+                elif c.empty:
+                    excluded.append({"label": it["label"], "reason": "no overlapping forecasts yet"})
+            for it in ext_items:
+                if it["mode"] != "attribute":
+                    excluded.append({"label": it["label"], "reason": "state-mode (nowcast only)"})
+            eligible = [(it, c) for it, c in ext_curves
+                        if not it.get("scale_mismatch") and not c.empty]
+            band = set(app_curve.index)
+            for it, c in eligible:
+                band &= set(c.index)
+            band = sorted(band)
+            if eligible and band:
+                # Typical magnitude in the canonical (per-interval) space the
+                # lead curves live in, for "% of typical" at matched lead.
+                _ac = (actual_canon.reindex(idx)
+                       if (actual_canon is not None and len(idx)) else actual_canon)
+                typical_canon = (float(_ac.abs().mean())
+                                 if (_ac is not None and _ac.notna().any()) else None)
+
+                def _band_stats(curve):
+                    a = s = g = 0.0
+                    den = 0
+                    for b in band:
+                        if b in curve.index:
+                            a += float(curve.loc[b, "abs_sum"])
+                            s += float(curve.loc[b, "sq_sum"])
+                            g += float(curve.loc[b, "signed_sum"])
+                            den += int(curve.loc[b, "count"])
+                    if den <= 0:
+                        return {"mae": None, "rmse": None, "bias": None, "pct": None, "n": 0}
+                    mae = a / den
+                    return {
+                        "mae": round(mae, 4),
+                        "rmse": round((s / den) ** 0.5, 4),
+                        "bias": round(g / den, 4),
+                        "pct": (round(mae / typical_canon * 100.0, 1)
+                                if typical_canon and typical_canon > 1e-9 else None),
+                        "n": den,
+                    }
+                skill_rows = [dict({"entity": None, "label": "ML Forecast Lab",
+                                    "app": True}, **_band_stats(app_curve))]
+                for it, c in eligible:
+                    skill_rows.append(dict({"entity": it["entity"], "label": it["label"],
+                                            "app": False}, **_band_stats(c)))
+                result["skill"] = {
+                    "available": True,
+                    "lead_band_minutes": [int(band[0]), int(band[-1])],
+                    "unit": result.get("lead_unit", ""),
+                    "rows": skill_rows,
+                    "excluded": excluded,
+                }
+            elif excluded:
+                result["skill"] = {
+                    "available": False,
+                    "reason": ("no common lead band" if eligible else
+                               "needs a trajectory (attribute-mode) source"),
+                    "excluded": excluded,
+                }
+
+        return result
 
     # ------------------------------------------------------------------
     # Benchmark results persistence

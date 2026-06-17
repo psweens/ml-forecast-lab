@@ -107,6 +107,9 @@
     {% else %}
     <a class="nav-disabled" title="Promote a model to production to see live forecast accuracy">Forecast Accuracy</a>
     {% endif %}
+    {% if exp_config %}
+    <a data-tab="sec-external-comparison" onclick="showTab(this)">Forecast Comparison</a>
+    {% endif %}
 </nav>
 
 <!-- ====== TAB: Settings ====== -->
@@ -120,7 +123,7 @@
          Backed by the /data-report endpoint which uses the same fetch
          path as the benchmark but skips the rest of the pipeline. -->
     <div class="settings-group">
-        <h3 class="settings-group-title">Data sanity check
+        <h3 class="settings-group-title">Data Sanity Check
             <span class="info-tip">?<span class="tip-text">Runs the same data fetch the benchmark would, then reports rows fetched vs expected, biggest gap, recorder freshness, missing-value rate, zero-run length, and (for cumulative sensors) max-increment hits. Use it before clicking Run Pipeline to avoid spending an hour benchmarking against broken data. The target is analysed in detail and every configured covariate gets its own compact verdict card below — a broken covariate (gap, dead sensor, wrong units) won't sneak into a benchmark.</span></span>
         </h3>
         <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
@@ -1200,7 +1203,7 @@
     <!-- Sweep results — populated by polling /tuning-all once a sweep is in
          flight. Hidden until at least one result is available. -->
     <div id="tune-all-results" style="display:none;margin-bottom:1.5rem;padding:0.75rem 1rem;background:var(--bg-tertiary);border-radius:0.5rem;border:1px solid var(--border);">
-        <h3 style="margin:0 0 0.5rem 0;font-size:1rem;">Sweep results <span class="info-tip">?<span class="tip-text">One row per model tuned during the latest 'Tune all enabled' run. Apply locks the model's tuned params into mlfl.yaml and promotes it to production — the same as the single-model Apply button.</span></span></h3>
+        <h3 style="margin:0 0 0.5rem 0;font-size:1rem;">Sweep Results <span class="info-tip">?<span class="tip-text">One row per model tuned during the latest 'Tune all enabled' run. Apply locks the model's tuned params into mlfl.yaml and promotes it to production — the same as the single-model Apply button.</span></span></h3>
         <table class="metrics-table" style="font-size:0.85rem;">
             <thead>
                 <tr><th>Model</th><th>Best composite</th><th>Default MAE</th><th>Tuned MAE</th><th>Δ MAE</th><th>Status</th><th></th></tr>
@@ -2074,6 +2077,233 @@
 </div>
 {% endif %}
 
+<!-- ====== TAB: Forecast Comparison ====== -->
+{% if exp_config %}
+{% set _exts = exp_config.external_forecasts %}
+<div class="tab-section" id="sec-external-comparison" style="display:none;">
+<section class="section">
+    <h2>Forecast Comparison
+        <span class="info-tip">?<span class="tip-text">Head-to-head: ML Forecast Lab's published forecast vs up to five third-party forecasts of this target (ones not produced by ML Forecast Lab — Solcast, a utility day-ahead curve, another model), all scored against the actuals. Add the sensors below; data is captured each production forecast cycle and accrues going forward — there's no historical backfill, so a freshly-added forecast fills in over the coming days.</span></span>
+    </h2>
+
+    <!-- Manage the compared third-party forecasts (collapsible; open on first run) -->
+    <details class="diag-accordion" id="external-manage"{% if not _exts %} open{% endif %}>
+        <summary>Third-party forecasts to compare against{% if _exts %} · {{ _exts | length }}{% endif %}
+            <span class="info-tip">?<span class="tip-text">Each entry is an HA entity holding a forecast of this same target, produced by something other than ML Forecast Lab. Add up to five. <b>Sensor state</b> mode treats the entity's recorded value as its estimate for that moment; <b>Forecast attribute</b> mode reads a future trajectory from an attribute (Solcast, weather) for a per-horizon comparison.</span></span>
+        </summary>
+        <div class="settings-group">
+        <div class="covariate-list" id="external-list">
+            {% if _exts %}
+            {% for ext in _exts %}
+            <div class="covariate-row" data-entity="{{ ext.entity_id }}"
+                 data-mode="{{ ext.mode }}"
+                 data-attribute="{{ ext.attribute if ext.mode == 'attribute' else '' }}"
+                 data-value-key="{{ ext.value_key if (ext.mode == 'attribute' and ext.value_key) else '' }}">
+                <span class="cov-entity">{{ ext.label or ext.entity_id }}</span>
+                <span class="cov-meta monospace" style="font-size:0.75rem;color:var(--text-secondary);">{{ ext.entity_id }}</span>
+                <span class="cov-meta"><span class="status-badge" style="font-size:0.7rem;padding:0.1rem 0.4rem;">{{ 'attribute' if ext.mode == 'attribute' else 'state' }}</span></span>
+                {% if ext.mode == 'attribute' and ext.attribute %}<span class="cov-meta" style="font-style:italic;">attr: {{ ext.attribute }}</span>{% endif %}
+                {% if ext.mode == 'attribute' and ext.value_key %}<span class="cov-meta" style="font-style:italic;">key: {{ ext.value_key }}</span>{% endif %}
+                {% if ext.scale is not none %}<span class="cov-meta">scale: {{ ext.scale }}</span>{% endif %}
+                {% if ext.is_cumulative is not none %}<span class="cov-meta">{{ 'cumulative' if ext.is_cumulative else 'per-interval' }}</span>{% endif %}
+                <button class="cov-remove-btn" onclick="removeExternalForecast(this)" title="Remove">&times;</button>
+            </div>
+            {% endfor %}
+            {% else %}
+            <p id="no-external-msg" style="color:var(--text-secondary);font-size:0.85rem;">No third-party forecasts added yet — add one below to start comparing.</p>
+            {% endif %}
+        </div>
+
+        <div class="add-cov-form" id="add-external-form" style="margin-top:0.75rem;">
+            <div class="exp-field entity-search-wrapper">
+                <label class="field-label">Entity <span class="info-tip">?<span class="tip-text">The HA entity holding the third-party forecast. Start typing to search your live entity list.</span></span></label>
+                <input type="text" class="setting-input" id="ext-entity-input" placeholder="Search HA entities (e.g. sensor.solcast_forecast)..."
+                       autocomplete="off" oninput="searchEntities(this)">
+                <div class="entity-search-results" style="display:none;"></div>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Read forecast from <span class="info-tip">?<span class="tip-text"><b>Sensor state</b>: the entity's recorded value at each time IS its estimate for that moment (compared contemporaneously). <b>Forecast attribute</b>: a trajectory of future <code>{datetime, value}</code> points in an attribute (Solcast, weather) — enables a per-horizon comparison.</span></span></label>
+                <select class="setting-input" id="ext-mode-input" onchange="onExternalModeChanged()">
+                    <option value="state">Sensor state (time-series)</option>
+                    <option value="attribute">Forecast attribute (trajectory)</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Is cumulative? <span class="info-tip">?<span class="tip-text">Whether the forecast is a running total that must be differenced to per-interval demand. <b>Inherit</b> uses the target's "Cumulative source" setting.</span></span></label>
+                <select class="setting-input" id="ext-iscum-input">
+                    <option value="">Inherit from target</option>
+                    <option value="true">Yes — cumulative</option>
+                    <option value="false">No — per-interval</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Scale <span class="info-tip">?<span class="tip-text">Optional multiplier to fix a unit mismatch (e.g. Wh→kWh = 0.001). Blank = none.</span></span></label>
+                <input type="number" class="setting-input" id="ext-scale-input" step="any" placeholder="None">
+            </div>
+            <div class="exp-field" id="ext-attr-field" style="display:none;">
+                <label class="field-label">Forecast data <span class="info-tip">?<span class="tip-text">Which attribute on the entity holds the forecast to compare from — auto-detected from the entity's live attributes once you pick it (e.g. <code>results</code> for Predbat, <code>detailedForecast</code> for Solcast, <code>forecast</code> for weather, or a <code>hourly</code>/<code>daily</code> weather-service forecast). "Auto" uses the resolver's default (<code>forecast</code>).</span></span></label>
+                <select class="setting-input" id="ext-attr-input" onchange="onExternalAttrChanged()">
+                    <option value="">Auto (forecast)</option>
+                </select>
+            </div>
+            <div class="exp-field" id="ext-key-field" style="display:none;">
+                <label class="field-label">Value key <span class="info-tip">?<span class="tip-text">Which value within each forecast entry to read (e.g. <code>pv_estimate</code> for Solcast). Populated from the chosen attribute; "Auto-detect" picks the first recognised numeric key.</span></span></label>
+                <select class="setting-input" id="ext-key-input">
+                    <option value="">Auto-detect</option>
+                </select>
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Display label <span class="info-tip">?<span class="tip-text">Friendly name shown in the comparison. Blank uses the entity's short name.</span></span></label>
+                <input type="text" class="setting-input" id="ext-label-input" placeholder="e.g. Solcast">
+            </div>
+            <button type="button" class="btn btn-secondary" id="add-external-btn" onclick="addExternalForecast()">Add forecast</button>
+        </div>
+        <p style="color:var(--text-secondary);font-size:0.8rem;margin:0.6rem 0 0 0;">Up to 5.{% if experiment.mode != 'production' %} <b>This experiment is in lab mode</b> — add forecasts now; scoring begins once you promote it to production (that's when ML Forecast Lab logs its own forecasts to compare against).{% endif %}</p>
+        </div>
+    </details>
+
+    <div class="acc-top-controls">
+        <div class="acc-control">
+            <label for="external-window">Window:</label>
+            <select id="external-window" class="setting-input" onchange="loadExternalComparison()">
+                <option value="7">Last 7 days</option>
+                <option value="30" selected>Last 30 days</option>
+                <option value="90">Last 90 days</option>
+            </select>
+            <span class="info-tip">?<span class="tip-text">Time range for every chart and number below. Shorter reflects recent behaviour; longer gives more samples.</span></span>
+        </div>
+        <div class="acc-control">
+            <label>Compare:</label>
+            <div class="toggle-group" style="display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+                <button type="button" id="external-cmp-operational" class="toggle-btn active" onclick="setExternalCompare('operational')" style="padding:0.35rem 0.75rem;background:var(--accent-secondary);color:#fff;border:none;cursor:pointer;font-size:0.85rem;">Best available</button>
+                <button type="button" id="external-cmp-skill" class="toggle-btn" onclick="setExternalCompare('skill')" style="padding:0.35rem 0.75rem;background:transparent;color:var(--text-secondary);border:none;cursor:pointer;font-size:0.85rem;">Same lead time</button>
+            </div>
+            <span class="info-tip">?<span class="tip-text"><b>Best available</b> (operational): each forecaster's most recent prediction for each moment — what you could act on right now, so a faster-updating source is rewarded for its freshness. <b>Same lead time</b> (skill): every trajectory forecaster scored over the lead band they all cover, isolating model skill from update frequency. State-mode (nowcast) sources only appear in Best available.</span></span>
+        </div>
+        <div class="acc-control">
+            <label>Analysis:</label>
+            <div class="toggle-group" style="display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+                <button type="button" id="external-mode-per-interval" class="toggle-btn active" onclick="setExternalAnalysis('per_interval')" style="padding:0.35rem 0.75rem;background:var(--accent-secondary);color:#fff;border:none;cursor:pointer;font-size:0.85rem;">Per-interval</button>
+                <button type="button" id="external-mode-cumulative" class="toggle-btn" onclick="setExternalAnalysis('cumulative')" style="padding:0.35rem 0.75rem;background:transparent;color:var(--text-secondary);border:none;cursor:pointer;font-size:0.85rem;">Cumulative</button>
+            </div>
+            <span class="info-tip">?<span class="tip-text"><b>Per-interval</b>: per-bin demand in the target's native unit (e.g. kW). <b>Cumulative</b>: the running daily total (kWh), integrating power forecasts to energy — this is what makes a cumulative-energy sensor directly comparable. Scoring follows the chosen view; the horizon chart stays per-interval.</span></span>
+        </div>
+        <div class="acc-control">
+            <label for="external-metric">Rank by:</label>
+            <select id="external-metric" class="setting-input" onchange="setExternalMetric(this.value)">
+                <option value="overall" selected>Overall (composite)</option>
+                <option value="mae">MAE</option>
+                <option value="rmse">RMSE</option>
+                <option value="bias">Bias</option>
+                <option value="pct">Error %</option>
+                <option value="daily_mae">Daily MAE</option>
+                <option value="daily_bias">Daily Bias</option>
+            </select>
+            <span class="info-tip">?<span class="tip-text">Which metric ranks the table and drives the verdict. <b>Overall</b> (default) is a composite mean rank across MAE, RMSE and Daily MAE — the same Demšar-style averaging the Results tab uses; lower is better. Pick a single metric to rank by it instead. <b>Error %</b> normalises MAE against typical demand so it's readable without knowing the units (0% = perfect, lower is better); <b>Daily MAE/bias</b> compare the running daily total. The ranked order, the #1/#2/#3 badge, the highlighted column and the "vs MLFL" gap all follow this choice.</span></span>
+        </div>
+    </div>
+
+    <!-- Warming-up banner (results inconclusive below the threshold) -->
+    <div id="external-warming-banner" style="display:none;margin:0.25rem 0 0.75rem 0;padding:0.6rem 0.9rem;border:1px solid var(--warning);border-radius:8px;background:rgba(245,158,11,0.08);color:var(--warning);font-size:0.9rem;"></div>
+
+    <!-- Verdict headline -->
+    <div id="external-verdict-card" class="verdict-card" style="display:none;">
+        <div class="verdict-headline" id="external-verdict-headline">Comparing forecasts…</div>
+    </div>
+
+    <!-- Ranked head-to-head table -->
+    <div id="external-ranktable-group" class="settings-group" style="display:none;">
+        <h3 class="settings-group-title">Accuracy Ranking
+            <span class="info-tip">?<span class="tip-text">Each forecaster's error vs the actuals. Each external row is scored on the samples where the actual, ML Forecast Lab's forecast, AND that external all exist (so each head-to-head is like-for-like; "ML Forecast Lab" MAE can differ row-to-row because each external covers a different set of moments). Lower MAE is better; the best in each row is highlighted.</span></span>
+        </h3>
+        <div class="table-container">
+            <table class="metrics-table" id="external-ranktable">
+                <thead><tr>
+                    <th>Rank <span class="info-tip">?<span class="tip-text">Standing on the selected "Rank by" metric. <b>Overall</b> is a composite mean rank across MAE, RMSE and Daily MAE (the metric on which a forecaster ranks best counts the same as the others; lower mean rank = better) — the small number is that mean rank. Mirrors the Results tab. Forecasters on a different scale (⚠) aren't ranked.</span></span></th>
+                    <th>Forecast</th>
+                    <th>Lead <span class="info-tip">?<span class="tip-text">How far ahead each forecaster's scored prediction was issued (its median lead). ML Forecast Lab re-forecasts every cycle, so its lead is short; a third-party that refreshes only a few times a day is judged at a much longer lead — a harder task. "Best available" scores each at its own lead (operationally what you can act on); switch to "Same lead time" for an equal-horizon skill comparison.</span></span></th>
+                    <th data-metric="mae">MAE</th>
+                    <th data-metric="rmse">RMSE</th>
+                    <th data-metric="bias">Bias <span class="info-tip">?<span class="tip-text">Mean signed error (forecast − actual). Positive = over-forecasting on average, negative = under-forecasting. Near zero is unbiased.</span></span></th>
+                    <th data-metric="pct">Error % <span class="info-tip">?<span class="tip-text">Error as a percentage of typical demand — <code>MAE ÷ mean(|actual|)</code> over the window. <b>0% is a perfect forecast; lower is better.</b> 100% means the average miss is as big as typical demand. Unit-free, so you can read accuracy without knowing the kW/kWh scale.</span></span></th>
+                    <th data-metric="daily_mae">Daily MAE</th>
+                    <th data-metric="daily_bias">Daily Bias</th>
+                    <th>vs MLFL <span class="info-tip">?<span class="tip-text">How this external's <b>MAE</b> compares to MLFL's (ML Forecast Lab) on their common samples. "MLFL N% better" means MLFL's mean absolute error is N% lower than this external's: <code>(external MAE − MLFL MAE) / external MAE</code>. Always MAE-based, regardless of the "Rank by" metric.</span></span></th><th>Days</th><th>Samples</th>
+                </tr></thead>
+                <tbody id="external-ranktable-body"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Skill leaderboard (same lead time) -->
+    <div id="external-skilltable-group" class="settings-group" style="display:none;">
+        <h3 class="settings-group-title">Accuracy at Matched Lead
+            <span class="info-tip">?<span class="tip-text">Every trajectory forecaster scored over the lead band they all cover, so the ranking reflects model skill rather than how often each source refreshes. MAE is in the per-interval space. State-mode (nowcast) and scale-mismatched sources can't be matched on lead and are listed under the table.</span></span>
+        </h3>
+        <p id="external-skill-band" style="color:var(--text-secondary);font-size:0.85rem;margin:0 0 0.5rem 0;"></p>
+        <div class="table-container">
+            <table class="metrics-table" id="external-skilltable">
+                <thead><tr>
+                    <th>Rank</th><th>Forecast</th><th>MAE</th><th>RMSE</th>
+                    <th>Bias <span class="info-tip">?<span class="tip-text">Mean signed error at matched lead (forecast − actual). Positive = over-forecasting, negative = under. Near zero is unbiased.</span></span></th>
+                    <th>Error % <span class="info-tip">?<span class="tip-text">Matched-lead error as a percentage of typical per-interval demand. <b>0% is a perfect forecast; lower is better.</b> 100% means the average miss is as big as typical demand. Unit-free, so you can read accuracy without knowing the kW/kWh scale.</span></span></th>
+                    <th>vs MLFL <span class="info-tip">?<span class="tip-text">How this forecaster's matched-lead MAE compares to ML Forecast Lab's over the same lead band: <code>(other − MLFL) / other</code>. Positive = MLFL better.</span></span></th>
+                    <th>Samples</th>
+                </tr></thead>
+                <tbody id="external-skilltable-body"></tbody>
+            </table>
+        </div>
+        <p id="external-skill-excluded" style="color:var(--text-secondary);font-size:0.8rem;margin:0.5rem 0 0 0;"></p>
+        <p id="external-skill-unavailable" style="color:var(--warning);font-size:0.9rem;display:none;"></p>
+    </div>
+
+    <!-- Comparison basis / timing transparency -->
+    <div id="external-timing" style="display:none;margin:0.25rem 0 0.75rem 0;font-size:0.85rem;color:var(--text-secondary);">
+        <p id="external-timing-basis" style="margin:0;"></p>
+        <p id="external-timing-warning" style="margin:0.3rem 0 0 0;color:var(--warning);display:none;"></p>
+    </div>
+
+    <!-- Overlay chart -->
+    <div class="settings-group">
+        <h3 class="settings-group-title">Forecast vs Actual
+            <span class="info-tip">?<span class="tip-text">The measured actuals overlaid with ML Forecast Lab's latest forecast for each moment and each external forecast. For cumulative targets the series are shown as per-interval demand (the space the comparison is scored in).</span></span>
+        </h3>
+        <div id="external-overlay-chart" style="width:100%;height:380px;"></div>
+    </div>
+
+    <!-- Diagnostics: deeper per-regime charts, collapsed to keep the first screen tight -->
+    <details class="diag-accordion" id="external-diagnostics" style="display:none;">
+        <summary>Diagnostics <span style="color:var(--text-secondary);font-size:0.85rem;font-weight:400;">— error by time of day &amp; forecast horizon</span></summary>
+
+        <!-- Error by hour-of-day (all sources; client-side from the overlay) -->
+        <div id="external-hour-group" class="settings-group" style="display:none;">
+            <h3 class="settings-group-title">Error by Time of Day
+                <span class="info-tip">?<span class="tip-text">Mean absolute error grouped by hour of day, one line per forecaster — catches regime-specific strengths the headline numbers hide (e.g. ML Forecast Lab wins mornings, an external wins afternoons). Computed in the current Analysis view (per-interval or cumulative). Provisional (warming) sources are drawn faded.</span></span>
+            </h3>
+            <div id="external-hour-chart" style="width:100%;height:320px;"></div>
+        </div>
+
+        <!-- Lead-time curve (attribute-mode externals only) -->
+        <div id="external-leadtime-group" class="settings-group" style="display:none;">
+            <h3 class="settings-group-title">Error by Forecast Horizon — ML Forecast Lab vs Externals
+                <span class="info-tip">?<span class="tip-text">Mean absolute error binned by lead time (how far ahead the forecast was looking). Available for trajectory (attribute-mode) externals. A lower line is the more accurate forecaster at that horizon.</span></span>
+            </h3>
+            <div id="external-leadtime-chart" style="width:100%;height:340px;"></div>
+        </div>
+    </details>
+
+    <!-- Empty / status -->
+    <div id="external-empty" style="display:none;">
+        <div class="empty-state">
+            <span class="empty-state-icon">📊</span>
+            <p id="external-empty-title">No comparison data yet.</p>
+            <p class="empty-state-hint" id="external-empty-hint">Each production forecast cycle captures the added forecasts alongside ML Forecast Lab's; once the actuals arrive, this tab scores them head-to-head. Data accrues from when you add each — give it a few cycles.</p>
+        </div>
+    </div>
+</section>
+</div>
+{% endif %}
+
 {% endblock %}
 
 {% block scripts %}
@@ -2204,6 +2434,7 @@ var _CHART_TABS = {
     'sec-results': true, 'sec-predictions': true, 'sec-generalisation': true,
     'sec-features': true, 'sec-tuning': true, 'sec-forecast-accuracy': true,
     'sec-training': true, 'sec-covariate-analysis': true,
+    'sec-external-comparison': true,
 };
 
 window.showTab = function(el) {
@@ -4715,17 +4946,20 @@ window.showTab = function(el) {
 
             var expName = {{ experiment.name | tojson }};
             var entityId = {{ experiment.target_entity | tojson }};
+            // Humanised (Title Case) name for axis labels so the y-axis
+            // reads "Solar Forecast (W)" rather than the raw slug.
+            var expDisplay = {{ experiment.name | humanise | tojson }};
             var yTitle;
             if (!EXP_UNITS) {
-                yTitle = expName + ' — ' + entityId;
+                yTitle = expDisplay + ' — ' + entityId;
             } else if (isCumulative) {
-                yTitle = expName + ' (cumulative ' + EXP_UNITS
+                yTitle = expDisplay + ' (cumulative ' + EXP_UNITS
                        + (EXP_RESET_DAILY ? ', resets daily' : '') + ')';
             } else if (EXP_SOURCE_CUMULATIVE) {
-                yTitle = expName + ' (' + EXP_UNITS + ' per '
+                yTitle = expDisplay + ' (' + EXP_UNITS + ' per '
                        + EXP_INTERVAL_MIN + '-min bucket)';
             } else {
-                yTitle = expName + ' (' + EXP_UNITS + ')';
+                yTitle = expDisplay + ' (' + EXP_UNITS + ')';
             }
 
             var xTitle = 'Target time' + _axisTzSuffix();
@@ -5206,7 +5440,11 @@ window.showTab = function(el) {
         var layout = {
             xaxis: stabXAxis,
             yaxis: {
-                title: { text: 'Run-to-run spread (std of predictions)', font: { size: 12 } },
+                title: {
+                    text: 'Run-to-run spread (std of predictions)'
+                        + (EXP_UNITS ? ' (' + EXP_UNITS + ')' : ''),
+                    font: { size: 12 },
+                },
                 color: '#b0b0b0', gridcolor: '#2d3561',
                 rangemode: 'tozero',
             },
@@ -5256,7 +5494,7 @@ window.showTab = function(el) {
             var barLayout = {
                 xaxis: { title: { text: 'Day', font: { size: 11 } },
                          color: '#b0b0b0', gridcolor: '#2d3561', type: 'category' },
-                yaxis: { title: { text: '± % of daily total', font: { size: 11 } },
+                yaxis: { title: { text: 'Daily-total spread (± %)', font: { size: 11 } },
                          color: '#b0b0b0', gridcolor: '#2d3561', rangemode: 'tozero' },
                 plot_bgcolor: 'rgba(0,0,0,0)',
                 paper_bgcolor: 'rgba(0,0,0,0)',
@@ -6425,6 +6663,857 @@ window.showTab = function(el) {
                       || document.querySelector('.section-nav a[data-tab="sec-models"]');
         if (defaultTab) showTab(defaultTab);
     }
+})();
+</script>
+
+<!-- ======== Forecast Comparison tab (multi-source) ======== -->
+<script>
+(function() {
+    var BASE = {{ base_path | tojson }};
+    var EXP = {{ experiment.name | tojson }};
+
+    // Palette tuned for legibility on the dark navy panel: Actual is the
+    // white dotted reference line used app-wide; the app's own forecast is
+    // the coral accent, and externals cycle through high-contrast hues.
+    // Plain blues/lavenders read as "blue on blue" against the navy
+    // background, so they're deliberately omitted from the lead positions.
+    var C_ACTUAL = '#ffffff', C_APP = '#ff6b6b';
+    var EXT_COLORS = ['#22d3ee', '#ffd93d', '#6bcb77', '#ff922b', '#f472b6', '#a3e635', '#fb923c', '#34d399'];
+    var DARK = { plot_bgcolor:'#16213e', paper_bgcolor:'#1a1a2e', font:{color:'#e0e0e0'}, grid:'#2d3561', axis:'#b0b0b0' };
+
+    var _externalAnalysis = 'per_interval';
+    window.setExternalAnalysis = function(mode) {
+        if (mode !== 'per_interval' && mode !== 'cumulative') return;
+        _externalAnalysis = mode;
+        var pi = document.getElementById('external-mode-per-interval');
+        var cum = document.getElementById('external-mode-cumulative');
+        [pi, cum].forEach(function(b){ if(!b) return; b.classList.remove('active'); b.style.background='transparent'; b.style.color='var(--text-secondary)'; });
+        var on = (mode === 'cumulative') ? cum : pi;
+        if (on) { on.classList.add('active'); on.style.background='var(--accent-secondary)'; on.style.color='#fff'; }
+        loadExternalComparison();
+    };
+
+    // v2.44.x: ranking metric + cached payload so the selector re-renders the
+    // table/verdict client-side without a re-fetch.
+    var _externalMetric = 'overall';
+    var _externalCompare = 'operational';   // 'operational' (best available) | 'skill' (same lead time)
+    var _lastExternalData = null;
+    // Metrics averaged for the "Overall" composite mean rank (lower better).
+    // MAE/RMSE/Daily-MAE mirror the Results tab's MAE/RMSE/MASE trio; bias is
+    // a calibration metric (not accuracy) and % of typical is just MAE
+    // rescaled by a shared constant (identical ranks), so both are excluded.
+    var _COMPOSITE_METRICS = ['mae', 'rmse', 'daily_mae'];
+    window.setExternalMetric = function(m) {
+        var valid = {overall:1, mae:1, rmse:1, bias:1, pct:1, daily_mae:1, daily_bias:1};
+        _externalMetric = valid[m] ? m : 'overall';
+        if (_lastExternalData) {
+            _renderVerdict(_lastExternalData);
+            _renderRankTable(_lastExternalData);
+        }
+    };
+
+    // Comparable "lower is better" scalar for a row on one metric (abs for the
+    // signed bias metrics). null when missing or the row is a scale mismatch.
+    function _rankScalar(r, metric) {
+        if (r.mismatch) return null;
+        var v;
+        if (metric === 'daily_mae') v = r.daily ? r.daily.mae : null;
+        else if (metric === 'daily_bias') v = r.daily ? r.daily.bias : null;
+        else v = r.block ? r.block[metric] : null;
+        if (v === null || v === undefined || isNaN(v)) return null;
+        return (metric === 'bias' || metric === 'daily_bias') ? Math.abs(v) : v;
+    }
+
+    // Average-rank the rows on one metric (ties share the mean rank, à la
+    // Demšar). Returns an index→rank map, or null if no row has the metric.
+    function _ranksOnMetric(rows, metric) {
+        var vals = [];
+        rows.forEach(function(r, i){ var v = _rankScalar(r, metric); if (v !== null) vals.push({i:i, v:v}); });
+        if (!vals.length) return null;
+        vals.sort(function(a, b){ return a.v - b.v; });
+        var ranks = {}, k = 0;
+        while (k < vals.length) {
+            var j = k;
+            while (j + 1 < vals.length && Math.abs(vals[j+1].v - vals[k].v) < 1e-12) j++;
+            var avg = (k + j) / 2 + 1;  // positions k..j → ranks (k+1)..(j+1), averaged
+            for (var t = k; t <= j; t++) ranks[vals[t].i] = avg;
+            k = j + 1;
+        }
+        return ranks;
+    }
+
+    // Rank every forecaster (app + externals) for the current _externalMetric.
+    // Returns rows ordered best→worst with `.rank` (1-based int, null for
+    // unranked scale-mismatch rows) and `.meanRank` (the composite/metric mean
+    // rank shown in the Rank cell). Shared by the table and the verdict.
+    function _standings(rows) {
+        var metrics = (_externalMetric === 'overall')
+            ? _COMPOSITE_METRICS.filter(function(m){
+                return rows.some(function(r){ return !r.mismatch; })
+                    && rows.every(function(r){ return r.mismatch || _rankScalar(r, m) !== null; });
+              })
+            : [_externalMetric];
+        if (!metrics.length) metrics = ['mae'];
+        var perMetric = metrics.map(function(m){ return _ranksOnMetric(rows, m); })
+                               .filter(function(x){ return x; });
+        rows.forEach(function(r, i){
+            if (r.mismatch) { r.meanRank = null; return; }
+            var rs = [];
+            perMetric.forEach(function(mr){ if (mr[i] !== undefined) rs.push(mr[i]); });
+            r.meanRank = rs.length ? rs.reduce(function(a, b){ return a + b; }, 0) / rs.length : null;
+        });
+        var ranked = rows.filter(function(r){ return r.meanRank !== null; })
+                         .sort(function(a, b){ return a.meanRank - b.meanRank; });
+        ranked.forEach(function(r, i){ r.rank = i + 1; });
+        var unranked = rows.filter(function(r){ return r.meanRank === null; });
+        unranked.forEach(function(r){ r.rank = null; });
+        return { rows: ranked.concat(unranked), nRanked: ranked.length, metrics: metrics };
+    }
+
+    // The metric the "vs MLFL" gap is expressed on (MAE when ranking Overall).
+    function _gapMetric() { return _externalMetric === 'overall' ? 'mae' : _externalMetric; }
+
+    // ---- Compare mode: Best available (operational) <-> Same lead time (skill) ----
+    function _bandPhrase(lo, hi) {
+        function f(m) { return m >= 90 ? (m / 60).toFixed(m % 60 ? 1 : 0) + ' h' : Math.round(m) + ' min'; }
+        return f(lo) + ' – ' + f(hi);
+    }
+
+    window.setExternalCompare = function(mode) {
+        if (mode !== 'operational' && mode !== 'skill') return;
+        _externalCompare = mode;
+        var op = document.getElementById('external-cmp-operational');
+        var sk = document.getElementById('external-cmp-skill');
+        [op, sk].forEach(function(b){ if(!b) return; b.classList.remove('active'); b.style.background='transparent'; b.style.color='var(--text-secondary)'; });
+        var on = (mode === 'skill') ? sk : op;
+        if (on) { on.classList.add('active'); on.style.background='var(--accent-secondary)'; on.style.color='#fff'; }
+        if (_lastExternalData) { _renderVerdict(_lastExternalData); _applyCompareMode(); }
+    };
+
+    // Show the leaderboard for the active mode; hide the other. The "Rank by"
+    // selector only applies operationally (skill is MAE-at-matched-lead).
+    function _applyCompareMode() {
+        var skillMode = _externalCompare === 'skill';
+        var opGrp = document.getElementById('external-ranktable-group');
+        var skGrp = document.getElementById('external-skilltable-group');
+        function _has(el){ return el && el.getAttribute('data-has') === '1'; }
+        if (skillMode) {
+            if (opGrp) opGrp.style.display = 'none';
+            if (skGrp) skGrp.style.display = _has(skGrp) ? '' : 'none';
+        } else {
+            if (skGrp) skGrp.style.display = 'none';
+            if (opGrp) opGrp.style.display = _has(opGrp) ? '' : 'none';
+        }
+        var mc = document.getElementById('external-metric');
+        var ctl = mc && mc.closest ? mc.closest('.acc-control') : null;
+        if (ctl) ctl.style.display = skillMode ? 'none' : '';
+    }
+
+    function _renderSkillTable(data) {
+        var grp = document.getElementById('external-skilltable-group');
+        var body = document.getElementById('external-skilltable-body');
+        var bandP = document.getElementById('external-skill-band');
+        var exclP = document.getElementById('external-skill-excluded');
+        var unavP = document.getElementById('external-skill-unavailable');
+        if (!grp || !body) return;
+        var sk = data.skill;
+        var unit = data.lead_unit || data.display_unit || '';
+        var hasData = (data.comparisons || []).some(function(c){ return c.head_to_head; });
+        grp.setAttribute('data-has', hasData ? '1' : '0');
+        body.innerHTML = '';
+        if (bandP) bandP.innerHTML = '';
+        if (exclP) exclP.textContent = '';
+        if (unavP) { unavP.style.display = 'none'; unavP.textContent = ''; }
+
+        var excludedTxt = (sk && sk.excluded && sk.excluded.length)
+            ? 'Not comparable at matched lead: ' + sk.excluded.map(function(e){ return e.label + ' (' + e.reason + ')'; }).join(', ') + '.'
+            : '';
+
+        if (!sk || !sk.available) {
+            if (unavP) {
+                unavP.style.display = '';
+                unavP.textContent = (sk && sk.reason)
+                    ? ('Same-lead comparison unavailable — ' + sk.reason + '. Use “Best available”, or add a trajectory (attribute-mode) forecast.')
+                    : 'Same-lead comparison needs a trajectory (attribute-mode) forecast. Use “Best available”.';
+            }
+            if (exclP) exclP.textContent = excludedTxt;
+            return;
+        }
+
+        var lo = sk.lead_band_minutes[0], hi = sk.lead_band_minutes[1];
+        if (bandP) bandP.innerHTML = 'Scored over the <b>' + _bandPhrase(lo, hi)
+            + '</b> lead band covered by all trajectory forecasters — equal-horizon, so update frequency doesn’t count.';
+
+        // Keep swatch colours consistent with the operational table.
+        var colorByLabel = {};
+        _buildRows(data).forEach(function(r){ colorByLabel[r.label] = r.color; });
+
+        var rows = (sk.rows || []).filter(function(r){ return r.mae !== null && r.mae !== undefined && !isNaN(r.mae); }).slice();
+        rows.sort(function(a, b){ return a.mae - b.mae; });
+        var appMae = (rows.filter(function(r){ return r.app; })[0] || {}).mae;
+
+        // Best (lowest, abs for bias) per column → bold green, like the
+        // operational table.
+        var skillCols = ['mae', 'rmse', 'bias', 'pct'];
+        var skillBest = {};
+        skillCols.forEach(function(col){
+            var isAbs = (col === 'bias'), bv = null;
+            rows.forEach(function(r){
+                var v = r[col];
+                if (v === null || v === undefined || isNaN(v)) return;
+                var s = isAbs ? Math.abs(v) : v;
+                if (bv === null || s < bv) bv = s;
+            });
+            skillBest[col] = bv;
+        });
+        function _skCell(r, col) {
+            var v = r[col], isAbs = (col === 'bias');
+            var txt = (col === 'pct')
+                ? (v === null || v === undefined || isNaN(v) ? '—' : Number(v).toFixed(0) + '%')
+                : _fmt(v, unit);
+            var isBest = (v !== null && v !== undefined && !isNaN(v) && skillBest[col] !== null
+                          && Math.abs((isAbs ? Math.abs(v) : v) - skillBest[col]) < 1e-9);
+            return '<td' + (isBest ? ' style="color:var(--success);font-weight:700;"' : '') + '>' + txt + '</td>';
+        }
+
+        body.innerHTML = rows.map(function(r, i) {
+            var color = colorByLabel[r.label] || (r.app ? C_APP : EXT_COLORS[i % EXT_COLORS.length]);
+            var name = '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:' + color + ';margin-right:6px;"></span>'
+                + (r.app ? '<strong>' + r.label + '</strong> <span style="color:var(--text-secondary);font-size:0.8rem;">(you)</span>' : r.label);
+            var vs;
+            if (r.app) {
+                vs = '<td style="color:var(--text-secondary);">reference</td>';
+            } else if (appMae === null || appMae === undefined || !r.mae) {
+                vs = '<td>—</td>';
+            } else if (Math.abs(r.mae - appMae) < 1e-9) {
+                vs = '<td>≈ tie</td>';
+            } else if (appMae < r.mae) {
+                vs = '<td><span style="color:var(--success);">MLFL ' + Math.abs((r.mae - appMae) / r.mae * 100).toFixed(0) + '% better</span></td>';
+            } else {
+                vs = '<td><span style="color:var(--warning);">' + Math.abs((appMae - r.mae) / appMae * 100).toFixed(0) + '% better</span></td>';
+            }
+            var hl = r.app ? 'background:rgba(255,107,107,0.07);' : '';
+            return '<tr style="' + hl + '">'
+                + '<td style="text-align:center;"><span class="rank-badge rank-' + (i + 1) + '">' + (i + 1) + '</span></td>'
+                + '<td>' + name + '</td>'
+                + _skCell(r, 'mae') + _skCell(r, 'rmse') + _skCell(r, 'bias') + _skCell(r, 'pct')
+                + vs
+                + '<td>' + (r.n || 0) + '</td>'
+                + '</tr>';
+        }).join('');
+        if (exclP) exclP.textContent = excludedTxt;
+    }
+
+    // ---- Settings add-form: toggle attribute-only fields by mode ----
+    window.onExternalModeChanged = function() {
+        var sel = document.getElementById('ext-mode-input');
+        var attr = document.getElementById('ext-attr-field');
+        var isAttr = sel && sel.value === 'attribute';
+        if (attr) attr.style.display = isAttr ? '' : 'none';
+        if (isAttr) {
+            // Populate the "Forecast data" picker from the chosen entity.
+            refreshExternalAttrs();
+        } else {
+            var key = document.getElementById('ext-key-field');
+            if (key) key.style.display = 'none';
+        }
+    };
+
+    // Inspect the chosen entity's HA attributes and offer the forecast-shaped
+    // ones to compare from (same detector the covariate form uses). "Auto"
+    // falls back to the resolver's default ("forecast").
+    window.refreshExternalAttrs = function() {
+        var entEl = document.getElementById('ext-entity-input');
+        var entity = entEl ? entEl.value.trim() : '';
+        var sel = document.getElementById('ext-attr-input');
+        if (!sel) return;
+        sel.innerHTML = '<option value="">Auto (forecast)</option>';
+        if (!entity) { onExternalAttrChanged(); return; }
+        fetch(BASE + '/api/ha/forecast-attrs?entity=' + encodeURIComponent(entity))
+            .then(function(r){ return r.json(); })
+            .then(function(data){
+                var attrs = (data && data.forecast_attributes) || [];
+                attrs.forEach(function(a){
+                    var opt = document.createElement('option');
+                    opt.value = a.name;
+                    opt.textContent = a.format === 'weather-service'
+                        ? (a.name + ' (weather service)')
+                        : a.format === 'date-dict'
+                            ? (a.name + ' (date-keyed)')
+                            : (a.name + ' (' + a.format + ')');
+                    opt.dataset.sampleKeys = JSON.stringify(a.sample_keys || []);
+                    opt.dataset.format = a.format;
+                    sel.appendChild(opt);
+                });
+                onExternalAttrChanged();
+            })
+            .catch(function(){ onExternalAttrChanged(); });
+    };
+
+    // Populate the value-key picker from the chosen attribute's sample keys
+    // (hidden for date-keyed dicts, which need no value key).
+    window.onExternalAttrChanged = function() {
+        var sel = document.getElementById('ext-attr-input');
+        var keyField = document.getElementById('ext-key-field');
+        var keySel = document.getElementById('ext-key-input');
+        if (!sel || !keyField || !keySel) return;
+        keySel.innerHTML = '<option value="">Auto-detect</option>';
+        var opt = sel.options[sel.selectedIndex];
+        if (!opt || !opt.value || opt.dataset.format === 'date-dict') {
+            keyField.style.display = 'none';
+            return;
+        }
+        var keys = [];
+        try { keys = JSON.parse(opt.dataset.sampleKeys || '[]'); } catch (e) {}
+        if (!keys.length) { keyField.style.display = 'none'; return; }
+        keys.forEach(function(k){
+            var o = document.createElement('option');
+            o.value = k; o.textContent = k; keySel.appendChild(o);
+        });
+        keyField.style.display = '';
+    };
+
+    // Re-detect when the entity is picked from the autocomplete (which sets
+    // the value and dispatches 'change').
+    document.addEventListener('change', function(ev){
+        if (ev.target && ev.target.id === 'ext-entity-input') {
+            var m = document.getElementById('ext-mode-input');
+            if (m && m.value === 'attribute') refreshExternalAttrs();
+        }
+    });
+
+    window.addExternalForecast = function() {
+        var get = function(id){ var el=document.getElementById(id); return el ? el.value.trim() : ''; };
+        var entity = get('ext-entity-input');
+        if (!entity) { mlfl.toast('Pick an entity first', 'error'); return; }
+        var payload = {
+            entity_id: entity,
+            mode: get('ext-mode-input') || 'state',
+            label: get('ext-label-input'),
+            scale: get('ext-scale-input'),
+            is_cumulative: get('ext-iscum-input'),
+            attribute: get('ext-attr-input'),
+            value_key: get('ext-key-input'),
+        };
+        var btn = document.getElementById('add-external-btn');
+        if (btn) btn.disabled = true;
+        fetch(BASE + '/experiment/' + EXP + '/add-external-forecast', {
+            method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload),
+        }).then(function(r){return r.json();}).then(function(res){
+            if (btn) btn.disabled = false;
+            if (res.success) {
+                var msg = 'Added ' + entity;
+                if (res.backfilled) msg += ' — backfilled ' + res.backfilled + ' history points';
+                mlfl.toast(msg, 'success');
+                // Non-fatal add-time validation (attribute/value_key didn't
+                // resolve live) — warn but keep the add.
+                if (res.warning) { try { mlfl.toast('⚠ ' + res.warning, 'warning'); } catch(e){} }
+                _reloadToThisTab();
+            } else {
+                mlfl.toast('Add failed: ' + (res.error || 'unknown'), 'error');
+            }
+        }).catch(function(err){ if(btn)btn.disabled=false; mlfl.toast('Add failed: '+err,'error'); });
+    };
+
+    // Reload but return to this tab (the server re-renders the list + nav).
+    function _reloadToThisTab() {
+        try { window.location.hash = 'sec-external-comparison'; } catch (e) {}
+        setTimeout(function(){ window.location.reload(); }, 500);
+    }
+
+    window.removeExternalForecast = function(btn) {
+        var row = btn.closest('.covariate-row');
+        var entity = row ? row.getAttribute('data-entity') : '';
+        if (!entity) return;
+        // Full identity so the right entry is removed when one entity is
+        // configured more than once (different attribute / value key).
+        var payload = { entity_id: entity };
+        var m = row.getAttribute('data-mode'); if (m) payload.mode = m;
+        var at = row.getAttribute('data-attribute'); if (at) payload.attribute = at;
+        var vk = row.getAttribute('data-value-key'); if (vk) payload.value_key = vk;
+        if (!confirm('Remove external forecast ' + entity + '?')) return;
+        fetch(BASE + '/experiment/' + EXP + '/remove-external-forecast', {
+            method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload),
+        }).then(function(r){return r.json();}).then(function(res){
+            if (res.success) {
+                if (row) row.remove();
+                mlfl.toast('Removed ' + entity, 'success');
+                _reloadToThisTab();
+            } else {
+                mlfl.toast('Remove failed: ' + (res.error || 'unknown'), 'error');
+            }
+        }).catch(function(err){ mlfl.toast('Remove failed: '+err,'error'); });
+    };
+
+    // ---- Tab rendering ----
+    function _fmt(v, units) {
+        if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return '—';
+        var n = Number(v); var s = (Math.abs(n) >= 100) ? n.toFixed(1) : n.toFixed(3);
+        return s + (units ? (' ' + units) : '');
+    }
+    function _leadPhrase(mins) {
+        if (mins === null || mins === undefined) return null;
+        if (mins >= 90) return (mins/60).toFixed(1) + ' h ahead';
+        return Math.round(mins) + ' min ahead';
+    }
+    // Compact lead for the table column: "now" for contemporaneous state
+    // sources, "15 min" / "8.0 h" otherwise.
+    function _leadShort(mins, contemporaneous) {
+        if (contemporaneous) return 'now';
+        if (mins === null || mins === undefined) return '—';
+        if (mins >= 90) return (mins/60).toFixed(1) + ' h';
+        return Math.round(mins) + ' min';
+    }
+    function _hide(id){ var el=document.getElementById(id); if(el) el.style.display='none'; }
+    function _showEmpty(title, hint) {
+        ['external-verdict-card','external-ranktable-group','external-timing','external-diagnostics','external-leadtime-group','external-hour-group','external-warming-banner'].forEach(_hide);
+        var empty = document.getElementById('external-empty');
+        if (empty) { empty.style.display='';
+            if (title){var t=document.getElementById('external-empty-title'); if(t)t.textContent=title;}
+            if (hint){var h=document.getElementById('external-empty-hint'); if(h)h.textContent=hint;}
+        }
+        var oc=document.getElementById('external-overlay-chart'); if(oc&&window.Plotly){try{Plotly.purge(oc);}catch(e){}}
+    }
+
+    // Shared row model: MLFL (the app) + each external (with head-to-head).
+    function _buildRows(data) {
+        var comps = (data.comparisons || []).filter(function(c){ return c.head_to_head; });
+        if (!comps.length) return [];
+        var appBlock = data.app_self || comps[0].head_to_head.app;
+        var appDaily = (data.app_self && data.app_self.daily)
+            || (comps[0].head_to_head.daily && comps[0].head_to_head.daily.app) || null;
+        var appLead = (comps[0].timing && comps[0].timing.app_median_lead_minutes != null)
+            ? comps[0].timing.app_median_lead_minutes : null;
+        var R = [{ kind:'app', label:'ML Forecast Lab', color:C_APP,
+                   block:appBlock, daily:appDaily,
+                   days:(data.app_days_logged||0), warming:!!(appBlock && appBlock.warming),
+                   mismatch:false, ratio:null, h:null, n:(appBlock?appBlock.n:0),
+                   lead:appLead, contemporaneous:false }];
+        comps.forEach(function(c, i) {
+            var h = c.head_to_head;
+            var t = c.timing || {};
+            R.push({ kind:'ext', label:(c.label||c.entity), color:EXT_COLORS[i%EXT_COLORS.length],
+                     mode:c.mode, block:h.external, daily:(h.daily?h.daily.external:null),
+                     days:(c.days_logged||0), warming:!!c.warming,
+                     mismatch:!!c.scale_mismatch, ratio:c.scale_ratio, h:h, n:h.n,
+                     lead: t.external_contemporaneous ? 0 : (t.external_median_lead_minutes != null ? t.external_median_lead_minutes : null),
+                     contemporaneous: !!t.external_contemporaneous });
+        });
+        return R;
+    }
+
+    function _renderRankTable(data) {
+        var grp = document.getElementById('external-ranktable-group');
+        var body = document.getElementById('external-ranktable-body');
+        if (!grp || !body) return;
+        var units = data.display_unit || data.units || '';
+        var R = _buildRows(data);
+        if (!R.length) { grp.style.display='none'; grp.setAttribute('data-has','0'); return; }
+        var warmDays = data.warmup_days || 7;
+
+        // Rank (and reorder) on the selected metric / Overall composite.
+        var rows = _standings(R).rows;
+
+        // Best per column (min over ranked rows; abs for the signed cols).
+        var cols = ['mae','rmse','bias','pct','daily_mae','daily_bias'];
+        function _cellVal(r, col) {
+            if (col === 'daily_mae') return r.daily ? r.daily.mae : null;
+            if (col === 'daily_bias') return r.daily ? r.daily.bias : null;
+            return r.block ? r.block[col] : null;
+        }
+        var best = {};
+        cols.forEach(function(col){
+            var isAbs = (col === 'bias' || col === 'daily_bias');
+            var bv = null;
+            R.forEach(function(r){
+                if (r.mismatch) return;
+                var v = _cellVal(r, col);
+                if (v === null || v === undefined || isNaN(v)) return;
+                var s = isAbs ? Math.abs(v) : v;
+                if (bv === null || s < bv) bv = s;
+            });
+            best[col] = bv;
+        });
+
+        function _cell(r, col) {
+            var v = _cellVal(r, col);
+            var isAbs = (col === 'bias' || col === 'daily_bias');
+            var u = (col === 'pct') ? '%' : units;
+            var txt = (col === 'pct')
+                ? (v === null || v === undefined ? '—' : Number(v).toFixed(0) + '%')
+                : _fmt(v, u);
+            var isBest = (!r.mismatch && v !== null && v !== undefined && !isNaN(v)
+                          && best[col] !== null
+                          && Math.abs((isAbs ? Math.abs(v) : v) - best[col]) < 1e-9);
+            var sel = (col === _externalMetric);
+            var style = '';
+            if (isBest) style += 'color:var(--success);font-weight:700;';
+            if (sel) style += 'background:rgba(34,211,238,0.08);';
+            return '<td' + (style ? ' style="' + style + '"' : '') + '>' + txt + '</td>';
+        }
+
+        // "vs MLFL": head-to-head gap on the selected metric (MAE for Overall),
+        // from the common-sample head_to_head blocks. Positive = MLFL better.
+        function _vsCell(r) {
+            if (r.kind === 'app') return '<td style="color:var(--text-secondary);">reference</td>';
+            if (r.mismatch) return '<td><span style="color:var(--warning);">⚠ scale mismatch (≈' + (r.ratio||'?') + '×)</span></td>';
+            var h = r.h; if (!h) return '<td>—</td>';
+            var m = _gapMetric(), isAbs = (m === 'bias' || m === 'daily_bias'), av, ev;
+            if (m === 'daily_mae' || m === 'daily_bias') {
+                var d = h.daily || {}, key = (m === 'daily_mae') ? 'mae' : 'bias';
+                av = d.app ? d.app[key] : null; ev = d.external ? d.external[key] : null;
+            } else {
+                av = h.app ? h.app[m] : null; ev = h.external ? h.external[m] : null;
+            }
+            if (av === null || av === undefined || ev === null || ev === undefined || isNaN(av) || isNaN(ev)) return '<td>—</td>';
+            var a = isAbs ? Math.abs(av) : av, e = isAbs ? Math.abs(ev) : ev;
+            if (Math.abs(a - e) < 1e-9) return '<td>≈ tie</td>';
+            if (Math.abs(e) < 1e-12) return '<td>—</td>';
+            var impr = Math.abs((e - a) / e * 100).toFixed(0);
+            if (a < e) return '<td><span style="color:var(--success);">MLFL ' + impr + '% better</span></td>';
+            return '<td><span style="color:var(--warning);">' + impr + '% better</span></td>';
+        }
+
+        // Rank badge (#1/#2/#3 styled like the Results tab); the small number
+        // under it in Overall mode is the composite mean rank.
+        function _rankCell(r) {
+            if (r.rank === null || r.rank === undefined) return '<td style="text-align:center;color:var(--text-muted);">—</td>';
+            var sub = (_externalMetric === 'overall' && r.meanRank !== null)
+                ? '<div style="font-size:0.7rem;color:var(--text-muted);margin-top:2px;">' + r.meanRank.toFixed(1) + '</div>'
+                : '';
+            return '<td style="text-align:center;"><span class="rank-badge rank-' + r.rank + '">' + r.rank + '</span>' + sub + '</td>';
+        }
+
+        function _daysCell(r) {
+            if (r.warming) return '<td><span title="Inconclusive until ' + warmDays + ' days of overlapping data" style="color:var(--warning);">' + r.days + '/' + warmDays + ' ⏳</span></td>';
+            return '<td><span style="color:var(--success);">' + r.days + ' ✓</span></td>';
+        }
+
+        var rowsHtml = rows.map(function(r){
+            var tag = r.kind === 'ext' ? ' <span style="color:var(--text-secondary);font-size:0.8rem;">(' + (r.mode==='attribute'?'trajectory':'state') + ')</span>'
+                    : ' <span style="color:var(--text-secondary);font-size:0.8rem;">(you)</span>';
+            var nameCell = '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+r.color+';margin-right:6px;"></span>'
+                + (r.kind === 'app' ? '<strong>' + r.label + '</strong>' : r.label) + tag
+                + (r.mismatch ? ' <span title="On a very different scale to the target" style="color:var(--warning);">⚠</span>' : '')
+                + (r.warming ? ' <span title="Provisional — still warming up" style="color:var(--warning);">⏳</span>' : '');
+            var op = r.mismatch ? 'opacity:0.6;' : (r.warming ? 'opacity:0.78;' : '');
+            // Tint MLFL's own row so "you" stands out without pinning it.
+            var hl = r.kind === 'app' ? 'background:rgba(255,107,107,0.07);' : '';
+            var leadTxt = _leadShort(r.lead, r.contemporaneous);
+            var leadCell = '<td style="color:var(--text-secondary);white-space:nowrap;"'
+                + (r.contemporaneous ? ' title="State-mode sensor: a same-time (lead 0) reading, not a forward forecast"' : '')
+                + '>' + leadTxt + '</td>';
+            return '<tr style="' + op + hl + '">'
+                + _rankCell(r)
+                + '<td>' + nameCell + '</td>'
+                + leadCell
+                + cols.map(function(col){ return _cell(r, col); }).join('')
+                + _vsCell(r) + _daysCell(r)
+                + '<td>' + (r.n||0) + '</td>'
+                + '</tr>';
+        }).join('');
+        body.innerHTML = rowsHtml;
+
+        // Emphasise the selected metric's column header.
+        var ths = document.querySelectorAll('#external-ranktable thead th[data-metric]');
+        ths.forEach(function(th){
+            var on = th.getAttribute('data-metric') === _externalMetric;
+            th.style.color = on ? 'var(--accent-secondary)' : '';
+            th.style.fontWeight = on ? '700' : '';
+        });
+        grp.style.display = '';
+        grp.setAttribute('data-has', '1');
+    }
+
+    var _METRIC_LABEL = {overall:'overall standing', mae:'MAE', rmse:'RMSE', bias:'bias', pct:'error %', daily_mae:'daily MAE', daily_bias:'daily bias'};
+
+    function _renderWarmingBanner(data) {
+        var b = document.getElementById('external-warming-banner');
+        if (!b) return;
+        if (!data.warming_up) { b.style.display = 'none'; return; }
+        var days = data.warmup_days || 7;
+        // Name the sources still below the threshold.
+        var names = [];
+        if ((data.app_days_logged || 0) < days) names.push('ML Forecast Lab (' + (data.app_days_logged||0) + '/' + days + ')');
+        (data.comparisons || []).forEach(function(c){
+            if (c.warming) names.push((c.label||c.entity) + ' (' + (c.days_logged||0) + '/' + days + ')');
+        });
+        b.innerHTML = '⏳ <b>Results are provisional</b> — a head-to-head needs at least ' + days
+            + ' days of overlapping data to be reliable. Still warming up: ' + names.join(', ')
+            + '. The ranking and verdict below will firm up as more cycles accrue.';
+        b.style.display = '';
+    }
+
+    function _renderVerdict(data) {
+        var card = document.getElementById('external-verdict-card');
+        var head = document.getElementById('external-verdict-headline');
+        if (!card || !head) return;
+        // Skill mode: rank at matched lead, off the skill block.
+        if (_externalCompare === 'skill') {
+            var sk = data.skill;
+            if (!sk || !sk.available) {
+                head.innerHTML = '⚠ No equal-lead comparison yet — '
+                    + ((sk && sk.reason) ? sk.reason : 'add a trajectory (attribute-mode) forecast')
+                    + '. Or switch to “Best available”.';
+                head.style.color = 'var(--warning)';
+                card.style.display = '';
+                return;
+            }
+            var srows = (sk.rows || []).filter(function(r){ return r.mae != null && !isNaN(r.mae); })
+                                       .slice().sort(function(a, b){ return a.mae - b.mae; });
+            if (!srows.length) { card.style.display = 'none'; return; }
+            var ai = 0; for (var si = 0; si < srows.length; si++) { if (srows[si].app) { ai = si; break; } }
+            var nn = srows.length, nnExt = nn - 1;
+            var bandTxt = _bandPhrase(sk.lead_band_minutes[0], sk.lead_band_minutes[1]);
+            var prov2 = data.warming_up ? '<span style="color:var(--warning);">Provisional · </span>' : '';
+            if (ai === 0) {
+                head.innerHTML = prov2 + '✓ At matched lead (' + bandTxt + '), ML Forecast Lab ranks #1'
+                    + (nnExt ? ' — ahead of all ' + nnExt + ' trajectory forecast' + (nnExt !== 1 ? 's' : '') : '');
+                head.style.color = data.warming_up ? 'var(--text-primary)' : 'var(--success)';
+            } else {
+                head.innerHTML = prov2 + '✗ At matched lead (' + bandTxt + '), ' + srows[0].label
+                    + ' leads; ML Forecast Lab is #' + (ai + 1) + ' of ' + nn;
+                head.style.color = 'var(--warning)';
+            }
+            card.style.display = '';
+            return;
+        }
+        var all = (data.comparisons || []).filter(function(c){ return c.head_to_head; });
+        if (!all.length) { card.style.display='none'; return; }
+        // Can't-compare: every external is on a different scale to the target.
+        var comparable = all.filter(function(c){ return !c.scale_mismatch; });
+        if (!comparable.length) {
+            head.innerHTML = '⚠ Can’t compare yet — the external forecast' + (all.length !== 1 ? 's are' : ' is') + ' on a different scale to the target (likely a unit or cumulative mismatch). Set <b>Is cumulative?</b> / <b>Scale</b> above, or pick a sensor in the target’s units.';
+            head.style.color = 'var(--warning)';
+            card.style.display = '';
+            return;
+        }
+        // Rank everything on the selected metric / Overall composite and read
+        // off where MLFL lands — a single source of truth with the table.
+        var ranked = _standings(_buildRows(data)).rows.filter(function(r){ return r.rank !== null; });
+        var app = ranked.filter(function(r){ return r.kind === 'app'; })[0];
+        if (!app) { card.style.display='none'; return; }
+        var n = ranked.length, nExt = n - 1;
+        var mismatched = all.length - comparable.length;
+        var mmNote = mismatched ? ' <span style="color:var(--warning);font-weight:400;">(' + mismatched + ' excluded — scale mismatch)</span>' : '';
+        var prov = data.warming_up ? '<span style="color:var(--warning);">Provisional · </span>' : '';
+        var on = (_externalMetric === 'overall') ? 'overall' : ('on ' + (_METRIC_LABEL[_externalMetric] || 'MAE'));
+        if (app.rank === 1) {
+            head.innerHTML = prov + '✓ ML Forecast Lab ranks #1 ' + on
+                + (nExt ? ' — ahead of all ' + nExt + ' external forecast' + (nExt !== 1 ? 's' : '') : '') + mmNote;
+            head.style.color = data.warming_up ? 'var(--text-primary)' : 'var(--success)';
+        } else {
+            head.innerHTML = prov + '✗ ' + ranked[0].label + ' leads ' + on
+                + '; ML Forecast Lab is #' + app.rank + ' of ' + n + mmNote;
+            head.style.color = 'var(--warning)';
+        }
+        card.style.display = '';
+    }
+
+    function _renderTiming(data) {
+        var box = document.getElementById('external-timing');
+        if (!box) return;
+        var comps = data.comparisons || [];
+        if (!comps.length) { box.style.display='none'; return; }
+        var basis = document.getElementById('external-timing-basis');
+        var warn = document.getElementById('external-timing-warning');
+        var anyState = comps.some(function(c){ return c.timing && c.timing.external_contemporaneous; });
+        var anyAttr = comps.some(function(c){ return c.timing && !c.timing.external_contemporaneous; });
+        var parts = ['<strong>Comparison basis:</strong> aligned on target time, scored on common samples.'];
+        // List each forecaster's median lead so the lead-time basis is
+        // explicit. When they match, the comparison is like-for-like; a large
+        // gap means a forecast is judged at a tougher horizon (and hints a
+        // source should update more often). State-mode externals are
+        // same-time snapshots, so they have no lead to list.
+        var leadBits = [];
+        if (comps[0].timing && comps[0].timing.app_median_lead_minutes != null) {
+            leadBits.push('ML Forecast Lab ' + _leadPhrase(comps[0].timing.app_median_lead_minutes));
+        }
+        comps.filter(function(c){ return c.timing && !c.timing.external_contemporaneous && c.timing.external_median_lead_minutes != null; })
+             .forEach(function(c){ leadBits.push((c.label||c.entity) + ' ' + (_leadPhrase(c.timing.external_median_lead_minutes) || 'n/a')); });
+        if (leadBits.length) parts.push('Each forecast is scored at its median lead: ' + leadBits.join(', ') + '.');
+        if (anyState) parts.push('State-mode externals are same-time snapshots (not lead-matched).');
+        if (anyAttr) parts.push('Trajectory externals are lead-matched — see the horizon chart.');
+        basis.innerHTML = parts.join(' ');
+        var msgs = [];
+        var mism = comps.filter(function(c){ return c.scale_mismatch; })
+                        .map(function(c){ return (c.label || c.entity) + ' (≈' + (c.scale_ratio || '?') + '×)'; });
+        if (mism.length) {
+            msgs.push('⚠ On a different scale to the target — likely a unit mismatch or a cumulative sensor read raw: ' + mism.join(', ') + '. Fix with Is cumulative? / Scale above, or pick a sensor in the target’s units.');
+        }
+        var stale = comps.filter(function(c){ return c.timing && c.timing.external_stale && !c.scale_mismatch; })
+                         .map(function(c){ return c.label || c.entity; });
+        if (stale.length) {
+            msgs.push('⚠ Sparse/stale (far fewer samples than ML Forecast Lab): ' + stale.join(', ') + ' — treat those head-to-heads as indicative.');
+        }
+        if (msgs.length) { warn.style.display=''; warn.innerHTML = msgs.join('<br>'); }
+        else { warn.style.display='none'; }
+        box.style.display = '';
+    }
+
+    function _renderOverlay(data) {
+        var oc = document.getElementById('external-overlay-chart');
+        if (!oc || !window.Plotly) return;
+        var ov = data.overlay || {};
+        if (!ov.ds || !ov.ds.length) { try{Plotly.purge(oc);}catch(e){} return; }
+        var ds = ov.ds.map(function(s){ return new Date(s); });
+        var units = data.display_unit || data.units || '';
+        // Warming sources are drawn at half opacity so a provisional line
+        // reads as not-yet-trustworthy at a glance.
+        var warmByLabel = {};
+        (data.comparisons || []).forEach(function(c){ warmByLabel[(c.label||c.entity)] = !!c.warming; });
+        var traces = [
+            { x:ds, y:ov.actual||[], name:'Actual', type:'scatter', mode:'lines', line:{color:C_ACTUAL,width:2.5,dash:'dot'}, connectgaps:false },
+            { x:ds, y:ov.app||[], name:'ML Forecast Lab', type:'scatter', mode:'lines', line:{color:C_APP,width:2}, connectgaps:false },
+        ];
+        (ov.externals||[]).forEach(function(ex, i){
+            var nm = ex.label||ex.entity;
+            traces.push({ x:ds, y:ex.values||[], name: nm + (warmByLabel[nm] ? ' ⏳' : ''), type:'scatter', mode:'lines',
+                line:{color:EXT_COLORS[i%EXT_COLORS.length], width:2, dash:'dot'},
+                opacity: warmByLabel[nm] ? 0.45 : 1.0, connectgaps:false });
+        });
+        var yUnits = units ? (' (' + units + ')') : '';
+        // Limit the x-range to where we actually have comparison data (any
+        // forecast/external present). The actuals can span the whole window
+        // (e.g. 30 days) while only ~1 day has logged forecasts, so without
+        // this the comparison data is a sliver lost in a sea of actuals.
+        var lo = -1, hi = -1;
+        function _scan(arr){ if(!arr) return; for(var i=0;i<arr.length;i++){ var v=arr[i]; if(v!==null&&v!==undefined){ if(lo<0||i<lo)lo=i; if(i>hi)hi=i; } } }
+        _scan(ov.app); (ov.externals||[]).forEach(function(ex){ _scan(ex.values); });
+        var xaxis = {title:'Time', color:DARK.axis, gridcolor:DARK.grid};
+        if (lo >= 0 && hi > lo) { xaxis.range = [ov.ds[lo], ov.ds[hi]]; }
+        Plotly.newPlot(oc, traces, {
+            xaxis: xaxis,
+            yaxis:{title:'Value'+yUnits, color:DARK.axis, gridcolor:DARK.grid, zeroline:true, zerolinecolor:'#4a5178'},
+            plot_bgcolor:DARK.plot_bgcolor, paper_bgcolor:DARK.paper_bgcolor, font:DARK.font,
+            hovermode:'x unified', legend:{orientation:'h', y:-0.2}, margin:{t:20,r:20,b:60},
+        }, {responsive:true});
+    }
+
+    // Error by hour-of-day, derived client-side from the overlay arrays so
+    // it follows the chosen Analysis view and needs no extra endpoint.
+    function _renderHourly(data) {
+        var grp = document.getElementById('external-hour-group');
+        var hc = document.getElementById('external-hour-chart');
+        if (!grp || !hc || !window.Plotly) { if(grp)grp.style.display='none'; return; }
+        var ov = data.overlay || {};
+        if (!ov.ds || !ov.ds.length || !ov.actual) { grp.style.display='none'; return; }
+        var hours = ov.ds.map(function(s){ return new Date(s).getHours(); });
+        // Mean |pred - actual| per hour for one prediction array.
+        function _hourMae(pred) {
+            var sum = new Array(24).fill(0), cnt = new Array(24).fill(0);
+            for (var i = 0; i < hours.length; i++) {
+                var a = ov.actual[i], p = pred ? pred[i] : null;
+                if (a === null || a === undefined || p === null || p === undefined) continue;
+                var h = hours[i]; sum[h] += Math.abs(p - a); cnt[h] += 1;
+            }
+            return sum.map(function(s, h){ return cnt[h] ? s / cnt[h] : null; });
+        }
+        var warmByLabel = {};
+        (data.comparisons || []).forEach(function(c){ warmByLabel[(c.label||c.entity)] = !!c.warming; });
+        var hx = []; for (var h = 0; h < 24; h++) hx.push(h);
+        var traces = [{ x:hx, y:_hourMae(ov.app), name:'ML Forecast Lab', type:'scatter', mode:'lines+markers', line:{color:C_APP,width:2}, marker:{size:4}, connectgaps:false }];
+        (ov.externals||[]).forEach(function(ex, i){
+            var nm = ex.label||ex.entity;
+            traces.push({ x:hx, y:_hourMae(ex.values), name: nm + (warmByLabel[nm]?' ⏳':''), type:'scatter', mode:'lines+markers',
+                line:{color:EXT_COLORS[i%EXT_COLORS.length], width:2, dash:'dot'}, marker:{size:4},
+                opacity: warmByLabel[nm] ? 0.45 : 1.0, connectgaps:false });
+        });
+        var units = data.display_unit || data.units || '';
+        // Reveal the container BEFORE plotting so Plotly measures its real
+        // (full) width. Rendering into a display:none group makes Plotly fall
+        // back to a default width that never fills out when the group is shown.
+        grp.style.display = '';
+        Plotly.newPlot(hc, traces, {
+            xaxis:{title:'Hour of day', color:DARK.axis, gridcolor:DARK.grid, dtick:3, range:[-0.5,23.5]},
+            yaxis:{title:'MAE'+(units?(' ('+units+')'):''), color:DARK.axis, gridcolor:DARK.grid},
+            plot_bgcolor:DARK.plot_bgcolor, paper_bgcolor:DARK.paper_bgcolor, font:DARK.font,
+            hovermode:'x unified', legend:{orientation:'h', y:-0.25}, margin:{t:20,r:20,b:60},
+        }, {responsive:true});
+    }
+
+    function _renderLeadtime(data) {
+        var grp = document.getElementById('external-leadtime-group');
+        var lc = document.getElementById('external-leadtime-chart');
+        if (!grp || !lc) return;
+        var lt = data.lead_time;
+        if (!lt || !lt.lead_minutes || !lt.lead_minutes.length || !window.Plotly) { grp.style.display='none'; return; }
+        grp.style.display = '';
+        var xHours = lt.lead_minutes.map(function(m){ return m/60; });
+        var units = data.lead_unit || data.units || '';
+        var traces = [{ x:xHours, y:lt.app_mae, name:'ML Forecast Lab', type:'scatter', mode:'lines+markers', line:{color:C_APP,width:2}, marker:{size:4}, connectgaps:false }];
+        (lt.externals||[]).forEach(function(ex, i){
+            traces.push({ x:xHours, y:ex.mae, name:ex.label||ex.entity, type:'scatter', mode:'lines+markers',
+                line:{color:EXT_COLORS[i%EXT_COLORS.length], width:2, dash:'dot'}, marker:{size:4}, connectgaps:false });
+        });
+        Plotly.newPlot(lc, traces, {
+            xaxis:{title:'Lead time (hours)', color:DARK.axis, gridcolor:DARK.grid},
+            yaxis:{title:'MAE'+(units?(' ('+units+')'):''), color:DARK.axis, gridcolor:DARK.grid},
+            plot_bgcolor:DARK.plot_bgcolor, paper_bgcolor:DARK.paper_bgcolor, font:DARK.font,
+            hovermode:'x unified', legend:{orientation:'h', y:-0.25}, margin:{t:20,r:20,b:60},
+        }, {responsive:true});
+    }
+
+    // Plotly measures zero width inside a collapsed <details>, so resize the
+    // diagnostics charts whenever the panel is opened.
+    function _resizeExternalDiagnostics() {
+        var det = document.getElementById('external-diagnostics');
+        if (!det || !window.Plotly) return;
+        setTimeout(function(){
+            det.querySelectorAll('.js-plotly-plot').forEach(function(c){
+                try { Plotly.Plots.resize(c); } catch (e) {}
+            });
+        }, 50);
+    }
+
+    // Show the Diagnostics accordion only when at least one of its charts has
+    // data; resize on demand if it's already open.
+    function _syncExternalDiagnostics() {
+        var det = document.getElementById('external-diagnostics');
+        if (!det) return;
+        var hour = document.getElementById('external-hour-group');
+        var lead = document.getElementById('external-leadtime-group');
+        var any = (hour && hour.style.display !== 'none') ||
+                  (lead && lead.style.display !== 'none');
+        det.style.display = any ? '' : 'none';
+        if (any && det.open) _resizeExternalDiagnostics();
+    }
+
+    window.loadExternalComparison = function() {
+        var winSel = document.getElementById('external-window');
+        var days = winSel ? winSel.value : '30';
+        fetch(BASE + '/experiment/' + EXP + '/external-forecast-comparison?days=' + encodeURIComponent(days) + '&analysis=' + encodeURIComponent(_externalAnalysis))
+            .then(function(r){ return r.json(); })
+            .then(function(data){
+                if (!data || data.configured === false) { _showEmpty('No third-party forecasts added yet.', 'Open “Third-party forecasts to compare against” above to add a forecast sensor.'); return; }
+                if (data.error) { _showEmpty('Could not load comparison.', String(data.error)); return; }
+                var hasOverlay = data.overlay && data.overlay.ds && data.overlay.ds.length;
+                var hasH2H = (data.comparisons||[]).some(function(c){ return c.head_to_head; });
+                if (!hasOverlay && !hasH2H) { _showEmpty(); return; }
+                var empty = document.getElementById('external-empty'); if (empty) empty.style.display='none';
+                _lastExternalData = data;
+                _renderWarmingBanner(data);
+                _renderVerdict(data);
+                _renderRankTable(data);
+                _renderSkillTable(data);
+                _applyCompareMode();
+                _renderTiming(data);
+                _renderOverlay(data);
+                _renderHourly(data);
+                _renderLeadtime(data);
+                _syncExternalDiagnostics();
+            })
+            .catch(function(err){ _showEmpty('Could not load comparison.', String(err)); });
+    };
+
+    if (typeof queueChart === 'function') {
+        queueChart('sec-external-comparison', function() { loadExternalComparison(); });
+    }
+    (function(){
+        var det = document.getElementById('external-diagnostics');
+        if (det) det.addEventListener('toggle', function(){ if (det.open) _resizeExternalDiagnostics(); });
+    })();
+    try { window.onExternalModeChanged(); } catch (e) {}
 })();
 </script>
 {% endblock %}

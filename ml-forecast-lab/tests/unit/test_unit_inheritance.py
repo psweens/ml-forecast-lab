@@ -19,10 +19,16 @@ from ml_forecast_lab.config import ExperimentCfg
 
 
 class _StubHA:
-    """Captures set_state payloads; serves a fixed source unit."""
+    """Captures set_state payloads; serves a (mutable) source unit.
+
+    ``raise_on_unit`` makes the unit lookup raise to simulate a transient
+    HA API failure (``HAInterface.get_state`` would itself swallow this and
+    return ``default``, so the stub mirrors the value path: None).
+    """
 
     def __init__(self, source_unit):
         self._source_unit = source_unit
+        self.raise_on_unit = False
         self.captured: list = []
         self.get_state_calls = 0
 
@@ -33,6 +39,8 @@ class _StubHA:
     async def get_state(self, entity_id, default=None, attribute=None):
         if attribute == "unit_of_measurement":
             self.get_state_calls += 1
+            if self.raise_on_unit:
+                raise RuntimeError("simulated transient HA failure")
             return self._source_unit if self._source_unit is not None else default
         return default
 
@@ -54,6 +62,9 @@ def _exp(units=""):
 
 
 def _publish(app, exp):
+    # Reset so the return reflects only THIS publish cycle's sensors (the
+    # stub accumulates set_state payloads across cycles).
+    app.ha_interface.captured = []
     y = np.array([1.0, 2.0, 3.0], dtype=np.float32)
     ds = pd.DatetimeIndex([
         pd.Timestamp("2026-06-12 12:00") + pd.Timedelta(minutes=30 * (i + 1))
@@ -99,3 +110,55 @@ def test_inherited_unit_is_cached_across_cycles():
     # One lookup total despite three publish cycles.
     assert app.ha_interface.get_state_calls == 1
     assert app._source_unit_cache.get("sensor.pv_power") == "kWh"
+
+
+def test_retrain_then_transient_empty_keeps_last_good_unit():
+    """Regression: a retrain invalidates the unit cache; if the post-retrain
+    re-resolve comes back empty (HA hiccup / source momentarily
+    ``unavailable``), the publish must keep the last-known unit instead of
+    flipping HA's unit_of_measurement to ''."""
+    app = _make_app(source_unit="W")
+    units = _publish(app, _exp(units=""))
+    assert all(u == "W" for u in units)
+
+    # Simulate the retrain cache invalidation (main.py:_retrain_single).
+    app._source_unit_cache.pop("sensor.pv_power", None)
+    # Source now returns no unit on the fresh lookup (transient miss).
+    app.ha_interface._source_unit = None
+
+    units2 = _publish(app, _exp(units=""))
+    assert all(u == "W" for u in units2), (
+        f"transient empty after retrain must keep last-known 'W'; got {units2}"
+    )
+
+
+def test_retrain_then_fetch_raises_keeps_last_good_unit():
+    """Same regression but the lookup raises (transient API error)."""
+    app = _make_app(source_unit="kWh")
+    assert all(u == "kWh" for u in _publish(app, _exp(units="")))
+    app._source_unit_cache.pop("sensor.pv_power", None)
+    app.ha_interface.raise_on_unit = True
+    units = _publish(app, _exp(units=""))
+    assert all(u == "kWh" for u in units), (
+        f"a raising lookup after retrain must keep 'kWh'; got {units}"
+    )
+
+
+def test_retrain_picks_up_legitimate_unit_change():
+    """The retrain re-resolve must still adopt a genuine source-unit change."""
+    app = _make_app(source_unit="W")
+    assert all(u == "W" for u in _publish(app, _exp(units="")))
+    app._source_unit_cache.pop("sensor.pv_power", None)
+    app.ha_interface._source_unit = "kW"  # source genuinely changed
+    units = _publish(app, _exp(units=""))
+    assert all(u == "kW" for u in units), (
+        f"a real source-unit change must be adopted; got {units}"
+    )
+
+
+def test_cold_start_unitless_source_stays_empty_without_last_good():
+    """No last-known unit yet + unitless source → empty, as before."""
+    app = _make_app(source_unit=None)
+    units = _publish(app, _exp(units=""))
+    assert all(u == "" for u in units)
+    assert app._source_unit_last_good.get("sensor.pv_power") is None

@@ -253,6 +253,8 @@ main { flex: 1; }
 .rank-badge {
     display: inline-flex; align-items: center; justify-content: center;
     width: 28px; height: 28px; border-radius: 50%; font-weight: bold;
+    /* Neutral default so ranks beyond the top 3 are still visible. */
+    background: var(--bg-tertiary); color: var(--text-primary);
 }
 .rank-1 { background: var(--success); color: var(--bg-primary); }
 .rank-2 { background: var(--accent-secondary); color: var(--bg-primary); }

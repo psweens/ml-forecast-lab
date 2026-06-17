@@ -132,6 +132,29 @@ def test_fill_preserves_daytime_nan():
     assert result.loc[midday, "y"].isna().all()
 
 
+def test_fill_zeros_nonzero_interpolated_night():
+    """The headline regression: gap-fill interpolation can leave night
+    rows NON-NaN AND non-zero (the resample step bridges dusk into the
+    next morning). Those rows must still be forced to 0 — the model
+    should never see overnight generation. The old ``isna() & night``
+    mask skipped them, so the model learnt phantom 23:00 output."""
+    result = _make_solar_result(drop_night=False)
+    night_idx = result["clear_sky_ghi"] <= 0
+    # Simulate the interpolation artefact: paint every night slot with a
+    # plausible-but-wrong non-zero value (as resample_to_grid would).
+    result.loc[night_idx, "y"] = 0.42
+    assert (result.loc[night_idx, "y"] > 0).all()  # fixture sanity
+
+    exp = ExperimentCfg(name="pv", target_entity="x", target_is_nonnegative=True)
+    n_filled = _apply_idle_value_fill(result, exp)
+    assert n_filled > 0
+    # Every night row is now exactly zero, despite never being NaN.
+    assert (result.loc[night_idx, "y"] == 0.0).all()
+    # Daytime production is left untouched.
+    day_idx = result["clear_sky_ghi"] > 0
+    assert (result.loc[day_idx, "y"] > 0).any()
+
+
 def test_fill_is_idempotent():
     """Running twice produces the same result; no double-fill."""
     result = _make_solar_result()
@@ -140,6 +163,19 @@ def test_fill_is_idempotent():
     n2 = _apply_idle_value_fill(result, exp)
     assert n1 > 0
     assert n2 == 0  # nothing left to fill
+
+
+def test_fill_idempotent_after_zeroing_interpolated_night():
+    """Idempotency must hold on the new force-zero path too: once the
+    night is zeroed, a second pass finds nothing to change."""
+    result = _make_solar_result(drop_night=False)
+    night_idx = result["clear_sky_ghi"] <= 0
+    result.loc[night_idx, "y"] = 0.42
+    exp = ExperimentCfg(name="pv", target_entity="x", target_is_nonnegative=True)
+    n1 = _apply_idle_value_fill(result, exp)
+    n2 = _apply_idle_value_fill(result, exp)
+    assert n1 > 0
+    assert n2 == 0
 
 
 def test_fill_restores_full_daily_coverage():

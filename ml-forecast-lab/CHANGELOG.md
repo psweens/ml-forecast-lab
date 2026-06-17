@@ -1,5 +1,452 @@
 # Changelog
 
+## 2.46.2
+
+**Forecast Comparison: the "% of Typical" column is now "Error %".** The old
+label was ambiguous about direction — it could read as coverage, where 100%
+looks good. It is an error ratio (`MAE ÷ typical demand`), so it now reads
+**Error %** in both leaderboards and the "Rank by" picker, and the tooltips
+state it plainly: **0% is a perfect forecast and lower is better; 100% means
+the average miss is as big as typical demand.** No change to how the value is
+computed or ranked.
+
+**Lead times for already-logged forecasts are corrected on upgrade.** The
+v2.46.1 content-change detection only applied to new captures, so leads
+recorded under earlier builds — where every cycle re-logged an unchanged
+trajectory as a fresh issuance — stayed stuck at one cycle (e.g. a source
+refreshing a few times a day still reading 15 min). A one-time migration now
+collapses each run of identical issuances down to its earliest one, applying
+the same content-change rule retroactively. Existing sources report their true
+leads without losing history or restarting the warming-up window.
+
+## 2.46.1
+
+**Forecast Comparison: accurate lead times + full metrics at matched lead.**
+
+- **Lead times now reflect each source's real forecast cadence.** An external
+  trajectory's issue time is detected from when its *content* changes, not
+  from HA `last_updated` — which on integrations like Solcast (recomputing
+  "now" every few minutes off a forecast that only refreshes ~10×/day) bumps
+  far more often than the forecast does, making the lead look artificially
+  short. A capture whose values match the last logged trajectory is treated
+  as the same issuance (its original issue time is kept); a changed trajectory
+  is a new issuance stamped at the capture time — accurate to within the
+  capture cadence and source-agnostic (no reliance on per-integration
+  timestamp quirks).
+- **The "Same lead time" leaderboard now shows MAE, RMSE, Bias and % of
+  Typical** (not just MAE), each best-in-column highlighted, computed exactly
+  over the matched-lead band from per-bucket error sums. Daily-total metrics
+  aggregate across lead times, so they remain in the "Best available" view.
+
+## 2.46.0
+
+**Forecast Comparison: fair, lead-aware accuracy.** A faster-updating source
+was being credited for its update frequency, not just its skill — its
+"latest available" forecast for a moment is issued minutes ahead, while a
+source that refreshes a few times a day is judged hours ahead (a much harder
+task). The comparison now separates the two questions:
+
+- A **Lead column** in the Accuracy Ranking shows each forecaster's median
+  lead (`now` for state-mode/nowcast sources, `15 min` / `8.0 h` otherwise),
+  so a "best available" win is read in context inline.
+- A **Compare toggle** — **Best available** vs **Same lead time**:
+  - *Best available* (operational, default): each forecaster's most recent
+    prediction for each moment — what you could act on now, so freshness
+    counts. This is the existing leaderboard.
+  - *Same lead time* (skill): every trajectory forecaster scored over the
+    lead band they all cover, isolating model skill from update frequency.
+    The matched-lead MAE is the sample-weighted mean of the per-bucket lead
+    errors. State-mode (nowcast-only) and scale-mismatched sources can't be
+    matched on lead and are listed as excluded; with no trajectory source the
+    skill view explains it isn't available.
+
+The verdict and the basis line follow the chosen mode, so the headline never
+implies a skill ranking the data can't support.
+
+## 2.45.8
+
+**Forecast Comparison tab — results-first layout.** The tab now opens on the
+verdict, leaderboard and "Forecast vs Actual" chart instead of the setup form:
+
+- The **"Third-party forecasts to compare against"** panel (the source list +
+  add form) is now a collapsible section — collapsed once at least one source
+  is configured (with a count in its header) and open on first run, so setup
+  is still obvious but doesn't sit above the results on every visit.
+- The **"Error by Time of Day"** and **"Error by Forecast Horizon"** charts
+  are grouped under a collapsible **Diagnostics** section, keeping the first
+  screen focused on the headline comparison. They resize correctly when the
+  section is expanded (Plotly otherwise measures zero width inside a closed
+  panel).
+
+No behavioural change — same data, metrics and charts, reorganised.
+
+## 2.45.7
+
+**External forecast lead times now reflect the source's real freshness.**
+Previously every external forecast was stamped with the *add-on's capture
+time*, so a source the add-on re-read each cycle always looked ~15 min
+ahead — even a Solcast sensor whose API was last polled hours ago (HA keeps
+the stale trajectory in the attribute, and we re-snapshotted it every
+cycle). The lead reported the snapshot cadence, not the forecast's age, so
+the basis line showed everything at ~15 min even when it shouldn't.
+
+The capture now:
+
+1. **Stamps each external snapshot with the source's own update time**
+   (HA `last_updated`), so `lead_minutes = target − source_issue_time` — a
+   source last polled 2 h ago correctly shows a ~2 h+ lead, and the
+   head-to-head / horizon comparison judges it at its true horizon.
+2. **Skips re-logging when the source hasn't changed**, so the log isn't
+   bloated with identical stale trajectories and the lead isn't reset to a
+   fresh value every cycle.
+
+If a source exposes no update timestamp, it falls back to the capture time
+(the previous behaviour).
+
+## 2.45.6
+
+**Cleaner "Comparison basis" wording.** The median-lead line now reads as
+one labelled list — "Each forecast is scored at its median lead: ML
+Forecast Lab 15 min ahead, Predbat … 15 min ahead, Solcast … 15 min
+ahead." — instead of the awkward "Externals are a median <name> …" phrasing.
+When the leads match, it's immediately clear the comparison is like-for-like.
+
+## 2.45.5
+
+**Forecast Comparison: clearer lead-time basis + tighter overlay window.**
+
+- The "Comparison basis" line now also reports **each trajectory external's
+  median lead** alongside ML Forecast Lab's, so the lead-time asymmetry is
+  visible at a glance — the headline table scores each forecaster at its
+  own median lead, and a forecast judged at a longer horizon has a tougher
+  job (a large gap is a hint a source should update more often; the horizon
+  chart remains the equal-lead comparison).
+- The **"Forecast vs Actual" chart now limits its x-axis to the window
+  where comparison data actually exists.** Actuals can span the whole
+  selected window (e.g. 30 days) while only a day of forecasts has been
+  logged; the chart no longer shows the comparison data as a sliver lost in
+  weeks of actuals.
+
+## 2.45.4
+
+**Dropped the non-physical-value banner from the comparison tab.** With the
+publish-boundary clamp (2.45.3) preventing blow-ups at the source, the
+read-side guard still quietly excludes any already-logged corruption (so
+the charts stay readable) and logs it server-side, but no longer shows a
+banner in the UI.
+
+## 2.45.3
+
+**Root-cause fix: blown-up forecasts can no longer be published.** When
+`log_transform` is on, predictions are inverted with `np.expm1`; a model
+that diverged in log space (a value of ~70) explodes to ~1e30, and the
+publish boundary only clamped the lower side (>= 0), so that garbage was
+sent to Home Assistant sensors **and** logged — later surfacing as the
+1e30 spike on the comparison's lead-time chart.
+
+The inverted forecast is now capped to a generous multiple (10×) of the
+largest target value seen in training — real demand / PV is physically
+bounded, so anything beyond that is a divergence, not a forecast. The cap
+is applied at both publish paths and on the holdout-evaluation inversion,
+and a clamp logs a warning so a diverging model is visible. The cap is
+loose enough never to touch a plausible forecast — only a blow-up.
+
+(The comparison tab's read-side guard and data-quality banner from
+2.45.1–2.45.2 stay, so any values logged before this fix are still handled
+gracefully and flagged.)
+
+## 2.45.2
+
+**A blown-up forecast is now flagged, not hidden.** v2.45.1 dropped
+non-physical forecast values so they couldn't wreck the charts — but that
+risked erasing the *only* evidence a blowup happened: a stale long-horizon
+divergence is masked everywhere else (the overlay and Accuracy Ranking use
+the latest forecast per timestamp, and the Forecast Accuracy tab is
+next-step only), so the horizon-binned lead-time chart was the sole place
+it surfaced. The comparison now shows a red **data-quality banner** naming
+what was excluded, the magnitude (e.g. ≈ 5.1e30), and when — so the event
+is visible regardless of which view would otherwise mask it, and the
+reported magnitude doubles as proof it's a real logged value rather than a
+plotting artefact.
+
+(The root cause — a log-transform forecast published without an upper
+clamp — is still worth fixing so such values never reach Home Assistant.)
+
+## 2.45.1
+
+**Forecast Comparison no longer broken by a single corrupt forecast
+value.** A diverged forecast (e.g. a log-transform inversion that
+overflowed to ~1e30 and was logged verbatim) made the "Error by forecast
+horizon" chart unreadable — one point auto-scaled the axis to 1e30 and
+flattened every real line to zero — and skewed the MAE/ranking. The
+comparison now drops non-physical logged values (non-finite, or more than
+10,000× the largest actual seen / beyond an absolute sanity ceiling) at
+ingestion for both the add-on's forecast and the externals, with a
+server-side warning, so one bad point can't dominate the charts or
+metrics.
+
+Note: this guards the *comparison view* against already-logged corruption.
+The underlying cause — a log-transform forecast being published without
+an upper clamp — is a separate publish-path issue worth fixing so such
+values are never sent to Home Assistant in the first place.
+
+## 2.45.0
+
+**Forecast Comparison now ranks like the Results tab.** The Accuracy
+Ranking table is a real leaderboard:
+
+- A **Rank** column with #1/#2/#3 badges (styled like the Results tab),
+  and the rows are sorted into rank order.
+- A new **"Overall (composite)"** mode — now the default "Rank by"
+  option — ranks forecasters by a composite **mean rank across MAE,
+  RMSE and Daily MAE** (the same Demšar-style averaging the Results tab
+  uses; bias is a calibration metric and % of typical is just rescaled
+  MAE, so both are excluded). The mean rank is shown under each badge.
+- Picking a **single metric** instead ranks, sorts, highlights and
+  computes the "vs MLFL" gap on *that* metric — so the head-to-head
+  number always matches what you're ranking by (it was previously
+  always MAE).
+- **MLFL is ranked inline**, taking its earned position among the
+  externals (still tinted as "you") rather than pinned on top — an
+  honest leaderboard.
+- The verdict follows suit: "ML Forecast Lab ranks #N of M overall / on
+  <metric>". Scale-mismatched sources stay unranked and excluded.
+
+## 2.44.5
+
+**Forecast Comparison tab polish.**
+
+- **Removed the Seasonal Naive baseline** from the comparison (table row,
+  overlay/hour-of-day lines, verdict suffix, and its backend computation)
+  — it added noise without earning its place next to the real
+  forecasters.
+- **"Error by time of day" now fills the full width** like the other
+  charts. It was rendered into a still-hidden container, so Plotly
+  measured zero width and never expanded; the container is now revealed
+  before plotting.
+- **The comparison column is now "vs MLFL"** (was "vs ML Forecast Lab"),
+  and its cells read "MLFL N% better" instead of "add-on N% better". A
+  tooltip explains the number: the relative reduction in **MAE** on the
+  two forecasters' common samples — `(external MAE − MLFL MAE) / external
+  MAE` — always MAE-based, regardless of the "Rank by" metric.
+- **Ambiguous metric columns now carry tooltips.** "% of Typical" (MAE ÷
+  mean |actual| — a unit-free accuracy read) and "Bias" (mean signed
+  error; positive = over-forecast) explain themselves on hover instead of
+  leaving the reader to guess.
+- **Chart palette tuned for the dark navy panel.** Plain blue/lavender
+  legend colours read as "blue on blue"; externals now lead with
+  high-contrast hues (cyan, amber, green, …) and the white dotted
+  "Actual" / coral "ML Forecast Lab" lines are unchanged.
+- **Section titles use Title Case** (e.g. "Accuracy Ranking", "Error by
+  Time of Day", "Forecast vs Actual", "Data Sanity Check", "Sweep
+  Results").
+
+## 2.44.4
+
+**Fix: data tabs failed to load with "SyntaxError: The string did not
+match the expected pattern."** Many endpoints compute floats — MAE,
+bias, scale ratios, the benchmark `mase`, per-bin means over possibly-
+empty groups — that can come out `NaN` or `Infinity`. Starlette renders
+JSON with `json.dumps(allow_nan=False)`, so a non-finite value raises
+*during render* — after the endpoint's own try/except has already
+returned — surfacing as an unhandled 500 with a non-JSON body. (Older
+Starlette instead emitted a bare `NaN` token, i.e. invalid JSON.) Either
+way a strict client parser chokes: WebKit — used by Safari **and the iOS
+Home Assistant companion app's WKWebView** — throws the SyntaxError above
+and the tab shows "Could not load…". This bit the Forecast Comparison tab
+first, but the Accuracy, Trajectory, Evolution, Stability and Results
+tabs were all exposed.
+
+The web app now renders every JSON response through a NaN-safe encoder
+(`SafeJSONResponse`) that replaces non-finite floats with `null` before
+serialising — a single chokepoint, so new endpoints are covered for free.
+`null` is what the charts already expect for gaps (they draw with
+`connectgaps:false`), so every payload is spec-valid JSON on every
+client.
+
+## 2.44.3
+
+**Forecast Comparison plots now match the rest of the app.** The
+comparison tab's charts were drawn on transparent panels with their own
+accent palette and a grey solid "Actual" line, so they looked foreign
+next to every other tab. They now use the shared dark panel background
+(`#16213e` / `#1a1a2e`), the same white dotted "Actual" reference line
+used app-wide, and the shared `PLOT_COLORWAY` hues — the add-on's own
+forecast takes the primary accent and each external cycles through the
+same palette as the model series elsewhere. The Seasonal Naive baseline
+moved from a washed-out grey to a soft lavender (`#a5b4fc`) that
+harmonises with the dark theme while staying subordinate as a dashed
+reference. The ranking-table colour swatches follow the same constants,
+so table and chart stay in sync.
+
+## 2.44.2
+
+**Solar forecasts no longer learn phantom night-time generation.** For
+non-negative solar targets the night-time rows are now forced to zero
+(or the configured `idle_value`) using the `clear_sky_ghi` /
+`sun_elevation` physics gate — every night row, not just the missing
+ones.
+
+Previously the night-time fill only rewrote `NaN` rows. But with the
+default `gap_handling: interpolate`, the overnight gap rarely stays
+`NaN`: the resample step linearly interpolates the first slots after
+dusk toward the next morning's value, and a blanket back-fill carried a
+neighbouring daytime reading across the rest of the night. The result
+was a training set with non-zero generation through the small hours, so
+the model predicted phantom output at, say, 23:00 and phase-shifted the
+daily peak. Because those rows were not `NaN`, the old fill skipped
+them.
+
+- The `resample_to_grid` `interpolate` path now back-fills only the
+  *leading* `NaN` run (before the first observation) instead of every
+  gap. A long interior gap (the overnight blackout) stays `NaN` rather
+  than inheriting the next observation — this also removes a lookahead
+  leak where a future value was planted into the past.
+- Daytime gaps are still preserved: a `clear_sky_ghi > 0` row with a
+  `NaN` target remains `NaN` so a genuine daylight sensor outage
+  surfaces via the dropna step instead of being masked as zero.
+- Non-solar targets are unchanged — without physics features the fill
+  still only acts on `NaN` rows and only when `idle_value` is set.
+
+## 2.44.1
+
+**Forecast Comparison tab — completed against the agreed spec.** Builds on
+2.44.0 (which over-delivered on unit-aware conversion, the two
+state/attribute ingestion modes, on-tab management, auto-detect and the
+scale-mismatch guard — all kept) by adding the pieces that were still
+missing:
+
+- **Seasonal Naive baseline.** A "same time yesterday" do-nothing
+  reference is now computed and shown as its own row (kept out of the
+  five-competitor cap) plus a dashed line on the overlay, and folded into
+  the verdict ("· vs Seasonal Naive: ahead/behind").
+
+- **Warming-up / inconclusive warnings.** A source is "warming up" until
+  it has at least **7 days** of overlapping data
+  (`EXTERNAL_COMPARISON_WARMUP_DAYS`). Below that: a page-top **"Results
+  are provisional"** banner names the sources still warming (with their
+  `n/7` day counts), each table row shows an `n/7 ⏳` Days badge, warming
+  overlay/hour lines are drawn faded, and the verdict is prefixed
+  "Provisional ·" and de-emphasised. Previously a winner could be declared
+  off a single overlapping sample.
+
+- **Metric selector.** A "Rank by" dropdown (MAE default; RMSE, Bias,
+  % of typical, Daily MAE, Daily bias) drives the table's column emphasis,
+  the best-in-column highlighting, and the head-to-head verdict.
+
+- **Richer ranking table.** New **% of typical**, **Daily MAE**, **Daily
+  bias** and **Days** columns; the best value in each column is bolded
+  green (the tooltip already promised this); the app reference row uses a
+  standalone `app_self` accuracy block.
+
+- **Error-by-time-of-day chart.** Mean error grouped by hour of day, one
+  line per forecaster — surfaces regime-specific strengths the headline
+  numbers hide. Computed client-side from the overlay so it follows the
+  per-interval/cumulative view.
+
+- **Separate external retention.** New global
+  `external_forecast_retention_days` (default **60**, editable in the
+  System tab) prunes the captured third-party trajectory log on its own
+  window instead of sharing the add-on's 120-day `forecast_log` schedule.
+
+- **Add-time validation.** Adding an attribute-mode external now probes
+  the entity live and returns a non-fatal warning if the chosen
+  attribute / value key doesn't resolve — a typo surfaces immediately
+  instead of after days of empty logging (never blocks the add).
+
+Backend: `get_external_forecast_comparison` now returns per-source
+`% of typical`, daily MAE/bias, `days_logged`/`warming`, an `app_self`
+block, a `baseline` (Seasonal Naive) block, and top-level
+`warming_up`/`warmup_days`/`typical`. 13 new tests; full unit + smoke
+suites pass.
+
+*Not included (the one explicitly-optional item from the spec):* the
+multi-source forecast-convergence / small-multiples chart, which needs a
+new per-target multi-issuance payload — deferred as a follow-up.
+
+## 2.44.0
+
+**New per-experiment "Forecast Comparison" tab — benchmark the add-on's
+forecast against up to five third-party ones.** Add external forecast
+sensors (ones *not* produced by this add-on — Solcast, a utility day-ahead
+curve, another model) directly on the tab, and it scores the add-on's
+published forecast head-to-head against each, all against the actuals: a
+verdict, an accuracy-ranking table (MAE / RMSE / bias on the common
+samples, with the add-on as the reference row), an overlay chart of actual
+vs the add-on vs each external, and — for trajectory externals — a combined
+per-lead-time error curve.
+
+Sensors are added and removed on the tab itself (capped at five). Each one
+has:
+
+- A **mode**. *Sensor state (time-series)* treats the entity's recorded
+  state at each timestamp as its estimate for that moment; the state is
+  cached every production cycle (via the same history cache as the actuals),
+  so the comparison survives Home Assistant's recorder retention. Newly
+  added state sensors are backfilled from recorder history so the comparison
+  populates immediately rather than only accruing going forward.
+  *Forecast attribute (trajectory)* reads a forecast array from an attribute
+  (`forecast`, `detailedForecast`, a Predbat `results` dict, or a weather
+  `hourly`/`daily` service type — the same resolver future covariates use)
+  and logs the whole trajectory each cycle to the `external_forecast_log`
+  table (tagged by source), enabling the per-horizon comparison. The
+  attribute and value key are **auto-detected** from the chosen entity's live
+  attributes — you pick which data to compare from rather than typing names.
+- Optional overrides — a **scale** and an explicit **is-cumulative** — on
+  top of the automatic handling below.
+
+**Unit-aware conversion.** Each sensor's Home Assistant `unit_of_measurement`
+is read and used to put every series into a common space, so mismatched
+quantities line up automatically: a cumulative sensor's shape is detected and
+differenced, and power↔energy is reconciled via the interval length and base
+units (W/kW/MW, Wh/kWh/MWh). A cumulative **kWh** sensor can therefore be
+compared correctly against an instantaneous **kW** target without any manual
+setup. When a unit isn't a recognised power/energy unit the series is left in
+its raw space and a **scale-mismatch guard** flags it — replacing the
+meaningless "X% better" verdict with a warning and excluding that sensor from
+the head-to-head — rather than guessing.
+
+**Per-interval / cumulative analysis toggle.** Switch the whole tab between
+*per-interval* (per-bin demand in the target's native unit, e.g. kW) and
+*cumulative* (the running daily total in kWh, integrating power forecasts to
+energy). The cumulative view is what makes a daily-total energy sensor
+directly comparable. The horizon chart stays per-interval.
+
+Everything is aligned on the experiment's target grid and each external is
+scored on the **common samples** (where the actual, the add-on's forecast,
+and that external all exist), so differing update cadences don't bias the
+result. A comparison-basis line states the timing explicitly (same-time
+snapshot for state mode vs lead-matched for trajectory mode, plus each
+side's typical lead) and flags any external that is sparse or stale relative
+to the add-on's own forecasts.
+
+The tab only collects data while the experiment is in **production** (when
+the add-on logs its own forecasts), and data accrues going forward — there
+is no historical backfill. The internal stores stay bounded: the trajectory
+log is pruned on the same age-based schedule as `forecast_log` (120 days)
+and state-mode caches are pruned to the experiment's `max_age`. Configured
+via the `external_forecasts` list (each entry: `entity_id`, `mode`,
+`attribute`, `value_key`, `scale`, `is_cumulative`, `label`); configs using
+the older flat `external_forecast_*` keys are migrated to the list on load.
+
+**Chart axis labels tidied up.** Every experiment chart now carries a
+capitalised axis label with units where the quantity has them — the
+forecast-evolution y-axis uses the humanised experiment name (e.g. "Solar
+Forecast (W)") instead of the raw slug, the run-to-run stability spread
+shows units, and a few lower-cased or unit-less labels were corrected.
+
+**Fixed: auto-inherited forecast unit could reset to empty after a
+retrain.** The per-target unit cache is invalidated on each retrain so a
+genuine source-sensor unit change is picked up, but if the immediate
+re-resolve hit a transient Home Assistant fetch failure — or the source
+sensor was momentarily `unavailable` (its attributes absent) — the empty
+result was published, so Home Assistant flagged the forecast sensor's
+`unit_of_measurement` as having changed to "". The last successfully
+resolved unit is now remembered and reused whenever a fresh lookup comes
+back empty, so a transient miss can no longer clear a known unit; a real
+unit change is still adopted, and a genuinely unitless source still
+publishes empty.
+
 ## 2.43.1
 
 **Forecast sensors now inherit their unit automatically.** When an

@@ -41,6 +41,7 @@ The app searches these in order: explicit `--config-path` (development only) →
 | `cpu_cores` | int | `0` (= all) | Caps `OMP_NUM_THREADS` / `MKL_NUM_THREADS` / `torch.set_num_threads` so training doesn't saturate every core. |
 | `nice_priority` | int 0–19 | `10` | Process `nice` value for training. Higher numbers = lower priority, so the Pi stays responsive during a benchmark. |
 | `model_overrides` | mapping | `{}` | Global per-model hyperparameter overrides; keys are model registry names (e.g. `lightgbm`, `lstm`). |
+| `external_forecast_retention_days` | int (days) | `60` | How long captured third-party forecast trajectories (Forecast Comparison tab) are kept before pruning — its own window, separate from the add-on's 120-day forecast log. Editable in the System tab. |
 | `experiments` | list | required | One entry per sensor you want to forecast. |
 
 ### Experiment essentials
@@ -163,6 +164,37 @@ Two zero-cost deterministic covariates for solar PV (or any sun-driven target). 
 | `include_clear_sky_irradiance` | bool | `false` | Adds the theoretical clear-sky GHI (W/m²) from `pvlib`'s Ineichen model. Zero at night. Turns "predict solar generation" into "predict cloud-cover attenuation". |
 
 When `include_clear_sky_irradiance` is on, the app also gates production forecasts to zero at night based on past `clear_sky_ghi` — preventing the "small positive forecast at 3 a.m." pattern.
+
+### External forecast comparison
+
+Compare this add-on's forecast against up to **five third-party forecasts of the same target** — ones *not* produced by this add-on (Solcast, a utility day-ahead curve, another model). Each experiment has a **Forecast Comparison** tab that scores this add-on head-to-head against each, all against the actuals (verdict + accuracy-ranking table + overlay chart + per-lead-time curve). Add and remove the sensors directly on that tab, or edit the `external_forecasts` list in YAML. Each entry:
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `entity_id` | string | **required** | HA entity holding the external forecast. |
+| `mode` | `state` \| `attribute` | `state` | `state`: the entity's recorded value at each time is its estimate for that moment (cached each cycle like the actuals; newly added sensors are backfilled from recorder history so the comparison shows immediately). `attribute`: read a forecast trajectory from an attribute and log it per cycle (tagged by source) for a per-horizon comparison. |
+| `attribute` | string | `forecast` | `attribute` mode only — which attribute (or weather `hourly`/`daily`/`twice_daily` service type) holds the trajectory. |
+| `value_key` | string | `null` | `attribute` mode only — the value key inside each trajectory entry (e.g. `pv_estimate`). `null` auto-detects. |
+| `scale` | float | `null` | Optional multiplier override. Usually unnecessary — base units (W/kW/MW, Wh/kWh/MWh) are reconciled automatically from each sensor's HA unit. |
+| `is_cumulative` | bool | `null` | Override for whether the sensor is a running total. `null` auto-detects the cumulative shape (and differences it before comparison). |
+| `label` | string | `null` | Friendly name in the tab's chart/legend. |
+
+The comparison is **unit-aware**: it reads each sensor's HA `unit_of_measurement` and converts everything into a common space, so a cumulative **kWh** energy sensor lines up correctly against an instantaneous **kW** power target with no manual setup (cumulative shape is differenced; power↔energy is reconciled via the interval length and base units). When a unit isn't a recognised power/energy unit, the series is left raw and a scale-mismatch guard warns rather than guessing. The tab has a **per-interval ↔ cumulative** toggle: per-interval shows per-bin demand in the target's native unit; cumulative shows the running daily total in kWh (integrating power forecasts to energy), which is what makes a daily-total energy sensor directly comparable.
+
+The tab presents an **accuracy leaderboard** that ranks this add-on inline against every external (with #1/#2/#3 badges like the Results tab). A **Rank by** selector chooses the basis — *Overall* (a composite mean rank across MAE, RMSE and Daily MAE; the default) or a single metric (MAE, RMSE, Bias, % of typical, Daily MAE, Daily bias) — and the ranking, column highlighting, the "vs MLFL" gap and the verdict all follow it. Each source is held **provisional until it has 7 days of overlapping data** (shown as an `n/7 ⏳` badge with a "results are provisional" banner) so a winner isn't declared off a handful of samples. Alongside the overlay there's an **error-by-time-of-day** chart and, for trajectory externals, a per-horizon error curve; a comparison-basis line reports each forecaster's median lead so the head-to-head is read at the right horizon. External forecast lead times reflect the source's own freshness (its HA `last_updated`), not the add-on's capture cadence.
+
+```yaml
+external_forecasts:
+  - entity_id: sensor.solcast_pv_forecast
+    mode: attribute
+    attribute: detailedForecast
+    value_key: pv_estimate
+    label: Solcast
+  - entity_id: sensor.neighbour_model
+    mode: state
+```
+
+Only collects data while the experiment is in **production** (that's when this add-on logs its own forecasts), and data accrues from when you add each external — apart from state-mode sensors, which are back-filled once from recorder history so they show immediately. Storage is bounded: the captured trajectory log is pruned on its own window — `external_forecast_retention_days` (default 60, editable in the System tab) — and state-mode caches to the experiment's `max_age`. Legacy single-sensor configs using the flat `external_forecast_*` keys are auto-migrated into this list on load.
 
 ### Cross-validation
 
@@ -292,6 +324,7 @@ Open the UI via the app's **Open Web UI** button (HA ingress).
   - **Tuning.** Bayesian optimisation (Optuna TPE) per model with default vs tuned holdout comparison. **Tune All Enabled** sweeps every enabled backend sequentially.
   - **Results.** Composite mean rank across MAE / RMSE / MASE (Demšar-style averaging of per-fold ranks — see [`docs/RANKING_NOTES.md`](docs/RANKING_NOTES.md) for what the rank does and does not claim) with 95% bootstrap CIs over fold resamples so the leaderboard can flag genuine ties ("T#1") rather than promoting a single winner that's within noise of second place. Models that errored on at least one fold are listed separately under **Did not complete** rather than ranked last — keeps the comparison like-for-like. Plus the always-on "vs Seasonal Naive" skill chip, a pairwise model-comparison matrix (paired-t test on per-fold MAE), the training-window vs test-window drift verdict (PSI), and a "Compare with previous run" strip — the last five benchmarks are retained and diff-able.
   - **Forecast Accuracy.** Three-layer diagnostic: verdict chip, per-horizon error chart, retrain-history chips (filter the chart to a specific `(model_name, model_version)` cohort). Conformal-band calibration countdown surfaces "Calibrating · N of 10 residuals" rather than a silent blank.
+  - **Forecast Comparison.** Add up to five third-party forecast sensors (Solcast, a utility curve, another model) right on the tab, and it scores this add-on's published forecast head-to-head against each — all against the actuals — as an **accuracy leaderboard** (rank by a composite or a single metric, with #1/#2/#3 badges), plus an overlay chart, an error-by-time-of-day chart, and (for trajectory sensors) a per-horizon error curve. Unit-aware, with a per-interval ↔ cumulative toggle; sources stay provisional until they have 7 days of overlap. Scoring runs once the experiment is in production. See *Configuration reference → External forecast comparison*.
   - **Predictions** and **Covariate Analysis.** Forecast-trace overlay and an automatic search across covariate combinations to identify which signals genuinely improve forecasts.
 - **System page.** CPU-core / nice-priority controls (actually applied) and a global "Run all benchmarks" trigger.
 

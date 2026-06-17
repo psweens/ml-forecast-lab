@@ -424,6 +424,36 @@ class HAInterface:
             logger.warning(f"Entity not found: {entity_id}")
             return default
 
+    async def get_last_updated(
+        self,
+        entity_id: str,
+        default: Any = None,
+    ) -> Any:
+        """Return when an entity's state/attributes last changed in HA.
+
+        Uses ``last_updated`` (bumped whenever the state OR attributes are
+        written with a change) so it reflects a forecast source re-publishing
+        its trajectory attribute; falls back to ``last_changed``. Returns a
+        tz-aware UTC ``datetime`` (via ``parse_timestamp``) or ``default``.
+
+        This is the closest proxy for "when did this source actually issue
+        its forecast" when the source exposes no generation timestamp — the
+        External Comparison capture uses it so a stale source (e.g. a Solcast
+        sensor last polled hours ago) isn't recorded as a fresh forecast.
+        """
+        try:
+            state_obj = await self.api_call("GET", f"/api/states/{entity_id}")
+        except RuntimeError:
+            logger.warning(f"Entity not found: {entity_id}")
+            return default
+        raw = state_obj.get("last_updated") or state_obj.get("last_changed")
+        if not raw:
+            return default
+        try:
+            return parse_timestamp(raw)
+        except (ValueError, TypeError):
+            return default
+
     async def set_state(
         self,
         entity_id: str,
