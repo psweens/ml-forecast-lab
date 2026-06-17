@@ -204,13 +204,52 @@ Only collects data while the experiment is in **production** (that's when this a
 | `cv_folds` | int 2–20 | `5` | Number of folds. With short histories, raising this leaves too few rows per test slice. |
 | `cv_embargo_periods` | int | `2` | Gap (in periods) between train and test in each fold. Prevents rolling-window features from leaking across the boundary. |
 
+### Smart Setup (Automatic settings)
+
+If you can describe your sensor but don't want to learn what `tweedie` means,
+leave the data-dependent settings on **Automatic** and the add-on picks them
+from the sensor's own history — each with a plain-English reason. The
+experiment's **Settings → Smart Setup** panel is the front door.
+
+- **What's managed.** `loss_fn`, `outlier_method`, and `production_metric`
+  accept the literal `auto` sentinel (their default). The concrete value is
+  resolved at every retrain from the data, so it tracks the sensor as its
+  behaviour drifts rather than freezing at config time.
+- **Personas.** The series is fingerprinted (how often it's near-zero, how
+  spiky it is, how strong the daily cycle is) and mapped to a *persona*:
+  *Smooth daily cycle* (solar, temperature), *Bursts on and off* (hot water,
+  EV, appliances), *Steady baseline with occasional spikes* (whole-home load),
+  or *Counts/occupancy*. A spiky load resolves to peak-preserving settings —
+  Tweedie loss, clipping off, and selection on `peak_weighted_mae` — so it's
+  trained **and judged** for peak tracking; a smooth cycle keeps the gentle
+  defaults. This is what stops a bursty hot-water target being treated like a
+  smooth solar one.
+- **Tiers (Simple / Guided / Advanced).** A depth control shows more or less of
+  the panel — it never changes or loses a setting. *Guided* asks plain-language
+  questions (what matters most; is "not reporting" off or missing; is it
+  weather-driven) and pins a small bundle. *Advanced* exposes every dropdown.
+- **Automatic vs Pinned.** A setting you never touch is **Automatic** (tracks
+  the data). Pick a concrete value and it becomes **Pinned** (frozen; Automatic
+  leaves it alone). Each setting shows an `Automatic → value` or `Pinned` chip
+  with a one-click **↩ Automatic** reset, plus a **Reset all to Automatic**
+  escape hatch.
+- **Suggestions.** The persona also surfaces structural advice the managed
+  settings can't fix — a one-click *Enable solar inputs* for a sun-shaped
+  cycle, or covariate / load-subtract guidance for spiky loads.
+
+> **Upgrade note.** Because the managed settings now default to `auto`, an
+> experiment that never set them explicitly will start resolving them from the
+> data on its next retrain (e.g. a spiky target moving to Tweedie +
+> `peak_weighted_mae`). Anything you set explicitly is preserved. Pin the
+> settings to `huber` / `quantile` / `seasonal_mase` to keep the old behaviour.
+
 ### Models and training
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `models_enabled` | list | `[lightgbm, xgboost, lstm, cnn]` | Backends to train. Names match the registry slugs in `docs/MODEL_GUIDE.md` (`seasonal_naive`, `lightgbm`, `xgboost`, `catboost`, `lstm`, `gru`, `cnn`, `dlinear`, `nlinear`, `tsmixer`, `timemixer`, `tide`, `sparsetsf`, `fits`, `nbeats`, `nhits`, `patchtst`, `itransformer`, `crossformer`, `timesnet`, `tft`, `timexer`, `moderntcn`, `arima`, `ets`, `theta`, `chronos_bolt`, `ttm`). The zero-shot foundation backends (`chronos_bolt`, `ttm`) download pretrained weights from the Hugging Face Hub on first use (cached afterwards) and are unavailable on `armv7`. |
 | `model_params` | mapping | `{}` | Per-experiment hyperparameter overrides; keys are model names. Takes precedence over global `model_overrides`. Easier path: tune in the UI and use **Apply Tuned Params, Promote & Retrain**. |
-| `loss_fn` | `mse` \| `mae` \| `huber` \| `tweedie` | `huber` | Training loss for neural models. `huber` is quadratic near zero and linear in the tails, which is right for the spiky near-zero HA signals most users forecast. `tweedie` is honoured only by tree backends (LightGBM / XGBoost / CatBoost). |
+| `loss_fn` | `auto` \| `mse` \| `mae` \| `huber` \| `tweedie` | `auto` | Training loss. `auto` (Smart Setup) resolves it from the data — `tweedie` for spiky/intermittent targets, `huber` for smooth ones. `huber` is quadratic near zero and linear in the tails, right for spiky near-zero HA signals; `tweedie` is honoured only by tree backends (LightGBM / XGBoost / CatBoost), where neural backends fall back to Huber. |
 | `optimiser` | `adam` \| `adamw` | `adamw` | Neural optimiser. `adamw` (decoupled weight decay) matches every published time-series transformer paper; `adam` is the classic. Ignored by tree models. |
 | `output_activation` | `auto` \| `linear` \| `softplus` \| `relu` \| `exp` \| `sigmoid` \| `zscore` | `auto` | Output-head activation for PyTorch neural backends. `auto` picks `softplus` for cumulative sources and `linear` otherwise (and `zscore` for LSTM). Override for niche cases — `sigmoid` for hard-bounded quantities (battery SOC, humidity %), `linear` for signed targets (temperature delta). Tree models ignore this. |
 | `use_revin` | bool | `true` | Reversible Instance Normalisation. Per-window normalisation at the network's input + reversal at the output. Matches the published transformer / MLP-mixer reference implementations. Tree models, N-BEATS, and N-HiTS ignore this. |
@@ -223,7 +262,7 @@ Only collects data while the experiment is in **production** (that's when this a
 |---|---|---|---|
 | `gap_handling` | `interpolate` \| `ffill` \| `mask` | `interpolate` | What to do with gaps after resampling. `interpolate` linear-fills short gaps and leaves long ones as NaN. `ffill` propagates the last value (legacy). `mask` leaves every gap as NaN so the row is dropped downstream. |
 | `gap_max_minutes` | int | `90` | Maximum gap that `interpolate` will bridge. Longer gaps fall through to NaN. |
-| `outlier_method` | `quantile` \| `mad` \| `off` | `quantile` | Outlier-clipping strategy. `quantile` clips the upper tail; `mad` uses the Iglewicz-Hoaglin robust bound (more forgiving on heavy-tailed legitimate data like rainfall); `off` disables clipping. |
+| `outlier_method` | `auto` \| `quantile` \| `mad` \| `off` | `auto` | Outlier-clipping strategy. `auto` (Smart Setup) turns clipping **off** for spiky personas (the peaks are real signal) and uses a gentle `quantile` trim for smooth ones. `quantile` clips the upper tail; `mad` uses the Iglewicz-Hoaglin robust bound (more forgiving on heavy-tailed legitimate data like rainfall); `off` disables clipping. |
 | `outlier_quantile` | float | `0.999` | Upper-tail quantile for `outlier_method: quantile`. Lower this if your target has a clean upper bound. |
 | `outlier_lower` | `auto` \| `zero` \| `symmetric` \| `off` | `auto` | Lower-bound rule. `auto` clips at zero for cumulative sources, symmetric quantile otherwise. `zero` for non-negative quantities, `symmetric` for two-sided signals. |
 | `log_transform` | bool | `false` | Apply log to the target before modelling. Useful when the target spans orders of magnitude. |
@@ -232,8 +271,8 @@ Only collects data while the experiment is in **production** (that's when this a
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `metrics` | list | `[mae, rmse, mase, seasonal_mase]` | Metrics to compute during benchmarking. Available: `mae`, `rmse`, `mape`, `smape`, `mase`, `seasonal_mase`, `r2`, `pinball`, `coverage`. |
-| `production_metric` | string | `seasonal_mase` | Metric used to auto-select the best model when `production_model` is unset. `seasonal_mase` (scaled by the same-time-yesterday baseline) is the right comparison for daily-seasonal HA sensors. |
+| `metrics` | list | `[mae, rmse, mase, seasonal_mase]` | Metrics to compute during benchmarking. Available: `mae`, `rmse`, `mape`, `smape`, `mase`, `seasonal_mase`, `peak_weighted_mae`, `pinball_q90`, `r2`, `pinball`, `coverage`. |
+| `production_metric` | string | `auto` | Metric used to select the champion (it carries the heaviest vote in the composite rank). `auto` (Smart Setup) resolves it from the data: `peak_weighted_mae` for spiky targets (so the winner is the model that tracks the peaks, not the one that flatlines through them), `seasonal_mase` for daily-seasonal sensors, `mae` otherwise. `peak_weighted_mae` = MAE that up-weights high-actual intervals; `pinball_q90` = upper-quantile pinball (penalises missing the highs). |
 | `production_model` | string | unset | Pin a specific model name. Unset = auto-pick by `production_metric`. |
 | `selected_model` | string | unset | Which model the Results-tab UI highlights by default. The `/select-model` click in the UI persists here. |
 

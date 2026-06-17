@@ -537,3 +537,86 @@ class TestMeanRankScoring:
             f"Paired bootstrap should preserve rank-sum=3 invariant: "
             f"a_high={a_high}, b_low={b_low}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Peak-aware metric + selection (Smart Setup "stop flattening my spikes")
+# --------------------------------------------------------------------------- #
+def test_peak_weighted_prefers_peak_hitter_where_mae_prefers_undershooter():
+    """The discriminating case: MAE crowns the model that undershoots rare
+    peaks (because peaks are rare), while peak_weighted_mae crowns the model
+    that actually reaches them. This is the whole point of the metric."""
+    reg = get_metric_registry()
+    n = 20
+    yt = np.zeros(n); yt[5] = 10.0; yt[15] = 10.0
+    undershooter = np.zeros(n); undershooter[5] = 5.0; undershooter[15] = 5.0
+    peak_hitter = np.zeros(n); peak_hitter[5] = 10.0; peak_hitter[15] = 10.0
+    # peak_hitter pays a little baseline noise to nail the peaks
+    peak_hitter[[0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 18, 19]] = 1.0
+
+    assert reg.compute("mae", yt, undershooter) < reg.compute("mae", yt, peak_hitter)
+    assert (reg.compute("peak_weighted_mae", yt, peak_hitter)
+            < reg.compute("peak_weighted_mae", yt, undershooter))
+
+
+def test_peak_weighted_mae_degenerate_falls_back_to_mae():
+    reg = get_metric_registry()
+    yt = np.array([3.0, 3.0, 3.0, 3.0, 3.0])  # flat ⇒ p90 == median
+    yp = np.array([2.0, 4.0, 3.0, 3.0, 1.0])
+    assert reg.compute("peak_weighted_mae", yt, yp) == pytest.approx(
+        reg.compute("mae", yt, yp)
+    )
+
+
+def test_pinball_q90_penalises_undershoot_more_than_overshoot():
+    reg = get_metric_registry()
+    yt = np.array([10.0, 10.0, 10.0, 10.0])
+    under = np.array([8.0, 8.0, 8.0, 8.0])
+    over = np.array([12.0, 12.0, 12.0, 12.0])
+    assert reg.compute("pinball_q90", yt, under) > reg.compute("pinball_q90", yt, over)
+
+
+def test_production_metric_weighted_makes_peak_champion_win():
+    """With production_metric=peak_weighted_mae, the model that wins on peaks
+    takes the crown even though it loses on mae/rmse — i.e. selection is no
+    longer dominated by the L1/L2 metrics that favour the smoother."""
+    from ml_forecast_lab.benchmark.runner import ModelResult
+
+    cfg = _make_experiment_cfg(
+        cv_folds=2, metrics=["mae", "rmse"],
+        production_metric="peak_weighted_mae",
+    )
+    runner = BenchmarkRunner(cfg, _make_feature_builder())
+    smoother = ModelResult(model_name="smoother")
+    chaser = ModelResult(model_name="chaser")
+    smoother.fold_metrics = [{"mae": 1.0, "rmse": 1.0, "peak_weighted_mae": 5.0}] * 2
+    chaser.fold_metrics = [{"mae": 2.0, "rmse": 2.0, "peak_weighted_mae": 1.0}] * 2
+
+    _, ranks, _, dnc = runner._compute_composite_ranks(
+        {"smoother": smoother, "chaser": chaser},
+        metric_source="fold_metrics", bootstrap_iters=10,
+    )
+    assert dnc == []
+    assert ranks["chaser"] == 1, (
+        f"peak-weighted selection metric should crown the peak-chaser; got {ranks}"
+    )
+
+
+def test_two_metric_weighting_is_neutral_keeps_mae_winner():
+    """Control: with only 2 ranking metrics the production weight collapses to
+    1 (no over-weighting), so a normal benchmark still picks the mae winner —
+    the weighting must not invert ordinary results."""
+    from ml_forecast_lab.benchmark.runner import ModelResult
+
+    cfg = _make_experiment_cfg(
+        cv_folds=2, metrics=["mae", "rmse"], production_metric="mae",
+    )
+    runner = BenchmarkRunner(cfg, _make_feature_builder())
+    a = ModelResult(model_name="a")
+    b = ModelResult(model_name="b")
+    a.fold_metrics = [{"mae": 1.0, "rmse": 1.0}] * 2
+    b.fold_metrics = [{"mae": 2.0, "rmse": 2.0}] * 2
+    _, ranks, _, _ = runner._compute_composite_ranks(
+        {"a": a, "b": b}, metric_source="fold_metrics", bootstrap_iters=10,
+    )
+    assert ranks["a"] == 1

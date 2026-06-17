@@ -172,6 +172,22 @@
                 <button type="button" class="btn" onclick="applyPriority('auto', this)" style="background:var(--bg);border:1px solid var(--border);">Let the app decide</button>
             </div>
             <p style="color:var(--text-secondary);font-size:0.8rem;margin-top:0.4rem;">This pins a couple of settings to match your priority — you can fine-tune them under Advanced.</p>
+
+            <!-- Plain-language questions for things the data can't reveal on
+                 its own. Each pins a concrete setting via /api/experiment-settings. -->
+            <label class="field-label" style="display:block;margin:0.9rem 0 0.4rem;">When the sensor isn't reporting, is the thing off or is data just missing?</label>
+            <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+                <button type="button" class="btn" onclick="applyGuided({idle_value: 0, target_is_nonnegative: true}, 'Off = zero', this)" style="background:var(--bg);border:1px solid var(--border);">It's off (counts as zero)</button>
+                <button type="button" class="btn" onclick="applyGuided({idle_value: ''}, 'Treat gaps as missing', this)" style="background:var(--bg);border:1px solid var(--border);">Data is just missing</button>
+            </div>
+            <p style="color:var(--text-secondary);font-size:0.8rem;margin-top:0.4rem;">Switchable loads (EV charger, pump) are usually "off"; a flaky sensor is "missing".</p>
+
+            <label class="field-label" style="display:block;margin:0.9rem 0 0.4rem;">Is this driven by the weather or time of day (sun, daylight)?</label>
+            <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+                <button type="button" class="btn" onclick="applyGuided({include_sun_elevation: true, include_clear_sky_irradiance: true}, 'Solar inputs enabled', this)" style="background:var(--bg);border:1px solid var(--border);">Yes — sun / daylight</button>
+                <button type="button" class="btn" onclick="applyGuided({include_sun_elevation: false, include_clear_sky_irradiance: false}, 'Solar inputs off', this)" style="background:var(--bg);border:1px solid var(--border);">No</button>
+            </div>
+            <p style="color:var(--text-secondary);font-size:0.8rem;margin-top:0.4rem;">"Yes" adds the built-in sun-elevation &amp; clear-sky-irradiance covariates (no extra sensor needed).</p>
         </div>
 
         <div id="auto-resolutions" style="display:none;margin-top:0.5rem;"></div>
@@ -355,6 +371,8 @@
                     <option value="mae" {% if exp_config and exp_config.production_metric == 'mae' %}selected{% endif %}>MAE</option>
                     <option value="rmse" {% if exp_config and exp_config.production_metric == 'rmse' %}selected{% endif %}>RMSE</option>
                     <option value="mase" {% if exp_config and exp_config.production_metric == 'mase' %}selected{% endif %}>MASE (vs 1-step naive)</option>
+                    <option value="peak_weighted_mae" {% if exp_config and exp_config.production_metric == 'peak_weighted_mae' %}selected{% endif %}>Peak-weighted MAE (favours peak tracking)</option>
+                    <option value="pinball_q90" {% if exp_config and exp_config.production_metric == 'pinball_q90' %}selected{% endif %}>Upper-quantile pinball (penalises missing highs)</option>
                 </select>
                 <span class="managed-pill" data-pill="production_metric" style="display:none;font-size:0.82rem;margin-top:0.3rem;"></span>
             </div>
@@ -2762,16 +2780,70 @@ window.showTab = function(el) {
             res.innerHTML = rows;
         }
 
-        var hints = document.getElementById('auto-hints');
-        if (hints) {
-            if (rep.hints && rep.hints.length) {
-                hints.style.display = '';
-                hints.innerHTML = '<b>Suggestions:</b><ul style="margin:0.3rem 0 0 1rem;">' +
-                    rep.hints.map(function(h) { return '<li>' + _esc(h) + '</li>'; }).join('') + '</ul>';
-            } else { hints.style.display = 'none'; }
+        var sg = document.getElementById('auto-hints');
+        if (sg) {
+            var sugg = rep.suggestions || [];
+            if (sugg.length) {
+                sg.style.display = '';
+                sg.innerHTML = '<b>Suggestions</b>' + sugg.map(function(s, i) {
+                    var btn = '';
+                    if (s.action && s.action.kind === 'settings') {
+                        btn = ' <button type="button" class="btn" onclick="applySuggestion(' + i + ', this)" '
+                            + 'style="background:var(--bg);border:1px solid var(--border);padding:0.15rem 0.6rem;font-size:0.78rem;margin-left:0.4rem;">'
+                            + _esc(s.action.label || 'Apply') + '</button>';
+                    }
+                    return '<div style="margin-top:0.5rem;padding:0.5rem 0.7rem;border:1px solid var(--border);border-radius:6px;">'
+                        + '<div style="font-weight:600;color:var(--accent-secondary);">' + _esc(s.title || '') + btn + '</div>'
+                        + '<div style="font-size:0.82rem;color:var(--text-secondary);margin-top:0.2rem;">' + _esc(s.detail || '') + '</div>'
+                        + '</div>';
+                }).join('');
+            } else { sg.style.display = 'none'; }
         }
         _updateChip(rep.n_pinned || 0);
     }
+
+    // One-click structural suggestion (e.g. enable solar covariates). Posts the
+    // action's field/value pairs to the same settings endpoint as the manual
+    // toggles, so nothing here can set a value the form wouldn't accept.
+    window.applySuggestion = function(i, btn) {
+        var rep = _autoReport || {};
+        var s = (rep.suggestions || [])[i];
+        if (!s || !s.action || !s.action.fields) return;
+        var data = { experiment: EXP_NAME };
+        Object.keys(s.action.fields).forEach(function(k) { data[k] = s.action.fields[k]; });
+        fetch(BASE + '/api/experiment-settings', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data)
+        }).then(function(r) { return r.json(); }).then(function(res) {
+            if (res.success) {
+                mlfl.toast('Applied: ' + (s.action.label || 'suggestion'), 'success');
+                if (btn) { btn.disabled = true; btn.textContent = '✓ Applied'; }
+                // Reflect on any matching visible toggle.
+                Object.keys(s.action.fields).forEach(function(k) {
+                    var el = document.querySelector('[data-field="' + k + '"]');
+                    if (el && el.type === 'checkbox') el.checked = !!s.action.fields[k];
+                });
+            } else { mlfl.toast('Failed: ' + (res.error || '?'), 'error'); }
+        }).catch(function(e) { mlfl.toast('Failed: ' + e, 'error'); });
+    };
+
+    // Guided answer → pin one or more concrete settings (idle_value, solar
+    // covariates, …). These aren't managed 'auto' sentinels — they're ordinary
+    // settings the answer fixes — so they save straight through.
+    window.applyGuided = function(fields, label, btn) {
+        var data = { experiment: EXP_NAME };
+        Object.keys(fields).forEach(function(k) { data[k] = fields[k]; });
+        fetch(BASE + '/api/experiment-settings', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data)
+        }).then(function(r) { return r.json(); }).then(function(res) {
+            if (res.success) {
+                mlfl.toast(label || 'Saved', 'success');
+                Object.keys(fields).forEach(function(k) {
+                    var el = document.querySelector('[data-field="' + k + '"]');
+                    if (el && el.type === 'checkbox') el.checked = !!fields[k];
+                });
+            } else { mlfl.toast('Failed: ' + (res.error || '?'), 'error'); }
+        }).catch(function(e) { mlfl.toast('Failed: ' + e, 'error'); });
+    };
 
     function _renderPill(field, fr) {
         var pill = document.querySelector('.managed-pill[data-pill="' + field + '"]');

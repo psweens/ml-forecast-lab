@@ -344,7 +344,20 @@ def resolve(
         )
 
     # ---- production_metric (champion selection) ---------------------------
-    if profile.daily_autocorr >= 0.3:
+    # The metric here decides which model is crowned. On a spiky target the
+    # plain L1/L2 metrics reward the model that flatlines through the middle
+    # (a peak chased at the wrong time is penalised twice), so for the spike-
+    # driven personas we select on the peak-weighted error instead — otherwise
+    # Smart Setup would train for peaks (Tweedie, no clipping) but still hand
+    # the crown to the smoother.
+    if persona in ("bursty", "baseline_plus_spikes"):
+        out["production_metric"] = Resolution(
+            "peak_weighted_mae", "Spiky target — the winning model is the one "
+            "that best tracks the peaks, not the one with the lowest average "
+            "error (plain MAE/RMSE would crown a model that flatlines through "
+            "the middle of your spikes).",
+        )
+    elif profile.daily_autocorr >= 0.3:
         out["production_metric"] = Resolution(
             "seasonal_mase", "Strong daily pattern — scoring against "
             "same-time-yesterday is the meaningful skill measure.",
@@ -386,6 +399,11 @@ def resolve(
             "off", "Prioritising peaks — outlier clipping is disabled so real "
             "spikes survive.", source="automatic",
         )
+        out["production_metric"] = Resolution(
+            "peak_weighted_mae", "Prioritising peaks — the champion is picked "
+            "by how well it tracks the highs, so a flatter model can't win on "
+            "average error alone.",
+        )
     elif priority == "average":
         out["loss_fn"] = Resolution(
             "huber", "You chose accuracy-on-average — Huber targets the "
@@ -393,6 +411,11 @@ def resolve(
         )
         out["outlier_method"] = Resolution(
             "quantile", "Accuracy-on-average — a gentle trim steadies the fit.",
+        )
+        out["production_metric"] = Resolution(
+            "seasonal_mase" if profile.daily_autocorr >= 0.3 else "mae",
+            "Accuracy-on-average — the champion is picked by overall error, "
+            "not peak tracking.",
         )
     elif priority == "total":
         out["production_metric"] = Resolution(
@@ -447,35 +470,66 @@ def resolve_settings_report(
             fields[fname] = res.to_dict()
 
     n_pinned = sum(1 for f in MANAGED_FIELDS if pinned.get(f, AUTO) not in (AUTO, None))
+    suggestions = _suggestions(profile)
     return {
         "profile": profile.to_dict(),
         "fields": fields,
-        "hints": _covariate_hints(profile),
+        # Structured suggestions (with optional one-click ``action``) plus a
+        # plain-string ``hints`` mirror for any legacy consumer.
+        "suggestions": suggestions,
+        "hints": [s["detail"] for s in suggestions],
         "n_managed": len(MANAGED_FIELDS),
         "n_pinned": n_pinned,
     }
 
 
-def _covariate_hints(profile: DataProfile) -> List[str]:
-    """Plain-language, advisory suggestions about inputs the model can't see."""
-    hints: List[str] = []
+def _suggestions(profile: DataProfile) -> List[Dict[str, Any]]:
+    """Structural advice about inputs the managed settings *can't* fix.
+
+    The managed settings (loss / clipping / metric) tune *how* the model
+    learns; these suggestions are about *what it can see*. Each item carries a
+    plain-language ``title`` + ``detail``; some also carry an ``action`` the
+    Settings tab can apply in one click. ``action`` is
+    ``{"kind": "settings", "fields": {...}}`` — the field/value pairs to POST
+    to ``/api/experiment-settings`` (so the only actions offered are ones the
+    settings endpoint already accepts).
+    """
+    out: List[Dict[str, Any]] = []
     if profile.persona == "smooth_cycle" and profile.nonneg:
-        hints.append(
-            "If this is solar generation, enabling the built-in sun-elevation "
-            "/ clear-sky-irradiance covariates usually helps a lot."
-        )
+        out.append({
+            "title": "Add the built-in solar inputs",
+            "detail": "This looks like a smooth, sun-shaped daily cycle. If "
+                      "it's solar generation, the built-in sun-elevation and "
+                      "clear-sky-irradiance covariates turn the problem into "
+                      "predicting cloud attenuation of a known envelope — "
+                      "usually a big accuracy win. They need no extra sensor.",
+            "action": {
+                "kind": "settings",
+                "label": "Enable solar inputs",
+                "fields": {
+                    "include_sun_elevation": True,
+                    "include_clear_sky_irradiance": True,
+                },
+            },
+        })
     if profile.persona in ("bursty", "baseline_plus_spikes"):
-        hints.append(
-            "The spike timing is driven by things the model can't see yet — "
-            "adding covariates (occupancy, appliance/EV state, a heating "
-            "schedule) is the biggest accuracy lever here."
-        )
+        out.append({
+            "title": "Tell the model what triggers the spikes",
+            "detail": "The spike timing is driven by things the model can't "
+                      "see yet. Adding covariates (occupancy, appliance/EV "
+                      "state, a hot-water or heating schedule) is the single "
+                      "biggest accuracy lever here — add them under Covariates "
+                      "below.",
+        })
     if profile.persona == "baseline_plus_spikes":
-        hints.append(
-            "If big switchable loads (EV, immersion) sit on top of a baseline, "
-            "Load-subtract lets the model learn the clean baseline separately."
-        )
-    return hints
+        out.append({
+            "title": "Subtract the big switchable loads",
+            "detail": "If large switchable draws (EV, immersion) sit on top of "
+                      "a baseline, Load-subtract lets the model learn the clean "
+                      "baseline separately and handle those spikes on their own "
+                      "— configure it under Load-subtract below.",
+        })
+    return out
 
 
 def apply_to_experiment(exp_cfg, series: pd.Series) -> Optional[Dict[str, Any]]:

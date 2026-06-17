@@ -29,10 +29,42 @@ history and picks each setting for them, with a plain-English reason.
   ("Setup: Automatic + N custom").
 - New endpoint `GET /experiment/{name}/auto-config-preview` powers the panel;
   pure resolver lives in `ml_forecast_lab/auto_config.py` with unit tests.
+- **Peak-aware champion selection.** Two new metrics — `peak_weighted_mae`
+  (MAE that up-weights high-actual intervals) and `pinball_q90` (upper-quantile
+  pinball, penalises missing the highs 9×) — are registered and selectable as
+  the `production_metric`. The composite rank now gives the configured selection
+  metric a heavier vote (≈1.5× the other metrics combined once there are ≥3),
+  so a deliberately peak-aware metric is decisive rather than diluted by the
+  three co-ranking L1 metrics. For the *Bursts on and off* /
+  *baseline-with-spikes* personas (and the Guided "catching the peaks" answer)
+  Smart Setup now resolves `production_metric` to `peak_weighted_mae` — closing
+  the loop so a spiky target is trained **and judged** for peak tracking
+  instead of being trained for peaks but still losing the benchmark to a
+  flatter model.
+- **One-click structural suggestions.** The persona now drives actionable
+  recommendations: a smooth solar-like cycle offers a one-click **Enable solar
+  inputs** (sun-elevation + clear-sky-irradiance); spiky personas surface
+  covariate and load-subtract guidance — the biggest accuracy levers the
+  managed settings can't fix on their own.
+- **Guided "describe your sensor" questions.** Beyond "what matters most", the
+  Guided tier now asks the two things the data can't reveal — *off vs missing*
+  (sets `idle_value`) and *weather/daylight driven* (enables the solar
+  covariates) — each answerable in one click.
 
-Prototype scope: the sentinel + runtime resolution covers the three managed
-settings; `log_transform` / `outlier_lower` / `outlier_quantile` are surfaced as
-recommendations. A peak-aware selection metric is noted as the next step.
+**Migration note (behaviour change on upgrade).** The three managed settings
+now default to `auto` (Automatic). An existing experiment that never explicitly
+set `loss_fn` / `outlier_method` / `production_metric` will, on its next
+retrain, resolve them from the data — e.g. a spiky hot-water target may move
+from `huber` to `tweedie` and be selected on `peak_weighted_mae`. Any value you
+set explicitly is preserved unchanged. To freeze the old behaviour, pin those
+settings to their previous concrete values (`huber` / `quantile` /
+`seasonal_mase`).
+
+Prototype scope: `log_transform` / `outlier_lower` / `outlier_quantile` are
+surfaced as recommendations only. Native per-backend *quantile output heads*
+(publishing a true P90 band from every backend, with CRPS scoring) remain a
+larger follow-up — only DLinear has a native quantile head today, so
+`pinball_q90` here is the evaluation-side down payment.
 
 ## 2.46.2
 

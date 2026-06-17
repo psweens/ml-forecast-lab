@@ -113,6 +113,53 @@ def test_guided_priority_overrides_persona():
     # Even on a smooth signal, asking for peaks flips to peak-preserving.
     assert res["loss_fn"].value == "tweedie"
     assert res["outlier_method"].value == "off"
+    # …and selects the champion on peak tracking too, so the loss change
+    # isn't undone by a smoother-favouring selection metric.
+    assert res["production_metric"].value == "peak_weighted_mae"
+
+
+def test_bursty_selects_on_peaks():
+    rng = np.random.default_rng(31)
+    prof = ac.characterize(_bursty_load(rng), INTERVAL)
+    res = ac.resolve(prof)
+    assert res["production_metric"].value == "peak_weighted_mae"
+    assert res["production_metric"].reason
+
+
+def test_average_priority_restores_overall_error_metric():
+    rng = np.random.default_rng(32)
+    prof = ac.characterize(_bursty_load(rng), INTERVAL)
+    res = ac.resolve(prof, answers={"priority": "average"})
+    # Asking for average accuracy pulls selection back off peak-weighting.
+    assert res["production_metric"].value in ("mae", "seasonal_mase")
+    assert res["loss_fn"].value == "huber"
+
+
+def test_smooth_cycle_suggests_solar_one_click():
+    rng = np.random.default_rng(33)
+    report = ac.resolve_settings_report(_smooth_solar_like(rng), INTERVAL)
+    sugg = report["suggestions"]
+    assert isinstance(sugg, list) and sugg
+    solar = [s for s in sugg if s.get("action")]
+    assert solar, "smooth solar-like cycle should offer a one-click action"
+    fields = solar[0]["action"]["fields"]
+    assert fields.get("include_sun_elevation") is True
+    assert fields.get("include_clear_sky_irradiance") is True
+
+
+def test_baseline_spikes_suggests_load_subtract_guidance():
+    # A continuous baseline with sharp spikes ⇒ guidance (no one-click) to add
+    # covariates and load-subtract.
+    rng = np.random.default_rng(34)
+    n = DAYS * STEPS_PER_DAY
+    base = 1.0 + 0.1 * rng.standard_normal(n)
+    for d in range(DAYS):
+        base[d * STEPS_PER_DAY + rng.integers(0, STEPS_PER_DAY)] += rng.uniform(8.0, 15.0)
+    prof = ac.characterize(pd.Series(np.clip(base, 0, None), index=_index(n)), INTERVAL)
+    if prof.persona != "baseline_plus_spikes":
+        pytest.skip(f"fixture profiled as {prof.persona}, not baseline_plus_spikes")
+    titles = " ".join(s["title"].lower() for s in ac._suggestions(prof))
+    assert "subtract" in titles
 
 
 # --------------------------------------------------------------------------- #
@@ -159,7 +206,8 @@ def test_apply_resolves_auto_fields_in_place():
     # 'auto' sentinels are replaced with concrete resolved values...
     assert cfg.loss_fn == "tweedie"
     assert cfg.outlier_method == "off"
-    assert cfg.production_metric in ("mae", "seasonal_mase")
+    # spiky target ⇒ champion selected on peak tracking, not average error
+    assert cfg.production_metric == "peak_weighted_mae"
     # ...and the report is available for the UI preview.
     assert report["profile"]["persona"] == "bursty"
     assert getattr(cfg, "_auto_resolution") is report
