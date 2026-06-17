@@ -2985,6 +2985,40 @@ class HistoryDB:
         except (ValueError, TypeError):
             return None
 
+    @_locked
+    def get_last_external_trajectory(
+        self, experiment: str, source: str,
+    ) -> dict:
+        """The most-recently-issued trajectory for an external source as a
+        ``{target_dt_str: value}`` map. Used to detect whether the source's
+        forecast *content* has changed (a new issuance) — a robust,
+        source-agnostic alternative to trusting HA ``last_updated``, which on
+        many integrations bumps far more often than the forecast actually
+        refreshes."""
+        try:
+            self.ensure_external_forecast_log_table()
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT MAX(issued_at) FROM external_forecast_log "
+                "WHERE experiment = ? AND source = ?",
+                (experiment, source),
+            )
+            row = cursor.fetchone()
+            if not row or not row[0]:
+                return {}
+            cursor.execute(
+                "SELECT target_dt, value FROM external_forecast_log "
+                "WHERE experiment = ? AND source = ? AND issued_at = ?",
+                (experiment, source, row[0]),
+            )
+            return {r[0]: r[1] for r in cursor.fetchall()}
+        except sqlite3.Error as e:
+            logger.error(
+                "Error reading last external trajectory for %s/%s: %s",
+                experiment, source, e,
+            )
+            return {}
+
     def log_external_forecast(
         self,
         experiment: str,
@@ -3737,7 +3771,10 @@ class HistoryDB:
         # --- combined lead-time (app + attribute externals), always
         #     per-interval canonical energy so horizons are comparable ---
         def _leadcurve(traj, value_col, is_cum, factor):
-            empty = pd.DataFrame(columns=["mean", "count"])
+            # Per-bucket error SUMS (abs / squared / signed) + count, so the
+            # skill block can aggregate exact MAE / RMSE / bias over any band
+            # via Σ/Σn (the per-bucket means alone can't be re-pooled).
+            empty = pd.DataFrame(columns=["abs_sum", "sq_sum", "signed_sum", "count"])
             if traj is None or traj.empty or value_col not in traj.columns:
                 return empty
             t = traj[["grid", "issued_at", "lead_minutes", value_col]].copy()
@@ -3753,10 +3790,16 @@ class HistoryDB:
             t = t.dropna(subset=["actual", vcol])
             if t.empty:
                 return empty
-            t["cv"] = t[vcol] * factor
+            t["err"] = t[vcol] * factor - t["actual"]
+            t["abs_e"] = t["err"].abs()
+            t["sq_e"] = t["err"] * t["err"]
             t["bucket"] = (t["lead_minutes"] // bucket_min) * bucket_min
-            t["abserr"] = (t["cv"] - t["actual"]).abs()
-            return t.groupby("bucket")["abserr"].agg(["mean", "count"])
+            return t.groupby("bucket").agg(
+                abs_sum=("abs_e", "sum"),
+                sq_sum=("sq_e", "sum"),
+                signed_sum=("err", "sum"),
+                count=("err", "size"),
+            )
 
         attr_items = [it for it in ext_items if it["mode"] == "attribute"]
         if attr_items:
@@ -3772,12 +3815,17 @@ class HistoryDB:
             buckets = sorted(buckets)
             if buckets:
                 def _ser(curve, key):
-                    return [
-                        (round(float(curve.loc[b, "mean"]), 4) if key == "mae"
-                         else int(curve.loc[b, "count"]))
-                        if b in curve.index else (None if key == "mae" else 0)
-                        for b in buckets
-                    ]
+                    out = []
+                    for b in buckets:
+                        if b in curve.index:
+                            cnt = int(curve.loc[b, "count"])
+                            if key == "mae":
+                                out.append(round(float(curve.loc[b, "abs_sum"]) / cnt, 4) if cnt else None)
+                            else:
+                                out.append(cnt)
+                        else:
+                            out.append(None if key == "mae" else 0)
+                    return out
                 result["lead_time"] = {
                     "lead_minutes": [int(b) for b in buckets],
                     "app_mae": _ser(app_curve, "mae"),
@@ -3812,21 +3860,38 @@ class HistoryDB:
                 band &= set(c.index)
             band = sorted(band)
             if eligible and band:
-                def _band_mae(curve):
-                    num, den = 0.0, 0
+                # Typical magnitude in the canonical (per-interval) space the
+                # lead curves live in, for "% of typical" at matched lead.
+                _ac = (actual_canon.reindex(idx)
+                       if (actual_canon is not None and len(idx)) else actual_canon)
+                typical_canon = (float(_ac.abs().mean())
+                                 if (_ac is not None and _ac.notna().any()) else None)
+
+                def _band_stats(curve):
+                    a = s = g = 0.0
+                    den = 0
                     for b in band:
                         if b in curve.index:
-                            nb = int(curve.loc[b, "count"])
-                            num += float(curve.loc[b, "mean"]) * nb
-                            den += nb
-                    return (round(num / den, 4), den) if den > 0 else (None, 0)
-                am, an = _band_mae(app_curve)
-                skill_rows = [{"entity": None, "label": "ML Forecast Lab",
-                               "app": True, "mae": am, "n": an}]
+                            a += float(curve.loc[b, "abs_sum"])
+                            s += float(curve.loc[b, "sq_sum"])
+                            g += float(curve.loc[b, "signed_sum"])
+                            den += int(curve.loc[b, "count"])
+                    if den <= 0:
+                        return {"mae": None, "rmse": None, "bias": None, "pct": None, "n": 0}
+                    mae = a / den
+                    return {
+                        "mae": round(mae, 4),
+                        "rmse": round((s / den) ** 0.5, 4),
+                        "bias": round(g / den, 4),
+                        "pct": (round(mae / typical_canon * 100.0, 1)
+                                if typical_canon and typical_canon > 1e-9 else None),
+                        "n": den,
+                    }
+                skill_rows = [dict({"entity": None, "label": "ML Forecast Lab",
+                                    "app": True}, **_band_stats(app_curve))]
                 for it, c in eligible:
-                    m, n = _band_mae(c)
-                    skill_rows.append({"entity": it["entity"], "label": it["label"],
-                                       "app": False, "mae": m, "n": n})
+                    skill_rows.append(dict({"entity": it["entity"], "label": it["label"],
+                                            "app": False}, **_band_stats(c)))
                 result["skill"] = {
                     "available": True,
                     "lead_band_minutes": [int(band[0]), int(band[-1])],

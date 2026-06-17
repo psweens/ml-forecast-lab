@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.46.1
+
+**Forecast Comparison: accurate lead times + full metrics at matched lead.**
+
+- **Lead times now reflect each source's real forecast cadence.** An external
+  trajectory's issue time is detected from when its *content* changes, not
+  from HA `last_updated` — which on integrations like Solcast (recomputing
+  "now" every few minutes off a forecast that only refreshes ~10×/day) bumps
+  far more often than the forecast does, making the lead look artificially
+  short. A capture whose values match the last logged trajectory is treated
+  as the same issuance (its original issue time is kept); a changed trajectory
+  is a new issuance stamped at the capture time — accurate to within the
+  capture cadence and source-agnostic (no reliance on per-integration
+  timestamp quirks).
+- **The "Same lead time" leaderboard now shows MAE, RMSE, Bias and % of
+  Typical** (not just MAE), each best-in-column highlighted, computed exactly
+  over the matched-lead band from per-bucket error sums. Daily-total metrics
+  aggregate across lead times, so they remain in the "Best available" view.
+
 ## 2.46.0
 
 **Forecast Comparison: fair, lead-aware accuracy.** A faster-updating source

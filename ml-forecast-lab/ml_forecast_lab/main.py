@@ -5253,38 +5253,6 @@ class MLForecastLabApp:
                         "future_attribute": attr_name,
                         "future_value_key": value_key,
                     }
-                    # Stamp the snapshot with the SOURCE's own update time
-                    # (HA last_updated), not the add-on's capture time, so
-                    # lead_minutes reflects the forecast's true age. A source
-                    # polled hours ago must not look like a fresh 15-min-ahead
-                    # forecast just because we re-read its (unchanged) attribute
-                    # every cycle.
-                    src_issued = await self.ha_interface.get_last_updated(
-                        entity, default=None,
-                    )
-                    src_issued_naive = (
-                        src_issued.astimezone(timezone.utc).replace(tzinfo=None)
-                        if isinstance(src_issued, datetime)
-                        else issued_naive  # fall back to capture time
-                    )
-                    # De-duplicate: if the source hasn't updated since the last
-                    # logged snapshot, re-logging would just bloat the table
-                    # and misreport the lead. Skip it.
-                    last_logged = await asyncio.to_thread(
-                        self.history_db.get_last_external_issued_at,
-                        exp_cfg.name, spec.source_key,
-                    )
-                    if (
-                        last_logged is not None
-                        and src_issued_naive <= last_logged
-                    ):
-                        logger.debug(
-                            "  External forecast (attr) for %s: %s unchanged "
-                            "since %s — skipping re-log.",
-                            exp_cfg.name, entity, last_logged,
-                        )
-                        continue
-
                     series = await resolver.fetch_future(cov_cfg, ds_future)
                     if series is None or len(series) == 0:
                         continue
@@ -5299,11 +5267,45 @@ class MLForecastLabApp:
                         for t in targets
                     ]
                     values = [float(v) for v in series.values]
+
+                    # Determine the forecast's TRUE issue time by content, not
+                    # by HA ``last_updated`` (which on many integrations — e.g.
+                    # Solcast recomputing "now" every few minutes — bumps far
+                    # more often than the forecast refreshes, making the lead
+                    # look short). A forecast is a *new issuance* only when its
+                    # values for the targets it shares with the last logged
+                    # trajectory have changed; otherwise it's the same forecast
+                    # and we keep its original issued_at (skip re-logging). So
+                    # issued_at = this capture time only when the content is new
+                    # — accurate to within the capture cadence.
+                    new_traj = {
+                        t.strftime("%Y-%m-%d %H:%M:%S"): round(v, 4)
+                        for t, v in zip(targets, values)
+                    }
+                    last_traj = await asyncio.to_thread(
+                        self.history_db.get_last_external_trajectory,
+                        exp_cfg.name, spec.source_key,
+                    )
+                    if last_traj:
+                        overlap = [k for k in new_traj if k in last_traj]
+                        unchanged = bool(overlap) and all(
+                            abs(new_traj[k] - round(float(last_traj[k]), 4))
+                            <= max(1e-4, 0.005 * abs(new_traj[k]))
+                            for k in overlap
+                        )
+                        if unchanged:
+                            logger.debug(
+                                "  External forecast (attr) for %s: %s content "
+                                "unchanged — same issuance, skipping re-log.",
+                                exp_cfg.name, entity,
+                            )
+                            continue
+
                     n = await asyncio.to_thread(
                         self.history_db.log_external_forecast,
                         experiment=exp_cfg.name,
                         source=spec.source_key,
-                        issued_at=src_issued_naive,
+                        issued_at=issued_naive,
                         targets=targets,
                         values=values,
                     )
@@ -5311,7 +5313,7 @@ class MLForecastLabApp:
                         logger.info(
                             f"  Logged {n} external_forecast_log rows for "
                             f"{exp_cfg.name} ({entity}.{attr_name}); "
-                            f"source issued {src_issued_naive}"
+                            f"new issuance at {issued_naive}"
                         )
                 else:  # state mode
                     from ml_forecast_lab.ha_interface import state_to_float

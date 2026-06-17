@@ -210,6 +210,19 @@ class TestLogExternalForecast:
         targets = [issued + timedelta(minutes=INTERVAL * (i + 1)) for i in range(3)]
         assert db.log_external_forecast("e", "s", issued, targets, [1.0, float("nan"), None]) == 1
 
+    def test_last_trajectory_returns_latest_issuance(self, db):
+        # get_last_external_trajectory backs content-change detection: it must
+        # return only the most-recently-issued snapshot's {target: value}.
+        t0 = datetime(2024, 6, 15, 6, 0, 0)
+        targets = [t0 + timedelta(minutes=INTERVAL * (i + 1)) for i in range(3)]
+        db.log_external_forecast("e", "sensor.s", t0, targets, [1.0, 2.0, 3.0])
+        t1 = datetime(2024, 6, 15, 8, 24, 0)   # later issuance, changed values
+        db.log_external_forecast("e", "sensor.s", t1, targets, [1.5, 2.5, 3.5])
+        traj = db.get_last_external_trajectory("e", "sensor.s")
+        assert len(traj) == 3
+        assert sorted(traj.values()) == [1.5, 2.5, 3.5]   # latest issuance only
+        assert db.get_last_external_trajectory("e", "missing") == {}
+
     def test_last_issued_at_drives_dedup(self, db):
         # None before anything is logged.
         assert db.get_last_external_issued_at("e", "sensor.solcast") is None
@@ -612,6 +625,14 @@ class TestComparisonSkill:
         assert "ML Forecast Lab" in by and "Solcast" in by
         # At matched lead the app (offset 3) beats the external (offset 10).
         assert by["ML Forecast Lab"]["mae"] < by["Solcast"]["mae"]
+        # Full metric set is present at matched lead (not just MAE).
+        for r in sk["rows"]:
+            for k in ("mae", "rmse", "bias", "pct", "n"):
+                assert k in r, k
+            assert r["rmse"] >= r["mae"]              # RMSE ≥ MAE always
+        # Constant-offset forecasts → bias ≈ the offset, RMSE ≈ MAE.
+        assert abs(by["Solcast"]["bias"] - 10.0) < 0.5
+        assert abs(by["ML Forecast Lab"]["bias"] - 3.0) < 0.5
         # The state-mode source can't do equal-lead → excluded as nowcast-only.
         reasons = {e["label"]: e["reason"] for e in sk["excluded"]}
         assert reasons.get("Crude", "").startswith("state-mode")

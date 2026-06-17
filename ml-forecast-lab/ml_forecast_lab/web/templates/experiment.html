@@ -2244,7 +2244,9 @@
         <div class="table-container">
             <table class="metrics-table" id="external-skilltable">
                 <thead><tr>
-                    <th>Rank</th><th>Forecast</th><th>MAE</th>
+                    <th>Rank</th><th>Forecast</th><th>MAE</th><th>RMSE</th>
+                    <th>Bias <span class="info-tip">?<span class="tip-text">Mean signed error at matched lead (forecast − actual). Positive = over-forecasting, negative = under. Near zero is unbiased.</span></span></th>
+                    <th>% of Typical <span class="info-tip">?<span class="tip-text">Matched-lead MAE as a percentage of typical per-interval demand — unit-free, so you can read accuracy without knowing the kW/kWh scale.</span></span></th>
                     <th>vs MLFL <span class="info-tip">?<span class="tip-text">How this forecaster's matched-lead MAE compares to ML Forecast Lab's over the same lead band: <code>(other − MLFL) / other</code>. Positive = MLFL better.</span></span></th>
                     <th>Samples</th>
                 </tr></thead>
@@ -6850,6 +6852,30 @@ window.showTab = function(el) {
         rows.sort(function(a, b){ return a.mae - b.mae; });
         var appMae = (rows.filter(function(r){ return r.app; })[0] || {}).mae;
 
+        // Best (lowest, abs for bias) per column → bold green, like the
+        // operational table.
+        var skillCols = ['mae', 'rmse', 'bias', 'pct'];
+        var skillBest = {};
+        skillCols.forEach(function(col){
+            var isAbs = (col === 'bias'), bv = null;
+            rows.forEach(function(r){
+                var v = r[col];
+                if (v === null || v === undefined || isNaN(v)) return;
+                var s = isAbs ? Math.abs(v) : v;
+                if (bv === null || s < bv) bv = s;
+            });
+            skillBest[col] = bv;
+        });
+        function _skCell(r, col) {
+            var v = r[col], isAbs = (col === 'bias');
+            var txt = (col === 'pct')
+                ? (v === null || v === undefined || isNaN(v) ? '—' : Number(v).toFixed(0) + '%')
+                : _fmt(v, unit);
+            var isBest = (v !== null && v !== undefined && !isNaN(v) && skillBest[col] !== null
+                          && Math.abs((isAbs ? Math.abs(v) : v) - skillBest[col]) < 1e-9);
+            return '<td' + (isBest ? ' style="color:var(--success);font-weight:700;"' : '') + '>' + txt + '</td>';
+        }
+
         body.innerHTML = rows.map(function(r, i) {
             var color = colorByLabel[r.label] || (r.app ? C_APP : EXT_COLORS[i % EXT_COLORS.length]);
             var name = '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:' + color + ';margin-right:6px;"></span>'
@@ -6870,7 +6896,7 @@ window.showTab = function(el) {
             return '<tr style="' + hl + '">'
                 + '<td style="text-align:center;"><span class="rank-badge rank-' + (i + 1) + '">' + (i + 1) + '</span></td>'
                 + '<td>' + name + '</td>'
-                + '<td>' + _fmt(r.mae, unit) + '</td>'
+                + _skCell(r, 'mae') + _skCell(r, 'rmse') + _skCell(r, 'bias') + _skCell(r, 'pct')
                 + vs
                 + '<td>' + (r.n || 0) + '</td>'
                 + '</tr>';
