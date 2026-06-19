@@ -1502,6 +1502,7 @@ class MLForecastLabApp:
         max_increment=None,
         source_is_cumulative: bool = False,
         big_gap_multiplier: int = 4,
+        attribute_key: Optional[str] = None,
     ) -> dict:
         """Per-entity history fetch + summary.
 
@@ -1522,10 +1523,19 @@ class MLForecastLabApp:
         """
         from ml_forecast_lab.ha_interface import normalise_history
 
-        table_name = (
-            self.history_db.safe_table_name(entity_id)
-            if self.history_db else None
-        )
+        # Read from the SAME cache the covariate resolver writes to. Covariate
+        # attribute-history is namespaced ``cov_{entity}__{attribute_key}``
+        # (see covariates.CovariateResolver._cov_cache_table); the bare entity
+        # table is the state/target series. Without this the report reads the
+        # wrong (or empty) cache for an attribute covariate.
+        if self.history_db is None:
+            table_name = None
+        elif attribute_key:
+            table_name = self.history_db.safe_table_name(
+                f"cov_{entity_id}__{attribute_key}"
+            )
+        else:
+            table_name = self.history_db.safe_table_name(entity_id)
 
         df = pd.DataFrame(columns=["ds", "value"])
         cache_rows = 0
@@ -1552,8 +1562,16 @@ class MLForecastLabApp:
         ha_rows = 0
         fetch_error = None
         try:
-            raw = await self.ha_interface.get_history(entity_id, fetch_start, now)
-            new_df = normalise_history(raw)
+            # For an attribute covariate (future_value_key set) read the same
+            # numeric attribute the training fetch reads — include_attributes
+            # drops minimal_response so the payload carries the attribute dict,
+            # and normalise_history pulls attributes[attribute_key] instead of
+            # the (often categorical, e.g. weather "partlycloudy") .state.
+            raw = await self.ha_interface.get_history(
+                entity_id, fetch_start, now,
+                include_attributes=attribute_key is not None,
+            )
+            new_df = normalise_history(raw, attribute_key=attribute_key)
             if not new_df.empty:
                 if hasattr(new_df["ds"].dtype, "tz") and new_df["ds"].dt.tz is not None:
                     new_df["ds"] = new_df["ds"].dt.tz_localize(None)
@@ -1722,9 +1740,20 @@ class MLForecastLabApp:
                 entity_id = cov.get("entity") if isinstance(cov, dict) else None
             if not entity_id:
                 continue
+            # Grade the same series training reads: when the covariate has a
+            # future_value_key, its numeric history comes from
+            # attributes[future_value_key], not the entity .state (v2.38.4+
+            # attribute-history path). Otherwise the report false-flags
+            # attribute covariates (weather temperature/cloud_coverage) as
+            # "100% non-numeric" because it only ever looked at .state.
+            try:
+                attr_key = cov.future_value_key
+            except AttributeError:
+                attr_key = cov.get("future_value_key") if isinstance(cov, dict) else None
             cov_report = await self._analyse_entity_history(
                 entity_id, start, now,
                 interval_minutes=exp_cfg.interval_minutes,
+                attribute_key=attr_key,
             )
             cov_report["role"] = getattr(cov, "role", None) or (
                 cov.get("role") if isinstance(cov, dict) else None

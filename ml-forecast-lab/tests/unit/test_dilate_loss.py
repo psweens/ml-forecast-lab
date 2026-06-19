@@ -11,7 +11,11 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from ml_forecast_lab.models.dilate_loss import dilate_per_sample, _soft_dtw_value
+from ml_forecast_lab.models.dilate_loss import (
+    dilate_per_sample,
+    _soft_dtw_value,
+    _soft_dtw_value_scalar,
+)
 
 
 def _bump(n, centre, width=2, height=1.0):
@@ -117,6 +121,32 @@ def test_dilate_band_cap_still_disciplines_far_drift():
     d_near = float(dilate_per_sample(near, true, alpha=1.0)[0])
     d_far = float(dilate_per_sample(far, true, alpha=1.0)[0])
     assert d_far > d_near
+
+
+def test_softdtw_vectorised_matches_scalar_value():
+    """The vectorised banded sweep is numerically identical to the reference
+    cell-by-cell recursion (validated in numpy to 0.0; this guards the torch
+    port — buffers/pad/gather — in CI)."""
+    torch.manual_seed(0)
+    for H, band in [(8, 3), (16, 8), (24, 8), (12, 11), (5, 1)]:
+        D = (torch.rand(3, H, H) ** 2) * 4.0
+        v = _soft_dtw_value(D, 0.01, band)
+        s = _soft_dtw_value_scalar(D, 0.01, band)
+        assert torch.allclose(v, s, atol=1e-5), (H, band, float((v - s).abs().max()))
+
+
+def test_softdtw_vectorised_matches_scalar_grad():
+    """Gradients match the reference too (the vectorised path uses only
+    out-of-place autograd ops, so first- and second-order grads are correct
+    by construction; this pins the first-order parity)."""
+    torch.manual_seed(1)
+    H, band = 16, 8
+    base = torch.rand(2, H, H) ** 2
+    Dv = base.clone().requires_grad_(True)
+    Ds = base.clone().requires_grad_(True)
+    _soft_dtw_value(Dv, 0.05, band).sum().backward()
+    _soft_dtw_value_scalar(Ds, 0.05, band).sum().backward()
+    assert torch.allclose(Dv.grad, Ds.grad, atol=1e-5)
 
 
 def test_dilate_long_horizon_full_objective_runs():

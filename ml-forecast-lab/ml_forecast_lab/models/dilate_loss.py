@@ -40,6 +40,7 @@ Implementation notes
 
 from __future__ import annotations
 
+import functools
 from typing import Optional
 
 import torch
@@ -57,27 +58,16 @@ import torch
 _DEFAULT_BAND_CAP = 8
 
 
-def _soft_dtw_value(
+def _soft_dtw_value_scalar(
     D: "torch.Tensor", gamma: float, band: int
 ) -> "torch.Tensor":
-    """Soft-DTW discrepancy for a batch of pairwise cost matrices.
+    """Reference soft-DTW (cell-by-cell Python recursion).
 
-    Parameters
-    ----------
-    D : torch.Tensor
-        Pairwise cost, shape ``(B, N, M)`` with ``D[b, i, j]`` the cost of
-        matching predicted step ``i`` to target step ``j``.
-    gamma : float
-        Soft-min temperature. Smaller → closer to hard DTW; larger → smoother
-        (and more convex) surrogate.
-    band : int
-        Sakoe-Chiba band half-width. Only cells with ``|i - j| <= band`` are
-        evaluated, bounding cost at O(N · band).
-
-    Returns
-    -------
-    torch.Tensor
-        Shape ``(B,)`` soft-DTW value, differentiable w.r.t. ``D``.
+    Kept as the readable, obviously-correct definition that
+    :func:`_soft_dtw_value` (the vectorised production path) is parity-tested
+    against. Same contract: ``D`` is ``(B, N, M)`` pairwise cost, returns a
+    ``(B,)`` soft-DTW value differentiable w.r.t. ``D``; only cells with
+    ``|i - j| <= band`` are evaluated.
     """
     B, N, M = D.shape
     BIG = 1e10  # finite "infinity": exp(-BIG/gamma) underflows to 0 cleanly
@@ -105,6 +95,124 @@ def _soft_dtw_value(
             R[(i, j)] = D[:, i - 1, j - 1] + soft_min
 
     return R[(N, M)]
+
+
+@functools.lru_cache(maxsize=64)
+def _band_plan(N: int, band: int):
+    """Precompute the per-anti-diagonal index plan for a banded soft-DTW sweep.
+
+    Geometry only (no data, no autograd), cached per ``(N, band)``. The
+    soft-DTW recurrence ``R[i,j] = D[i,j] + softmin(R[i-1,j-1], R[i-1,j],
+    R[i,j-1])`` has no dependency *within* an anti-diagonal ``s = i + j`` — each
+    cell only needs diagonals ``s-1`` and ``s-2`` — so a whole diagonal can be
+    computed in one vectorised tensor op. That turns the ``O(N·band)`` Python
+    loop of :func:`_soft_dtw_value_scalar` into ``~2N`` iterations while still
+    touching only the banded cells (so the autograd graph stays banded too).
+
+    Returns ``(steps, final_pos)`` where ``steps`` has one entry per diagonal
+    ``s = 2..2N`` of ``(ii, jj, gd, gu, gl)`` Long index tensors:
+
+    * ``ii, jj`` index this diagonal's cells into ``D`` (``i-1``, ``j-1``);
+    * ``gd, gu, gl`` gather the three neighbours from the previous two
+      diagonals' R-vectors — a missing neighbour points at a padded "BIG"
+      column (index ``K_prev``), so out-of-band / boundary cells read as +inf.
+
+    ``final_pos`` is the index of cell ``(N, N)`` in the last diagonal.
+    """
+    def diag_cells(s):
+        # valid i on diagonal s: in-bounds AND within the band |2i - s| <= band
+        ilo = max(1, s - N, -((-(s - band)) // 2))   # max(1, s-N, ceil((s-band)/2))
+        ihi = min(N, s - 1, (s + band) // 2)         # min(N, s-1, floor((s+band)/2))
+        return list(range(ilo, ihi + 1)) if ilo <= ihi else []
+
+    cells = {0: [0], 1: []}                          # diag 0 = origin; diag 1 = boundary
+    pos = {0: {0: 0}, 1: {}}
+    for s in range(2, 2 * N + 1):
+        cells[s] = diag_cells(s)
+        pos[s] = {i: p for p, i in enumerate(cells[s])}
+
+    steps = []
+    for s in range(2, 2 * N + 1):
+        K2, K1 = len(cells[s - 2]), len(cells[s - 1])
+        p2, p1 = pos[s - 2], pos[s - 1]
+        ii, jj, gd, gu, gl = [], [], [], [], []
+        for i in cells[s]:
+            j = s - i
+            ii.append(i - 1)
+            jj.append(j - 1)
+            gd.append(p2.get(i - 1, K2))             # (i-1, j-1) on diag s-2
+            gu.append(p1.get(i - 1, K1))             # (i-1, j)   on diag s-1
+            gl.append(p1.get(i, K1))                 # (i,   j-1) on diag s-1
+        steps.append((
+            torch.tensor(ii, dtype=torch.long),
+            torch.tensor(jj, dtype=torch.long),
+            torch.tensor(gd, dtype=torch.long),
+            torch.tensor(gu, dtype=torch.long),
+            torch.tensor(gl, dtype=torch.long),
+        ))
+    return steps, pos[2 * N][N]
+
+
+def _soft_dtw_value(
+    D: "torch.Tensor", gamma: float, band: int
+) -> "torch.Tensor":
+    """Soft-DTW discrepancy for a batch of pairwise cost matrices.
+
+    Vectorised banded anti-diagonal sweep — numerically identical to
+    :func:`_soft_dtw_value_scalar` (parity-tested), but ``~2N`` Python
+    iterations instead of ``O(N·band)``, which matters for the second-order
+    autograd graph DILATE's temporal term builds. Only banded cells are
+    touched, so the graph stays ``O(N·band)``.
+
+    Parameters
+    ----------
+    D : torch.Tensor
+        Pairwise cost, shape ``(B, N, M)`` (square ``N == M`` for DILATE).
+    gamma : float
+        Soft-min temperature.
+    band : int
+        Sakoe-Chiba band half-width (``|i - j| <= band``).
+
+    Returns
+    -------
+    torch.Tensor
+        Shape ``(B,)`` soft-DTW value, differentiable w.r.t. ``D``.
+    """
+    B, N, M = D.shape
+    if N != M:  # DILATE always passes a square cost; be safe for odd callers
+        return _soft_dtw_value_scalar(D, gamma, band)
+
+    steps, final_pos = _band_plan(int(N), int(band))
+    BIG = 1e10
+    device, dtype = D.device, D.dtype
+
+    # Two rolling diagonals, built functionally (no in-place writes) so the
+    # autograd graph — including the create_graph=True second-order pass of the
+    # temporal term — flows through cleanly. Diag 0 is the origin (0,0)=0;
+    # diag 1 is the all-BIG boundary (represented as an empty vector — any
+    # gather into it lands on the padded BIG column).
+    R_prev2 = torch.zeros(B, 1, device=device, dtype=dtype)   # diagonal s-2
+    R_prev1 = torch.zeros(B, 0, device=device, dtype=dtype)   # diagonal s-1
+    big_col = torch.full((B, 1), BIG, device=device, dtype=dtype)
+
+    for (ii, jj, gd, gu, gl) in steps:
+        ii = ii.to(device); jj = jj.to(device)
+        gd = gd.to(device); gu = gu.to(device); gl = gl.to(device)
+        # Pad each previous diagonal with a trailing BIG column; a "missing"
+        # gather index equals K_prev and so selects that +inf sentinel.
+        Rpp = torch.cat([R_prev2, big_col], dim=1)
+        Rp = torch.cat([R_prev1, big_col], dim=1)
+        Dd = D[:, ii, jj]                                     # (B, K)
+        neigh = torch.stack([
+            Rpp.index_select(1, gd),                         # (i-1, j-1)
+            Rp.index_select(1, gu),                          # (i-1, j)
+            Rp.index_select(1, gl),                          # (i,   j-1)
+        ], dim=0)                                            # (3, B, K)
+        soft_min = -gamma * torch.logsumexp(-neigh / gamma, dim=0)
+        R_cur = Dd + soft_min                                # (B, K)
+        R_prev2, R_prev1 = R_prev1, R_cur
+
+    return R_prev1[:, final_pos]
 
 
 def dilate_per_sample(

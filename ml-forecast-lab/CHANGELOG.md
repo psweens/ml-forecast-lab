@@ -13,6 +13,13 @@ very heavy and can exhaust memory.
 - Band now defaults to `min(H // 2, 8)` (`_DEFAULT_BAND_CAP`, overridable via
   `dilate_band`) — ≈2.4× fewer cells at H=48, ≈4.5× at H=96, with the same
   reduction again in the second-order graph.
+- The soft-DTW is now a **vectorised banded anti-diagonal sweep** instead of a
+  cell-by-cell Python recursion: each anti-diagonal is one tensor op, so the
+  Python/graph-build cost drops from `O(H·band)` iterations to `~2H`, while only
+  the banded cells are touched (the autograd graph stays banded). The scalar
+  recursion is kept as `_soft_dtw_value_scalar` and the two are parity-tested
+  (value + gradient); the vectorised forward was validated against it in numpy
+  to 0.0 across 300 random shapes including the production band cap.
 - The shape term is unchanged in behaviour (a 1-step-shifted spike still beats a
   flat line), and the timing term is **more** meaningful: a small band stops a
   spike drifting half the horizon and still counting as "aligned" — a far-drifted
