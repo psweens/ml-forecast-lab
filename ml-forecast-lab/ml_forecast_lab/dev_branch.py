@@ -127,6 +127,19 @@ def branches_api_url(page: int = 1, per_page: int = 100) -> str:
     )
 
 
+def pulls_api_url(page: int = 1, per_page: int = 100) -> str:
+    """GitHub API URL listing OPEN pull requests of this repo (one page)."""
+    return (
+        f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
+        f"/pulls?state=open&per_page={per_page}&page={page}"
+    )
+
+
+# The default branch is always offered in the dropdown even though it has
+# no PR of its own — it's the "run mainline" choice and the revert target.
+_DEFAULT_BRANCHES = ("main", "master")
+
+
 def parse_branches(payload: Any) -> list[str]:
     """Extract sorted branch names from a GitHub branches-API payload.
 
@@ -145,6 +158,78 @@ def parse_branches(payload: Any) -> list[str]:
         return (name not in ("main", "master"), name.lower())
 
     return sorted(names, key=_key)
+
+
+def parse_pr_branches(payload: Any) -> Dict[str, Dict[str, Any]]:
+    """Map each open PR's same-repo head branch → ``{number, title}``.
+
+    Only PRs whose head lives in THIS repo are kept — a PR opened from a
+    fork has a head ref that doesn't name a branch here, so codeload
+    couldn't fetch it and offering it would only 404. When a branch backs
+    more than one open PR (rare), the lowest PR number wins for a stable
+    label. Pure and side-effect-free for unit testing.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(payload, list):
+        return out
+    expect = f"{REPO_OWNER}/{REPO_NAME}".lower()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        head = item.get("head") or {}
+        ref = head.get("ref")
+        if not isinstance(ref, str) or not ref:
+            continue
+        # Skip fork PRs: include only when we can confirm the head repo is
+        # this repo (absent repo info — e.g. a deleted fork — is skipped too,
+        # since we can't safely codeload it).
+        repo = head.get("repo") or {}
+        full = repo.get("full_name")
+        if not (isinstance(full, str) and full.lower() == expect):
+            continue
+        num = item.get("number")
+        num = num if isinstance(num, int) else None
+        title = item.get("title")
+        prev = out.get(ref)
+        if (prev is None or
+                (num is not None and
+                 (prev.get("number") is None or num < prev["number"]))):
+            out[ref] = {
+                "number": num,
+                "title": title if isinstance(title, str) else None,
+            }
+    return out
+
+
+def compose_dev_branch_list(
+    all_branches: list,
+    open_pr_branches: Any,
+) -> list:
+    """Filter existing branches to those backed by an open PR.
+
+    Keeps the default branch (``main``/``master``) always available and
+    preserves the incoming order (``list_repo_branches`` already floats the
+    default to the top). ``open_pr_branches`` may be a dict (branch → PR
+    meta) or any membership-testable collection of branch names.
+    """
+    keep = set(open_pr_branches or ())
+    return [
+        b for b in (all_branches or [])
+        if b in keep or b in _DEFAULT_BRANCHES
+    ]
+
+
+def branch_is_closed(branch: Optional[str], open_pr_branches: Any) -> bool:
+    """Whether an installed overlay's branch is now stale (no open PR).
+
+    The default branch is never "closed" (it's always offered). Used to
+    decide whether to auto-remove the overlay's files from the Pi.
+    """
+    if not branch:
+        return False
+    if branch in _DEFAULT_BRANCHES:
+        return False
+    return branch not in set(open_pr_branches or ())
 
 
 async def list_repo_branches(token: Optional[str] = None) -> list[str]:
@@ -194,6 +279,58 @@ async def list_repo_branches(token: Optional[str] = None) -> list[str]:
 
     # Re-sort the merged set so the default branch stays on top across pages.
     return parse_branches([{"name": n} for n in names])
+
+
+async def list_open_pr_branches(
+    token: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Fetch the head branches of this repo's OPEN pull requests.
+
+    Returns a dict mapping each same-repo head branch → ``{number, title}``
+    so the System tab can list only branches with active work and annotate
+    each with its PR. Paginates up to the same sane cap as the branch list.
+    Raises :class:`DevBranchError` on any transport/HTTP failure so the
+    caller can fall back cleanly (and, importantly, NOT auto-remove an
+    overlay on a transient error).
+    """
+    import aiohttp
+
+    headers = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    out: Dict[str, Dict[str, Any]] = {}
+    max_pages = 10  # 1000 open PRs — far more than this project will ever have
+    try:
+        async with aiohttp.ClientSession() as session:
+            for page in range(1, max_pages + 1):
+                async with session.get(
+                    pulls_api_url(page=page),
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status == 403:
+                        raise DevBranchError(
+                            "GitHub API rate limit hit while listing pull "
+                            "requests. Wait a few minutes or type the branch "
+                            "name manually."
+                        )
+                    if resp.status != 200:
+                        raise DevBranchError(
+                            f"Could not list pull requests (HTTP {resp.status})."
+                        )
+                    page_items = await resp.json()
+                if not page_items:
+                    break
+                out.update(parse_pr_branches(page_items))
+                if len(page_items) < 100:
+                    break
+    except DevBranchError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise DevBranchError(f"Could not list pull requests: {e}") from e
+
+    return out
 
 
 def active_status() -> Optional[Dict[str, Any]]:
