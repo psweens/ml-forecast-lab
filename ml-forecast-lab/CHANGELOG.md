@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased — Log-transform blow-up guarded across every analysis tab
+
+**A `log_transform` divergence can no longer corrupt the analysis tabs.** When
+log-transform is on, a diverged model emits a large log-space value that
+`np.expm1` explodes to ~1e30 (or `inf`). The blow-up cap previously guarded only
+the HA publish boundary, so a single such value could still pollute the
+leaderboard metrics and any chart that recomputed or aggregated it.
+
+- **Shared helper.** `clamp_forecast_blowup` + `FORECAST_BLOWUP_CAP_FACTOR`
+  moved to `preprocessing.py` (a neutral module the benchmark runner can import
+  without a circular dependency); `main.py` re-exports them under the original
+  names so existing call sites and tests are unchanged.
+- **Benchmark / Results tab.** The CV metric path (`runner.py`) now clamps the
+  inverted predictions before scoring — both the leaderboard metrics and the
+  overfitting table — using the fold's observed actual max as the reference, so
+  a diverged fold can no longer push a model's MAE/RMSE to ~1e30 and corrupt the
+  champion **ranking**.
+- **Every DB-backed tab (Accuracy / Comparison / trajectory / evolution /
+  stability).** Guarded at the write path instead of in each read query (several
+  aggregate `predicted` directly in SQL): `log_forecast` now drops non-finite /
+  absurd (`> FORECAST_ABS_SANITY`, 1e12) predicted values before insert and
+  nulls absurd interval bounds. Since every tab reads `forecast_log`, one guard
+  keeps a blow-up out of all of them by construction. The read-side corruption
+  filter now shares the same `FORECAST_ABS_SANITY` constant.
+- Tests: write-guard drops inf/nan/1e30 and nulls absurd bounds while keeping
+  the point forecast; the read-side filter test now seeds a legacy row directly
+  (the write-guard would otherwise drop it); shared-helper re-export verified.
+
 ## Unreleased — Forecast Accuracy & Comparison data-quality controls
 
 **Per-interval ↔ cumulative switch is back on every Forecast Accuracy tab.**

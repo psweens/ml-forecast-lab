@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from ml_forecast_lab.models.base import ForecastModel, TrainingCancelled
+from ml_forecast_lab.preprocessing import clamp_forecast_blowup
 
 from .metrics import MetricRegistry, get_metric_registry
 
@@ -706,6 +707,25 @@ class BenchmarkRunner:
                 yt_metric = np.expm1(yt_metric)
                 yp_metric = np.expm1(yp_metric)
                 yt_train_metric = np.expm1(yt_train_metric)
+                # A diverged fold's prediction explodes under expm1 (~1e30) and
+                # would dominate MAE/RMSE — polluting the leaderboard RANKING,
+                # not just one chart. Cap predictions to a generous multiple of
+                # the fold's observed actual scale (same rule as the publish
+                # boundary). Actuals are real observations and never blow up.
+                try:
+                    _cands = [float(np.nanmax(yt_metric)),
+                              float(np.nanmax(yt_train_metric))]
+                    _cands = [c for c in _cands if np.isfinite(c)]
+                    _ref = max(_cands) if _cands else None
+                except (ValueError, TypeError):
+                    _ref = None
+                yp_metric, _n_blow, _ = clamp_forecast_blowup(yp_metric, _ref)
+                if _n_blow:
+                    logger.warning(
+                        "Clamped %d blown-up CV prediction(s) before scoring "
+                        "(log-transform divergence) so the leaderboard isn't "
+                        "polluted by a ~1e30 value.", _n_blow,
+                    )
 
             interval_minutes = int(self.experiment_cfg.get('interval_minutes', 30))
             season = max(1, 1440 // max(interval_minutes, 1))
@@ -724,6 +744,15 @@ class BenchmarkRunner:
                     if self.experiment_cfg.get('log_transform'):
                         y_train_for_metric = np.expm1(y_train_metric)
                         y_pred_train_for_metric = np.expm1(y_pred_train)
+                        # Same blow-up guard for the overfitting-table metrics.
+                        try:
+                            _reft = float(np.nanmax(y_train_for_metric))
+                            _reft = _reft if np.isfinite(_reft) else None
+                        except (ValueError, TypeError):
+                            _reft = None
+                        y_pred_train_for_metric, _, _ = clamp_forecast_blowup(
+                            y_pred_train_for_metric, _reft,
+                        )
                     else:
                         y_train_for_metric = y_train_metric
                         y_pred_train_for_metric = y_pred_train

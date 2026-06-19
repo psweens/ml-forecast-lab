@@ -7,6 +7,7 @@ and automatic cleanup of old records.
 
 import functools
 import logging
+import math
 import re
 import sqlite3
 import threading
@@ -24,6 +25,14 @@ logger = logging.getLogger(__name__)
 # can grey provisional lines, badge "n/7 days", and suppress the headline
 # verdict until the comparison clears the gate.
 EXTERNAL_COMPARISON_WARMUP_DAYS = 7
+
+# Absolute sanity ceiling for a logged forecast value. No real HA sensor
+# produces ~1e12; a value beyond this is a log-inversion blow-up (np.expm1 of a
+# diverged log-space prediction → ~1e30 / inf), not a forecast. Guarded at the
+# WRITE path (log_forecast) so a blow-up can never enter forecast_log and
+# corrupt every analytics tab that reads/aggregates it — and reused by the
+# read-side corruption filter as the no-actuals fallback cap.
+FORECAST_ABS_SANITY = 1e12
 
 
 def _locked(fn):
@@ -377,16 +386,47 @@ class HistoryDB:
         if lower_bounds is not None and len(lower_bounds) != n:
             raise ValueError("lower_bounds length must match targets")
         rows = []
+        n_dropped = 0
         for i, (ts, val) in enumerate(zip(targets, predictions)):
+            fval = float(val)
+            # WRITE-PATH BLOW-UP GUARD. forecast_log is the single source every
+            # analytics tab reads (Forecast Accuracy, Comparison, trajectory,
+            # evolution, stability — several aggregate `predicted` directly in
+            # SQL via AVG/MAX). A non-finite or absurd value (a log-inversion
+            # divergence: np.expm1 of a diverged log-space prediction → ~1e30 /
+            # inf) would corrupt every one of those, so it never enters the log.
+            # Normal forecasts are already clamped far below this upstream, so
+            # this only ever fires on a pathological divergence — defence in
+            # depth, not the primary clamp.
+            if not math.isfinite(fval) or abs(fval) > FORECAST_ABS_SANITY:
+                n_dropped += 1
+                continue
             target_str = ts.strftime("%Y-%m-%d %H:%M:%S")
             lead_min = int((ts - issued_at).total_seconds() / 60)
             upper_val = float(upper_bounds[i]) if upper_bounds is not None else None
             lower_val = float(lower_bounds[i]) if lower_bounds is not None else None
+            # Drop a non-finite / absurd band to NULL rather than the whole row
+            # (the point forecast is still usable; only the interval is bad).
+            if upper_val is not None and (
+                not math.isfinite(upper_val) or abs(upper_val) > FORECAST_ABS_SANITY
+            ):
+                upper_val = None
+            if lower_val is not None and (
+                not math.isfinite(lower_val) or abs(lower_val) > FORECAST_ABS_SANITY
+            ):
+                lower_val = None
             rows.append((
                 experiment, model_name, issued_str, target_str,
-                lead_min, float(val), forecast_type, upper_val, lower_val,
+                lead_min, fval, forecast_type, upper_val, lower_val,
                 model_version,
             ))
+        if n_dropped:
+            logger.warning(
+                "log_forecast[%s/%s]: dropped %d non-finite/absurd predicted "
+                "value(s) (>|%.0e|) before insert — a log-inversion blow-up "
+                "never reaches the analytics tabs.",
+                experiment, model_name, n_dropped, FORECAST_ABS_SANITY,
+            )
         cursor = self.conn.cursor()
         try:
             cursor.executemany(
@@ -3563,7 +3603,7 @@ class HistoryDB:
         # data, so drop it here. Legitimate unit/scale differences are handled
         # separately by the scale-mismatch guard.
         CORRUPT_FACTOR = 1e4
-        ABS_SANITY = 1e12
+        ABS_SANITY = FORECAST_ABS_SANITY
         _amax = float(actual_raw.abs().max()) if (actual_raw is not None and len(actual_raw)) else 0.0
         _corrupt_cap = min(_amax * CORRUPT_FACTOR, ABS_SANITY) if _amax > 0 else ABS_SANITY
 

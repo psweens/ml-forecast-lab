@@ -206,47 +206,15 @@ def _apply_idle_value_fill(result: 'pd.DataFrame', exp_cfg) -> int:
 _apply_solar_night_fill = _apply_idle_value_fill
 
 
-# A diverged model can emit a large value in log space; np.expm1 then
-# explodes it (expm1(70) ≈ 2.5e30). With only a lower (>= 0) clamp at the
-# publish boundary, that garbage was published to Home Assistant and logged
-# verbatim. Real demand / PV is physically bounded, so a forecast beyond a
-# generous multiple of the largest value ever observed is a divergence, not a
-# forecast — cap it. The cap is intentionally loose (10× the historical max)
-# so it never touches a plausible forecast, only a blow-up.
-FORECAST_BLOWUP_CAP_FACTOR = 10.0
-
-
-def _clamp_forecast_blowup(y_pred, ref_max_display, factor=FORECAST_BLOWUP_CAP_FACTOR):
-    """Cap an (already display-space) forecast array to ``factor`` × the
-    largest observed value so a log-inversion blow-up can't publish ~1e30.
-
-    Parameters
-    ----------
-    y_pred : array-like
-        Forecast values in display (published) units.
-    ref_max_display : float or None
-        Largest observed magnitude in display units (e.g. training/holdout
-        actual max). ``None`` / non-finite / <= 0 disables the cap.
-
-    Returns
-    -------
-    (clamped, n_clamped, cap) : (np.ndarray, int, float | None)
-    """
-    y = np.asarray(y_pred, dtype=np.float32)
-    if ref_max_display is None:
-        return y, 0, None
-    try:
-        ref = float(ref_max_display)
-    except (TypeError, ValueError):
-        return y, 0, None
-    if not np.isfinite(ref) or ref <= 0:
-        return y, 0, None
-    cap = float(factor) * ref
-    over = np.isfinite(y) & (y > cap)
-    n = int(np.count_nonzero(over))
-    if n:
-        y = np.minimum(y, np.float32(cap))
-    return y.astype(np.float32), n, cap
+# Blow-up cap for a log-inversion divergence. The canonical implementation
+# lives in preprocessing so the benchmark runner shares the exact same rule
+# without a circular import (see preprocessing.clamp_forecast_blowup for the
+# rationale). Re-exported here under the original names so the existing call
+# sites and the regression test — which import from main — are unchanged.
+from ml_forecast_lab.preprocessing import (  # noqa: E402
+    FORECAST_BLOWUP_CAP_FACTOR,
+    clamp_forecast_blowup as _clamp_forecast_blowup,
+)
 
 
 def _cov_column_name(cov_cfg, all_covs: Optional[list] = None) -> str:
