@@ -2798,15 +2798,14 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # ?mode=raw URL would still hit this branch.
         if evaluation_mode == "raw" and exp_cfg.source_is_cumulative:
             evaluation_mode = "increment"
-        # v2.40.9: daily_cumulative mode is only meaningful for
-        # cumulative-source sensors (it reads the seed from actuals
-        # at issued_at and cumsums per-interval predictions to compare
-        # against the cumulative actual). For non-cumulative sensors,
-        # fall back to the default per-interval mode rather than
-        # produce nonsense.
-        if (evaluation_mode == "daily_cumulative"
-                and not exp_cfg.source_is_cumulative):
-            evaluation_mode = "raw"
+        # daily_cumulative is now meaningful on every experiment. For a
+        # cumulative-source sensor the actual running total is read
+        # straight from the sensor; for an instantaneous sensor the DB
+        # layer builds the running daily total by summing per-interval
+        # actuals within each local day (see
+        # _get_forecast_accuracy_daily_cumulative_locked,
+        # cumulative_source=False). Either way the forecast side is the
+        # summed per-interval predictions, so the comparison is in-space.
         # Default filter: current champion + its latest training tag. UI
         # can escape via ?model=all or ?version=all. See
         # _resolve_model_filter for the full contract.
@@ -2911,6 +2910,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             model_name,
             model_version,
             day_offset_hours,
+            bool(exp_cfg.source_is_cumulative),
         )
         result["model_name"] = model_name
         result["model_version"] = model_version
@@ -3136,6 +3136,25 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         model_name = model_param if model_param and model_param != "all" else None
         model_version = version_param if version_param and version_param != "all" else None
 
+        # Data-quality controls: drop user-flagged corrupt days and honour a
+        # "restart" floor. The excluded-date match follows HA local midnight,
+        # so compute the UTC→local offset the same way the accuracy endpoint
+        # does (so "exclude 14 June" means the local 14th, not the UTC 14th).
+        excluded_dates = list(getattr(exp_cfg, "comparison_excluded_dates", []) or [])
+        reset_at = getattr(exp_cfg, "comparison_reset_at", None)
+        day_offset_hours = None
+        if excluded_dates:
+            tz_name = app.state.appstate.ha_time_zone
+            if tz_name:
+                try:
+                    from zoneinfo import ZoneInfo
+                    from datetime import datetime as _dt, timezone as _tz
+                    _off = _dt.now(_tz.utc).astimezone(ZoneInfo(tz_name)).utcoffset()
+                    if _off is not None:
+                        day_offset_hours = _off.total_seconds() / 3600.0
+                except Exception as e:
+                    logger.debug("Could not compute comparison day offset: %s", e)
+
         try:
             result = await asyncio.to_thread(
                 db.get_external_forecast_comparison,
@@ -3149,6 +3168,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 model_version,
                 analysis_mode,
                 target_unit,
+                excluded_dates,
+                reset_at,
+                day_offset_hours,
             )
         except Exception as e:
             logger.error(
@@ -3397,6 +3419,88 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception as e:
             logger.error(f"Failed to remove external forecast: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": _safe_error(e)})
+
+    @app.post("/experiment/{name}/comparison-controls")
+    async def comparison_controls(name: str, request: Request):
+        """Manage the Forecast Comparison data-quality controls.
+
+        Body ``{"action": ...}``:
+          - ``exclude_day`` + ``date`` (YYYY-MM-DD): drop a corrupt day.
+          - ``include_day`` + ``date``: re-include a previously-excluded day.
+          - ``reset``: restart the comparison from now (sets a floor and
+            clears the accrued third-party captures so it starts fresh).
+          - ``clear_reset``: undo a previous restart.
+
+        Returns the resulting ``excluded_dates`` / ``reset_at`` so the tab can
+        refresh without a full reload.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        action = (body.get("action") or "").strip()
+        date = (body.get("date") or "").strip()
+
+        from ml_forecast_lab.config import (
+            add_experiment_excluded_date, remove_experiment_excluded_date,
+            set_experiment_comparison_reset, load_config,
+        )
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+
+        db = app.state.appstate.history_db
+        try:
+            if action == "exclude_day":
+                changed = add_experiment_excluded_date(config_path, name, date)
+            elif action == "include_day":
+                changed = remove_experiment_excluded_date(config_path, name, date)
+            elif action == "reset":
+                from datetime import datetime, timezone
+                reset_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                changed = set_experiment_comparison_reset(config_path, name, reset_at)
+                # Discard the accrued third-party captures so re-added/ongoing
+                # externals start clean from the restart point. The add-on's
+                # own forecast_log and the actuals are left intact (the floor
+                # hides the pre-reset ones; the Forecast Accuracy tab keeps
+                # its full history).
+                if changed and db:
+                    try:
+                        db.delete_external_forecast_log(name)
+                    except Exception as e:
+                        logger.debug(f"reset: external_forecast_log purge failed: {e}")
+            elif action == "clear_reset":
+                changed = set_experiment_comparison_reset(config_path, name, None)
+            else:
+                return JSONResponse(content={
+                    "success": False, "error": f"Unknown action: {action!r}",
+                })
+        except ValueError as e:
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
+        except Exception as e:
+            logger.error(f"comparison-controls {action} failed: {e}", exc_info=True)
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
+
+        # Re-read so the response reflects the persisted state.
+        excluded: list = []
+        reset_at_val = None
+        try:
+            cfg = load_config(config_path)
+            exp_cfg = next((e for e in cfg.experiments if e.name == name), None)
+            if exp_cfg:
+                excluded = list(getattr(exp_cfg, "comparison_excluded_dates", []) or [])
+                reset_at_val = getattr(exp_cfg, "comparison_reset_at", None)
+        except Exception:
+            pass
+
+        logger.info("comparison-controls[%s]: %s (date=%r)", name, action, date)
+        return JSONResponse(content={
+            "success": True, "changed": bool(changed),
+            "excluded_dates": excluded, "reset_at": reset_at_val,
+        })
 
     @app.get("/experiment/{name}/forecast-log-stats")
     async def forecast_log_stats(name: str, request: Request):
