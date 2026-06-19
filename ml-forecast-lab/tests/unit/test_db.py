@@ -627,3 +627,70 @@ class TestForecastAccuracyDailyCumulativeMode:
             f"boundary, so day-D+1 cumulatives carried day-D's offset."
         )
 
+
+class TestForecastLogBlowupGuard:
+    """The write-path guard in log_forecast keeps a log-inversion blow-up out
+    of forecast_log entirely — the single source every analytics tab reads, so
+    a ~1e30 / inf value can't corrupt any of them (Accuracy, Comparison,
+    trajectory, evolution, stability)."""
+
+    def _targets(self, issued, n):
+        from datetime import timedelta as _td
+        return [issued + _td(minutes=30 * (i + 1)) for i in range(n)]
+
+    def test_blowup_predictions_are_dropped_before_insert(self, tmp_db):
+        from datetime import datetime as _dt
+        db = HistoryDB(tmp_db)
+        db.ensure_forecast_log_table()
+        issued = _dt(2024, 1, 1, 0, 0, 0)
+        # 2 good values + inf + 5e30 + nan → only the 2 good survive.
+        preds = [1.0, float("inf"), 5e30, float("nan"), 2.0]
+        n = db.log_forecast(
+            experiment="pv", issued_at=issued,
+            targets=self._targets(issued, 5), predictions=preds,
+            model_name="m1", model_version="v1",
+        )
+        assert n == 2
+        cur = db.conn.cursor()
+        cur.execute(
+            "SELECT predicted FROM forecast_log WHERE experiment='pv' "
+            "ORDER BY target_dt"
+        )
+        vals = [r[0] for r in cur.fetchall()]
+        assert vals == [1.0, 2.0]
+        assert all(abs(v) < 1e12 for v in vals)
+
+    def test_blowup_bound_nulled_but_point_kept(self, tmp_db):
+        from datetime import datetime as _dt
+        db = HistoryDB(tmp_db)
+        db.ensure_forecast_log_table()
+        issued = _dt(2024, 1, 1, 0, 0, 0)
+        db.log_forecast(
+            experiment="pv", issued_at=issued,
+            targets=self._targets(issued, 1), predictions=[10.0],
+            model_name="m1", upper_bounds=[1e30], lower_bounds=[9.0],
+            model_version="v1",
+        )
+        cur = db.conn.cursor()
+        cur.execute(
+            "SELECT predicted, upper, lower FROM forecast_log "
+            "WHERE experiment='pv'"
+        )
+        pred, upper, lower = cur.fetchone()
+        assert pred == 10.0       # point forecast kept
+        assert upper is None      # absurd band nulled
+        assert lower == 9.0       # sane band kept
+
+    def test_normal_forecast_is_untouched(self, tmp_db):
+        from datetime import datetime as _dt
+        db = HistoryDB(tmp_db)
+        db.ensure_forecast_log_table()
+        issued = _dt(2024, 1, 1, 0, 0, 0)
+        preds = [0.0, 5.0, 12.5, 100.0]
+        n = db.log_forecast(
+            experiment="pv", issued_at=issued,
+            targets=self._targets(issued, 4), predictions=preds,
+            model_name="m1", model_version="v1",
+        )
+        assert n == 4
+

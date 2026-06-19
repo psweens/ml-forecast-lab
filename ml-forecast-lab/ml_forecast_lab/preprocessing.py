@@ -910,6 +910,67 @@ def invert_transform(
     return series
 
 
+# A diverged model can emit a large value in log space; np.expm1 then explodes
+# it (expm1(70) ≈ 2.5e30, and it overflows float32 to inf beyond ~89). Real
+# demand / PV is physically bounded, so a forecast beyond a generous multiple
+# of the largest value ever observed is a divergence, not a forecast — cap it.
+# The cap is intentionally loose (10× the historical max) so it never touches a
+# plausible forecast, only a blow-up.
+#
+# This lives here (not in main.py) so BOTH the production publish path AND the
+# benchmark runner — which can't import main without a circular import — share
+# the exact same rule. That keeps every analysis surface (leaderboard CV
+# metrics, holdout chart, published sensors) clamping a log-inversion blow-up
+# identically, instead of only the publish boundary being guarded.
+FORECAST_BLOWUP_CAP_FACTOR = 10.0
+
+
+def clamp_forecast_blowup(
+    values: "np.ndarray",
+    ref_max_display: Optional[float],
+    factor: float = FORECAST_BLOWUP_CAP_FACTOR,
+) -> Tuple["np.ndarray", int, Optional[float]]:
+    """Cap a display-space forecast to ``factor`` × the largest observed value.
+
+    A ``log_transform`` inversion (``np.expm1``) of a diverged log-space
+    prediction explodes to ~1e30 (or ``inf``). Such a value is not a forecast —
+    it would dominate any MAE/RMSE it enters and flatten any chart. This caps it
+    to a generous multiple of the reference scale so a blow-up can never reach a
+    metric, a chart, or a published sensor, while a plausible forecast is never
+    touched.
+
+    Parameters
+    ----------
+    values : array-like
+        Forecast values in display (un-transformed) units.
+    ref_max_display : float or None
+        Largest observed magnitude in display units (e.g. the fold's / training
+        actuals' max). ``None`` / non-finite / ``<= 0`` disables the cap.
+    factor : float, default ``FORECAST_BLOWUP_CAP_FACTOR``
+        Multiplier applied to ``ref_max_display`` to form the cap.
+
+    Returns
+    -------
+    (clamped, n_clamped, cap) : (np.ndarray float32, int, float | None)
+        ``cap`` is ``None`` when no reference was usable.
+    """
+    y = np.asarray(values, dtype=np.float32)
+    if ref_max_display is None:
+        return y, 0, None
+    try:
+        ref = float(ref_max_display)
+    except (TypeError, ValueError):
+        return y, 0, None
+    if not np.isfinite(ref) or ref <= 0:
+        return y, 0, None
+    cap = float(factor) * ref
+    over = np.isfinite(y) & (y > cap)
+    n = int(np.count_nonzero(over))
+    if n:
+        y = np.minimum(y, np.float32(cap))
+    return y.astype(np.float32), n, cap
+
+
 def align_series(
     series_list: list[pd.Series],
     method: str = 'inner',
