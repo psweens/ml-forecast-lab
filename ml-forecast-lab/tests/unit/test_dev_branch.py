@@ -199,6 +199,81 @@ def test_parse_branches_empty_and_non_list():
     assert dev_branch.parse_branches({"name": "x"}) == []
 
 
+# ---- open-PR branch listing (dropdown = branches with an open PR) ----
+
+def _pr(number, ref, full_name="psweens/ml-forecast-lab", title=None):
+    return {
+        "number": number,
+        "title": title or f"PR {number}",
+        "head": {"ref": ref, "repo": {"full_name": full_name}},
+    }
+
+
+def test_parse_pr_branches_same_repo_only_with_metadata():
+    payload = [
+        _pr(88, "claude/vibrant-babbage-7ypvor", title="Smart Setup"),
+        _pr(12, "feature/x"),
+        # Fork PR — head repo is someone else's; not overlayable, skipped.
+        _pr(99, "patch-1", full_name="someone/ml-forecast-lab"),
+    ]
+    out = dev_branch.parse_pr_branches(payload)
+    assert set(out) == {"claude/vibrant-babbage-7ypvor", "feature/x"}
+    assert out["claude/vibrant-babbage-7ypvor"] == {"number": 88, "title": "Smart Setup"}
+
+
+def test_parse_pr_branches_keeps_lowest_pr_number_per_branch():
+    payload = [_pr(40, "shared"), _pr(7, "shared"), _pr(55, "shared")]
+    out = dev_branch.parse_pr_branches(payload)
+    assert out["shared"]["number"] == 7
+
+
+def test_parse_pr_branches_skips_missing_repo_and_malformed():
+    payload = [
+        {"number": 1, "head": {"ref": "noinfo"}},          # no head.repo
+        {"number": 2, "head": {"ref": "", "repo": {"full_name": "psweens/ml-forecast-lab"}}},
+        "not-a-dict",
+        {"number": 3, "head": {"ref": "ok", "repo": {"full_name": "psweens/ml-forecast-lab"}}},
+    ]
+    out = dev_branch.parse_pr_branches(payload)
+    assert set(out) == {"ok"}
+
+
+def test_parse_pr_branches_empty_and_non_list():
+    assert dev_branch.parse_pr_branches([]) == {}
+    assert dev_branch.parse_pr_branches(None) == {}
+    assert dev_branch.parse_pr_branches({"head": {"ref": "x"}}) == {}
+
+
+def test_compose_dev_branch_list_keeps_open_pr_and_default():
+    all_branches = ["main", "claude/feat-a", "stale/merged", "claude/feat-b"]
+    open_prs = {"claude/feat-a": {"number": 1}, "claude/feat-b": {"number": 2}}
+    # Default always kept; stale (no PR) dropped; order preserved.
+    assert dev_branch.compose_dev_branch_list(all_branches, open_prs) == [
+        "main", "claude/feat-a", "claude/feat-b",
+    ]
+
+
+def test_compose_dev_branch_list_accepts_set_and_handles_empty():
+    assert dev_branch.compose_dev_branch_list(["main", "x"], {"x"}) == ["main", "x"]
+    # No open PRs → only the default branch survives.
+    assert dev_branch.compose_dev_branch_list(["main", "x", "y"], {}) == ["main"]
+    assert dev_branch.compose_dev_branch_list([], {"x"}) == []
+
+
+def test_branch_is_closed_logic():
+    open_prs = {"claude/feat-a": {"number": 1}}
+    # Open PR → not closed.
+    assert dev_branch.branch_is_closed("claude/feat-a", open_prs) is False
+    # No PR → closed (eligible for auto-removal).
+    assert dev_branch.branch_is_closed("claude/old", open_prs) is True
+    # Default branch is never "closed".
+    assert dev_branch.branch_is_closed("main", {}) is False
+    assert dev_branch.branch_is_closed("master", {}) is False
+    # No active branch installed → nothing to remove.
+    assert dev_branch.branch_is_closed(None, open_prs) is False
+    assert dev_branch.branch_is_closed("", open_prs) is False
+
+
 # ---- version label ----
 
 def test_version_label_plain_when_not_running(monkeypatch):
