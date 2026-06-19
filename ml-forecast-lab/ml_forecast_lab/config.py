@@ -693,6 +693,25 @@ class ExperimentCfg:
     Legacy single-sensor configs using the flat ``external_forecast_*`` keys
     are auto-migrated into this list on load."""
 
+    comparison_excluded_dates: List[str] = field(default_factory=list)
+    """Calendar dates (``YYYY-MM-DD``, in the HA-local day the Forecast
+    Comparison tab buckets by) to DROP from the Forecast Comparison tab.
+
+    Use this to discard a day on which one of the compared sensors logged
+    corrupt data, without throwing away the rest of the accrued history.
+    Every series (actuals, this add-on's forecast, and each external) is
+    filtered to these dates in all comparison charts, head-to-head metrics
+    and rankings. Reversible — remove the date to bring the day back. Only
+    affects the comparison view; the underlying logs are untouched."""
+
+    comparison_reset_at: Optional[str] = None
+    """UTC ISO timestamp marking a Forecast Comparison "restart". When set,
+    the comparison ignores everything (actuals, this add-on's forecast and
+    the externals) before this moment, so the head-to-head starts fresh
+    from the restart point. Set by the tab's "Restart comparison" button;
+    cleared to undo. The Forecast Accuracy tab and the raw logs are not
+    affected — this is purely a comparison-view floor."""
+
     def __post_init__(self) -> None:
         """Validate configuration."""
         valid_modes = {'lab', 'production'}
@@ -753,6 +772,28 @@ class ExperimentCfg:
         # past-only forecast. Every neural backend in the registry now
         # consumes user future covariates, so the warning is no longer
         # needed and has been removed.
+
+        # Normalise the comparison-exclusion dates. YAML auto-parses bare
+        # ISO dates into datetime.date, so coerce everything back to
+        # "YYYY-MM-DD" strings, drop blanks/dupes and keep them sorted so
+        # the stored config and the UI list are stable.
+        if self.comparison_excluded_dates:
+            seen = []
+            for d in self.comparison_excluded_dates:
+                if d is None:
+                    continue
+                s = d.isoformat() if hasattr(d, 'isoformat') else str(d).strip()
+                if s and s not in seen:
+                    seen.append(s)
+            self.comparison_excluded_dates = sorted(seen)
+        else:
+            self.comparison_excluded_dates = []
+        if self.comparison_reset_at is not None:
+            self.comparison_reset_at = (
+                self.comparison_reset_at.isoformat()
+                if hasattr(self.comparison_reset_at, 'isoformat')
+                else str(self.comparison_reset_at).strip() or None
+            )
 
 
 @dataclass
@@ -1679,6 +1720,105 @@ def remove_experiment_external_forecast(
     if removed:
         atomic_yaml_write(config_path, data)
     return removed
+
+
+_ISO_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def add_experiment_excluded_date(
+    config_path: Path | str,
+    experiment_name: str,
+    date: str,
+) -> bool:
+    """Exclude a calendar date (``YYYY-MM-DD``) from an experiment's Forecast
+    Comparison view.
+
+    Returns True if the date was added; False if the experiment wasn't found
+    or the date was already excluded.
+
+    Raises ``ValueError`` on a malformed date.
+    """
+    date = (date or '').strip()
+    if not _ISO_DATE_RE.match(date):
+        raise ValueError(f'date must be YYYY-MM-DD, got {date!r}')
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    for exp in data.get('experiments', []):
+        if exp.get('name') != experiment_name:
+            continue
+        items = exp.setdefault('comparison_excluded_dates', [])
+        existing = {str(d).strip() for d in items}
+        if date in existing:
+            return False
+        items.append(date)
+        exp['comparison_excluded_dates'] = sorted(
+            {str(d).strip() for d in items}
+        )
+        atomic_yaml_write(config_path, data)
+        return True
+
+    return False
+
+
+def remove_experiment_excluded_date(
+    config_path: Path | str,
+    experiment_name: str,
+    date: str,
+) -> bool:
+    """Re-include a previously-excluded date. Returns True if it was removed."""
+    date = (date or '').strip()
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    removed = False
+    for exp in data.get('experiments', []):
+        if exp.get('name') != experiment_name:
+            continue
+        items = exp.get('comparison_excluded_dates', []) or []
+        kept = [d for d in items if str(d).strip() != date]
+        if len(kept) != len(items):
+            removed = True
+            if kept:
+                exp['comparison_excluded_dates'] = kept
+            else:
+                exp.pop('comparison_excluded_dates', None)
+        break
+
+    if removed:
+        atomic_yaml_write(config_path, data)
+    return removed
+
+
+def set_experiment_comparison_reset(
+    config_path: Path | str,
+    experiment_name: str,
+    reset_at: Optional[str],
+) -> bool:
+    """Set (or clear) the Forecast Comparison restart floor for an experiment.
+
+    ``reset_at`` is a UTC ISO timestamp; pass ``None`` (or an empty string) to
+    clear the floor and undo a previous restart. Returns True if the
+    experiment was found and updated.
+    """
+    reset_at = (reset_at or '').strip() or None
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    for exp in data.get('experiments', []):
+        if exp.get('name') != experiment_name:
+            continue
+        if reset_at:
+            exp['comparison_reset_at'] = reset_at
+        else:
+            exp.pop('comparison_reset_at', None)
+        atomic_yaml_write(config_path, data)
+        return True
+
+    return False
 
 
 _EXP_NAME_RE = re.compile(r'^[a-z][a-z0-9_]{0,63}$')

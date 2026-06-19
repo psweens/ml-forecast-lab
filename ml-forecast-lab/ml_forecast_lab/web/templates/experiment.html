@@ -1699,26 +1699,25 @@
             </select>
             <span class="info-tip">?<span class="tip-text">Time range used by every chart and verdict on this tab. Shorter windows reflect recent behaviour (a freshly-promoted model, an environmental change); longer windows give more samples but mix older cohorts in.</span></span>
         </div>
-        <!-- Evaluation mode toggle — cumulative sensors only.
-             v2.40.9: re-introduced a real "Daily cumulative" option
-             alongside the per-interval one. The previous "Cumulative
-             value" (raw mode) toggle was removed in v2.40.7 because it
-             compared per-interval delta predictions against raw
-             cumulative actuals — different spaces, MAE collapsed to
-             roughly the cumulative level. The new "Daily cumulative"
-             option does it properly: seeds the cumulative at issued_at
-             with the actual reading, cumsums the per-interval
-             predictions within each day (resetting at midnight), and
-             compares against the raw cumulative actual — both sides in
-             the same space, answering "how close is the predicted
-             day-so-far to actual day-so-far". -->
+        <!-- Per-interval ↔ cumulative evaluation toggle — shown on every
+             experiment. "Per-interval" scores each bin's value; for a
+             cumulative source that's the per-bin delta (increment), for
+             an instantaneous source it's the raw value. "Daily
+             cumulative" scores the running daily total: it seeds the
+             cumulative at issued_at with the actual-so-far, sums the
+             per-interval predictions within each day (resetting at local
+             midnight), and compares against the actual running total —
+             read straight from the sensor for cumulative sources, or
+             built by summing per-interval actuals for instantaneous ones.
+             Both sides land in the same space, answering "how close is
+             the predicted day-so-far to the actual day-so-far". -->
         <div class="acc-control" id="accuracy-mode-wrapper" style="display:none;">
             <label>Errors shown as:</label>
             <div class="toggle-group" style="display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
-                <button type="button" id="accuracy-mode-increment" class="toggle-btn active" onclick="setAccuracyMode('increment')" style="padding:0.35rem 0.75rem;background:var(--accent-secondary);color:#fff;border:none;cursor:pointer;font-size:0.85rem;">Per-interval demand</button>
+                <button type="button" id="accuracy-mode-increment" class="toggle-btn active" onclick="setAccuracyMode('per_interval')" style="padding:0.35rem 0.75rem;background:var(--accent-secondary);color:#fff;border:none;cursor:pointer;font-size:0.85rem;">Per-interval demand</button>
                 <button type="button" id="accuracy-mode-daily-cumulative" class="toggle-btn" onclick="setAccuracyMode('daily_cumulative')" style="padding:0.35rem 0.75rem;background:transparent;color:var(--text-secondary);border:none;cursor:pointer;font-size:0.85rem;">Daily cumulative</button>
             </div>
-            <span class="info-tip">?<span class="tip-text"><b>Per-interval demand</b>: evaluates <code>value[t] − value[t−1]</code> — each bin's predicted demand vs actual demand for that bin. Comparable across times of day. <b>Daily cumulative</b>: cumsums per-interval predictions within each day (anchored to the actual reading at issuance, resetting at midnight) and compares against the raw cumulative actual — i.e. accuracy of the running daily total. Errors integrate over the horizon, so the lead-time chart slopes upward; the "End-of-day" tile shows the single most useful number for daily-total forecasting.</span></span>
+            <span class="info-tip">?<span class="tip-text"><b>Per-interval demand</b>: each bin's predicted value vs the actual for that bin — for a cumulative source this is the per-interval demand <code>value[t] − value[t−1]</code>, for an instantaneous source it's the value itself. Comparable across times of day. <b>Daily cumulative</b>: sums per-interval predictions within each day (anchored to the actual-so-far at issuance, resetting at local midnight) and compares against the actual running daily total — i.e. accuracy of the running daily total. Errors integrate over the horizon, so the lead-time chart slopes upward; the "End-of-day" tile shows the single most useful number for daily-total forecasting.</span></span>
         </div>
         <div class="acc-control" id="acc-tz-wrapper">
             <label for="accuracy-tz">Times in:</label>
@@ -2269,6 +2268,35 @@
             <span class="info-tip">?<span class="tip-text">Which metric ranks the table and drives the verdict. <b>Overall</b> (default) is a composite mean rank across MAE, RMSE and Daily MAE — the same Demšar-style averaging the Results tab uses; lower is better. Pick a single metric to rank by it instead. <b>Error %</b> normalises MAE against typical demand so it's readable without knowing the units (0% = perfect, lower is better); <b>Daily MAE/bias</b> compare the running daily total. The ranked order, the #1/#2/#3 badge, the highlighted column and the "vs MLFL" gap all follow this choice.</span></span>
         </div>
     </div>
+
+    <!-- Data quality: exclude a corrupt day or restart the comparison.
+         Both are comparison-view only — they never touch the underlying
+         forecast/actuals logs or the Forecast Accuracy tab. -->
+    <details class="diag-accordion" id="external-dataquality">
+        <summary>Data quality
+            <span style="color:var(--text-secondary);font-size:0.85rem;font-weight:400;">— exclude a corrupted day or restart the comparison</span>
+        </summary>
+        <div class="settings-group">
+            <p style="color:var(--text-secondary);font-size:0.85rem;margin:0 0 0.75rem 0;">
+                If one of the compared sensors logged bad data on a given day, exclude that day so it can't skew the head-to-head — the rest of your accrued history is kept. Or restart the comparison to begin fresh from now.
+            </p>
+            <div style="display:flex;gap:0.75rem;align-items:flex-end;flex-wrap:wrap;">
+                <div class="exp-field" style="margin:0;">
+                    <label class="field-label" for="external-exclude-date">Exclude a day
+                        <span class="info-tip">?<span class="tip-text">Drops every series (actuals, ML Forecast Lab and each external) for this local calendar date from all charts, metrics and rankings on this tab. Reversible — remove it from the list below to bring the day back. The raw logs are untouched.</span></span>
+                    </label>
+                    <input type="date" class="setting-input" id="external-exclude-date" style="width:auto;">
+                </div>
+                <button type="button" class="btn btn-secondary" onclick="excludeComparisonDay()" style="height:fit-content;">Exclude day</button>
+                <div style="flex:1;"></div>
+                <button type="button" class="btn btn-secondary" id="external-reset-btn" onclick="resetComparison()" style="height:fit-content;border-color:var(--warning);color:var(--warning);">Restart comparison</button>
+            </div>
+            <div id="external-excluded-list" style="margin-top:0.75rem;display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center;"></div>
+        </div>
+    </details>
+
+    <!-- Active-restart banner (set when a comparison reset floor is in effect) -->
+    <div id="external-reset-banner" style="display:none;margin:0.25rem 0 0.75rem 0;padding:0.6rem 0.9rem;border:1px solid var(--accent-secondary);border-radius:8px;background:rgba(99,102,241,0.08);color:var(--text-secondary);font-size:0.9rem;"></div>
 
     <!-- Warming-up banner (results inconclusive below the threshold) -->
     <div id="external-warming-banner" style="display:none;margin:0.25rem 0 0.75rem 0;padding:0.6rem 0.9rem;border:1px solid var(--warning);border-radius:8px;background:rgba(245,158,11,0.08);color:var(--warning);font-size:0.9rem;"></div>
@@ -4872,8 +4900,14 @@ window.showTab = function(el) {
     // ever expose the toggle, and raw on a cumulative sensor is the
     // bug 2.40.7 fixed.
     window.setAccuracyMode = function(mode) {
-        if (mode === 'raw') mode = 'increment';
-        if (mode !== 'increment' && mode !== 'daily_cumulative') return;
+        // Logical 'per_interval' resolves to the right per-interval space
+        // for this sensor: 'increment' (the per-bin delta) for cumulative
+        // sources, 'raw' (the value itself, which already IS the per-bin
+        // quantity) otherwise. A bare 'raw' on a cumulative sensor is the
+        // bug v2.40.7 fixed, so coerce it to 'increment'.
+        if (mode === 'per_interval') mode = EXP_SOURCE_CUMULATIVE ? 'increment' : 'raw';
+        if (mode === 'raw' && EXP_SOURCE_CUMULATIVE) mode = 'increment';
+        if (mode !== 'increment' && mode !== 'raw' && mode !== 'daily_cumulative') return;
         accuracyMode = mode;
         var incBtn = document.getElementById('accuracy-mode-increment');
         var cumBtn = document.getElementById('accuracy-mode-daily-cumulative');
@@ -4883,7 +4917,8 @@ window.showTab = function(el) {
             btn.style.background = active ? 'var(--accent-secondary)' : 'transparent';
             btn.style.color = active ? '#fff' : 'var(--text-secondary)';
         }
-        apply(incBtn, mode === 'increment');
+        // The "Per-interval" button covers both per-interval spaces.
+        apply(incBtn, mode === 'increment' || mode === 'raw');
         apply(cumBtn, mode === 'daily_cumulative');
         loadForecastAccuracy();
     };
@@ -4937,11 +4972,13 @@ window.showTab = function(el) {
     }
 
     queueChart('sec-forecast-accuracy', function() {
-        // Show mode toggle only for cumulative sensors (increment
-        // evaluation is meaningful only when the target accumulates).
-        if (EXP_SOURCE_CUMULATIVE) {
-            document.getElementById('accuracy-mode-wrapper').style.display = '';
-        }
+        // Per-interval ↔ cumulative switch is available on every
+        // experiment. For cumulative sources "Per-interval" is the
+        // delta (increment) space; for instantaneous sources it's the
+        // raw value. "Cumulative" is the running daily total in both
+        // cases (the backend builds it for non-cumulative sensors).
+        var _modeWrap = document.getElementById('accuracy-mode-wrapper');
+        if (_modeWrap) _modeWrap.style.display = '';
         _bindDiagAccordion();
         loadForecastAccuracy();
         // Stability is a Layer-1 input (the verdict chip) — fetch it
@@ -7804,6 +7841,100 @@ window.showTab = function(el) {
         if (any && det.open) _resizeExternalDiagnostics();
     }
 
+    // ---- Data-quality controls (exclude a day / restart comparison) ----
+    function _postComparisonControl(payload) {
+        return fetch(BASE + '/experiment/' + EXP + '/comparison-controls', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+        }).then(function(r){ return r.json(); });
+    }
+
+    window.excludeComparisonDay = function() {
+        var el = document.getElementById('external-exclude-date');
+        var date = el ? el.value : '';
+        if (!date) { mlfl.toast('Pick a date to exclude', 'warning'); return; }
+        _postComparisonControl({action: 'exclude_day', date: date}).then(function(res){
+            if (res.success) {
+                mlfl.toast(res.changed ? ('Excluded ' + date) : (date + ' already excluded'),
+                           res.changed ? 'success' : 'info');
+                if (el) el.value = '';
+                loadExternalComparison();
+            } else { mlfl.toast('Failed: ' + (res.error || 'unknown'), 'error'); }
+        }).catch(function(err){ mlfl.toast('Failed: ' + err, 'error'); });
+    };
+
+    window.includeComparisonDay = function(date) {
+        _postComparisonControl({action: 'include_day', date: date}).then(function(res){
+            if (res.success) { mlfl.toast('Re-included ' + date, 'success'); loadExternalComparison(); }
+            else { mlfl.toast('Failed: ' + (res.error || 'unknown'), 'error'); }
+        }).catch(function(err){ mlfl.toast('Failed: ' + err, 'error'); });
+    };
+
+    window.resetComparison = function() {
+        if (!confirm('Restart the comparison from now?\n\n'
+            + 'This clears the accrued third-party forecast captures and hides '
+            + 'all comparison data from before this moment. Your Forecast '
+            + 'Accuracy tab and the underlying logs are NOT affected. You can '
+            + 'undo the restart afterwards.')) return;
+        _postComparisonControl({action: 'reset'}).then(function(res){
+            if (res.success) { mlfl.toast('Comparison restarted', 'success'); loadExternalComparison(); }
+            else { mlfl.toast('Restart failed: ' + (res.error || 'unknown'), 'error'); }
+        }).catch(function(err){ mlfl.toast('Restart failed: ' + err, 'error'); });
+    };
+
+    window.clearComparisonReset = function() {
+        _postComparisonControl({action: 'clear_reset'}).then(function(res){
+            if (res.success) { mlfl.toast('Restart undone', 'success'); loadExternalComparison(); }
+            else { mlfl.toast('Failed: ' + (res.error || 'unknown'), 'error'); }
+        }).catch(function(err){ mlfl.toast('Failed: ' + err, 'error'); });
+    };
+
+    // Render the excluded-day chips + the active-restart banner from the
+    // comparison response. Runs on every (configured) load, including the
+    // empty-data case, so the controls stay usable after a restart wipes
+    // the accrued data.
+    function _renderComparisonDataQuality(data) {
+        var list = document.getElementById('external-excluded-list');
+        var banner = document.getElementById('external-reset-banner');
+        var excluded = (data && data.excluded_dates) || [];
+        if (list) {
+            list.innerHTML = '';
+            var lead = document.createElement('span');
+            lead.style.cssText = 'color:var(--text-secondary);font-size:0.85rem;';
+            lead.textContent = excluded.length ? 'Excluded days:' : 'No days excluded.';
+            list.appendChild(lead);
+            excluded.forEach(function(d){
+                var chip = document.createElement('span');
+                chip.className = 'status-badge';
+                chip.style.cssText = 'display:inline-flex;align-items:center;gap:0.35rem;font-size:0.8rem;';
+                chip.appendChild(document.createTextNode(d));
+                var x = document.createElement('button');
+                x.textContent = '×';
+                x.title = 'Re-include ' + d;
+                x.style.cssText = 'background:none;border:none;color:inherit;cursor:pointer;font-size:1rem;line-height:1;padding:0;';
+                x.onclick = function(){ window.includeComparisonDay(d); };
+                chip.appendChild(x);
+                list.appendChild(chip);
+            });
+        }
+        if (banner) {
+            if (data && data.reset_at) {
+                var when = String(data.reset_at);
+                try {
+                    var dt = new Date(when.replace(' ', 'T') + 'Z');
+                    if (!isNaN(dt.getTime())) when = dt.toLocaleString();
+                } catch (e) {}
+                banner.style.display = '';
+                banner.innerHTML = '↻ Comparison restarted — only data since <strong>'
+                    + when + '</strong> is shown. '
+                    + '<a href="#" onclick="window.clearComparisonReset();return false;" '
+                    + 'style="color:var(--accent-secondary);">Undo restart</a>';
+            } else {
+                banner.style.display = 'none';
+            }
+        }
+    }
+
     window.loadExternalComparison = function() {
         var winSel = document.getElementById('external-window');
         var days = winSel ? winSel.value : '30';
@@ -7812,6 +7943,10 @@ window.showTab = function(el) {
             .then(function(data){
                 if (!data || data.configured === false) { _showEmpty('No third-party forecasts added yet.', 'Open “Third-party forecasts to compare against” above to add a forecast sensor.'); return; }
                 if (data.error) { _showEmpty('Could not load comparison.', String(data.error)); return; }
+                // Render the exclude-day chips + restart banner before the
+                // empty-data bail-out, so a restart that wipes the accrued
+                // data still leaves the controls (and the undo link) usable.
+                _renderComparisonDataQuality(data);
                 var hasOverlay = data.overlay && data.overlay.ds && data.overlay.ds.length;
                 var hasH2H = (data.comparisons||[]).some(function(c){ return c.head_to_head; });
                 if (!hasOverlay && !hasH2H) { _showEmpty(); return; }

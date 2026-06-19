@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased — Forecast Accuracy & Comparison data-quality controls
+
+**Per-interval ↔ cumulative switch is back on every Forecast Accuracy tab.**
+The toggle that flips the accuracy view between per-interval error and the
+running daily total was previously shown only for cumulative-source sensors;
+it now appears on every experiment. For an instantaneous sensor "Daily
+cumulative" builds the running daily total by summing the per-interval values
+within each local day (reset at midnight) for both the forecast and the
+actuals, so the End-of-day tile and the integrating lead-time curve work the
+same way they do for cumulative sensors. The backend builds a cumulative
+actuals grid on demand (`get_forecast_accuracy(..., cumulative_source=False)`),
+so the two sides are always compared in the same space.
+
+**Forecast Comparison: exclude a corrupt day, or restart the comparison.** A
+new "Data quality" panel on the Forecast Comparison tab handles days where one
+of the compared sensors logged bad data:
+
+- **Exclude a day** drops that local calendar date from every series (actuals,
+  ML Forecast Lab and each external) across all charts, metrics and rankings —
+  the rest of the accrued history is kept, and it's reversible (remove the date
+  to bring the day back).
+- **Restart comparison** sets a floor at "now" so all earlier data is ignored
+  and clears the accrued third-party captures, giving a clean slate. The
+  underlying logs and the Forecast Accuracy tab are untouched, and the restart
+  can be undone.
+
+Both are stored per-experiment in the config (`comparison_excluded_dates`,
+`comparison_reset_at`) and survive restarts. Excluded-date matching follows HA
+local midnight, the same day key the rest of the tab buckets by.
+
 ## Unreleased — Daily-profile (hierarchical) backend
 
 **New `daily_profile` backend** — a 29th model that forecasts the *recent day's
