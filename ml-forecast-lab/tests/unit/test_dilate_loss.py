@@ -124,7 +124,11 @@ def test_dilate_long_horizon_full_objective_runs():
     horizon (regression guard for the second-order temporal path at scale)."""
     n = 96
     true = torch.tensor(_bump(n, 40)).unsqueeze(0)
-    pred = torch.tensor(_bump(n, 43)).unsqueeze(0).requires_grad_(True)
+    # Use a magnitude mismatch at the SAME location (an under-shot peak) so the
+    # gradient is genuinely non-zero. A slightly-shifted but equal-height spike
+    # would warp-align within the band at ~zero shape cost — a flat minimum
+    # where a zero gradient is correct, not a back-prop failure.
+    pred = torch.tensor(_bump(n, 40, height=0.4)).unsqueeze(0).requires_grad_(True)
     loss = dilate_per_sample(pred, true, alpha=0.5).mean()
     loss.backward()
     assert torch.isfinite(loss).all()
