@@ -319,7 +319,17 @@ main { flex: 1; }
     box-shadow: 0 8px 24px rgba(0,0,0,0.5); z-index: 9999;
     line-height: 1.5; pointer-events: none;
 }
-.info-tip:hover .tip-text { display: block; }
+/* Show on hover and on keyboard focus (info-tips made focusable with
+   tabindex are reachable by keyboard / assistive tech, not hover-only). */
+.info-tip:hover .tip-text,
+.info-tip:focus .tip-text,
+.info-tip:focus-within .tip-text { display: block; }
+.info-tip:focus-visible { outline: 2px solid var(--accent-secondary); outline-offset: 2px; }
+
+/* Smart Setup depth + guided buttons: visible keyboard focus ring (their
+   active state is set inline via JS, so the ring must come from CSS). */
+.depth-btn:focus-visible,
+.guided-btn:focus-visible { outline: 2px solid var(--accent-secondary); outline-offset: 2px; }
 
 /* --- Footer --- */
 .footer {

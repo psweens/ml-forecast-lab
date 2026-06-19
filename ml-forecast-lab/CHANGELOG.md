@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased — Smart Setup UX follow-ups (Guided / Advanced)
+
+Polish and correctness fixes for the Smart Setup tiers, from a UX review of the
+panel:
+
+- **"Catching the peaks" now also selects on peaks.** The Guided priority pinned
+  a peak-tuned loss (DILATE) and turned outlier clipping off but left champion
+  selection on the average-error metric — so the model was *trained* for peaks
+  but *judged* on the average, the exact gap Smart Setup exists to close. It now
+  also pins `production_metric: peak_weighted_mae`.
+- **Guided genuinely shows less.** The depth control previously hid only the
+  three managed dropdowns, leaving the full wall of expert robustness/training
+  knobs (CV strategy/folds/embargo, recency, optimiser, output activation,
+  conformal coverage, patience, gap & outlier detail) visible in Guided. Those
+  are now tagged advanced-only and hidden in Guided; the managed settings show
+  as read-only chips. Advanced reveals everything.
+- **The status chip and "Reset all to Automatic" account for guided answers.**
+  Both previously tracked only the three managed settings, so the chip could
+  read "Setup: Automatic" while a guided answer had pinned `idle_value` or the
+  solar covariates, and reset-all left them in place. They now include the
+  guided pins (and reset only the ones the guided UI set, not values changed by
+  hand elsewhere).
+- **Guided answers stick and confirm themselves.** Each guided button now shows
+  a selected state (persisted across reloads) and a one-line confirmation of
+  what it changed, right beneath the question — no need to scroll to distant
+  dropdowns to see the effect. Guided number inputs (e.g. `idle_value`) now
+  reflect the chosen value immediately.
+- **Detect-from-my-data feedback + empty state.** The button now shows it's
+  working and warns the profile fetch can take a moment on a Pi; a brand-new
+  experiment with no cached history gets an actionable "set History days and run
+  a benchmark, then Detect" message instead of a dead-end string.
+- **Plainer persona summary.** The detected-profile line now reads in words
+  ("often idle · sharp peaks · strong daily pattern · based on N samples") with
+  the raw figures on hover, instead of bare `spikiness 4.2 · daily-repeat 0.6`.
+- **Accessibility.** Depth buttons expose `aria-pressed`; the Smart Setup
+  tooltip is keyboard-focusable and its popover shows on focus (not hover-only);
+  depth/guided buttons get a visible focus ring.
+- Docs/comments corrected: the depth control is **Guided / Advanced** (there is
+  no "Simple" tier — the legacy value migrates to Guided).
+
 ## Unreleased — Log-transform blow-up guarded across every analysis tab
 
 **A `log_transform` divergence can no longer corrupt the analysis tabs.** When
@@ -123,12 +163,13 @@ history and picks each setting for them, with a plain-English reason.
   smooth cycle keeps the gentle defaults. This is what stops a spiky hot-water
   target being treated like a smooth solar one.
 - **Tier model via progressive disclosure, not a mode switch.** A
-  **Simple / Guided / Advanced** depth control shows more or less of the panel
-  but never changes or loses a setting. Guided asks "what matters most?"
+  **Guided / Advanced** depth control shows more or less of the panel but never
+  changes or loses a setting. Guided (the default) asks "what matters most?"
   (catching the peaks / accuracy on average / the daily total) and pins a small
-  bundle; Advanced exposes the raw dropdowns. Each managed setting shows an
-  *Automatic → value* (or *Pinned*) chip with a one-click **↩ Automatic** reset,
-  plus a **Reset all to Automatic** escape hatch and a status chip
+  bundle, shows the resolved values as read-only chips, and hides the expert
+  robustness/training knobs; Advanced reveals every field. Each managed setting
+  shows an *Automatic → value* (or *Pinned*) chip with a one-click **↩ Automatic**
+  reset, plus a **Reset all to Automatic** escape hatch and a status chip
   ("Setup: Automatic + N custom").
 - New endpoint `GET /experiment/{name}/auto-config-preview` powers the panel;
   pure resolver lives in `ml_forecast_lab/auto_config.py` with unit tests.

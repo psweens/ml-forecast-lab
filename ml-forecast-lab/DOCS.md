@@ -224,15 +224,21 @@ experiment's **Settings → Smart Setup** panel is the front door.
   trained **and judged** for peak tracking; a smooth cycle keeps the gentle
   defaults. This is what stops a bursty hot-water target being treated like a
   smooth solar one.
-- **Tiers (Simple / Guided / Advanced).** A depth control shows more or less of
-  the panel — it never changes or loses a setting. *Guided* asks plain-language
-  questions (what matters most; is "not reporting" off or missing; is it
-  weather-driven) and pins a small bundle. *Advanced* exposes every dropdown.
+- **Tiers (Guided / Advanced).** A depth control shows more or less of the
+  panel — it never changes or loses a setting. *Guided* (the default) asks
+  plain-language questions (what matters most; is "not reporting" off or
+  missing; is it weather-driven), pins a small bundle, shows the resolved
+  values as read-only chips, and hides the expert robustness/training knobs.
+  *Advanced* reveals every field. Each guided answer highlights to show what's
+  active and confirms what it changed; *"catching the peaks"* also moves
+  champion selection to `peak_weighted_mae`.
 - **Automatic vs Pinned.** A setting you never touch is **Automatic** (tracks
   the data). Pick a concrete value and it becomes **Pinned** (frozen; Automatic
   leaves it alone). Each setting shows an `Automatic → value` or `Pinned` chip
   with a one-click **↩ Automatic** reset, plus a **Reset all to Automatic**
-  escape hatch.
+  escape hatch. The status chip (`Setup: Automatic + N custom`) and the
+  reset-all both account for guided answers, not just the three managed
+  settings.
 - **Suggestions.** The persona also surfaces structural advice the managed
   settings can't fix — a one-click *Enable solar inputs* for a sun-shaped
   cycle, or covariate / load-subtract guidance for spiky loads.

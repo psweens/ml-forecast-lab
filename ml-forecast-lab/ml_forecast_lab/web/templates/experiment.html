@@ -136,21 +136,23 @@
         <div id="data-report-detail" style="display:none;margin-top:0.75rem;font-size:0.85rem;"></div>
     </div>
 
-    <!-- Smart Setup — Automatic tiers (Simple / Guided / Advanced).
+    <!-- Smart Setup — Automatic tiers (Guided / Advanced).
          Each data-dependent setting can be left on Automatic (resolved from
          the sensor's history with a plain-English reason), pinned to an
          explicit value, or reset back to Automatic. The depth control only
-         changes how much you see — it never changes or loses a setting. -->
+         changes how much you see — it never changes or loses a setting:
+         Guided hides the expert robustness/training knobs and surfaces the
+         resolved values as read-only chips; Advanced reveals every field. -->
     <div class="settings-group" id="smart-setup">
         <h3 class="settings-group-title">Smart Setup
-            <span class="info-tip">?<span class="tip-text">Leave the data-dependent settings on <b>Automatic</b> and the add-on picks them from your sensor's history — with a plain-English reason. Pin any setting to override it; reset it to go back to Automatic. <b>Guided</b> asks what matters most to you and shows what was chosen; <b>Advanced</b> exposes every dropdown. Switching depth never changes or loses a setting.</span></span>
+            <span class="info-tip" tabindex="0" role="button" aria-label="About Smart Setup">?<span class="tip-text">Leave the data-dependent settings on <b>Automatic</b> and the add-on picks them from your sensor's history — with a plain-English reason. Pin any setting to override it; reset it to go back to Automatic. <b>Guided</b> asks what matters most to you, shows what was chosen, and hides the expert robustness/training knobs; <b>Advanced</b> reveals every field. Switching depth never changes or loses a setting.</span></span>
         </h3>
 
         <div class="depth-control" role="group" aria-label="Setup depth"
              style="display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:0.75rem;">
-            <button type="button" class="depth-btn" data-depth="guided" onclick="setSettingsDepth('guided')"
+            <button type="button" class="depth-btn" data-depth="guided" aria-pressed="false" onclick="setSettingsDepth('guided')"
                     style="padding:0.4rem 0.95rem;background:none;border:none;color:var(--text);cursor:pointer;">Guided</button>
-            <button type="button" class="depth-btn" data-depth="advanced" onclick="setSettingsDepth('advanced')"
+            <button type="button" class="depth-btn" data-depth="advanced" aria-pressed="false" onclick="setSettingsDepth('advanced')"
                     style="padding:0.4rem 0.95rem;background:none;border:none;color:var(--text);cursor:pointer;border-left:1px solid var(--border);">Advanced</button>
         </div>
 
@@ -165,29 +167,32 @@
 
         <div id="guided-questions" style="display:none;margin:0.5rem 0;">
             <label class="field-label" style="display:block;margin-bottom:0.4rem;">What matters most for this sensor?</label>
-            <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-                <button type="button" class="btn" onclick="applyPriority('peaks', this)" style="background:var(--bg);border:1px solid var(--border);">Catching the peaks</button>
-                <button type="button" class="btn" onclick="applyPriority('average', this)" style="background:var(--bg);border:1px solid var(--border);">Being right on average</button>
-                <button type="button" class="btn" onclick="applyPriority('total', this)" style="background:var(--bg);border:1px solid var(--border);">The daily total</button>
-                <button type="button" class="btn" onclick="applyPriority('auto', this)" style="background:var(--bg);border:1px solid var(--border);">Let the app decide</button>
+            <div data-guided-group="priority" role="group" aria-label="What matters most" style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+                <button type="button" class="btn guided-btn" data-guided-key="peaks" aria-pressed="false" onclick="applyPriority('peaks', this)" style="background:var(--bg);border:1px solid var(--border);">Catching the peaks</button>
+                <button type="button" class="btn guided-btn" data-guided-key="average" aria-pressed="false" onclick="applyPriority('average', this)" style="background:var(--bg);border:1px solid var(--border);">Being right on average</button>
+                <button type="button" class="btn guided-btn" data-guided-key="total" aria-pressed="false" onclick="applyPriority('total', this)" style="background:var(--bg);border:1px solid var(--border);">The daily total</button>
+                <button type="button" class="btn guided-btn" data-guided-key="auto" aria-pressed="false" onclick="applyPriority('auto', this)" style="background:var(--bg);border:1px solid var(--border);">Let the app decide</button>
             </div>
-            <p style="color:var(--text-secondary);font-size:0.8rem;margin-top:0.4rem;">This pins a couple of settings to match your priority — you can fine-tune them under Advanced.</p>
+            <p style="color:var(--text-secondary);font-size:0.8rem;margin-top:0.4rem;">This pins a couple of settings to match your priority (shown just below) — you can fine-tune them under Advanced. "The daily total" judges the champion by Seasonal MASE, the best available proxy for getting the day's shape and total right.</p>
+            <div class="guided-applied" data-guided-cap="priority" style="display:none;font-size:0.8rem;color:var(--accent-secondary);margin-top:0.25rem;"></div>
 
             <!-- Plain-language questions for things the data can't reveal on
                  its own. Each pins a concrete setting via /api/experiment-settings. -->
             <label class="field-label" style="display:block;margin:0.9rem 0 0.4rem;">When the sensor isn't reporting, is the thing off or is data just missing?</label>
-            <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-                <button type="button" class="btn" onclick="applyGuided({idle_value: 0, target_is_nonnegative: true}, 'Off = zero', this)" style="background:var(--bg);border:1px solid var(--border);">It's off (counts as zero)</button>
-                <button type="button" class="btn" onclick="applyGuided({idle_value: ''}, 'Treat gaps as missing', this)" style="background:var(--bg);border:1px solid var(--border);">Data is just missing</button>
+            <div data-guided-group="idle" role="group" aria-label="Off or missing" style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+                <button type="button" class="btn guided-btn" data-guided-key="off" aria-pressed="false" onclick="applyGuided({idle_value: 0, target_is_nonnegative: true}, 'Off = zero', this, 'idle', 'off')" style="background:var(--bg);border:1px solid var(--border);">It's off (counts as zero)</button>
+                <button type="button" class="btn guided-btn" data-guided-key="missing" aria-pressed="false" onclick="applyGuided({idle_value: ''}, 'Treat gaps as missing', this, 'idle', 'missing')" style="background:var(--bg);border:1px solid var(--border);">Data is just missing</button>
             </div>
             <p style="color:var(--text-secondary);font-size:0.8rem;margin-top:0.4rem;">Switchable loads (EV charger, pump) are usually "off"; a flaky sensor is "missing".</p>
+            <div class="guided-applied" data-guided-cap="idle" style="display:none;font-size:0.8rem;color:var(--accent-secondary);margin-top:0.25rem;"></div>
 
             <label class="field-label" style="display:block;margin:0.9rem 0 0.4rem;">Is this driven by the weather or time of day (sun, daylight)?</label>
-            <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-                <button type="button" class="btn" onclick="applyGuided({include_sun_elevation: true, include_clear_sky_irradiance: true}, 'Solar inputs enabled', this)" style="background:var(--bg);border:1px solid var(--border);">Yes — sun / daylight</button>
-                <button type="button" class="btn" onclick="applyGuided({include_sun_elevation: false, include_clear_sky_irradiance: false}, 'Solar inputs off', this)" style="background:var(--bg);border:1px solid var(--border);">No</button>
+            <div data-guided-group="solar" role="group" aria-label="Weather or daylight driven" style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+                <button type="button" class="btn guided-btn" data-guided-key="yes" aria-pressed="false" onclick="applyGuided({include_sun_elevation: true, include_clear_sky_irradiance: true}, 'Solar inputs enabled', this, 'solar', 'yes')" style="background:var(--bg);border:1px solid var(--border);">Yes — sun / daylight</button>
+                <button type="button" class="btn guided-btn" data-guided-key="no" aria-pressed="false" onclick="applyGuided({include_sun_elevation: false, include_clear_sky_irradiance: false}, 'Solar inputs off', this, 'solar', 'no')" style="background:var(--bg);border:1px solid var(--border);">No</button>
             </div>
             <p style="color:var(--text-secondary);font-size:0.8rem;margin-top:0.4rem;">"Yes" adds the built-in sun-elevation &amp; clear-sky-irradiance covariates (no extra sensor needed).</p>
+            <div class="guided-applied" data-guided-cap="solar" style="display:none;font-size:0.8rem;color:var(--accent-secondary);margin-top:0.25rem;"></div>
         </div>
 
         <div id="auto-resolutions" style="display:none;margin-top:0.5rem;"></div>
@@ -297,7 +302,7 @@
     <div class="settings-group">
         <h3 class="settings-group-title">Robustness</h3>
         <div class="exp-field-grid" style="grid-template-columns:repeat(3, 1fr);">
-            <div class="exp-field">
+            <div class="exp-field" data-advanced="1">
                 <label class="field-label">Gap handling <span class="info-tip">?<span class="tip-text"><b>Interpolate</b> (default): linearly fill gaps up to the maximum size; longer gaps are dropped. <b>ffill</b> (legacy): forward-fill every gap regardless of length — can inject synthetic flat segments during a recorder outage. <b>Mask</b>: drop every gap row so the model never sees imputed data.</span></span></label>
                 <select class="setting-input" data-field="gap_handling" onchange="saveSettingsField(this)">
                     <option value="interpolate" {% if not exp_config or exp_config.gap_handling == 'interpolate' %}selected{% endif %}>Interpolate (≤ max)</option>
@@ -305,13 +310,13 @@
                     <option value="mask" {% if exp_config and exp_config.gap_handling == 'mask' %}selected{% endif %}>Mask (drop rows)</option>
                 </select>
             </div>
-            <div class="exp-field">
+            <div class="exp-field" data-advanced="1">
                 <label class="field-label">Gap max (minutes) <span class="info-tip">?<span class="tip-text">Longest gap (in minutes) the <b>Interpolate</b> gap-handling mode will fill. Anything longer is dropped instead of imputed, to avoid faking data through a multi-hour recorder outage. Defaults to 90 min — raise it for slowly-changing signals (temperature) where a 2 h interpolation is still credible; lower it for spiky signals (power) where imputation invents fictitious behaviour.</span></span></label>
                 <input type="number" class="setting-input" data-field="gap_max_minutes" min="1" max="1440"
                        value="{{ exp_config.gap_max_minutes if exp_config else 90 }}"
                        onchange="saveSettingsField(this)">
             </div>
-            <div class="exp-field"></div>
+            <div class="exp-field" data-advanced="1"></div>
             <div class="exp-field">
                 <label class="field-label">Outlier method <span class="info-tip">?<span class="tip-text"><b>Quantile</b> (default): clip the upper tail at the chosen quantile. <b>MAD</b>: robust median ± 3.5 · MAD clip — less aggressive on heavy-tailed but legitimate data like rainfall or occupancy. <b>Off</b>: no clipping — pair with a robust loss (mae / huber) if your sensor has legitimate unbounded values.</span></span></label>
                 <select class="setting-input managed-select" data-managed="outlier_method" data-field="outlier_method" onchange="saveSettingsField(this)">
@@ -322,13 +327,13 @@
                 </select>
                 <span class="managed-pill" data-pill="outlier_method" style="display:none;font-size:0.82rem;margin-top:0.3rem;"></span>
             </div>
-            <div class="exp-field">
+            <div class="exp-field" data-advanced="1">
                 <label class="field-label">Outlier quantile <span class="info-tip">?<span class="tip-text">Upper-tail cutoff for the <b>Quantile</b> outlier method (ignored in MAD / Off modes). Values above this percentile of the training data are clipped. Default <code>0.999</code> = clip the top 0.1 %. Lower it (e.g. <code>0.99</code>) if your sensor occasionally spikes to obviously-wrong values; raise it (e.g. <code>0.9999</code>) if real peaks matter for forecasting and you don't want them softened.</span></span></label>
                 <input type="number" class="setting-input" data-field="outlier_quantile" min="0.9" max="0.9999" step="0.0005"
                        value="{{ exp_config.outlier_quantile if exp_config else 0.999 }}"
                        onchange="saveSettingsField(this)">
             </div>
-            <div class="exp-field">
+            <div class="exp-field" data-advanced="1">
                 <label class="field-label">Lower bound <span class="info-tip">?<span class="tip-text"><b>Auto</b>: zero for cumulative sources, symmetric quantile otherwise. <b>Zero</b>: clip at 0 — for non-negative quantities. <b>Symmetric</b>: clip at the matching lower quantile — for two-sided signed sensors. <b>Off</b>: no lower clip.</span></span></label>
                 <select class="setting-input" data-field="outlier_lower" onchange="saveSettingsField(this)">
                     <option value="auto" {% if not exp_config or exp_config.outlier_lower == 'auto' %}selected{% endif %}>Auto</option>
@@ -344,20 +349,20 @@
     <div class="settings-group">
         <h3 class="settings-group-title">Training</h3>
         <div class="exp-field-grid" style="grid-template-columns:repeat(3, 1fr);">
-            <div class="exp-field">
+            <div class="exp-field" data-advanced="1">
                 <label class="field-label">CV strategy <span class="info-tip">?<span class="tip-text"><b>Walk-forward</b> (default): each fold trains on everything before a cutoff and tests on the slice immediately after. Train set grows over folds — the right choice for time-series, no future-leak. <b>Sliding window</b>: train on a fixed-width window that slides forward each fold. Useful when very old history is no longer representative (sensor changed, regime shift). Walk-forward is the safer default unless you have a specific reason to discard old data.</span></span></label>
                 <select class="setting-input" data-field="cv_strategy" onchange="saveSettingsField(this)">
                     <option value="walk_forward" {% if exp_config and exp_config.cv_strategy == 'walk_forward' %}selected{% endif %}>Walk-forward</option>
                     <option value="sliding_window" {% if exp_config and exp_config.cv_strategy == 'sliding_window' %}selected{% endif %}>Sliding window</option>
                 </select>
             </div>
-            <div class="exp-field">
+            <div class="exp-field" data-advanced="1">
                 <label class="field-label">CV folds <span class="info-tip">?<span class="tip-text">Number of cross-validation folds used to score each model in the benchmark. Default <code>5</code> is the sweet spot — enough variation to detect noise, fast enough on a Pi 5. Raise it (8–10) if rankings on adjacent models look noisy fold-to-fold; lower it (3) if benchmarks are taking too long.</span></span></label>
                 <input type="number" class="setting-input" data-field="cv_folds" min="2" max="20"
                        value="{{ exp_config.cv_folds if exp_config else 5 }}"
                        onchange="saveSettingsField(this)">
             </div>
-            <div class="exp-field">
+            <div class="exp-field" data-advanced="1">
                 <label class="field-label">Recency half-life (days) <span class="info-tip">?<span class="tip-text">Half-life for exponential recency weighting. Recent samples get higher weight. Set to 0 to disable.</span></span></label>
                 <input type="number" class="setting-input" data-field="recency_half_life_days" min="0" max="365" step="0.5"
                        value="{{ exp_config.recency_half_life_days if exp_config else 0 }}"
@@ -388,14 +393,14 @@
                 </select>
                 <span class="managed-pill" data-pill="loss_fn" style="display:none;font-size:0.82rem;margin-top:0.3rem;"></span>
             </div>
-            <div class="exp-field">
+            <div class="exp-field" data-advanced="1">
                 <label class="field-label">Optimiser (neural) <span class="info-tip">?<span class="tip-text"><b>AdamW</b> (default): decoupled weight decay — every parameter receives the same effective regularisation regardless of its gradient history. This is what every published time-series transformer paper uses. <b>Adam</b>: classic Adam with tied weight decay — decay is divided by the adaptive per-parameter learning rate, so frequently-updated weights receive less effective regularisation than bias terms / layer-norm scales. Both share the same learning rate, cosine schedule, and weight_decay=1e-4. Use Adam to investigate how the tied-vs-decoupled choice affects your models; leave on AdamW unless you have a reason.</span></span></label>
                 <select class="setting-input" data-field="optimiser" onchange="saveSettingsField(this)">
                     <option value="adamw" {% if not exp_config or exp_config.optimiser == 'adamw' %}selected{% endif %}>AdamW (decoupled weight decay)</option>
                     <option value="adam" {% if exp_config and exp_config.optimiser == 'adam' %}selected{% endif %}>Adam (tied weight decay)</option>
                 </select>
             </div>
-            <div class="exp-field">
+            <div class="exp-field" data-advanced="1">
                 <label class="field-label">Output activation (neural) <span class="info-tip">?<span class="tip-text">Activation on the final head of PyTorch neural models. Tree backends (LightGBM / XGBoost / CatBoost) ignore this. <b>Auto</b> (recommended): backend picks per target shape — LSTM uses <i>zscore</i>, other neural backends use <i>softplus</i> for cumulative sources and <i>linear</i> otherwise. <b>Linear</b>: unbounded, signed (temperature, deltas, signed power). <b>Softplus</b>: smooth non-negative in (0, ∞) — energy / power / counts; recommended explicitly when <b>Log transform</b> is on and you want a hard zero floor instead of the post-hoc <code>max(0)</code> clamp. <b>Sigmoid</b>: bounded in (0, s) with <code>s</code> learned from training-data max — for physical-ceiling quantities (battery SoC, humidity %). <b>zscore</b>: per-horizon z-score normalisation with a linear head, denormalised at inference and floored at zero. <b>Note:</b> when <code>use_revin=True</code> on the backend (the default for every PyTorch model except N-BEATS / N-HiTS) the zscore path becomes a no-op — RevIN owns the scale. The <i>relu</i> and <i>exp</i> values are YAML-only footguns: relu produces dead units on near-zero targets, exp saturates fast.</span></span></label>
                 <select class="setting-input" data-field="output_activation" onchange="saveSettingsField(this)">
                     <option value="auto" {% if not exp_config or exp_config.output_activation == 'auto' %}selected{% endif %}>Auto (recommended)</option>
@@ -408,19 +413,19 @@
                     {% endif %}
                 </select>
             </div>
-            <div class="exp-field">
+            <div class="exp-field" data-advanced="1">
                 <label class="field-label">CV embargo (periods) <span class="info-tip">?<span class="tip-text">Number of rows dropped between training and test sets in each CV fold, to prevent rolling-window features from spanning the boundary. The pipeline's longest rolling window is ~36 h (72 steps at 30-min sampling); the recommended value scales with the history length. Default <code>2</code> is the conservative legacy value — increase to the longest rolling-window length when running on ≥ 30 days of data.</span></span></label>
                 <input type="number" class="setting-input" data-field="cv_embargo_periods" min="0" max="500" step="1"
                        value="{{ exp_config.cv_embargo_periods if exp_config else 2 }}"
                        onchange="saveSettingsField(this)">
             </div>
-            <div class="exp-field">
+            <div class="exp-field" data-advanced="1">
                 <label class="field-label">Conformal coverage <span class="info-tip">?<span class="tip-text">Nominal coverage for the conformal prediction interval published with every forecast. Higher values widen the band — pick 0.9 when the downstream automation must avoid false-negatives (e.g. "definitely not empty before 6pm"). 0.8 is the default. Bands are computed with split conformal over a 14-day rolling residual buffer (not adaptive — see <code>DOCS.md</code> for retrain semantics). Empirical coverage may differ from nominal under regime change; the Forecast Accuracy tab reports the achieved coverage overall plus per-hour and weekday/weekend breakdowns so you can spot which slice of the week is mis-covered.</span></span></label>
                 <input type="number" class="setting-input" data-field="conformal_coverage" min="0.5" max="0.99" step="0.05"
                        value="{{ exp_config.conformal_coverage if exp_config else 0.8 }}"
                        onchange="saveSettingsField(this)">
             </div>
-            <div class="exp-field">
+            <div class="exp-field" data-advanced="1">
                 <label class="field-label">Early-stop patience <span class="info-tip">?<span class="tip-text">Epochs (neural) or boosting rounds (tree) with no smoothed-val-loss improvement before training stops. <b>Leave empty</b> to use each backend's default (20 neural, 50 tree). Set to an integer to override uniformly across every model in this experiment — useful when "neural runs cut off at 20, LightGBM at 50" makes results hard to compare. v2.40.12 added an EMA-smoothed stop decision so single noisy epochs don't reset patience; a 0.1% min_delta margin so micro-improvements don't either. Set very high (≥ epochs) to effectively disable early stopping — but disabling almost always hurts generalisation; consider raising rather than disabling.</span></span></label>
                 <input type="number" class="setting-input" data-field="patience" min="1" max="500" step="1"
                        value="{{ exp_config.patience if exp_config and exp_config.patience is not none else '' }}"
@@ -2704,19 +2709,65 @@ window.showTab = function(el) {
 
     // ======== Smart Setup (Automatic tiers) ========
     // The depth control (Guided / Advanced) is progressive disclosure only —
-    // it shows/hides controls but never changes or loses a setting. Each
-    // managed setting is either on the 'auto' sentinel (tracks the data) or
-    // pinned to a value; "Detect from my data" previews what Automatic
-    // resolves to, with a plain-English reason.
+    // it shows/hides controls but never changes or loses a setting. Guided
+    // hides the expert robustness/training knobs ([data-advanced]) and the raw
+    // managed dropdowns, surfacing the resolved values as read-only chips;
+    // Advanced reveals every field. Each managed setting is either on the
+    // 'auto' sentinel (tracks the data) or pinned to a value; "Detect from my
+    // data" previews what Automatic resolves to, with a plain-English reason.
     var AUTO_SENTINEL = 'auto';
     var MANAGED = ['loss_fn', 'outlier_method', 'production_metric'];
     var _autoReport = null;
 
+    // Guided answers pin ordinary (non-managed) settings. We remember which
+    // ones the guided UI set — and to what default they reset — so the status
+    // chip can count them and "Reset all to Automatic" can undo them without
+    // clobbering settings the user changed by hand elsewhere on the page.
+    var GUIDED_DEFAULTS = {
+        idle_value: '', target_is_nonnegative: false,
+        include_sun_elevation: false, include_clear_sky_irradiance: false,
+    };
+    // Friendly labels + nearby confirmation copy for each guided answer (also
+    // lets us restore the selected highlight after a reload).
+    var GUIDED_LABELS = {
+        priority: {
+            peaks:   { label: 'Catching the peaks',    cap: 'Tuned to catch the peaks — neural backends train with DILATE, outlier clipping off, and the champion is picked by peak tracking.' },
+            average: { label: 'Being right on average', cap: 'Tuned for average accuracy — Huber loss with a gentle outlier trim.' },
+            total:   { label: 'The daily total',        cap: 'Champion judged by Seasonal MASE — the best available proxy for getting the day’s shape and total right.' },
+            auto:    { label: 'Let the app decide',     cap: 'Back to Automatic — resolved from your data on every retrain.' },
+        },
+        idle: {
+            off:     { label: 'It’s off (counts as zero)', cap: 'Idle gaps are filled with 0 (the thing is genuinely off).' },
+            missing: { label: 'Data is just missing',          cap: 'Idle gaps are treated as missing, not filled.' },
+        },
+        solar: {
+            yes:     { label: 'Yes — sun / daylight', cap: 'Added the built-in sun-elevation & clear-sky-irradiance inputs.' },
+            no:      { label: 'No',                    cap: 'Solar inputs off.' },
+        },
+    };
+
     function _depthKey() { return 'mlfl_depth_' + (typeof EXP_NAME !== 'undefined' ? EXP_NAME : ''); }
+    function _guidedKey() { return 'mlfl_guided_' + (typeof EXP_NAME !== 'undefined' ? EXP_NAME : ''); }
+    function _guidedSelKey() { return 'mlfl_guided_sel_' + (typeof EXP_NAME !== 'undefined' ? EXP_NAME : ''); }
     function _esc(s) {
         return String(s).replace(/[&<>"]/g, function(c) {
             return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
         });
+    }
+    function _readJSON(key) { try { return JSON.parse(localStorage.getItem(key) || '{}') || {}; } catch (e) { return {}; } }
+    function _writeJSON(key, obj) { try { localStorage.setItem(key, JSON.stringify(obj)); } catch (e) {} }
+
+    // Guided-pinned settings currently differing from their default.
+    function _guidedCustomCount() { return Object.keys(_readJSON(_guidedKey())).length; }
+    // Managed settings currently pinned away from the 'auto' sentinel, read
+    // from the live dropdowns so the count is right before any detection.
+    function _localManagedPinned() {
+        var n = 0;
+        MANAGED.forEach(function(f) {
+            var sel = document.querySelector('.managed-select[data-managed="' + f + '"]');
+            if (sel && sel.value !== AUTO_SENTINEL) n++;
+        });
+        return n;
     }
 
     window.setSettingsDepth = function(depth) {
@@ -2726,10 +2777,17 @@ window.showTab = function(el) {
             b.style.background = on ? 'var(--accent-secondary)' : 'none';
             b.style.color = on ? '#04121a' : 'var(--text)';
             b.style.fontWeight = on ? '600' : '400';
+            b.setAttribute('aria-pressed', on ? 'true' : 'false');
         });
-        var showDropdowns = (depth === 'advanced');
+        var advanced = (depth === 'advanced');
+        // Managed dropdowns are hidden in Guided (the read-only chip shows the
+        // resolved value instead) and shown in Advanced.
         document.querySelectorAll('.managed-select').forEach(function(s) {
-            s.style.display = showDropdowns ? '' : 'none';
+            s.style.display = advanced ? '' : 'none';
+        });
+        // Expert robustness/training knobs only appear in Advanced.
+        document.querySelectorAll('[data-advanced="1"]').forEach(function(el) {
+            el.style.display = advanced ? '' : 'none';
         });
         var gq = document.getElementById('guided-questions');
         if (gq) gq.style.display = (depth === 'guided') ? '' : 'none';
@@ -2738,14 +2796,16 @@ window.showTab = function(el) {
     window.loadAutoConfig = function(force) {
         var status = document.getElementById('auto-setup-status');
         var btn = document.getElementById('btn-auto-detect');
-        if (status) status.textContent = 'Analysing your data…';
-        if (btn) btn.disabled = true;
+        // The preview runs a full fetch + preprocess, so be explicit that this
+        // can take a moment (especially on a Pi 5 over a long history).
+        if (status) status.textContent = 'Analysing your data… (fetching recent history — this can take a moment on a Pi 5)';
+        if (btn) { btn.dataset.label = btn.dataset.label || btn.textContent; btn.disabled = true; btn.textContent = 'Analysing…'; }
         fetch(BASE + '/experiment/' + encodeURIComponent(EXP_NAME) + '/auto-config-preview')
             .then(function(r) { return r.json(); })
             .then(function(rep) {
-                if (btn) btn.disabled = false;
+                if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || 'Detect from my data'; }
                 if (!rep || !rep.available) {
-                    if (status) status.textContent = (rep && rep.error) ? rep.error : 'No data yet.';
+                    if (status) status.innerHTML = _emptyStateMessage(rep && rep.error);
                     return;
                 }
                 if (status) status.textContent = '';
@@ -2753,10 +2813,42 @@ window.showTab = function(el) {
                 _renderAutoConfig(rep);
             })
             .catch(function(err) {
-                if (btn) btn.disabled = false;
+                if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || 'Detect from my data'; }
                 if (status) status.textContent = 'Detection failed: ' + err;
             });
     };
+
+    // Smart Setup reads the sensor's own past, so a brand-new experiment with
+    // no cached history dead-ends. Turn the raw backend string into a next
+    // step the user can act on.
+    function _emptyStateMessage(error) {
+        var e = String(error || '');
+        if (/history|profile|data/i.test(e)) {
+            return 'No history to profile yet. Smart Setup reads the sensor’s own past — set '
+                + '<b>History (days)</b> below and run a benchmark (or let a production cycle '
+                + 'fetch data), then click <b>Detect from my data</b> again.';
+        }
+        return _esc(e || 'No data yet.');
+    }
+
+    // Translate the raw fingerprint numbers into plain words for the non-ML
+    // audience; keep the exact figures available on hover.
+    function _personaStats(p) {
+        var z = Math.round((p.zero_fraction || 0) * 100);
+        var zWord = z >= 40 ? ('often idle (~' + z + '% near zero)')
+                  : z >= 10 ? ('sometimes near zero (~' + z + '%)')
+                  : 'rarely near zero';
+        var s = p.spikiness || 0;
+        var sWord = s >= 6 ? 'very sharp peaks' : s >= 3.5 ? 'sharp peaks'
+                  : s >= 2 ? 'moderate peaks' : 'gentle variation';
+        var a = p.daily_autocorr || 0;
+        var aWord = a >= 0.45 ? 'strong daily pattern' : a >= 0.3 ? 'some daily pattern'
+                  : a >= 0.15 ? 'weak daily pattern' : 'little daily pattern';
+        var title = 'zero-fraction ' + (p.zero_fraction || 0) + ' · spikiness ' + s
+                  + ' · daily-repeat ' + a + ' · ' + (p.n || 0) + ' samples';
+        return '<span title="' + _esc(title) + '">' + _esc(zWord + ' · ' + sWord + ' · ' + aWord)
+             + ' · based on ' + (p.n || 0) + ' samples</span>';
+    }
 
     function _renderAutoConfig(rep) {
         var p = rep.profile || {};
@@ -2768,8 +2860,7 @@ window.showTab = function(el) {
                 _esc(p.persona_label || 'General signal') + '</div>' +
                 '<div style="font-size:0.85rem;color:var(--text-secondary);">' + _esc(p.persona_blurb || '') + '</div>' +
                 '<div style="font-size:0.78rem;color:var(--text-muted,#9ca3af);margin-top:0.35rem;">' +
-                Math.round((p.zero_fraction || 0) * 100) + '% near-zero · spikiness ' + (p.spikiness || 0) +
-                ' · daily-repeat ' + (p.daily_autocorr || 0) + ' · ' + (p.n || 0) + ' samples</div>';
+                _personaStats(p) + '</div>';
         }
         var fields = rep.fields || {};
         MANAGED.forEach(function(f) { _renderPill(f, fields[f]); });
@@ -2857,8 +2948,10 @@ window.showTab = function(el) {
 
     // Guided answer → pin one or more concrete settings (idle_value, solar
     // covariates, …). These aren't managed 'auto' sentinels — they're ordinary
-    // settings the answer fixes — so they save straight through.
-    window.applyGuided = function(fields, label, btn) {
+    // settings the answer fixes — so they save straight through. We also track
+    // any that end up non-default so the status chip and "Reset all" account
+    // for them, and reflect each value onto its visible control.
+    window.applyGuided = function(fields, label, btn, group, key) {
         var data = { experiment: EXP_NAME };
         Object.keys(fields).forEach(function(k) { data[k] = fields[k]; });
         fetch(BASE + '/api/experiment-settings', {
@@ -2866,10 +2959,23 @@ window.showTab = function(el) {
         }).then(function(r) { return r.json(); }).then(function(res) {
             if (res.success) {
                 mlfl.toast(label || 'Saved', 'success');
+                // Reflect onto the matching visible control (checkbox or input).
                 Object.keys(fields).forEach(function(k) {
                     var el = document.querySelector('[data-field="' + k + '"]');
-                    if (el && el.type === 'checkbox') el.checked = !!fields[k];
+                    if (!el) return;
+                    if (el.type === 'checkbox') el.checked = !!fields[k];
+                    else el.value = (fields[k] === null || fields[k] === undefined) ? '' : fields[k];
                 });
+                // Track guided pins that differ from their default.
+                var tracked = _readJSON(_guidedKey());
+                Object.keys(fields).forEach(function(k) {
+                    if (!(k in GUIDED_DEFAULTS)) return;
+                    if (String(fields[k]) === String(GUIDED_DEFAULTS[k])) delete tracked[k];
+                    else tracked[k] = fields[k];
+                });
+                _writeJSON(_guidedKey(), tracked);
+                if (group && key) _selectGuided(group, key);
+                _recountChip();
             } else { mlfl.toast('Failed: ' + (res.error || '?'), 'error'); }
         }).catch(function(e) { mlfl.toast('Failed: ' + e, 'error'); });
     };
@@ -2892,23 +2998,44 @@ window.showTab = function(el) {
         var sel = document.querySelector('.managed-select[data-managed="' + field + '"]');
         if (sel) sel.value = AUTO_SENTINEL;
         _saveManaged(field, AUTO_SENTINEL, function() { loadAutoConfig(true); });
+        _seedPills();
+        _recountChip();
         mlfl.toast(field + ' reset to Automatic', 'success');
     };
 
     window.resetAllAuto = function() {
+        // Managed trio → back to the 'auto' sentinel.
         var done = 0;
         MANAGED.forEach(function(f) {
             var sel = document.querySelector('.managed-select[data-managed="' + f + '"]');
             if (sel) sel.value = AUTO_SENTINEL;
             _saveManaged(f, AUTO_SENTINEL, function() { if (++done === MANAGED.length) loadAutoConfig(true); });
         });
+        // Guided-pinned ordinary settings → their defaults — but only the ones
+        // the guided UI actually set, so values changed by hand elsewhere on
+        // the page are left untouched.
+        var tracked = _readJSON(_guidedKey());
+        Object.keys(tracked).forEach(function(f) {
+            var def = (f in GUIDED_DEFAULTS) ? GUIDED_DEFAULTS[f] : '';
+            _saveManaged(f, def);
+            var el = document.querySelector('[data-field="' + f + '"]');
+            if (el) { if (el.type === 'checkbox') el.checked = !!def; else el.value = (def === '' ? '' : def); }
+        });
+        _writeJSON(_guidedKey(), {});
+        _writeJSON(_guidedSelKey(), {});
+        _clearGuidedSelections();
+        _seedPills();
+        _recountChip();
         mlfl.toast('All Smart Setup settings reset to Automatic', 'success');
     };
 
     window.applyPriority = function(priority, btn) {
         // Guided shortcut: pin a small bundle that matches the user's priority.
+        // "Catching the peaks" must also pin the peak-aware selection metric —
+        // otherwise the model is trained for peaks but the champion is still
+        // judged on average error.
         var bundle;
-        if (priority === 'peaks') bundle = { loss_fn: 'dilate', outlier_method: 'off' };
+        if (priority === 'peaks') bundle = { loss_fn: 'dilate', outlier_method: 'off', production_metric: 'peak_weighted_mae' };
         else if (priority === 'average') bundle = { loss_fn: 'huber', outlier_method: 'quantile' };
         else if (priority === 'total') bundle = { production_metric: 'seasonal_mase' };
         else bundle = { loss_fn: 'auto', outlier_method: 'auto', production_metric: 'auto' };
@@ -2917,8 +3044,12 @@ window.showTab = function(el) {
             if (sel) sel.value = bundle[f];
             _saveManaged(f, bundle[f]);
         });
+        _selectGuided('priority', priority);
+        _seedPills();
+        _recountChip();
         setTimeout(function() { loadAutoConfig(true); }, 350);
-        mlfl.toast('Applied: ' + (priority === 'auto' ? 'Automatic' : priority), 'success');
+        var meta = (GUIDED_LABELS.priority || {})[priority] || {};
+        mlfl.toast('Applied: ' + (meta.label || priority), 'success');
     };
 
     function _saveManaged(field, value, cb) {
@@ -2931,24 +3062,69 @@ window.showTab = function(el) {
         }).catch(function(e) { mlfl.toast('Save failed: ' + e, 'error'); });
     }
 
-    function _updateChip(nPinned) {
+    // Chip counts both the pinned managed trio AND any guided-pinned ordinary
+    // settings, so "Setup: Automatic" can't read clean while guided answers
+    // have actually customised the experiment.
+    function _updateChip(nManagedPinned) {
         var chip = document.getElementById('auto-setup-chip');
         if (!chip) return;
-        chip.textContent = nPinned === 0 ? 'Setup: Automatic' : ('Setup: Automatic + ' + nPinned + ' custom');
+        var total = (nManagedPinned || 0) + _guidedCustomCount();
+        chip.textContent = total === 0 ? 'Setup: Automatic' : ('Setup: Automatic + ' + total + ' custom');
+    }
+    function _recountChip() { _updateChip(_localManagedPinned()); }
+
+    // ---- Guided selected-state (persisted so it survives a reload) ----
+    function _selectGuided(group, key) {
+        var sel = _readJSON(_guidedSelKey());
+        sel[group] = key;
+        _writeJSON(_guidedSelKey(), sel);
+        _paintGuided(group, key);
+    }
+    function _paintGuided(group, key) {
+        var box = document.querySelector('[data-guided-group="' + group + '"]');
+        if (box) {
+            box.querySelectorAll('button[data-guided-key]').forEach(function(b) {
+                var on = b.getAttribute('data-guided-key') === key;
+                b.setAttribute('aria-pressed', on ? 'true' : 'false');
+                b.style.background = on ? 'var(--accent-secondary)' : 'var(--bg)';
+                b.style.color = on ? '#04121a' : 'var(--text)';
+                b.style.borderColor = on ? 'var(--accent-secondary)' : 'var(--border)';
+                b.style.fontWeight = on ? '600' : '400';
+            });
+        }
+        var cap = document.querySelector('[data-guided-cap="' + group + '"]');
+        var meta = (GUIDED_LABELS[group] || {})[key];
+        if (cap && meta) { cap.textContent = '✓ ' + meta.cap; cap.style.display = ''; }
+    }
+    function _clearGuidedSelections() {
+        document.querySelectorAll('[data-guided-group] button[data-guided-key]').forEach(function(b) {
+            b.setAttribute('aria-pressed', 'false');
+            b.style.background = 'var(--bg)';
+            b.style.color = 'var(--text)';
+            b.style.borderColor = 'var(--border)';
+            b.style.fontWeight = '400';
+        });
+        document.querySelectorAll('.guided-applied').forEach(function(c) { c.style.display = 'none'; c.textContent = ''; });
     }
 
-    function _initSmartSetup() {
-        if (!document.getElementById('smart-setup')) return;
-        // Seed pills + chip from the current select values (before detection).
-        var pinned = 0;
+    // Reflect the current managed-select values onto their read-only chips so
+    // the chips are right immediately — before (or without) a data preview.
+    function _seedPills() {
         MANAGED.forEach(function(f) {
             var sel = document.querySelector('.managed-select[data-managed="' + f + '"]');
             if (!sel) return;
             var v = sel.value;
             _renderPill(f, { value: v, source: (v === AUTO_SENTINEL ? 'automatic' : 'pinned'), reason: '' });
-            if (v !== AUTO_SENTINEL) pinned++;
         });
-        _updateChip(pinned);
+    }
+
+    function _initSmartSetup() {
+        if (!document.getElementById('smart-setup')) return;
+        _seedPills();
+        // Restore any remembered guided selections + their confirmation copy.
+        var sel = _readJSON(_guidedSelKey());
+        Object.keys(sel).forEach(function(g) { _paintGuided(g, sel[g]); });
+        _recountChip();
         var d = 'guided';
         try { d = localStorage.getItem(_depthKey()) || 'guided'; } catch (e) {}
         if (d !== 'guided' && d !== 'advanced') d = 'guided';  // migrate legacy 'simple'
