@@ -63,6 +63,18 @@ def test_branches_endpoint_returns_list_when_enabled(client, monkeypatch):
         return ["main", "claude/feature-a", "claude/feature-b"]
 
     monkeypatch.setattr(dev_branch, "list_repo_branches", _fake_list)
+
+    # The endpoint now also filters to branches that back an open PR
+    # (compose_dev_branch_list keeps only those + the default branch), so stub
+    # the open-PR lookup to mark the feature branches as having open PRs —
+    # otherwise the list collapses to just ['main'].
+    async def _fake_open_prs(token=None):
+        return {
+            "claude/feature-a": {"number": 1, "title": "Feature A"},
+            "claude/feature-b": {"number": 2, "title": "Feature B"},
+        }
+
+    monkeypatch.setattr(dev_branch, "list_open_pr_branches", _fake_open_prs)
     resp = client.get("/api/system/dev/branches")
     assert resp.status_code == 200
     body = resp.json()
