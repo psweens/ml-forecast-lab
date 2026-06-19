@@ -44,6 +44,18 @@ from typing import Optional
 
 import torch
 
+# Default Sakoe-Chiba band half-width (in horizon steps) when the caller does
+# not pin ``band``. DILATE only needs to tolerate a *small* misalignment — a
+# few steps either side — so the warping window is a small constant, not a
+# fraction of the horizon. The previous ``H // 2`` default made the band as
+# wide as half the horizon, which (a) computed almost the full H×H lattice
+# (the dominant cost, doubled again by the second-order temporal term) and
+# (b) let a spike drift up to ±H/2 steps and still count as "aligned", which
+# defeats the temporal term. A small cap is both far cheaper (≈4–5× fewer
+# cells at a 48-step horizon) and makes the timing penalty meaningful.
+# Override per call / per backend with ``dilate_band``.
+_DEFAULT_BAND_CAP = 8
+
 
 def _soft_dtw_value(
     D: "torch.Tensor", gamma: float, band: int
@@ -115,7 +127,10 @@ def dilate_per_sample(
     gamma : float, default 0.01
         Soft-min temperature for soft-DTW.
     band : int, optional
-        Sakoe-Chiba band half-width. ``None`` → ``max(1, H // 2)``.
+        Sakoe-Chiba band half-width (max timing tolerance, in steps).
+        ``None`` → ``min(max(1, H // 2), _DEFAULT_BAND_CAP)`` — a small
+        constant window rather than half the horizon, so the loss is cheap
+        (≈O(H · band)) and the timing term stays meaningful.
 
     Returns
     -------
@@ -132,7 +147,11 @@ def dilate_per_sample(
         return torch.abs(y_pred - y_true).reshape(B, -1).mean(dim=-1)
 
     if band is None:
-        band = max(1, H // 2)
+        # Small constant window (not H // 2): keeps the soft-DTW banded for
+        # real (≈4–5× fewer cells at a 48-step horizon, halved again under
+        # the second-order temporal term) and keeps the timing penalty
+        # meaningful. Override via ``dilate_band``.
+        band = min(max(1, H // 2), _DEFAULT_BAND_CAP)
 
     # Pairwise squared cost: D[b, i, j] = (pred_i - true_j)^2.
     diff = y_pred.unsqueeze(2) - y_true.unsqueeze(1)  # (B, H, H)

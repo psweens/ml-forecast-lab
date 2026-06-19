@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased — DILATE loss: bound the warping band (much cheaper on a Pi)
+
+**The DILATE soft-DTW band now defaults to a small constant instead of half
+the horizon.** The previous `band = H // 2` made the Sakoe-Chiba window as wide
+as half the forecast horizon, so the "banded" soft-DTW actually computed almost
+the entire H×H lattice — ≈75% of it at a 48-step horizon — in a pure-Python
+recursion, and the second-order temporal term (`autograd.grad(..., create_graph
+=True)`) doubled that graph. On a Pi-class CPU at a 48–96-step horizon that is
+very heavy and can exhaust memory.
+
+- Band now defaults to `min(H // 2, 8)` (`_DEFAULT_BAND_CAP`, overridable via
+  `dilate_band`) — ≈2.4× fewer cells at H=48, ≈4.5× at H=96, with the same
+  reduction again in the second-order graph.
+- The shape term is unchanged in behaviour (a 1-step-shifted spike still beats a
+  flat line), and the timing term is **more** meaningful: a small band stops a
+  spike drifting half the horizon and still counting as "aligned" — a far-drifted
+  spike is now correctly penalised.
+- Tests: default band is capped; a drift beyond the band costs more than one
+  within it; the full shape+time objective runs and back-props on a 96-step
+  horizon.
+
 ## Unreleased — Smart Setup UX follow-ups (Guided / Advanced)
 
 Polish and correctness fixes for the Smart Setup tiers, from a UX review of the

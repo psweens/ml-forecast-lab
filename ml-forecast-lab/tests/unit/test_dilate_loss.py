@@ -96,3 +96,37 @@ def test_dilate_batched_shape():
     assert loss.shape == (2,)
     # Exact-match sample (index 1) has lower loss than the shifted one (index 0).
     assert float(loss[1]) <= float(loss[0])
+
+
+def test_dilate_default_band_is_capped():
+    """The default band is a small constant, not H // 2 — so long horizons
+    stay banded (cheap) instead of computing almost the full lattice."""
+    from ml_forecast_lab.models.dilate_loss import _DEFAULT_BAND_CAP
+    assert _DEFAULT_BAND_CAP < 24  # smaller than H//2 for the typical 48-step horizon
+
+
+def test_dilate_band_cap_still_disciplines_far_drift():
+    """With the capped band, a spike drifted *beyond* the band costs more than
+    one within it — the timing term stays meaningful on a long horizon (the old
+    H//2 band would have let a spike drift half the horizon and still align)."""
+    from ml_forecast_lab.models.dilate_loss import _DEFAULT_BAND_CAP
+    n = 64
+    true = torch.tensor(_bump(n, 20)).unsqueeze(0)
+    near = torch.tensor(_bump(n, 20 + 2)).unsqueeze(0)                       # within band
+    far = torch.tensor(_bump(n, 20 + _DEFAULT_BAND_CAP + 6)).unsqueeze(0)    # beyond band
+    d_near = float(dilate_per_sample(near, true, alpha=1.0)[0])
+    d_far = float(dilate_per_sample(far, true, alpha=1.0)[0])
+    assert d_far > d_near
+
+
+def test_dilate_long_horizon_full_objective_runs():
+    """The full shape+time objective runs and back-props on a realistic
+    horizon (regression guard for the second-order temporal path at scale)."""
+    n = 96
+    true = torch.tensor(_bump(n, 40)).unsqueeze(0)
+    pred = torch.tensor(_bump(n, 43)).unsqueeze(0).requires_grad_(True)
+    loss = dilate_per_sample(pred, true, alpha=0.5).mean()
+    loss.backward()
+    assert torch.isfinite(loss).all()
+    assert pred.grad is not None and torch.isfinite(pred.grad).all()
+    assert float(pred.grad.abs().sum()) > 0.0
