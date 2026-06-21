@@ -482,6 +482,60 @@ class TestComparisonMulti:
         cur.execute("SELECT COUNT(*) FROM external_forecast_log WHERE source='sensor.solcast'")
         assert cur.fetchone()[0] == 0
 
+    def test_actual_carried_forward_to_forecast_horizon(self, db):
+        # HA's recorder dedups unchanged states, so a cumulative daily total
+        # whose generation has stopped (a PV "energy today" sensor on a cloudy
+        # afternoon) writes no new rows — its cached series ends at the last
+        # change, mid-window. The forecast is logged live and runs further. The
+        # overlay must hold the last actual flat up to the forecast horizon so
+        # the actual line doesn't "just stop" mid-day while the forecast
+        # continues; in cumulative view that means the running total stays flat.
+        grid = _grid(48)
+        # Cumulative daily energy that plateaus after bin 40 (generation stops).
+        cum, s = [], 0.0
+        for i in range(48):
+            s += (1.0 if i <= 40 else 0.0)        # flat from bin 41 on
+            cum.append(s)
+        ttbl = db.safe_table_name("sensor.pv_today_kwh")
+        # The recorder only logs while the value changes → cache stops at bin 40.
+        db.store_history(ttbl, pd.DataFrame({"ds": grid[:41], "value": cum[:41]}))
+        # App forecast is logged live for the whole window, out to bin 47.
+        for i, t in enumerate(grid):
+            delta = cum[i] - (cum[i - 1] if i > 0 else 0.0)
+            db.log_forecast(experiment="e", issued_at=t - timedelta(minutes=INTERVAL),
+                            targets=[t], predictions=[delta + 0.01],
+                            model_name="lgb", model_version="v1")
+        specs = [_spec("sensor.dummy", "state", db.safe_table_name("sensor.dummy"))]
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, specs, GENEROUS_WINDOW, INTERVAL, "increment",
+            None, None, "cumulative", "kWh")
+        ds = res["overlay"]["ds"]
+        actual = res["overlay"]["actual"]
+        app = res["overlay"]["app"]
+        last = lambda a: max(i for i, v in enumerate(a) if v is not None)
+        # Actual now reaches the same horizon as the live forecast (bin 47),
+        # not the last recorder write (bin 40).
+        assert last(actual) == last(app)
+        # The carried tail holds the running total flat (no afternoon energy).
+        peak = actual[last(actual)]
+        assert abs(actual[last(actual)] - peak) < 1e-6
+        carried = [actual[i] for i in range(41, len(actual)) if actual[i] is not None]
+        assert carried and all(abs(v - peak) < 1e-6 for v in carried)
+
+    def test_actual_not_extended_when_already_current(self, db):
+        # When the actuals already reach the forecast horizon, carry-forward is
+        # a no-op: it must not fabricate a flat tail beyond the real data, and
+        # in particular must not extend a stale series across the (huge) window.
+        ttbl, e1, _ = self._seed(db)   # actuals + app share the same 48-bin grid
+        specs = [_spec("sensor.ext_state", "state", e1, label="Crude")]
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, specs, GENEROUS_WINDOW, INTERVAL, "raw")
+        actual = res["overlay"]["actual"]
+        app = res["overlay"]["app"]
+        last = lambda a: max(i for i, v in enumerate(a) if v is not None)
+        assert last(actual) == last(app)            # no tail past the forecast
+        assert len(res["overlay"]["ds"]) <= 48 + 1  # window not blown up
+
 
 class TestComparisonBaselineAndWarmup:
     """v2.44.x additions: %-of-typical + daily metrics, and the 7-day
