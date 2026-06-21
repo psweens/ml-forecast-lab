@@ -3793,6 +3793,59 @@ class HistoryDB:
                 "update_min": update_min,
             })
 
+        # --- carry the actual forward to the comparison horizon -----------
+        # HA's recorder dedups unchanged states, so a sensor whose value has
+        # plateaued writes no new rows — its cached series ends at the last
+        # *change*, not at wall-clock now. The canonical trigger is a
+        # cumulative daily total once generation stops for the day (e.g. a PV
+        # "energy today" sensor on a cloudy afternoon): the running total holds
+        # flat, the recorder goes quiet, and the cached actual stops mid-day.
+        # The app forecast is logged live every cycle and runs to ~now, so
+        # without this the actual line "just stops" mid-window while the
+        # forecasts march on. (A complete past day doesn't show this: its
+        # plateau is bracketed by the next midnight-reset row, so the per-day
+        # cumsum fills the internal gap — only the current partial day, whose
+        # plateau reaches the right edge, truncates.)
+        #
+        # Mirror the forecast pipeline's recorder-quiet carry-forward
+        # (main.py): hold the last cached value flat up to the latest bin any
+        # forecast/external covers (capped at now). The per-day cumsum and the
+        # diff reset guard handle a midnight reset inside the carried span, and
+        # a resumed real reading supersedes the hold (its first diff trips the
+        # reset guard). Bounding to the forecast extent — not unconditionally
+        # to now — keeps a long-stale series (the rolling window can be 30 days)
+        # from growing a fabricated flat tail, and makes this a no-op whenever
+        # the actuals are already current.
+        last_valid = actual_raw.last_valid_index() if actual_raw is not None else None
+        if last_valid is not None:
+            horizon = None
+            for s in [app_disp] + [it["disp"] for it in ext_items]:
+                if s is not None and not s.empty:
+                    m = s.index.max()
+                    horizon = m if horizon is None else max(horizon, m)
+            if horizon is not None:
+                now_floor = pd.Timestamp(now).floor(freq)
+                if horizon > now_floor:
+                    horizon = now_floor
+                if horizon > last_valid:
+                    fill_idx = pd.date_range(
+                        last_valid + pd.Timedelta(freq), horizon, freq=freq
+                    )
+                    if len(fill_idx):
+                        held = pd.Series(float(actual_raw.loc[last_valid]), index=fill_idx)
+                        actual_raw = pd.concat([actual_raw, held])
+                        actual_raw = actual_raw[
+                            ~actual_raw.index.duplicated(keep="first")
+                        ].sort_index()
+                        # Re-derive the canonical + display from the held series.
+                        if unit_aware:
+                            actual_canon = _to_canon(
+                                actual_raw, t_dim, t_base, target_cumulative
+                            )
+                        else:
+                            actual_canon = _legacy_eval(actual_raw, target_cumulative)
+                        actual_disp = _display(actual_canon)
+
         # --- drop user-excluded days from every series & frame ---
         # A day flagged as corrupt is removed from the actuals, this add-on's
         # forecast AND every external before any overlay/metric/ranking is

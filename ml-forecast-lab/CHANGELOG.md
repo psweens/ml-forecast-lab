@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased — Forecast Comparison: actual no longer "just stops" mid-day
+
+**The Forecast vs Actual overlay now carries the actual forward to the forecast
+horizon.** HA's recorder dedups unchanged states, so a sensor whose value has
+plateaued writes no new history rows — its cached series ends at the last
+*change*, not at wall-clock now. The canonical trigger is a cumulative daily
+total once generation stops for the day (a PV "energy today" sensor on a cloudy
+afternoon): the running total holds flat, the recorder goes quiet, and the
+cached actual stops mid-day. Because this add-on's forecast is logged live every
+cycle and runs to ~now, the actual line "just stopped" mid-window while the
+forecast (and externals) marched on.
+
+- A complete *past* day never showed this: its plateau is bracketed by the next
+  midnight-reset row, so the per-day cumulative sum fills the internal gap. Only
+  the current partial day — whose plateau reaches the right edge with no
+  bracketing row — truncated.
+- `get_external_forecast_comparison` now holds the last cached actual flat up to
+  the latest bin any forecast/external covers (capped at now), mirroring the
+  forecast pipeline's recorder-quiet carry-forward (`main.py`). The per-day
+  cumsum and the diff-reset guard handle a midnight reset inside the carried
+  span, and a resumed real reading supersedes the hold (its first diff trips the
+  reset guard). In the cumulative view the running total now stays flat to the
+  horizon; in per-interval it reads zero increment — both faithful to a sensor
+  that is reporting an unchanged value.
+- Bounded to the forecast extent (not unconditionally to now), so a long-stale
+  series over the rolling window can't grow a fabricated flat tail, and it's a
+  no-op whenever the actuals are already current.
+- Tests: the actual reaches the live-forecast horizon (held flat) when the
+  cumulative source plateaus; carry-forward is a no-op — and never blows up the
+  window — when the actuals already reach the forecast.
+
 ## Unreleased — DILATE loss: bound the warping band (much cheaper on a Pi)
 
 **The DILATE soft-DTW band now defaults to a small constant instead of half
