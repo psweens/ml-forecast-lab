@@ -332,12 +332,13 @@
                 </select>
             </div>
             <div class="exp-field">
-                <label class="field-label">Loss function <span class="info-tip">?<span class="tip-text"><b>Huber</b> (default): smooth-L1 — quadratic near zero, linear in the tails. Right default for the typical HA sensor (power, occupancy, intermittent loads) because peak spikes don't dominate the loss. <b>MSE</b>: squared error — choose only when peaks matter more than baseline accuracy. <b>MAE</b>: absolute error — for very clean signals. <b>Tweedie</b>: compound Poisson-Gamma loss for zero-inflated right-skewed targets (rainfall, occupancy count, intermittent EV draw). Honoured by tree backends (LightGBM / XGBoost / CatBoost); neural backends fall back to Huber.</span></span></label>
+                <label class="field-label">Loss function <span class="info-tip">?<span class="tip-text"><b>Huber</b> (default): smooth-L1 — quadratic near zero, linear in the tails. Right default for the typical HA sensor (power, occupancy, intermittent loads) because peak spikes don't dominate the loss. <b>MSE</b>: squared error — choose only when peaks matter more than baseline accuracy. <b>MAE</b>: absolute error — for very clean signals. <b>Tweedie</b>: compound Poisson-Gamma loss for zero-inflated right-skewed targets (rainfall, occupancy count, intermittent EV draw). Honoured by tree backends (LightGBM / XGBoost / CatBoost); neural backends fall back to Huber. <b>DILATE</b>: shape + timing loss (soft-DTW) for spiky targets — a peak predicted slightly early is penalised once for its timing, not twice as a point loss does (a false alarm plus a miss), so the model is pushed to reach the peaks rather than flatten them. <b>Costs about 2.5x the training time</b> of the other losses — measured against a full LSTM step at a 96-step horizon — so try it on one experiment before rolling it out. Neural backends only; tree backends fall back to Tweedie, which is the peak-appropriate tree objective.</span></span></label>
                 <select class="setting-input" data-field="loss_fn" onchange="saveSettingsField(this)">
                     <option value="huber" {% if not exp_config or exp_config.loss_fn == 'huber' %}selected{% endif %}>Huber (default)</option>
                     <option value="mse" {% if exp_config and exp_config.loss_fn == 'mse' %}selected{% endif %}>MSE</option>
                     <option value="mae" {% if exp_config and exp_config.loss_fn == 'mae' %}selected{% endif %}>MAE</option>
                     <option value="tweedie" {% if exp_config and exp_config.loss_fn == 'tweedie' %}selected{% endif %}>Tweedie (tree backends only)</option>
+                    <option value="dilate" {% if exp_config and exp_config.loss_fn == 'dilate' %}selected{% endif %}>DILATE — shape + timing (slow; neural only)</option>
                 </select>
             </div>
             <div class="exp-field">

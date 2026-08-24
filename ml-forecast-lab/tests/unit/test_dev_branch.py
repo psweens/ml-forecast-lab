@@ -199,6 +199,81 @@ def test_parse_branches_empty_and_non_list():
     assert dev_branch.parse_branches({"name": "x"}) == []
 
 
+# ---- open-PR branch listing (dropdown = branches with an open PR) ----
+
+def _pr(number, ref, full_name="psweens/ml-forecast-lab", title=None):
+    return {
+        "number": number,
+        "title": title or f"PR {number}",
+        "head": {"ref": ref, "repo": {"full_name": full_name}},
+    }
+
+
+def test_parse_pr_branches_same_repo_only_with_metadata():
+    payload = [
+        _pr(88, "claude/vibrant-babbage-7ypvor", title="Smart Setup"),
+        _pr(12, "feature/x"),
+        # Fork PR — head repo is someone else's; not overlayable, skipped.
+        _pr(99, "patch-1", full_name="someone/ml-forecast-lab"),
+    ]
+    out = dev_branch.parse_pr_branches(payload)
+    assert set(out) == {"claude/vibrant-babbage-7ypvor", "feature/x"}
+    assert out["claude/vibrant-babbage-7ypvor"] == {"number": 88, "title": "Smart Setup"}
+
+
+def test_parse_pr_branches_keeps_lowest_pr_number_per_branch():
+    payload = [_pr(40, "shared"), _pr(7, "shared"), _pr(55, "shared")]
+    out = dev_branch.parse_pr_branches(payload)
+    assert out["shared"]["number"] == 7
+
+
+def test_parse_pr_branches_skips_missing_repo_and_malformed():
+    payload = [
+        {"number": 1, "head": {"ref": "noinfo"}},          # no head.repo
+        {"number": 2, "head": {"ref": "", "repo": {"full_name": "psweens/ml-forecast-lab"}}},
+        "not-a-dict",
+        {"number": 3, "head": {"ref": "ok", "repo": {"full_name": "psweens/ml-forecast-lab"}}},
+    ]
+    out = dev_branch.parse_pr_branches(payload)
+    assert set(out) == {"ok"}
+
+
+def test_parse_pr_branches_empty_and_non_list():
+    assert dev_branch.parse_pr_branches([]) == {}
+    assert dev_branch.parse_pr_branches(None) == {}
+    assert dev_branch.parse_pr_branches({"head": {"ref": "x"}}) == {}
+
+
+def test_compose_dev_branch_list_keeps_open_pr_and_default():
+    all_branches = ["main", "claude/feat-a", "stale/merged", "claude/feat-b"]
+    open_prs = {"claude/feat-a": {"number": 1}, "claude/feat-b": {"number": 2}}
+    # Default always kept; stale (no PR) dropped; order preserved.
+    assert dev_branch.compose_dev_branch_list(all_branches, open_prs) == [
+        "main", "claude/feat-a", "claude/feat-b",
+    ]
+
+
+def test_compose_dev_branch_list_accepts_set_and_handles_empty():
+    assert dev_branch.compose_dev_branch_list(["main", "x"], {"x"}) == ["main", "x"]
+    # No open PRs → only the default branch survives.
+    assert dev_branch.compose_dev_branch_list(["main", "x", "y"], {}) == ["main"]
+    assert dev_branch.compose_dev_branch_list([], {"x"}) == []
+
+
+def test_branch_is_closed_logic():
+    open_prs = {"claude/feat-a": {"number": 1}}
+    # Open PR → not closed.
+    assert dev_branch.branch_is_closed("claude/feat-a", open_prs) is False
+    # No PR → closed (eligible for auto-removal).
+    assert dev_branch.branch_is_closed("claude/old", open_prs) is True
+    # Default branch is never "closed".
+    assert dev_branch.branch_is_closed("main", {}) is False
+    assert dev_branch.branch_is_closed("master", {}) is False
+    # No active branch installed → nothing to remove.
+    assert dev_branch.branch_is_closed(None, open_prs) is False
+    assert dev_branch.branch_is_closed("", open_prs) is False
+
+
 # ---- version label ----
 
 def test_version_label_plain_when_not_running(monkeypatch):
@@ -289,3 +364,56 @@ def test_pip_install_command_targets_this_interpreter():
     assert cmd[0] == sys.executable
     assert cmd[1:4] == ["-m", "pip", "install"]
     assert cmd[-2:] == ["pkg-a", "pkg-b"]
+
+
+# --------------------------------------------------------------------------- #
+# Auto-clean of a stale overlay must not delete the running process's own code
+# --------------------------------------------------------------------------- #
+class TestStaleOverlayAutoClean:
+    """The dev-branch listing endpoint drops an installed overlay whose PR has
+    closed. When that overlay is also the code currently executing, deleting it
+    breaks the running process — the s6 boot script puts DEV_SRC on PYTHONPATH,
+    so this module, the Jinja template dir and the static dir all resolve
+    inside the directory being removed.
+
+    These pin both directions: it IS removed when merely installed, and it is
+    NOT removed when it is what we booted from.
+    """
+
+    def test_revert_removes_an_installed_overlay(self, _isolate_overlay):
+        dev_src = _isolate_overlay
+        dev_src.mkdir(parents=True, exist_ok=True)
+        (dev_src / "ACTIVE.json").write_text(json.dumps({"branch": "feature/x"}))
+        (dev_src / "payload.txt").write_text("overlay content")
+
+        assert dev_branch.revert() is True
+        assert not dev_src.exists(), "revert should remove the overlay directory"
+
+    def test_is_overlay_running_is_false_when_merely_installed(
+        self, _isolate_overlay, monkeypatch
+    ):
+        """An overlay on disk that this process did NOT boot from. The auto-
+        clean is safe here, which is the case the endpoint acts on."""
+        dev_src = _isolate_overlay
+        dev_src.mkdir(parents=True, exist_ok=True)
+        (dev_src / "ACTIVE.json").write_text(json.dumps({"branch": "feature/x"}))
+        monkeypatch.setattr(dev_branch, "developer_mode_enabled", lambda: True)
+        # dev_branch.__file__ lives in the real package, not the tmp overlay.
+        assert dev_branch.is_overlay_running() is False
+
+    def test_is_overlay_running_is_true_when_booted_from_the_overlay(
+        self, _isolate_overlay, monkeypatch
+    ):
+        """The dangerous case: the module was imported from inside the overlay,
+        so revert() would delete the code under the running process. The
+        endpoint must consult this and decline to auto-clean."""
+        dev_src = _isolate_overlay
+        dev_src.mkdir(parents=True, exist_ok=True)
+        (dev_src / "ACTIVE.json").write_text(json.dumps({"branch": "feature/x"}))
+        monkeypatch.setattr(dev_branch, "developer_mode_enabled", lambda: True)
+        # Simulate having been imported from within the overlay tree.
+        fake = dev_src / "ml_forecast_lab" / "dev_branch.py"
+        fake.parent.mkdir(parents=True, exist_ok=True)
+        fake.write_text("")
+        monkeypatch.setattr(dev_branch, "__file__", str(fake))
+        assert dev_branch.is_overlay_running() is True

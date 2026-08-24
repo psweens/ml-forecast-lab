@@ -4655,18 +4655,26 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     @app.get("/api/system/dev/branches")
     async def dev_list_branches():
-        """List branches of this repo to populate the System-tab dropdown.
+        """List this repo's OPEN-PR branches to populate the System-tab dropdown.
+
+        Only branches that currently back an open pull request are offered
+        (plus the default branch), so merged/closed work drops off on its
+        own. As a side effect, an installed overlay whose branch no longer
+        has an open PR is treated as stale: its files are removed from the
+        Pi so the next restart returns to the bundled release.
 
         Best-effort: on any GitHub failure (rate limit, no network) returns
         ``success: false`` with a message so the UI can fall back to the
-        manual branch-name field rather than breaking.
+        manual branch-name field rather than breaking — and crucially, no
+        overlay is auto-removed when the PR list couldn't be fetched.
         """
         _require_dev_mode()
         from ml_forecast_lab import dev_branch
 
         token = os.environ.get("GITHUB_TOKEN", "") or None
         try:
-            branches = await dev_branch.list_repo_branches(token=token)
+            all_branches = await dev_branch.list_repo_branches(token=token)
+            open_prs = await dev_branch.list_open_pr_branches(token=token)
         except dev_branch.DevBranchError as e:
             return JSONResponse(content={"success": False, "error": str(e),
                                          "branches": []})
@@ -4675,11 +4683,62 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"success": False,
                                          "error": _safe_error(e), "branches": []})
 
+        branches = dev_branch.compose_dev_branch_list(all_branches, open_prs)
+
+        # Auto-cleanup: an installed overlay whose branch no longer has an
+        # open PR is stale — drop its files from /data so the Pi reverts to
+        # the bundled release on the next restart. Runs only after a
+        # successful PR fetch (above), so a transient API failure can never
+        # nuke a valid overlay.
+        removed_overlay = None
+        stale_overlay = None
         active = dev_branch.active_status() or {}
+        active_branch = active.get("branch")
+        if dev_branch.branch_is_closed(active_branch, open_prs):
+            if dev_branch.is_overlay_running():
+                # The overlay is not just installed, it is the code currently
+                # executing: the s6 init script puts DEV_SRC on PYTHONPATH, so
+                # this very module — and the Jinja template and static dirs
+                # resolved at startup — live inside the directory revert()
+                # deletes. Removing it underneath the running process makes the
+                # next template render raise TemplateNotFound and every
+                # function-local import raise ModuleNotFoundError (the imported
+                # package's __path__ is pinned to the deleted directory, so it
+                # does not fall back to the bundled /app copy). The page that
+                # would tell the user to reload is itself the request that 500s.
+                #
+                # The manual Revert endpoint pairs the same delete with a
+                # restart, which is why it is safe there. This path fires
+                # unconditionally on page load, so it reports instead of acting.
+                stale_overlay = {"branch": active_branch}
+                logger.info(
+                    "Dev overlay for %r has no open PR, but it is the running "
+                    "code — leaving it in place; use Revert to restart onto "
+                    "the bundled release.", active_branch,
+                )
+            else:
+                try:
+                    if dev_branch.revert():
+                        removed_overlay = {"branch": active_branch}
+                        active = {}
+                        logger.warning(
+                            "Auto-removed dev overlay for closed branch %r "
+                            "(no open PR); Pi reverts to bundled on next restart.",
+                            active_branch,
+                        )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"Auto-remove of closed overlay failed: {e}")
+
+        # PR metadata (number/title) for the branches we kept, for nicer
+        # dropdown labels.
+        prs = {b: open_prs[b] for b in branches if b in open_prs}
         return JSONResponse(content={
             "success": True,
             "branches": branches,
+            "pull_requests": prs,
             "current": active.get("branch"),
+            "removed_overlay": removed_overlay,
+            "stale_overlay": stale_overlay,
         })
 
     @app.post("/api/system/dev/install-branch")
@@ -4987,7 +5046,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "mae", "rmse", "mase", "seasonal_mase",
                 "peak_weighted_mae", "pinball_q90",
             ) else None,
-            "loss_fn": lambda v: v if v in ("mse", "mae", "huber", "tweedie") else None,
+            "loss_fn": lambda v: v if v in ("mse", "mae", "huber", "tweedie", "dilate") else None,
             "optimiser": lambda v: v if v in ("adamw", "adam") else None,
             # v2.41.0: daily_loss_weight / loss_balance validators
             # removed. The fields were inert since v2.40.14 but the API
