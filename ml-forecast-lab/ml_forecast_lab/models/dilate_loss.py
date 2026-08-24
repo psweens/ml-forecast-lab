@@ -367,14 +367,31 @@ def dilate_per_sample(
 
     # Temporal term — the soft alignment is exactly d(soft-DTW)/dD. Weight it
     # by the squared off-diagonal distance so drift from "on time" is penalised.
-    # create_graph=True keeps it differentiable for the optimiser step; if no
-    # graph exists (e.g. under torch.no_grad in validation) fall back to shape.
-    try:
+    #
+    # This needs a graph, and validation runs the whole loss under
+    # `torch.no_grad()` — every neural backend does. The previous
+    # `except RuntimeError: return shape` was written as a safety net, but under
+    # no_grad it is the ONLY branch that ever runs, so it silently redefined the
+    # loss for every validation call: training returned
+    # `alpha*shape + (1-alpha)*temporal` while validation returned bare `shape`.
+    #
+    # With the shipped alpha=0.5 that inflates validation by ~2x, so the epoch
+    # chart showed val pinned at almost exactly twice train from epoch one for
+    # every DILATE run — indistinguishable from severe overfitting, and it does
+    # not improve with training because it is an artefact, not a gap. Measured
+    # on a realistic batch: train 0.045336, val 0.088291, ratio 1.9475.
+    #
+    # Re-enable grad on a detached copy so validation computes the SAME formula.
+    # The copy is discarded; nothing here can leak into the optimiser step.
+    if D.requires_grad:
         align = torch.autograd.grad(
             shape.sum(), D, create_graph=True, retain_graph=True,
         )[0]  # (B, H, H)
-    except RuntimeError:
-        return _with_flat_fallback(shape)
+    else:
+        with torch.enable_grad():
+            D2 = D.detach().clone().requires_grad_(True)
+            shape2 = _soft_dtw_value(D2, gamma, band) / float(H)
+            align = torch.autograd.grad(shape2.sum(), D2)[0].detach()
 
     idx = torch.arange(H, device=D.device, dtype=D.dtype)
     omega = (idx.view(H, 1) - idx.view(1, H)) ** 2 / float(H * H)  # (H, H)

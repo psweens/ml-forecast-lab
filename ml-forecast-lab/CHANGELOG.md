@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.49.5
+
+### Fixed
+
+**DILATE runs no longer look like they are overfitting from the first epoch.**
+Validation is computed under `torch.no_grad()`, and DILATE's timing term needs
+a gradient graph to exist. The guard that was meant to be a safety net turned
+out to be the only branch that ever ran during validation, so training measured
+shape *and* timing while validation measured shape alone. At the shipped
+settings that inflates the validation figure by about 2x, so the epoch chart
+showed the validation curve pinned at roughly double the training curve from
+epoch one and never converging — a artefact of the two halves disagreeing, not
+a real gap. Both now compute the same thing: measured on a realistic batch the
+ratio moves from 1.95 to exactly 1.00.
+
+**The "Error by Time of Day" chart no longer scores against invented readings.**
+That chart computes its own error client-side from the Comparison overlay, and
+the overlay's actual trace can include points held forward from the last real
+reading when Home Assistant's recorder goes quiet. Those points are drawn on
+purpose, but they were also being scored — so the chart reported error against
+a flat line the add-on had inferred rather than measured, on exactly the
+plateaued sensors the carry-forward exists for. The response now carries an
+observed-only series alongside the drawn one, and the chart scores from that.
 ## 2.49.4
 
 ### Fixed

@@ -897,3 +897,75 @@ class TestComparisonResetKeepsItsData:
             "the reset branch purges external_forecast_log again — undo cannot "
             "restore what the reset deleted"
         )
+
+
+class TestHourlyChartScoresObservedOnly:
+    """The Diagnostics "Error by Time of Day" chart computes its own MAE
+    client-side from the overlay arrays. Those arrays carry the DRAWN actual,
+    which may include points held forward from the last real reading when HA's
+    recorder went quiet.
+
+    The carry-forward's stated invariant is that the held series feeds the
+    chart and nothing else — true server-side, but the client scores from the
+    same array, and the payload carried no marker distinguishing held points
+    from measured ones. They are also non-null, so they survive every null
+    check. The response now ships a real-only series alongside the drawn one.
+    """
+
+    def _plateaued(self, db, n=48, stop_at=40):
+        """Cumulative daily total that plateaus, so the recorder goes quiet and
+        the cached actual ends mid-window while the forecast runs to now."""
+        grid = _grid(n)
+        cum, s = [], 0.0
+        for i in range(n):
+            s += (1.0 if i <= stop_at else 0.0)
+            cum.append(s)
+        ttbl = db.safe_table_name("sensor.pv_today_kwh")
+        db.store_history(ttbl, pd.DataFrame({"ds": grid[:stop_at + 1],
+                                             "value": cum[:stop_at + 1]}))
+        for i, t in enumerate(grid):
+            delta = cum[i] - (cum[i - 1] if i > 0 else 0.0)
+            db.log_forecast(experiment="e", issued_at=t - timedelta(minutes=INTERVAL),
+                            targets=[t], predictions=[delta + 0.01],
+                            model_name="lgb", model_version="v1")
+        return ttbl, stop_at
+
+    def test_overlay_ships_a_real_only_series(self, db):
+        ttbl, stop_at = self._plateaued(db)
+        specs = [_spec("sensor.dummy", "state", db.safe_table_name("sensor.dummy"))]
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, specs, GENEROUS_WINDOW, INTERVAL, "increment",
+            None, None, "cumulative", "kWh")
+        ov = res["overlay"]
+        assert "actual_scored" in ov, (
+            "the client computes its own MAE from these arrays and needs an "
+            "observed-only series to do it honestly"
+        )
+        assert len(ov["actual_scored"]) == len(ov["actual"]) == len(ov["ds"])
+
+    def test_held_points_are_drawn_but_not_scoreable(self, db):
+        ttbl, stop_at = self._plateaued(db)
+        specs = [_spec("sensor.dummy", "state", db.safe_table_name("sensor.dummy"))]
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, specs, GENEROUS_WINDOW, INTERVAL, "increment",
+            None, None, "cumulative", "kWh")
+        ov = res["overlay"]
+        drawn = [i for i, v in enumerate(ov["actual"]) if v is not None]
+        scoreable = [i for i, v in enumerate(ov["actual_scored"]) if v is not None]
+        assert max(drawn) > max(scoreable), (
+            "the drawn trace should extend past the last observed reading; "
+            f"drawn ends {max(drawn)}, scoreable ends {max(scoreable)}"
+        )
+        # Every point the client can score is a point that was measured.
+        assert set(scoreable).issubset(set(drawn))
+
+    def test_the_chart_reads_the_real_only_series(self):
+        """The producer half is useless if the consumer still reads the drawn
+        array — the same producer/consumer gap that hid two statistics earlier."""
+        html = (Path(__file__).resolve().parents[2]
+                / "ml_forecast_lab" / "web" / "templates" / "experiment.html").read_text()
+        i = html.index("function _renderHourly")
+        body = html[i:html.index("\n    }", html.index("_hourMae", i))]
+        assert "ov.actual_scored" in body, (
+            "_renderHourly still scores against the drawn trace"
+        )

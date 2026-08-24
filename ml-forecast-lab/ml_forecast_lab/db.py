@@ -3939,7 +3939,17 @@ class HistoryDB:
         result["app_points"] = app_points
         result["overlay"] = {
             "ds": [_iso_utc(t) for t in idx],
+            # The drawn trace. May include recorder-quiet points held forward
+            # from the last real reading — inferred, not observed.
             "actual": _col(actual_disp_overlay),
+            # Observed readings only, for anything that SCORES. The client
+            # computes its own hour-of-day error from these arrays, so without
+            # a real-only series it had no way to exclude the held points even
+            # in principle — the payload carried no marker distinguishing them,
+            # and they are non-null, so they survive every dropna. The held
+            # bins are null here and the client's existing null checks skip
+            # them, which is the whole point.
+            "actual_scored": _col(actual_disp),
             "app": _col(app_disp),
             "externals": [
                 {"entity": it["entity"], "label": it["label"],
