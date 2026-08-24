@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.49.3
+
+### Fixed
+
+**DILATE was measuring the gaps between peaks instead of the peaks.** The
+per-window scale normalisation added in 2.48.3 divides the cost matrix by the
+window's variance. A flat window has variance exactly zero, and the floor was
+an absolute constant — so a flat window divided by `1e-8` and its cost was
+multiplied by 1e8. On a spiky load, which is the entire reason the loss exists,
+most windows *are* flat between bursts, so those windows became the whole batch
+loss and the gradient from the real peaks was swamped. Measured at a 96-step
+horizon:
+
+- a normal spiky window scored `1.4e-01`
+- an all-zero window scored `1.0e+06`
+- adding four flat windows to one spiky window moved the batch mean from
+  `0.094` to `80.0`
+
+The floor is now taken from the batch's own scale rather than a constant, and
+windows with no shape or timing to match fall back to a point loss — the same
+treatment a single-step horizon already got. A batch that is entirely flat has
+no scale at all and falls back to plain MAE. Scale invariance across sensor
+units is unchanged, and the loss can no longer go negative, which previously
+let a batch mean be lowered just by including more flat windows.
+
 ## 2.49.2
 
 ### Fixed
