@@ -229,6 +229,9 @@ class XGBoostModel(ForecastModel):
             "mae": "reg:absoluteerror",
             "huber": "reg:pseudohubererror",
             "tweedie": "reg:tweedie",
+            # 'dilate' (neural shape+time loss) has no tree analogue → use the
+            # peak-appropriate Tweedie objective for spiky targets.
+            "dilate": "reg:tweedie",
         }
         objective = objective_map.get(self.loss_fn, "reg:pseudohubererror")
         regressor_kwargs = dict(

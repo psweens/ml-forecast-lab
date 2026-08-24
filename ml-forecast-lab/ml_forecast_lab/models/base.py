@@ -932,6 +932,31 @@ class ForecastModel(ABC):
         same signature backends and training-loop loggers already
         consume, so no per-backend changes are needed.
         """
+        # DILATE (shape + time) loss for spiky targets. Selected per experiment
+        # via loss_fn='dilate'; only meaningful for a multi-step horizon, so it
+        # degrades to the point-loss path when y has <2 horizon columns. Handled
+        # here at the shared chokepoint so every neural backend that calls
+        # _composite_horizon_loss gets it with no per-backend edit.
+        # `== 2`, not `>= 2`: a quantile backend emits (B, H, Q) and
+        # dilate_per_sample only handles (B,) or (B, H). With `>= 2` the guard
+        # passed for a 3-D tensor, dilate read the quantile axis as the horizon
+        # and DLinear raised on its first batch — while also bypassing the
+        # _pinball criterion that handles the 3-D case correctly.
+        if (getattr(self, 'loss_fn', None) == 'dilate'
+                and y_pred.dim() == 2 and y_pred.shape[-1] >= 2):
+            from .dilate_loss import dilate_per_sample
+            per_sample = dilate_per_sample(
+                y_pred, y_true,
+                alpha=float(getattr(self, 'dilate_alpha', 0.5)),
+                gamma=float(getattr(self, 'dilate_gamma', 0.01)),
+                band=getattr(self, 'dilate_band', None),
+            )
+            if w_batch is not None:
+                loss = ForecastModel._weighted_mean_loss(per_sample, w_batch)
+            else:
+                loss = per_sample.mean()
+            return loss, per_sample
+
         interval_per_sample = criterion(y_pred, y_true)
         if w_batch is not None:
             loss = ForecastModel._weighted_mean_loss(

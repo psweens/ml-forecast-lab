@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.48.3
+
+### Added
+
+**DILATE — a shape + timing training loss for spiky targets.** Selectable as
+**Loss function** on the experiment Settings tab. A point loss charges a
+slightly-early peak twice — a false alarm where the model reached up, and a
+miss where the spike actually landed — which is precisely what teaches a model
+to flatten spikes instead of chasing them. DILATE (soft-DTW) charges the
+timing error once, so the model is pushed to reach the peaks.
+
+It costs about **2.5x the training time** of the other losses, measured against
+a full LSTM training step at a 96-step horizon, so try it on one experiment
+before rolling it out. Neural backends only; tree backends fall back to
+`tweedie`, the peak-appropriate tree objective.
+
+### Fixed
+
+**DILATE's soft-min no longer collapses to a hard min on real sensors.** The
+loss applied its `gamma` temperature to a cost matrix left in raw sensor units,
+on the assumption that targets arrive z-scored — they do not, because the
+neural backends denormalise inside their forward pass and no pipeline-level
+scaler exists. Measured at a 96-step horizon, changing `gamma` by three orders
+of magnitude moved the loss by a factor of 77 at amplitude 1 but by a factor of
+1.0000 from amplitude 100 upward: above that the exponentials saturate, the
+soft-min becomes a hard min, and DILATE is quietly plain DTW. Most HA power
+sensors report watts. The cost is now normalised by a detached per-window
+variance, making the loss exactly scale-invariant and keeping `gamma`
+meaningful at any magnitude.
+
+**DILATE no longer crashes a quantile backend.** The dispatch guard tested
+`y_pred.dim() >= 2` where the loss handles only `(B,)` or `(B, H)`. A quantile
+backend emits `(B, H, Q)`, so the guard passed, the loss read the quantile axis
+as the horizon, and DLinear raised on its first batch — while also bypassing
+the pinball criterion that handles the 3-D case correctly.
+
 ## 2.48.1
 
 ### Fixed

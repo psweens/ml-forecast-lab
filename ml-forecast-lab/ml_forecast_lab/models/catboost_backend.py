@@ -129,7 +129,9 @@ class CatBoostModel(ForecastModel):
             loss_function = "RMSE"
         elif self.loss_fn == "mae":
             loss_function = "MAE"
-        elif self.loss_fn == "tweedie":
+        elif self.loss_fn in ("tweedie", "dilate"):
+            # 'dilate' is a neural shape+time loss with no tree analogue → use
+            # the peak-appropriate Tweedie objective for spiky targets.
             loss_function = f"Tweedie:variance_power={float(self.tweedie_variance_power):.3f}"
         else:  # huber (default) and anything unknown
             loss_function = f"Huber:delta={float(self.huber_delta):.3f}"
