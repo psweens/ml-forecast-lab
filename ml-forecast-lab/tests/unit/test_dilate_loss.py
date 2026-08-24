@@ -327,3 +327,60 @@ def test_flat_fallback_does_not_break_scale_invariance():
         vals.append(float(dilate_per_sample(yt * 0.8, yt, band=8).mean()))
     assert vals[0] == pytest.approx(vals[1], rel=1e-4)
     assert vals[0] == pytest.approx(vals[2], rel=1e-4)
+
+
+class TestValidationUsesTheSameFormulaAsTraining:
+    """Validation runs the whole loss under `torch.no_grad()` — every neural
+    backend does. The temporal term needs a graph, and the old
+    `except RuntimeError: return shape` was written as a safety net; under
+    no_grad it was the ONLY branch that ever ran.
+
+    So training returned `alpha*shape + (1-alpha)*temporal` and validation
+    returned bare `shape`. At the shipped alpha=0.5 that inflates validation by
+    ~2x, pinning the epoch chart's val curve at almost exactly twice train from
+    epoch one for every DILATE run — indistinguishable from severe overfitting,
+    and it never improves, because it is an artefact rather than a gap.
+    """
+
+    @staticmethod
+    def _batch(H=48, seed=0):
+        torch.manual_seed(seed)
+        yt = torch.zeros(4, H)
+        yt[:, 12:14] = 3.0
+        yt[:, 36:38] = 3.0
+        return yt * 0.7 + torch.randn(4, H) * 0.05, yt
+
+    def test_val_equals_train_on_identical_input(self):
+        base, yt = self._batch()
+        yp = base.clone().requires_grad_(True)
+        train = float(dilate_per_sample(yp, yt, band=8).mean().detach())
+        with torch.no_grad():
+            val = float(dilate_per_sample(base.clone(), yt, band=8).mean())
+        assert val == pytest.approx(train, rel=1e-6), (
+            f"val {val:.6f} vs train {train:.6f} (ratio {val/train:.4f}) — the "
+            f"two paths are computing different formulas"
+        )
+
+    def test_training_still_gets_gradients(self):
+        base, yt = self._batch()
+        yp = base.clone().requires_grad_(True)
+        dilate_per_sample(yp, yt, band=8).mean().backward()
+        assert torch.isfinite(yp.grad).all()
+        assert float(yp.grad.norm()) > 0
+
+    def test_no_grad_path_does_not_leak_into_autograd(self):
+        """The temporal term is recovered on a detached copy; nothing from it
+        may attach to the graph the optimiser steps on."""
+        base, yt = self._batch()
+        with torch.no_grad():
+            out = dilate_per_sample(base.clone(), yt, band=8)
+        assert out.requires_grad is False
+
+    @pytest.mark.parametrize("alpha", [0.0, 0.25, 0.5, 0.75])
+    def test_holds_at_every_shape_time_mix(self, alpha):
+        base, yt = self._batch()
+        yp = base.clone().requires_grad_(True)
+        train = float(dilate_per_sample(yp, yt, alpha=alpha, band=8).mean().detach())
+        with torch.no_grad():
+            val = float(dilate_per_sample(base.clone(), yt, alpha=alpha, band=8).mean())
+        assert val == pytest.approx(train, rel=1e-6)

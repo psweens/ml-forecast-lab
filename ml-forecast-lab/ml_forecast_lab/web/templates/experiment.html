@@ -7561,12 +7561,19 @@ window.showTab = function(el) {
         if (!grp || !hc || !window.Plotly) { if(grp)grp.style.display='none'; return; }
         var ov = data.overlay || {};
         if (!ov.ds || !ov.ds.length || !ov.actual) { grp.style.display='none'; return; }
+        // Score against OBSERVED readings only. `ov.actual` is the drawn trace
+        // and may include points held forward from the last real reading when
+        // HA's recorder went quiet — inferred, not measured. Scoring those
+        // reports error against a flat line the add-on invented, and because
+        // they are non-null they survive the null check below. Falls back to
+        // ov.actual so an older cached payload still renders.
+        var scored = ov.actual_scored || ov.actual;
         var hours = ov.ds.map(function(s){ return new Date(s).getHours(); });
         // Mean |pred - actual| per hour for one prediction array.
         function _hourMae(pred) {
             var sum = new Array(24).fill(0), cnt = new Array(24).fill(0);
             for (var i = 0; i < hours.length; i++) {
-                var a = ov.actual[i], p = pred ? pred[i] : null;
+                var a = scored[i], p = pred ? pred[i] : null;
                 if (a === null || a === undefined || p === null || p === undefined) continue;
                 var h = hours[i]; sum[h] += Math.abs(p - a); cnt[h] += 1;
             }
