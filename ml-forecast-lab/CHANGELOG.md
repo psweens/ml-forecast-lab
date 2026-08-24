@@ -16,6 +16,16 @@ than over-shooting.
 
 ### Changed
 
+**Unrankable (NaN) metric values no longer decide the leaderboard.** A metric
+that computed to NaN on a fold — `seasonal_mase` on a window that is entirely
+flat, for instance — was left in the sort key. Every comparison against NaN is
+False, so the sort silently preserved insertion order and handed out ranks that
+encoded model-registry order rather than accuracy. NaN is now treated as the
+same "unrankable" sentinel a missing metric already got, so the metric is
+dropped for that fold and the remaining metrics decide. This was latent while
+every metric carried one equal vote of N; the weighting above would have made
+it decisive.
+
 **The configured production metric now carries a heavier vote in the composite
 rank.** The default metric list holds three L1-family metrics (mae / mase /
 seasonal_mase) that co-rank almost identically, so a single deliberately

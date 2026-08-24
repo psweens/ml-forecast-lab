@@ -674,3 +674,58 @@ def test_two_metric_weighting_is_neutral_keeps_mae_winner():
         {"a": a, "b": b}, metric_source="fold_metrics", bootstrap_iters=10,
     )
     assert ranks["a"] == 1
+
+
+def test_nan_production_metric_does_not_decide_the_ranking():
+    """A metric that computes to NaN must not silently rank models.
+
+    Every comparison against NaN is False, so `sorted` leaves dict insertion
+    order intact and the resulting ranks encode model-registry order rather
+    than accuracy. Harmless while each metric was one equal vote of N; not
+    harmless once the selection metric carries ~60% of the composite.
+
+    Constructed so the arbitrary order and the real order disagree: the worse
+    model is inserted first, so it would win on the NaN metric's insertion
+    ranking while losing on both real metrics.
+    """
+    from ml_forecast_lab.benchmark.runner import ModelResult
+
+    cfg = _make_experiment_cfg(
+        cv_folds=2, metrics=["mae", "rmse"], production_metric="seasonal_mase",
+    )
+    runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+    worse = ModelResult(model_name="worse")
+    better = ModelResult(model_name="better")
+    worse.fold_metrics = [{"mae": 9.0, "rmse": 9.0, "seasonal_mase": float("nan")}] * 2
+    better.fold_metrics = [{"mae": 1.0, "rmse": 1.0, "seasonal_mase": float("nan")}] * 2
+
+    # "worse" first: with the NaN unhandled it takes rank 1 on the
+    # heavily-weighted selection metric purely by insertion order.
+    _, ranks, _, _ = runner._compute_composite_ranks(
+        {"worse": worse, "better": better},
+        metric_source="fold_metrics", bootstrap_iters=10,
+    )
+    assert ranks["better"] == 1, (
+        f"NaN selection metric decided the ranking by insertion order; got {ranks}"
+    )
+
+
+def test_missing_production_metric_still_ranks_last_not_first():
+    """The pre-existing sentinel behaviour must survive the NaN handling: a
+    model missing the metric entirely sorts last, it is not skipped."""
+    from ml_forecast_lab.benchmark.runner import ModelResult
+
+    cfg = _make_experiment_cfg(
+        cv_folds=2, metrics=["mae"], production_metric="mae",
+    )
+    runner = BenchmarkRunner(cfg, _make_feature_builder())
+    has = ModelResult(model_name="has")
+    lacks = ModelResult(model_name="lacks")
+    has.fold_metrics = [{"mae": 5.0}] * 2
+    lacks.fold_metrics = [{"rmse": 0.1}] * 2          # no 'mae' key at all
+    _, ranks, _, _ = runner._compute_composite_ranks(
+        {"lacks": lacks, "has": has},
+        metric_source="fold_metrics", bootstrap_iters=10,
+    )
+    assert ranks["has"] == 1

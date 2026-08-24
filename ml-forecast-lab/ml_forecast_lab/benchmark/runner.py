@@ -1145,10 +1145,21 @@ class BenchmarkRunner:
                         # exclude from this metric's rank-sort rather
                         # than punishing it with last place.
                         continue
-                    fold_values[name] = fm.get(
-                        metric_name,
-                        -np.inf if higher_is_better else np.inf,
-                    )
+                    worst = -np.inf if higher_is_better else np.inf
+                    val = fm.get(metric_name, worst)
+                    # A metric that computed to NaN (e.g. seasonal_mase on a
+                    # fold whose window is entirely flat) is unrankable: every
+                    # comparison against NaN is False, so `sorted` below would
+                    # silently leave dict insertion order intact and hand out
+                    # ranks that encode registry order rather than accuracy.
+                    # Map it to the same worst-case sentinel a missing metric
+                    # gets, so the all-sentinel guard can drop the metric for
+                    # this fold. Latent while every metric was one equal vote
+                    # of N; not latent now the selection metric carries the
+                    # majority (see the weighting above).
+                    if val is None or val != val:
+                        val = worst
+                    fold_values[name] = val
 
                 if not fold_values or all(
                     np.isinf(v) for v in fold_values.values()
