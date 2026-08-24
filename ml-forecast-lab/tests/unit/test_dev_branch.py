@@ -364,3 +364,56 @@ def test_pip_install_command_targets_this_interpreter():
     assert cmd[0] == sys.executable
     assert cmd[1:4] == ["-m", "pip", "install"]
     assert cmd[-2:] == ["pkg-a", "pkg-b"]
+
+
+# --------------------------------------------------------------------------- #
+# Auto-clean of a stale overlay must not delete the running process's own code
+# --------------------------------------------------------------------------- #
+class TestStaleOverlayAutoClean:
+    """The dev-branch listing endpoint drops an installed overlay whose PR has
+    closed. When that overlay is also the code currently executing, deleting it
+    breaks the running process — the s6 boot script puts DEV_SRC on PYTHONPATH,
+    so this module, the Jinja template dir and the static dir all resolve
+    inside the directory being removed.
+
+    These pin both directions: it IS removed when merely installed, and it is
+    NOT removed when it is what we booted from.
+    """
+
+    def test_revert_removes_an_installed_overlay(self, _isolate_overlay):
+        dev_src = _isolate_overlay
+        dev_src.mkdir(parents=True, exist_ok=True)
+        (dev_src / "ACTIVE.json").write_text(json.dumps({"branch": "feature/x"}))
+        (dev_src / "payload.txt").write_text("overlay content")
+
+        assert dev_branch.revert() is True
+        assert not dev_src.exists(), "revert should remove the overlay directory"
+
+    def test_is_overlay_running_is_false_when_merely_installed(
+        self, _isolate_overlay, monkeypatch
+    ):
+        """An overlay on disk that this process did NOT boot from. The auto-
+        clean is safe here, which is the case the endpoint acts on."""
+        dev_src = _isolate_overlay
+        dev_src.mkdir(parents=True, exist_ok=True)
+        (dev_src / "ACTIVE.json").write_text(json.dumps({"branch": "feature/x"}))
+        monkeypatch.setattr(dev_branch, "developer_mode_enabled", lambda: True)
+        # dev_branch.__file__ lives in the real package, not the tmp overlay.
+        assert dev_branch.is_overlay_running() is False
+
+    def test_is_overlay_running_is_true_when_booted_from_the_overlay(
+        self, _isolate_overlay, monkeypatch
+    ):
+        """The dangerous case: the module was imported from inside the overlay,
+        so revert() would delete the code under the running process. The
+        endpoint must consult this and decline to auto-clean."""
+        dev_src = _isolate_overlay
+        dev_src.mkdir(parents=True, exist_ok=True)
+        (dev_src / "ACTIVE.json").write_text(json.dumps({"branch": "feature/x"}))
+        monkeypatch.setattr(dev_branch, "developer_mode_enabled", lambda: True)
+        # Simulate having been imported from within the overlay tree.
+        fake = dev_src / "ml_forecast_lab" / "dev_branch.py"
+        fake.parent.mkdir(parents=True, exist_ok=True)
+        fake.write_text("")
+        monkeypatch.setattr(dev_branch, "__file__", str(fake))
+        assert dev_branch.is_overlay_running() is True

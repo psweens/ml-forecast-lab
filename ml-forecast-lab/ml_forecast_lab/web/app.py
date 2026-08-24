@@ -4573,20 +4573,43 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # successful PR fetch (above), so a transient API failure can never
         # nuke a valid overlay.
         removed_overlay = None
+        stale_overlay = None
         active = dev_branch.active_status() or {}
         active_branch = active.get("branch")
         if dev_branch.branch_is_closed(active_branch, open_prs):
-            try:
-                if dev_branch.revert():
-                    removed_overlay = {"branch": active_branch}
-                    active = {}
-                    logger.warning(
-                        "Auto-removed dev overlay for closed branch %r "
-                        "(no open PR); Pi reverts to bundled on next restart.",
-                        active_branch,
-                    )
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Auto-remove of closed overlay failed: {e}")
+            if dev_branch.is_overlay_running():
+                # The overlay is not just installed, it is the code currently
+                # executing: the s6 init script puts DEV_SRC on PYTHONPATH, so
+                # this very module — and the Jinja template and static dirs
+                # resolved at startup — live inside the directory revert()
+                # deletes. Removing it underneath the running process makes the
+                # next template render raise TemplateNotFound and every
+                # function-local import raise ModuleNotFoundError (the imported
+                # package's __path__ is pinned to the deleted directory, so it
+                # does not fall back to the bundled /app copy). The page that
+                # would tell the user to reload is itself the request that 500s.
+                #
+                # The manual Revert endpoint pairs the same delete with a
+                # restart, which is why it is safe there. This path fires
+                # unconditionally on page load, so it reports instead of acting.
+                stale_overlay = {"branch": active_branch}
+                logger.info(
+                    "Dev overlay for %r has no open PR, but it is the running "
+                    "code — leaving it in place; use Revert to restart onto "
+                    "the bundled release.", active_branch,
+                )
+            else:
+                try:
+                    if dev_branch.revert():
+                        removed_overlay = {"branch": active_branch}
+                        active = {}
+                        logger.warning(
+                            "Auto-removed dev overlay for closed branch %r "
+                            "(no open PR); Pi reverts to bundled on next restart.",
+                            active_branch,
+                        )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"Auto-remove of closed overlay failed: {e}")
 
         # PR metadata (number/title) for the branches we kept, for nicer
         # dropdown labels.
@@ -4597,6 +4620,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "pull_requests": prs,
             "current": active.get("branch"),
             "removed_overlay": removed_overlay,
+            "stale_overlay": stale_overlay,
         })
 
     @app.post("/api/system/dev/install-branch")

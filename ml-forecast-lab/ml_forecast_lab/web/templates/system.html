@@ -344,6 +344,15 @@
             // An installed overlay whose branch no longer has an open PR was
             // just cleaned off the Pi — tell the user and nudge a reload so
             // the server-rendered "Active overlay" box refreshes.
+            // The overlay's PR is closed but it is the running code, so it
+            // was deliberately left in place — deleting it would break this
+            // very page. Tell the user to Revert, which restarts.
+            if (body.stale_overlay && body.stale_overlay.branch) {
+                _devStatus('The overlay you are running ("'
+                    + body.stale_overlay.branch + '") no longer has an open PR. '
+                    + 'Click Revert to restart onto the bundled release.',
+                    'var(--warning)');
+            }
             if (body.removed_overlay && body.removed_overlay.branch) {
                 _devStatus('Removed the overlay for closed branch "'
                     + body.removed_overlay.branch + '" (no open PR) — the Pi '
