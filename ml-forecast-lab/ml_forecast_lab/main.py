@@ -453,17 +453,39 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
         ``model_overrides``). Entries here are NOT overwritten, preserving
         the caller's intent.
     """
-    if not getattr(model, 'is_neural', False):
-        return
+    # Gated per attribute, NOT with a blanket is_neural early return.
+    #
+    # `loss_fn` is honoured by the tree backends too — LightGBM, XGBoost and
+    # CatBoost each map it onto a native objective. The blanket return meant
+    # only the benchmark CV loop (which sets it separately in runner.py) ever
+    # gave a tree its experiment loss. Holdout, production training, retrain,
+    # tuning and covariate analysis all came through here and silently trained
+    # the trees with their default objective instead.
+    #
+    # The consequence was the one thing this add-on must not do: LightGBM was
+    # BENCHMARKED under one objective and TRAINED FOR PRODUCTION under another,
+    # so the model publishing forecasts to HA was not the model the leaderboard
+    # ranked. `optimiser` genuinely is neural-only and stays gated.
+    is_neural = bool(getattr(model, 'is_neural', False))
     overrides = overrides or {}
     for attr in ('loss_fn', 'optimiser'):
         if attr in overrides:
+            continue
+        if attr == 'optimiser' and not is_neural:
             continue
         value = getattr(exp_cfg, attr, None)
         if value is None:
             continue
         if not hasattr(model, attr):
             continue
+        if attr == 'loss_fn' and is_neural and value == 'tweedie':
+            # Tweedie has no native torch loss. The CV loop already demotes it
+            # to huber; doing it here too makes this helper the single source
+            # of truth, so every path agrees on what a neural model trains
+            # with. Without it the backend silently falls back to its own
+            # default for an unrecognised name — no error, and a different
+            # objective from the one the benchmark ranked.
+            value = 'huber'
         try:
             model.set_params(**{attr: value})
         except (ValueError, TypeError):

@@ -385,6 +385,47 @@ class TrainingCancelled(Exception):
     """
 
 
+def resolve_tree_loss_for_target(loss_fn: str, y, model_name: str = "tree") -> str:
+    """Demote a Tweedie-family loss to Huber when the target goes negative.
+
+    Tweedie models a non-negative compound Poisson-Gamma quantity, so every
+    tree library rejects negative labels: LightGBM and XGBoost raise, CatBoost
+    reports an error. Signed targets are ordinary in Home Assistant — net grid
+    power (import positive, export negative), a temperature delta, battery net
+    flow — and a user picking a loss the UI labels "neural only" has no reason
+    to expect their tree backends to hard-fail on a whole benchmark.
+
+    `dilate` is included because the tree backends map it onto Tweedie: it has
+    no tree analogue, and Tweedie is the peak-appropriate substitute for the
+    spiky targets DILATE is meant for. That substitution is what carries the
+    Tweedie constraint across to a loss whose label says it does not apply to
+    trees at all.
+
+    Data-driven rather than reading ``target_is_nonnegative`` from config: that
+    flag defaults to False, so trusting it would demote Tweedie for everyone
+    who never set it — including the zero-inflated targets Tweedie exists for.
+    The actual training target is the honest source.
+
+    Returns the loss to use; logs once when it demotes.
+    """
+    if loss_fn not in ("tweedie", "dilate"):
+        return loss_fn
+    try:
+        arr = np.asarray(y, dtype=float).ravel()
+        finite = arr[np.isfinite(arr)]
+        if finite.size and float(finite.min()) < 0.0:
+            logger.warning(
+                "%s: loss_fn=%r maps to a Tweedie objective, which requires a "
+                "non-negative target, but this one reaches %.4g. Training with "
+                "Huber instead so the benchmark completes.",
+                model_name, loss_fn, float(finite.min()),
+            )
+            return "huber"
+    except Exception:  # never let a guard break training
+        pass
+    return loss_fn
+
+
 class ForecastModel(ABC):
     """
     Abstract base class for all time-series forecast models.
