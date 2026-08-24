@@ -124,7 +124,7 @@
          path as the benchmark but skips the rest of the pipeline. -->
     <div class="settings-group">
         <h3 class="settings-group-title">Data Sanity Check
-            <span class="info-tip">?<span class="tip-text">Runs the same data fetch the benchmark would, then reports rows fetched vs expected, biggest gap, recorder freshness, missing-value rate, zero-run length, and (for cumulative sensors) max-increment hits. Use it before clicking Run Pipeline to avoid spending an hour benchmarking against broken data. The target is analysed in detail and every configured covariate gets its own compact verdict card below — a broken covariate (gap, dead sensor, wrong units) won't sneak into a benchmark.</span></span>
+            <span class="info-tip">?<span class="tip-text">Runs the same data fetch the benchmark would, then reports rows fetched vs expected, biggest gap, recorder freshness, missing-value rate, zero-run length, and (for cumulative sensors) max-increment hits. Use it before clicking Run Pipeline to avoid spending an hour benchmarking against broken data. The target is analysed in detail and every configured covariate gets its own compact verdict card below — a broken covariate (gap, dead sensor, wrong units) won't sneak into a benchmark. It also reports two numbers about the shape of the signal: <b>Daily rhythm</b> is how closely the sensor repeats itself 24 hours later — a strong pattern means Seasonal MASE and calendar features are worth having, a weak one means the model has no daily cycle to lean on and you probably need covariates. <b>Spikiness</b> is the peak-to-mean ratio — a high value means a mostly-off load whose peaks are the whole point, where a plain error metric will crown a model that flattens them; that is when Peak-weighted MAE and the DILATE loss earn their keep.</span></span>
         </h3>
         <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
             <button type="button" class="btn btn-secondary" id="btn-data-report"
@@ -5924,6 +5924,36 @@ window.showTab = function(el) {
             add('Longest zero-run', rep.max_zero_run_samples + ' samples');
             if (rep.max_increment_config != null) {
                 add('Max-increment hits', rep.max_increment_hits + ' (limit ' + rep.max_increment_config + ')');
+            }
+
+            // Shape diagnostics — what the numbers above can't tell you. Each
+            // carries the reading, because the raw figure means nothing to
+            // someone who hasn't met an autocorrelation before.
+            if (rep.daily_autocorr != null) {
+                var ac = rep.daily_autocorr;
+                var acRead = ac >= 0.7 ? 'strong daily pattern'
+                           : ac >= 0.45 ? 'moderate daily pattern'
+                           : ac >= 0.2 ? 'weak daily pattern'
+                           : 'little or no daily pattern';
+                add('Daily rhythm', ac.toFixed(2) + ' — ' + acRead);
+            }
+            if (rep.spikiness != null) {
+                // Bands calibrated against real household shapes rather than
+                // picked round numbers. Measured on 30 days at 30 minutes:
+                //   tank temperature 1.19   flat baseline 1.21
+                //   heat pump 1.85          whole-home load 3.16
+                //   solar, summer 3.65      solar, winter 5.78
+                //   EV charger 11.86        hot water 12.43
+                // The top band sits at 8 deliberately: the same solar array
+                // moves 3.65 -> 5.78 between summer and winter, so a lower
+                // cut would make one sensor change its description with the
+                // season while nothing about it had changed.
+                var sp = rep.spikiness;
+                var spRead = sp >= 8 ? 'mostly off, with sharp peaks'
+                           : sp >= 3 ? 'peaked'
+                           : sp >= 1.8 ? 'gently varying'
+                           : 'smooth';
+                add('Spikiness (peak / mean)', sp.toFixed(2) + ' — ' + spRead);
             }
 
             var warn = '';

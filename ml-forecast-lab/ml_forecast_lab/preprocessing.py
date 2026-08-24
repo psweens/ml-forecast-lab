@@ -1025,3 +1025,73 @@ def align_series(
     raise ValueError(
         f"method must be 'inner', 'outer', 'left', or 'right', got {method!r}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Data-shape diagnostics
+# --------------------------------------------------------------------------- #
+# Two descriptive statistics for the Data Sanity Check. Everything else that
+# panel reports (min / median / max / std, zero runs, coverage, gaps) can be
+# read off the raw recorder rows; these two need the series on its regular
+# interval grid, and neither is derivable from the others.
+#
+# They exist to answer two questions a user otherwise has to guess at:
+# "does my sensor have a daily rhythm?" (which decides whether seasonal_mase
+# and calendar features are worth anything) and "is this a spiky load?" (which
+# decides whether to reach for peak_weighted_mae or the DILATE loss).
+
+def spikiness(series: "pd.Series") -> Optional[float]:
+    """Peak-to-mean ratio: ``p99 / mean(|y|)``.
+
+    How concentrated the mass is. A mostly-off spike train (hot water, EV) has
+    a small mean and a large p99, so it scores high; a smooth daytime bump
+    spreads its mass and scores low — even though both spend about half the
+    day near zero. Standard deviation does not separate those cases, which is
+    why this is not derivable from what the panel already reports.
+
+    Returns ``None`` when there is nothing to measure.
+    """
+    y = pd.to_numeric(pd.Series(series), errors="coerce").dropna().to_numpy(dtype=float)
+    if y.size < 2:
+        return None
+    abs_y = np.abs(y)
+    mean_abs = float(np.mean(abs_y))
+    # Guard a near-zero mean without letting the guard dominate the ratio.
+    scale = float(np.median(abs_y[abs_y > 0])) if np.any(abs_y > 0) else 0.0
+    eps = max(1e-9, 1e-3 * scale)
+    if mean_abs + eps <= 0:
+        return None
+    val = float(np.quantile(y, 0.99)) / (mean_abs + eps)
+    return val if np.isfinite(val) else None
+
+
+def daily_autocorrelation(
+    on_grid: "pd.Series", interval_minutes: int
+) -> Optional[float]:
+    """Correlation between the series and itself one day earlier (-1..1).
+
+    Takes the series **with its gaps** — on the regular interval grid, not
+    compacted. Dropping NaN first shifts every sample after a hole, so a
+    positional lag stops being 24 hours the moment the recorder misses a
+    reading, and the error compounds with each subsequent gap. Measured on a
+    synthetic tank with a genuine 0.99 daily rhythm, a 5% hole rate reads 0.06
+    and 10% goes negative.
+
+    ``Series.corr`` uses pairwise-complete observations, so gaps cost only the
+    pairs they touch and the lag stays a true 24 hours.
+
+    Returns ``None`` when it cannot be determined — fewer than two full days,
+    or either side constant.
+    """
+    lag = max(1, int(round(24 * 60 / max(1, int(interval_minutes)))))
+    s = pd.to_numeric(pd.Series(on_grid), errors="coerce")
+    if lag < 1 or s.size <= 2 * lag:
+        return None
+    paired = pd.concat([s, s.shift(lag)], axis=1).dropna()
+    if len(paired) < 2:
+        return None
+    a, b = paired.iloc[:, 0], paired.iloc[:, 1]
+    if a.std() < 1e-12 or b.std() < 1e-12:
+        return None
+    r = a.corr(b)
+    return None if pd.isna(r) else float(r)

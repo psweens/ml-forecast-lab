@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.49.1
+
+### Added
+
+**The Data Sanity Check now reports the shape of the signal, not just its
+health.** Two numbers, both on the experiment's Settings tab beside the
+existing report:
+
+- **Daily rhythm** — how closely the sensor repeats itself 24 hours later. A
+  strong pattern means Seasonal MASE and calendar features are worth having; a
+  weak one means there is no daily cycle for the model to lean on and you
+  probably need covariates.
+- **Spikiness** — the peak-to-mean ratio. A high value means a mostly-off load
+  whose peaks are the whole point, where a plain error metric will crown the
+  model that flattens them. That is when Peak-weighted MAE and the DILATE loss
+  earn their keep.
+
+Each is shown with a plain-English reading rather than a bare number. The bands
+are calibrated against real household shapes measured over 30 days at 30-minute
+resolution — tank temperature 1.2, heat pump 1.9, whole-home load 3.2, solar
+3.7 in summer and 5.8 in winter, EV charger 11.9, hot water 12.4 — and the top
+band sits high enough that a solar array does not change its description
+between seasons.
+
+The daily rhythm is measured on the interval grid with pairwise-complete
+observations, so recorder gaps cost only the pairs they touch. Measuring it
+positionally on a gap-compacted series instead makes the lag drift off 24
+hours: a sensor with a genuine 0.99 daily rhythm reads 0.06 at a 5% hole rate
+and goes negative at 10%.
+
 ## 2.49.0
 
 ### Added
