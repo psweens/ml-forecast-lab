@@ -1025,3 +1025,118 @@ def align_series(
     raise ValueError(
         f"method must be 'inner', 'outer', 'left', or 'right', got {method!r}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Data-shape diagnostics
+# --------------------------------------------------------------------------- #
+# Two descriptive statistics for the Data Sanity Check. Everything else that
+# panel reports (min / median / max / std, zero runs, coverage, gaps) can be
+# read off the raw recorder rows; these two need the series on its regular
+# interval grid, and neither is derivable from the others.
+#
+# They exist to answer two questions a user otherwise has to guess at:
+# "does my sensor have a daily rhythm?" (which decides whether seasonal_mase
+# and calendar features are worth anything) and "is this a spiky load?" (which
+# decides whether to reach for peak_weighted_mae or the DILATE loss).
+
+def spikiness(series: "pd.Series") -> Optional[float]:
+    """Peak-to-mean ratio: ``p99 / mean(|y|)``.
+
+    How concentrated the mass is. A mostly-off spike train (hot water, EV) has
+    a small mean and a large p99, so it scores high; a smooth daytime bump
+    spreads its mass and scores low — even though both spend about half the
+    day near zero. Standard deviation does not separate those cases, which is
+    why this is not derivable from what the panel already reports.
+
+    **What the number means.** For a non-negative load that rests near zero,
+    this is the reciprocal of the duty cycle — verified against synthetic loads
+    from 2% to 75% on-time, where ``spikiness × duty`` stays within 0.79-1.05,
+    and it is invariant to amplitude, units and interval. So a reading of 8
+    means "on about an eighth of the time", i.e. roughly three hours a day.
+    That is what makes the reported bands transferable rather than tuned to one
+    person's sensors.
+
+    **Where it stops meaning that.** It measures mass concentrated *relative to
+    zero*, not variability, so a standing baseline dilutes it. The same 3 kW
+    load at an 8.3% duty reads 11.3 on no baseline, 5.99 on 0.3 kW, 3.17 on
+    1 kW and 1.84 on 3 kW. A signal that never approaches zero — a tank
+    temperature, a charge percentage — reads 1.2-2.0 however much it moves, so
+    the number is uninformative there rather than wrong. A small standby draw
+    is harmless: a CT clamp reading 0.5 W against 3 kW peaks is 0.017% of the
+    peak and does not move the ratio.
+
+    Returns ``None`` when there is nothing to measure.
+    """
+    y = pd.to_numeric(pd.Series(series), errors="coerce").dropna().to_numpy(dtype=float)
+    if y.size < 2:
+        return None
+    abs_y = np.abs(y)
+    mean_abs = float(np.mean(abs_y))
+    # Guard a near-zero mean without letting the guard dominate the ratio.
+    scale = float(np.median(abs_y[abs_y > 0])) if np.any(abs_y > 0) else 0.0
+    eps = max(1e-9, 1e-3 * scale)
+    if mean_abs + eps <= 0:
+        return None
+    val = float(np.quantile(y, 0.99)) / (mean_abs + eps)
+    return val if np.isfinite(val) else None
+
+
+def daily_autocorrelation(
+    on_grid: "pd.Series", interval_minutes: int
+) -> Optional[float]:
+    """Correlation between the series and itself one day earlier (-1..1).
+
+    Takes the series **with its gaps** — on the regular interval grid, not
+    compacted. Dropping NaN first shifts every sample after a hole, so a
+    positional lag stops being 24 hours the moment the recorder misses a
+    reading, and the error compounds with each subsequent gap. Measured on a
+    synthetic tank with a genuine 0.99 daily rhythm, a 5% hole rate reads 0.06
+    and 10% goes negative.
+
+    ``Series.corr`` uses pairwise-complete observations, so gaps cost only the
+    pairs they touch and the lag stays a true 24 hours.
+
+    Returns ``None`` when it cannot be determined — fewer than two full days,
+    or either side constant.
+    """
+    lag = max(1, int(round(24 * 60 / max(1, int(interval_minutes)))))
+    s = pd.to_numeric(pd.Series(on_grid), errors="coerce")
+    if lag < 1 or s.size <= 2 * lag:
+        return None
+
+    # Remove everything slower than a day before correlating.
+    #
+    # A raw lag-24h correlation cannot tell a daily rhythm from a trend: any
+    # slowly-varying signal correlates with itself at every lag. Measured on
+    # the raw form — a pure linear ramp with no cycle at all read 1.000, a
+    # random walk 0.968, and a purely WEEKLY rhythm 0.627, all of which would
+    # be reported as a daily pattern and push the user toward seasonal metrics
+    # and calendar features that cannot help them.
+    #
+    # Subtracting a one-day centred rolling mean is a high-pass filter at
+    # exactly the scale of interest: a full daily cycle averages to ~0 over a
+    # day so it survives intact, while a trend, a random walk or a weekly
+    # component is tracked by the rolling mean and cancels. `min_periods` lets
+    # the filter tolerate the recorder gaps this function exists to survive.
+    baseline = s.rolling(lag, center=True, min_periods=max(2, lag // 2)).mean()
+    resid = s - baseline
+
+    # A signal with no within-day structure leaves a residual that is pure
+    # numerical dust; correlating that yields a meaningless number. Compare
+    # against the original scale rather than an absolute floor, so this holds
+    # for a sensor in watts and the same sensor in kilowatts.
+    ref = float(s.std(skipna=True))
+    if not np.isfinite(ref) or ref <= 0:
+        return None
+    if float(resid.std(skipna=True) or 0.0) < 1e-6 * ref:
+        return 0.0
+
+    paired = pd.concat([resid, resid.shift(lag)], axis=1).dropna()
+    if len(paired) < 2:
+        return None
+    a, b = paired.iloc[:, 0], paired.iloc[:, 1]
+    if a.std() < 1e-12 or b.std() < 1e-12:
+        return None
+    r = a.corr(b)
+    return None if pd.isna(r) else float(r)

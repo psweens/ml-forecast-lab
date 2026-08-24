@@ -1611,6 +1611,43 @@ class MLForecastLabApp:
             diffs = series.diff().dropna()
             max_inc_hits = int((diffs > max_increment).sum())
 
+        # --- data-shape diagnostics -------------------------------------
+        # Two numbers the rest of this report cannot give: how strong the
+        # daily rhythm is, and how spiky the load is. Both need the series on
+        # its regular interval grid rather than the raw recorder rows — an
+        # uneven sample rate biases a peak-to-mean ratio, and a positional
+        # daily lag is only 24 hours on a gapless grid.
+        #
+        # They answer two questions a user otherwise guesses at: whether
+        # seasonal_mase and calendar features are worth anything, and whether
+        # to reach for the peak-aware loss and metric.
+        shape_spikiness = None
+        shape_daily_autocorr = None
+        try:
+            from ml_forecast_lab.preprocessing import (
+                cumulative_to_interval,
+                daily_autocorrelation,
+                resample_to_grid,
+                spikiness as _spikiness,
+            )
+            shaped = df.set_index("ds")["value"]
+            shaped = pd.to_numeric(shaped, errors="coerce")
+            if source_is_cumulative:
+                shaped = cumulative_to_interval(
+                    shaped,
+                    interval_minutes=interval_minutes,
+                    max_increment=max_increment,
+                )
+            on_grid = resample_to_grid(
+                shaped,
+                freq=f"{interval_minutes}min",
+                method="sum" if source_is_cumulative else "mean",
+            )
+            shape_spikiness = _spikiness(on_grid)
+            shape_daily_autocorr = daily_autocorrelation(on_grid, interval_minutes)
+        except Exception as e:  # diagnostics must never break the report
+            logger.debug("shape diagnostics failed for %s: %s", entity_id, e)
+
         warnings = []
         verdict = "ok"
         if recorder_age_min > interval_minutes * 4:
@@ -1661,6 +1698,10 @@ class MLForecastLabApp:
             "value_median": v_median,
             "value_std": v_std,
             "max_zero_run_samples": int(max_zero_run),
+            # None when undeterminable (too short, or a constant series) —
+            # the UI renders a dash rather than inventing a number.
+            "spikiness": shape_spikiness,
+            "daily_autocorr": shape_daily_autocorr,
             "max_increment_hits": max_inc_hits,
             "max_increment_config": max_increment,
             "warnings": warnings,

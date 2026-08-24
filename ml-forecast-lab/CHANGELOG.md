@@ -1,5 +1,53 @@
 # Changelog
 
+## 2.49.1
+
+### Added
+
+**The Data Sanity Check now reports the shape of the signal, not just its
+health.** Two numbers, both on the experiment's Settings tab beside the
+existing report:
+
+- **Daily rhythm** — how closely the sensor repeats itself 24 hours later. A
+  strong pattern means Seasonal MASE and calendar features are worth having; a
+  weak one means there is no daily cycle for the model to lean on and you
+  probably need covariates.
+- **Spikiness** — the peak-to-mean ratio. A high value means a mostly-off load
+  whose peaks are the whole point, where a plain error metric will crown the
+  model that flattens them. That is when Peak-weighted MAE and the DILATE loss
+  earn their keep.
+
+Each is shown with a plain-English reading rather than a bare number. For a
+load that sits at zero between bursts, spikiness is **one divided by the
+fraction of the day it is on** — so the top band at 8 means "on about three
+hours a day", not a round number. That holds within 0.79-1.05 across duty
+cycles from 2% to 75%, and is invariant to amplitude, units and interval, so
+the bands transfer between installations rather than being tuned to one set of
+sensors. Sense-checked against measured household shapes over 30 days at
+30-minute resolution: tank temperature 1.2, heat pump 1.9, whole-home load 3.2,
+solar 3.7 in summer and 5.8 in winter, EV charger 11.9, hot water 12.4.
+
+The measure is taken against zero, so it describes how concentrated the signal
+is rather than how variable. A sensor that never drops near zero — a tank
+temperature, a charge percentage — reads 1.2-2.0 whatever it does, and a load
+on a large constant baseline reads lower than its bursts suggest. Both are
+stated in the field's help text.
+
+The daily rhythm is measured on the interval grid with pairwise-complete
+observations, so recorder gaps cost only the pairs they touch. Measuring it
+positionally on a gap-compacted series instead makes the lag drift off 24
+hours: a sensor with a genuine 0.99 daily rhythm reads 0.06 at a 5% hole rate
+and goes negative at 10%.
+
+Anything slower than a day is filtered out first, because a plain lag-24h
+correlation cannot separate a daily rhythm from a trend — every slowly-varying
+signal correlates with itself at every lag. Without that step a pure linear
+ramp with no cycle at all reads 1.00 and a random walk 0.97, both of which
+would be reported as a strong daily pattern. An EV charged three evenings a
+week correctly reads ~0.0 (yesterday tells you nothing about today), while a
+hot-water tank that reheats on weekdays only reads 0.81 — five days in seven
+repeating is a daily pattern worth exploiting.
+
 ## 2.49.0
 
 ### Added

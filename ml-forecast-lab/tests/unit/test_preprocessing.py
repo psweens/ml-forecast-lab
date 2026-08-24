@@ -5,6 +5,8 @@ import pandas as pd
 import pytest
 
 from ml_forecast_lab.preprocessing import (
+    daily_autocorrelation,
+    spikiness,
     align_series,
     clip_outliers,
     cumulative_to_interval,
@@ -234,3 +236,246 @@ class TestAlignSeries:
         # Must be a copy — mutating the result should not touch the input
         out[0].iloc[0] = 99.0
         assert a.iloc[0] == 1.0
+
+
+# --------------------------------------------------------------------------- #
+# Data-shape diagnostics (Data Sanity Check)
+# --------------------------------------------------------------------------- #
+class TestSpikiness:
+    """Peak-to-mean ratio. Must separate a mostly-off spike train from a smooth
+    daytime bump — the two look similar to a standard deviation, since both
+    spend about half the day near zero, which is why this is reported."""
+
+    @staticmethod
+    def _grid(n, minutes=30):
+        return pd.date_range("2024-06-15", periods=n, freq=f"{minutes}min")
+
+    def test_spike_train_scores_higher_than_a_smooth_bump(self):
+        n = 48 * 14
+        spiky = np.zeros(n)
+        spiky[::16] = 10.0                        # brief, tall
+        t = np.arange(n)
+        smooth = np.clip(np.sin((t % 48) / 48 * 2 * np.pi - np.pi / 2), 0, None) * 3.0
+        s_spiky = spikiness(pd.Series(spiky, index=self._grid(n)))
+        s_smooth = spikiness(pd.Series(smooth, index=self._grid(n)))
+        assert s_spiky > s_smooth * 2, (
+            f"spike train {s_spiky:.2f} should clearly exceed smooth bump "
+            f"{s_smooth:.2f}"
+        )
+
+    def test_flat_series_is_about_one(self):
+        n = 48 * 3
+        s = spikiness(pd.Series(np.full(n, 4.0), index=self._grid(n)))
+        assert s == pytest.approx(1.0, abs=0.05)
+
+    def test_returns_none_when_unmeasurable(self):
+        assert spikiness(pd.Series([], dtype=float)) is None
+        assert spikiness(pd.Series([1.0])) is None
+
+
+class TestDailyAutocorrelation:
+    """The daily lag must stay a real 24 hours when the recorder has holes.
+
+    Measuring it positionally on a gap-compacted array shifts every sample
+    after a hole, so the lag drifts and the correlation collapses — the fixture
+    below reads 0.99 gapless, 0.06 at a 5% hole rate and goes negative at 10%
+    under that approach.
+    """
+
+    @staticmethod
+    def _tank(days=30, per_day=48, seed=1):
+        idx = pd.date_range("2024-06-15", periods=days * per_day, freq="30min")
+        rng = np.random.default_rng(seed)
+        y = np.zeros(days * per_day)
+        for d in range(days):
+            for slot in (12, 36):
+                y[d * per_day + slot] = rng.uniform(8, 12)
+        return pd.Series(y + rng.normal(0, 0.05, y.size).clip(0), index=idx)
+
+    @pytest.mark.parametrize("hole_pct", [0.0, 0.02, 0.05, 0.10, 0.25])
+    def test_rhythm_survives_recorder_gaps(self, hole_pct):
+        s = self._tank()
+        if hole_pct:
+            rng = np.random.default_rng(99)
+            s = s.copy()
+            s.iloc[rng.choice(s.size, int(s.size * hole_pct), replace=False)] = np.nan
+        assert daily_autocorrelation(s, 30) > 0.9
+
+    def test_does_not_invent_a_rhythm(self):
+        """Gap tolerance must not become a free pass, or every sensor would
+        look seasonal."""
+        idx = pd.date_range("2024-06-15", periods=30 * 48, freq="30min")
+        noise = pd.Series(np.random.default_rng(3).normal(5, 1, 30 * 48), index=idx)
+        assert abs(daily_autocorrelation(noise, 30)) < 0.1
+
+    def test_lag_follows_the_interval(self):
+        """A day is 96 bins at 15 minutes, 24 at 60 — the same physical rhythm
+        must read the same at any resolution."""
+        for per_day, minutes in ((96, 15), (48, 30), (24, 60)):
+            idx = pd.date_range("2024-06-15", periods=30 * per_day,
+                                freq=f"{minutes}min")
+            t = np.arange(len(idx))
+            y = np.sin((t % per_day) / per_day * 2 * np.pi)
+            r = daily_autocorrelation(pd.Series(y, index=idx), minutes)
+            assert r > 0.95, f"{minutes}-minute grid read {r}"
+
+    def test_returns_none_below_two_days(self):
+        idx = pd.date_range("2024-06-15", periods=48, freq="30min")
+        assert daily_autocorrelation(pd.Series(np.arange(48.0), index=idx), 30) is None
+
+
+class TestSpikinessSeparatesRealShapes:
+    """The reported bands are only worth showing if they separate the shapes a
+    household actually has. Measured on 30 days at 30-minute resolution."""
+
+    @staticmethod
+    def _idx():
+        return pd.date_range("2024-06-15", periods=30 * 48, freq="30min")
+
+    def test_intermittent_loads_score_far_above_continuous_ones(self):
+        idx = self._idx()
+        rng = np.random.default_rng(1)
+        t = np.arange(len(idx))
+
+        heat_pump = 1.2 + 0.8 * np.sin(t / 48 * 2 * np.pi) + rng.normal(0, .15, len(idx))
+        solar = np.clip(np.sin((t % 48) / 48 * 2 * np.pi - np.pi / 2), 0, None) * 3
+        hot_water = np.zeros(len(idx))
+        for d in range(30):
+            for s0 in (12, 36):
+                hot_water[d * 48 + s0:d * 48 + s0 + 2] = 3.0
+
+        sp_hp = spikiness(pd.Series(heat_pump, index=idx))
+        sp_solar = spikiness(pd.Series(solar, index=idx))
+        sp_hw = spikiness(pd.Series(hot_water, index=idx))
+
+        assert sp_hp < 3, f"a modulating heat pump should read low; got {sp_hp:.2f}"
+        assert sp_hw >= 8, f"a twice-daily reheat should read high; got {sp_hw:.2f}"
+        assert sp_hw > sp_solar * 2, (
+            f"hot water {sp_hw:.2f} must clearly separate from solar {sp_solar:.2f}"
+        )
+
+    def test_solar_does_not_change_band_between_summer_and_winter(self):
+        """The same array reads ~3.7 in summer and ~5.8 in winter. Both must
+        land in the same band, or one sensor would change its description with
+        the season while nothing about it had changed."""
+        idx = self._idx()
+        rng = np.random.default_rng(1)
+        t = np.arange(len(idx))
+        summer = np.clip(np.sin((t % 48) / 48 * 2 * np.pi - np.pi / 2), 0, None) * 3 \
+            * rng.uniform(.6, 1, len(idx))
+        winter = np.clip(np.sin((t % 48) / 48 * 2 * np.pi - np.pi / 2) * 3 - 1.6, 0, None) \
+            * rng.uniform(.5, 1, len(idx))
+        band = lambda s: (s >= 8) + (s >= 3) + (s >= 1.8)   # matches the UI bands
+        assert band(spikiness(pd.Series(summer, index=idx))) == \
+               band(spikiness(pd.Series(winter, index=idx)))
+
+
+class TestSpikinessIsReciprocalDutyCycle:
+    """The reported bands are only transferable if the number means something
+    physical rather than matching the fixtures it was tuned on.
+
+    For a non-negative load resting near zero, spikiness is 1 / duty-cycle. So
+    the band boundary at 8 is "on about an eighth of the time" — roughly three
+    hours a day — not a round number someone liked.
+    """
+
+    @staticmethod
+    def _idx(n=60 * 48):
+        return pd.date_range("2024-06-15", periods=n, freq="30min")
+
+    @pytest.mark.parametrize("duty", [0.04, 0.0833, 0.125, 0.20, 0.33, 0.50, 0.75])
+    def test_tracks_the_reciprocal_of_duty_cycle(self, duty):
+        idx = self._idx()
+        rng = np.random.default_rng(0)
+        y = np.zeros(len(idx))
+        y[rng.random(len(idx)) < duty] = 3.0
+        s = spikiness(pd.Series(y, index=idx))
+        assert s * duty == pytest.approx(1.0, abs=0.15), (
+            f"at a {duty:.1%} duty cycle spikiness read {s:.2f}; "
+            f"expected ~{1/duty:.1f}"
+        )
+
+    @pytest.mark.parametrize("amp", [0.5, 3.0, 7.0, 3000.0])
+    def test_is_invariant_to_amplitude(self, amp):
+        """Units must not move it, or a band means different things for a
+        sensor in W and the same sensor in kW."""
+        idx = self._idx()
+        rng = np.random.default_rng(0)
+        y = np.zeros(len(idx))
+        y[rng.random(len(idx)) < 0.0833] = amp
+        assert spikiness(pd.Series(y, index=idx)) == pytest.approx(12.0, rel=0.20)
+
+    def test_a_standing_baseline_dilutes_it(self):
+        """Documented limitation, pinned so it is not mistaken for a bug: the
+        ratio is measured against zero, so a constant floor pulls it down."""
+        idx = self._idx()
+        rng = np.random.default_rng(0)
+        on = rng.random(len(idx)) < 0.0833
+        readings = []
+        for base in (0.0, 1.0, 3.0):
+            y = np.full(len(idx), base)
+            y[on] += 3.0
+            readings.append(spikiness(pd.Series(y, index=idx)))
+        assert readings[0] > readings[1] > readings[2], readings
+        assert readings[0] >= 8 and readings[2] < 3, (
+            f"expected the same load to fall out of the top band once it sits "
+            f"on a baseline; got {readings}"
+        )
+
+
+class TestDailyAutocorrelationIsNotFooledByTrend:
+    """A raw lag-24h correlation cannot tell a daily rhythm from a trend: any
+    slowly-varying signal correlates with itself at every lag.
+
+    Measured on the undetrended form, a pure linear ramp with no cycle at all
+    read 1.000 and a random walk 0.968 — both reported as a strong daily
+    pattern, pushing the user toward seasonal metrics and calendar features
+    that cannot help. Subtracting a one-day centred rolling mean removes
+    anything slower than a day while leaving the within-day shape intact.
+    """
+
+    @staticmethod
+    def _idx(n=60 * 48):
+        return pd.date_range("2024-06-15", periods=n, freq="30min")
+
+    @pytest.mark.parametrize("name,build", [
+        ("linear trend", lambda t, n, rng: t / n),
+        ("slow drift + noise", lambda t, n, rng: t / n * 3 + rng.normal(0, .05, n)),
+        ("random walk", lambda t, n, rng: np.cumsum(rng.normal(0, .1, n))),
+        ("white noise", lambda t, n, rng: rng.normal(0, 1, n)),
+    ])
+    def test_signals_without_a_daily_cycle_read_near_zero(self, name, build):
+        idx = self._idx()
+        n = len(idx)
+        r = daily_autocorrelation(
+            pd.Series(build(np.arange(n), n, np.random.default_rng(0)), index=idx), 30
+        )
+        assert abs(r) < 0.2, f"{name} reported a daily rhythm of {r:.3f}"
+
+    def test_a_genuine_rhythm_survives_a_strong_trend(self):
+        """Removing the trend must not remove the signal with it — a sensor
+        whose usage is climbing still has its daily shape."""
+        idx = self._idx()
+        t = np.arange(len(idx))
+        y = np.sin(t / 48 * 2 * np.pi) + t / len(idx) * 6      # trend dominates in amplitude
+        assert daily_autocorrelation(pd.Series(y, index=idx), 30) > 0.9
+
+    def test_a_weekly_only_load_is_not_called_daily(self):
+        """An EV charged three evenings a week has no daily pattern —
+        yesterday tells you nothing about today."""
+        idx = self._idx()
+        y = np.zeros(len(idx))
+        for d in range(60):
+            if d % 7 in (1, 3, 5):
+                y[d * 48 + 36:d * 48 + 44] = 7.0
+        assert daily_autocorrelation(pd.Series(y, index=idx), 30) < 0.2
+
+    def test_a_weekday_only_rhythm_still_counts_as_daily(self):
+        """Five days in seven repeating IS a daily pattern worth exploiting."""
+        idx = self._idx()
+        y = np.zeros(len(idx))
+        for d in range(60):
+            if d % 7 < 5:
+                for s0 in (12, 36):
+                    y[d * 48 + s0:d * 48 + s0 + 2] = 3.0
+        assert daily_autocorrelation(pd.Series(y, index=idx), 30) > 0.7
