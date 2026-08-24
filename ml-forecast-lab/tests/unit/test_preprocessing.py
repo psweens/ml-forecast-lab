@@ -368,3 +368,56 @@ class TestSpikinessSeparatesRealShapes:
         band = lambda s: (s >= 8) + (s >= 3) + (s >= 1.8)   # matches the UI bands
         assert band(spikiness(pd.Series(summer, index=idx))) == \
                band(spikiness(pd.Series(winter, index=idx)))
+
+
+class TestSpikinessIsReciprocalDutyCycle:
+    """The reported bands are only transferable if the number means something
+    physical rather than matching the fixtures it was tuned on.
+
+    For a non-negative load resting near zero, spikiness is 1 / duty-cycle. So
+    the band boundary at 8 is "on about an eighth of the time" — roughly three
+    hours a day — not a round number someone liked.
+    """
+
+    @staticmethod
+    def _idx(n=60 * 48):
+        return pd.date_range("2024-06-15", periods=n, freq="30min")
+
+    @pytest.mark.parametrize("duty", [0.04, 0.0833, 0.125, 0.20, 0.33, 0.50, 0.75])
+    def test_tracks_the_reciprocal_of_duty_cycle(self, duty):
+        idx = self._idx()
+        rng = np.random.default_rng(0)
+        y = np.zeros(len(idx))
+        y[rng.random(len(idx)) < duty] = 3.0
+        s = spikiness(pd.Series(y, index=idx))
+        assert s * duty == pytest.approx(1.0, abs=0.15), (
+            f"at a {duty:.1%} duty cycle spikiness read {s:.2f}; "
+            f"expected ~{1/duty:.1f}"
+        )
+
+    @pytest.mark.parametrize("amp", [0.5, 3.0, 7.0, 3000.0])
+    def test_is_invariant_to_amplitude(self, amp):
+        """Units must not move it, or a band means different things for a
+        sensor in W and the same sensor in kW."""
+        idx = self._idx()
+        rng = np.random.default_rng(0)
+        y = np.zeros(len(idx))
+        y[rng.random(len(idx)) < 0.0833] = amp
+        assert spikiness(pd.Series(y, index=idx)) == pytest.approx(12.0, rel=0.20)
+
+    def test_a_standing_baseline_dilutes_it(self):
+        """Documented limitation, pinned so it is not mistaken for a bug: the
+        ratio is measured against zero, so a constant floor pulls it down."""
+        idx = self._idx()
+        rng = np.random.default_rng(0)
+        on = rng.random(len(idx)) < 0.0833
+        readings = []
+        for base in (0.0, 1.0, 3.0):
+            y = np.full(len(idx), base)
+            y[on] += 3.0
+            readings.append(spikiness(pd.Series(y, index=idx)))
+        assert readings[0] > readings[1] > readings[2], readings
+        assert readings[0] >= 8 and readings[2] < 3, (
+            f"expected the same load to fall out of the top band once it sits "
+            f"on a baseline; got {readings}"
+        )

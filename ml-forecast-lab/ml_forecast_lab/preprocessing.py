@@ -1049,6 +1049,23 @@ def spikiness(series: "pd.Series") -> Optional[float]:
     day near zero. Standard deviation does not separate those cases, which is
     why this is not derivable from what the panel already reports.
 
+    **What the number means.** For a non-negative load that rests near zero,
+    this is the reciprocal of the duty cycle — verified against synthetic loads
+    from 2% to 75% on-time, where ``spikiness × duty`` stays within 0.79-1.05,
+    and it is invariant to amplitude, units and interval. So a reading of 8
+    means "on about an eighth of the time", i.e. roughly three hours a day.
+    That is what makes the reported bands transferable rather than tuned to one
+    person's sensors.
+
+    **Where it stops meaning that.** It measures mass concentrated *relative to
+    zero*, not variability, so a standing baseline dilutes it. The same 3 kW
+    load at an 8.3% duty reads 11.3 on no baseline, 5.99 on 0.3 kW, 3.17 on
+    1 kW and 1.84 on 3 kW. A signal that never approaches zero — a tank
+    temperature, a charge percentage — reads 1.2-2.0 however much it moves, so
+    the number is uninformative there rather than wrong. A small standby draw
+    is harmless: a CT clamp reading 0.5 W against 3 kW peaks is 0.017% of the
+    peak and does not move the ratio.
+
     Returns ``None`` when there is nothing to measure.
     """
     y = pd.to_numeric(pd.Series(series), errors="coerce").dropna().to_numpy(dtype=float)

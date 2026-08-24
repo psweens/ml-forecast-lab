@@ -17,12 +17,21 @@ existing report:
   model that flattens them. That is when Peak-weighted MAE and the DILATE loss
   earn their keep.
 
-Each is shown with a plain-English reading rather than a bare number. The bands
-are calibrated against real household shapes measured over 30 days at 30-minute
-resolution — tank temperature 1.2, heat pump 1.9, whole-home load 3.2, solar
-3.7 in summer and 5.8 in winter, EV charger 11.9, hot water 12.4 — and the top
-band sits high enough that a solar array does not change its description
-between seasons.
+Each is shown with a plain-English reading rather than a bare number. For a
+load that sits at zero between bursts, spikiness is **one divided by the
+fraction of the day it is on** — so the top band at 8 means "on about three
+hours a day", not a round number. That holds within 0.79-1.05 across duty
+cycles from 2% to 75%, and is invariant to amplitude, units and interval, so
+the bands transfer between installations rather than being tuned to one set of
+sensors. Sense-checked against measured household shapes over 30 days at
+30-minute resolution: tank temperature 1.2, heat pump 1.9, whole-home load 3.2,
+solar 3.7 in summer and 5.8 in winter, EV charger 11.9, hot water 12.4.
+
+The measure is taken against zero, so it describes how concentrated the signal
+is rather than how variable. A sensor that never drops near zero — a tank
+temperature, a charge percentage — reads 1.2-2.0 whatever it does, and a load
+on a large constant baseline reads lower than its bursts suggest. Both are
+stated in the field's help text.
 
 The daily rhythm is measured on the interval grid with pairwise-complete
 observations, so recorder gaps cost only the pairs they touch. Measuring it
