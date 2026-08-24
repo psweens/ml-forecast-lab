@@ -1811,6 +1811,12 @@ class MLForecastLabApp:
             "target_median": target["value_median"],
             "target_std": target["value_std"],
             "max_zero_run_samples": target["max_zero_run_samples"],
+            # Shape diagnostics. This dict is an explicit allow-list, not a
+            # spread of `target`, so anything added to _analyse_entity_history
+            # has to be surfaced here as well or the UI never sees it — which
+            # is exactly how these two shipped computed-but-invisible.
+            "spikiness": target.get("spikiness"),
+            "daily_autocorr": target.get("daily_autocorr"),
             "max_increment_hits": target["max_increment_hits"],
             "max_increment_config": target["max_increment_config"],
             "interval_minutes": exp_cfg.interval_minutes,

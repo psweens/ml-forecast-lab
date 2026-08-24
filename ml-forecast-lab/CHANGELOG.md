@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.49.2
+
+### Fixed
+
+**Daily rhythm and Spikiness never appeared in the Data Sanity Check.** Both
+were computed correctly and stored, but `compute_data_report` returns an
+explicit list of fields rather than passing the analysis through, so the two
+new ones were dropped on the way to the browser. The UI hides any row whose
+value is missing, so they simply did not render — no error, nothing in the log.
+Shipped invisible in 2.49.1.
+
 ## 2.49.1
 
 ### Added
