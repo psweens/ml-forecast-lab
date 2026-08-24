@@ -1,5 +1,6 @@
 """Tests for preprocessing module."""
 
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
@@ -479,3 +480,59 @@ class TestDailyAutocorrelationIsNotFooledByTrend:
                 for s0 in (12, 36):
                     y[d * 48 + s0:d * 48 + s0 + 2] = 3.0
         assert daily_autocorrelation(pd.Series(y, index=idx), 30) > 0.7
+
+
+class TestDataReportContract:
+    """Every field the Data Sanity Check UI reads must exist in the response.
+
+    `compute_data_report` builds an explicit allow-list rather than spreading
+    the per-entity analysis, so a statistic added to `_analyse_entity_history`
+    is computed, stored in `target[...]`, and then silently dropped on the way
+    out. The UI guards each row with `!= null`, so the row just does not
+    appear — no error, no log line, nothing to notice.
+
+    That is exactly how `spikiness` and `daily_autocorr` shipped invisible:
+    both were unit-tested, and so was the UI, but nothing tested the wiring
+    between them.
+    """
+
+    @staticmethod
+    def _paths():
+        root = Path(__file__).resolve().parents[2]
+        return (root / "ml_forecast_lab" / "web" / "templates" / "experiment.html",
+                root / "ml_forecast_lab" / "main.py")
+
+    def test_every_field_the_ui_reads_is_returned(self):
+        import re
+        html_path, main_path = self._paths()
+
+        js = html_path.read_text()
+        i = js.index("window.runDataReport")
+        j = js.index("window.", i + 20)
+        read = set(re.findall(r'\brep\.([a-zA-Z_][a-zA-Z0-9_]*)', js[i:j]))
+
+        src = main_path.read_text()
+        k = src.index("async def compute_data_report")
+        end = src.index("\n    async def ", k + 10)
+        provided = set(re.findall(r'^\s+"([a-z_0-9]+)":', src[k:end], re.M))
+
+        missing = sorted(read - provided)
+        assert not missing, (
+            f"the Data Sanity Check UI reads {missing} but compute_data_report "
+            f"does not return them — those rows will silently never render"
+        )
+
+    def test_the_shape_diagnostics_specifically_are_wired(self):
+        """Named explicitly, so a regression names itself rather than showing
+        up as an anonymous set difference."""
+        import re
+        _, main_path = self._paths()
+        src = main_path.read_text()
+        k = src.index("async def compute_data_report")
+        end = src.index("\n    async def ", k + 10)
+        block = src[k:end]
+        for f in ("spikiness", "daily_autocorr"):
+            assert re.search(rf'^\s+"{f}":', block, re.M), (
+                f"{f} is computed in _analyse_entity_history but not surfaced "
+                f"by compute_data_report"
+            )

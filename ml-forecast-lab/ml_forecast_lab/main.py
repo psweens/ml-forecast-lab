@@ -1811,6 +1811,12 @@ class MLForecastLabApp:
             "target_median": target["value_median"],
             "target_std": target["value_std"],
             "max_zero_run_samples": target["max_zero_run_samples"],
+            # Shape diagnostics. This dict is an explicit allow-list, not a
+            # spread of `target`, so anything added to _analyse_entity_history
+            # has to be surfaced here as well or the UI never sees it — which
+            # is exactly how these two shipped computed-but-invisible.
+            "spikiness": target.get("spikiness"),
+            "daily_autocorr": target.get("daily_autocorr"),
             "max_increment_hits": target["max_increment_hits"],
             "max_increment_config": target["max_increment_config"],
             "interval_minutes": exp_cfg.interval_minutes,
@@ -2552,7 +2558,17 @@ class MLForecastLabApp:
 
             metric_means = {}
             metric_stds = {}
-            for metric_name in exp_cfg.metrics:
+            # Aggregate the metric that actually decides the ranking as well as
+            # the display list. `exp_cfg.metrics` has no UI control, so it is
+            # always the factory default — which means the selection metric
+            # (peak_weighted_mae, pinball_q90, and even the DEFAULT
+            # seasonal_mase) was computed per fold, used to rank, and then
+            # never aggregated or shown. The leaderboard reordered with every
+            # visible column contradicting it.
+            _agg_metrics = list(dict.fromkeys(
+                list(exp_cfg.metrics) + [exp_cfg.production_metric]
+            ))
+            for metric_name in _agg_metrics:
                 values = [
                     fm.get(metric_name, np.nan)
                     for fm in fold_metrics_list
@@ -2621,6 +2637,11 @@ class MLForecastLabApp:
                 mase=MetricValue(
                     mean=metric_means.get("mase", 0.0),
                     std=metric_stds.get("mase", 0.0),
+                ),
+                selection_metric=exp_cfg.production_metric,
+                selection_value=MetricValue(
+                    mean=metric_means.get(exp_cfg.production_metric, 0.0),
+                    std=metric_stds.get(exp_cfg.production_metric, 0.0),
                 ),
                 train_time_seconds=runner_model_result.mean_train_time,
                 rank=rank,

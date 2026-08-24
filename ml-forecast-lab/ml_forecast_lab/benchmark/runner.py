@@ -527,6 +527,21 @@ class BenchmarkRunner:
                                 )
                                 sequence_kwargs['sequence_data'] = seq_X
                                 sequence_kwargs['channel_names'] = channel_names
+                                # The windows built above are EXTENDED — past
+                                # observations followed by a zero-filled future
+                                # block carrying only known-future features. A
+                                # backend that reads the target channel has to
+                                # be told where that split is, or it reads the
+                                # zero-filled tail as real history.
+                                #
+                                # The holdout and production paths already set
+                                # these (main.py); CV did not. Backends that
+                                # ignore the flags are unaffected, but
+                                # daily_profile predicted all zeros in every
+                                # fold without them — scoring exactly mean|y|,
+                                # ranking last, and never being promotable.
+                                sequence_kwargs['extended_window'] = True
+                                sequence_kwargs['past_window_size'] = window_size
                                 y_train = seq_y
                                 X_train = X_train[-len(seq_y):]
                                 if sample_weights is not None:

@@ -151,6 +151,12 @@ class ModelResult(BaseModel):
     mae: MetricValue
     rmse: MetricValue
     mase: MetricValue
+    # The metric that actually ranked the models, and its value. Typed fields
+    # exist only for mae/rmse/mase, so without these the selection metric —
+    # including the default seasonal_mase — reaches the browser inside
+    # fold_results and is rendered nowhere.
+    selection_metric: Optional[str] = None
+    selection_value: Optional[MetricValue] = None
     train_time_seconds: float
     rank: int
     mean_rank: float = 0.0
