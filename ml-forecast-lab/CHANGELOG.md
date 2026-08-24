@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.48.0
+
+### Added
+
+**Two peak-aware champion metrics: `peak_weighted_mae` and `pinball_q90`.**
+Plain MAE / RMSE / MASE reward the model that runs through the *middle* of a
+spiky series — chasing a peak and missing its timing is penalised twice, so a
+flat conditional-mean forecast scores best. That is the "it flattens my
+spikes" failure on intermittent loads (hot water, EV, appliances). Both new
+metrics are selectable as **Production metric** on the experiment Settings
+tab. `peak_weighted_mae` weights each interval by how far its actual value
+sits above the typical level; `pinball_q90` makes under-shooting cost 9x more
+than over-shooting.
+
+### Changed
+
+**The configured production metric now carries a heavier vote in the composite
+rank.** The default metric list holds three L1-family metrics (mae / mase /
+seasonal_mase) that co-rank almost identically, so a single deliberately
+chosen metric was diluted 1-of-N and barely moved the champion. The selection
+metric is now weighted at roughly 1.5x the others combined once there are
+three or more ranking metrics, and it is added to the ranking set even when
+the user's `metrics` list omits it. For one or two metrics the weight
+collapses to 1, so ordinary benchmarks — and the existing rank tests — are
+unchanged.
+
 ## 2.46.2
 
 **Forecast Comparison: the "% of Typical" column is now "Error %".** The old

@@ -1047,8 +1047,30 @@ class BenchmarkRunner:
         """
         _higher_better = {'r_squared', 'coverage'}
         ranking_metrics = [m for m in self.metrics if m not in _higher_better]
+        # Always let the configured selection metric steer the composite, even
+        # if the user's `metrics` list omits it — otherwise a peak-aware
+        # `production_metric` (e.g. peak_weighted_mae) would be computed but
+        # never influence which model wins. It is also weighted below.
+        prod_metric = self.production_metric
+        if (prod_metric and prod_metric not in _higher_better
+                and prod_metric not in ranking_metrics):
+            ranking_metrics.append(prod_metric)
         if not ranking_metrics:
             ranking_metrics = [self.production_metric]
+
+        # The selection metric carries a heavier vote in the composite so a
+        # deliberately-chosen metric is decisive rather than diluted 1-of-N
+        # (the default list has three L1-family metrics — mae/mase/seasonal_mase
+        # — that co-rank, which would otherwise drown out a single peak-aware
+        # metric). Weight ~1.5x(other metrics) gives the selection metric a
+        # clear majority once there are >=3 ranking metrics (the common case),
+        # and collapses to a no-op for 1-2 metrics so the equal-weight
+        # behaviour — and the existing rank tests — are preserved.
+        _prod_weight = max(1, (len(ranking_metrics) - 1) * 3 // 2)
+        _metric_weight = {
+            m: (_prod_weight if m == prod_metric else 1)
+            for m in ranking_metrics
+        }
 
         model_names = list(model_results.keys())
         if not model_names:
@@ -1109,8 +1131,8 @@ class BenchmarkRunner:
             )
             if all_skipped:
                 continue
-            per_metric_ranks: Dict[str, List[int]] = {
-                name: [] for name in rankable_names
+            per_metric_ranks: Dict[str, Dict[str, int]] = {
+                name: {} for name in rankable_names
             }
             for metric_name in ranking_metrics:
                 higher_is_better = metric_name in _higher_better
@@ -1139,12 +1161,17 @@ class BenchmarkRunner:
                     reverse=higher_is_better,
                 )
                 for r, (name, _) in enumerate(sorted_fold):
-                    per_metric_ranks[name].append(r + 1)
+                    per_metric_ranks[name][metric_name] = r + 1
 
             fold_recorded = False
             for name in rankable_names:
-                if per_metric_ranks[name]:
-                    fold_ranks[name].append(float(np.mean(per_metric_ranks[name])))
+                rd = per_metric_ranks[name]
+                if rd:
+                    # Weighted mean of this fold's per-metric ranks, giving the
+                    # selection metric the heavier vote defined above.
+                    num = sum(rank * _metric_weight[m] for m, rank in rd.items())
+                    den = sum(_metric_weight[m] for m in rd)
+                    fold_ranks[name].append(float(num) / float(den))
                     fold_recorded = True
                 else:
                     # Pad with NaN so the per-fold arrays stay aligned

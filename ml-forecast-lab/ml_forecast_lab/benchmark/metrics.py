@@ -15,6 +15,12 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Minimum number of above-median intervals needed before `peak_weighted_mae`
+# will estimate its weighting scale from the active part of a zero-heavy
+# series. Below this the sample is too thin to be meaningful and the metric
+# falls back to plain MAE.
+_PEAK_MIN_ACTIVE = 8
+
 
 def mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """
@@ -319,6 +325,89 @@ def pinball_loss(
     return float(np.mean(loss))
 
 
+def peak_weighted_mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Mean absolute error that weights high-actual intervals more heavily.
+
+    Plain MAE / RMSE / MASE reward the model that runs through the *middle* of
+    a spiky series: chasing a peak and missing its timing is penalised twice
+    (a false alarm where the model reached up, and a miss where the spike
+    actually landed), so a flat conditional-mean forecast scores best. That is
+    exactly the "it flattens my spikes" failure for bursty loads (hot water,
+    EV, appliances).
+
+    This metric weights each interval by how far its *actual* value sits above
+    the typical level, so the score is dominated by how well the model tracks
+    the peaks rather than the quiet baseline. Direction matches MAE (lower is
+    better), so it slots into the existing rank machinery unchanged.
+
+    The weight is ``1 + clip((y_true - median) / spread, 0, 9)``: an interval
+    at the median weighs 1, a tall peak weighs up to 10, and the cap stops a
+    single freak spike from dominating.
+
+    ``spread`` is normally ``p90 - median``. On a zero-heavy target — a load
+    that is off most of the time, which is precisely what this metric exists
+    for — the p90 still sits inside the flat baseline (both are 0.0), so the
+    scale is taken from the distribution *above* the median instead. Real
+    30-minute hot-water and EV loads sit at 92-96% zeros, well past the point
+    where the p90 collapses. Without the second anchor this metric silently
+    degrades to plain MAE on exactly its intended targets.
+
+    Only a genuinely constant series, or one with too few active intervals to
+    estimate a scale from, falls back to plain MAE.
+
+    Parameters
+    ----------
+    y_true : np.ndarray
+        True values.
+    y_pred : np.ndarray
+        Predicted values.
+
+    Returns
+    -------
+    float
+        Peak-weighted mean absolute error. ``np.nan`` if all values are NaN.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+
+    valid_mask = ~(np.isnan(y_true) | np.isnan(y_pred))
+    if not np.any(valid_mask):
+        return np.nan
+
+    yt = y_true[valid_mask]
+    yp = y_pred[valid_mask]
+    abs_err = np.abs(yt - yp)
+
+    median = float(np.median(yt))
+    spread = float(np.quantile(yt, 0.9)) - median
+    if spread <= 0:
+        # Zero-heavy target: the p90 sits inside the flat baseline. Anchor the
+        # scale on the active part rather than collapsing to plain MAE.
+        active = yt[yt > median]
+        if active.size >= _PEAK_MIN_ACTIVE:
+            spread = float(np.quantile(active, 0.9)) - median
+    if not np.isfinite(spread) or spread <= 0:
+        # Flat or degenerate target — nothing to up-weight, behave like MAE.
+        return float(np.mean(abs_err))
+
+    excess = np.clip((yt - median) / spread, 0.0, 9.0)
+    weights = 1.0 + excess
+    return float(np.sum(weights * abs_err) / np.sum(weights))
+
+
+def pinball_q90(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Upper-quantile (0.9) pinball loss — under-shooting a value costs 9x more
+    than over-shooting it.
+
+    A first-class probabilistic / peak-emphasis score: it rewards a forecast
+    that reaches *up* toward the highs rather than splitting the difference.
+    Useful as an evaluation column or as the champion-selection metric for
+    users who care most about not missing peaks (capacity, peak demand).
+    Lower is better. See :func:`pinball_loss` for the underlying definition.
+    """
+    return pinball_loss(y_true, y_pred, quantile=0.9)
+
+
 def coverage(
     y_true: np.ndarray, lower: np.ndarray, upper: np.ndarray
 ) -> float:
@@ -384,8 +473,10 @@ class MetricRegistry:
         self.register('seasonal_mase', seasonal_mase)
         self.register('r_squared', r_squared)
         self.register('pinball_loss', pinball_loss)
+        self.register('peak_weighted_mae', peak_weighted_mae)
+        self.register('pinball_q90', pinball_q90)
         self.register('coverage', coverage)
-        logger.info('Registered 9 standard metrics')
+        logger.info('Registered 11 standard metrics')
 
     def register(self, name: str, func: Callable) -> None:
         """

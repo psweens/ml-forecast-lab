@@ -304,12 +304,14 @@
                        onchange="saveSettingsField(this)">
             </div>
             <div class="exp-field">
-                <label class="field-label">Production metric <span class="info-tip">?<span class="tip-text">Which error metric the composite mean rank weighs most heavily when picking the winner (Demšar-style averaging step only; see <code>docs/RANKING_NOTES.md</code>). <b>Seasonal MASE</b> (default): error relative to "same time yesterday" — handles diurnal patterns gracefully; usually the right pick for household sensors. <b>MAE</b>: raw absolute error, easy to read in your sensor's units. <b>RMSE</b>: penalises large misses more — pick if a few big errors hurt much more than many small ones. <b>MASE</b>: vs 1-step naive — only beats seasonal MASE on signals without daily seasonality.</span></span></label>
+                <label class="field-label">Production metric <span class="info-tip">?<span class="tip-text">Which error metric the composite mean rank weighs most heavily when picking the winner (Demšar-style averaging step only; see <code>docs/RANKING_NOTES.md</code>). <b>Seasonal MASE</b> (default): error relative to "same time yesterday" — handles diurnal patterns gracefully; usually the right pick for household sensors. <b>MAE</b>: raw absolute error, easy to read in your sensor's units. <b>RMSE</b>: penalises large misses more — pick if a few big errors hurt much more than many small ones. <b>MASE</b>: vs 1-step naive — only beats seasonal MASE on signals without daily seasonality. <b>Peak-weighted MAE</b>: up-weights intervals where the actual value is high — pick this for a load that is off most of the time (hot water, EV, appliances), where plain MAE crowns the model that flatlines through the middle of your spikes. <b>Pinball q90</b>: under-shooting costs 9x more than over-shooting — pick if missing a peak is much worse than over-predicting one.</span></span></label>
                 <select class="setting-input" data-field="production_metric" onchange="saveSettingsField(this)">
                     <option value="seasonal_mase" {% if not exp_config or exp_config.production_metric == 'seasonal_mase' %}selected{% endif %}>Seasonal MASE (vs same time yesterday)</option>
                     <option value="mae" {% if exp_config and exp_config.production_metric == 'mae' %}selected{% endif %}>MAE</option>
                     <option value="rmse" {% if exp_config and exp_config.production_metric == 'rmse' %}selected{% endif %}>RMSE</option>
                     <option value="mase" {% if exp_config and exp_config.production_metric == 'mase' %}selected{% endif %}>MASE (vs 1-step naive)</option>
+                    <option value="peak_weighted_mae" {% if exp_config and exp_config.production_metric == 'peak_weighted_mae' %}selected{% endif %}>Peak-weighted MAE (for spiky loads)</option>
+                    <option value="pinball_q90" {% if exp_config and exp_config.production_metric == 'pinball_q90' %}selected{% endif %}>Pinball q90 (penalises under-shooting peaks)</option>
                 </select>
             </div>
             <div class="exp-field">
