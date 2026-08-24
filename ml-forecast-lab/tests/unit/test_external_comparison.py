@@ -524,11 +524,21 @@ class TestComparisonBaselineAndWarmup:
         # value, flattens the charts and explodes the MAE/ranking.
         ttbl, e1, _ = self._seed_days(db, n_days=8)
         bad_t = pd.Timestamp("2024-06-03 12:00")
-        # Log it LATER than the seeded row for that grid so, without the
-        # guard, groupby-last would pick the corrupt value.
-        db.log_forecast(experiment="e", issued_at=bad_t,
-                        targets=[bad_t], predictions=[5e30],
-                        model_name="lgb", model_version="v1")
+        # Simulate a HISTORICAL corrupt row written before the log_forecast
+        # write-guard existed. The guard now drops such a value at write time,
+        # so insert directly to bypass it — the read-side corruption filter's
+        # remaining job is exactly cleaning up legacy rows like this. Stamped
+        # LATER than the seeded row for that grid so, without the read filter,
+        # groupby-last would pick the corrupt value.
+        _ts = bad_t.strftime("%Y-%m-%d %H:%M:%S")
+        _cur = db.conn.cursor()
+        _cur.execute(
+            "INSERT INTO forecast_log (experiment, model_name, issued_at, "
+            "target_dt, lead_minutes, predicted, forecast_type, upper, lower, "
+            "model_version) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("e", "lgb", _ts, _ts, 0, 5e30, "cached", None, None, "v1"),
+        )
+        db.conn.commit()
         res = db.get_external_forecast_comparison(
             "e", ttbl, [_spec("sensor.ext_state", "state", e1, label="Crude")],
             GENEROUS_WINDOW, INTERVAL, "raw")
