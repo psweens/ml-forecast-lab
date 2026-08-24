@@ -246,3 +246,84 @@ def test_flat_window_does_not_divide_by_zero():
     loss.backward()
     assert torch.isfinite(loss).item()
     assert torch.isfinite(yp.grad).all().item()
+
+
+# --------------------------------------------------------------------------- #
+# Flat windows must not dominate the batch
+# --------------------------------------------------------------------------- #
+# The per-window variance normalisation divides the cost matrix by var(y_true).
+# A flat window has variance exactly 0, so flooring at a small CONSTANT turned
+# it into a 1e8 amplifier. On a spiky load — the workload this loss exists for —
+# most windows ARE flat between bursts, so those windows became the entire loss
+# and the gradient from the real peaks was drowned out. Measured at H=96,
+# band=8 before the fix:
+#
+#     normal spiky window          var 7.6e+00   loss 1.4e-01
+#     all-zero window, pred 0.1    var 0.0e+00   loss 1.0e+06
+#     1 spiky + 4 flat windows     batch mean 0.094 -> 80.0
+#
+# Flooring against the batch's own scale fixed the magnitude but left the loss
+# able to go NEGATIVE on flat windows (a soft-min with a large effective gamma
+# dips below zero), so a batch mean could be lowered just by adding flat
+# windows. Flat windows now fall back to a normalised point loss instead.
+def _spiky_and_flat(n_flat, H=96, seed=0):
+    torch.manual_seed(seed)
+    spiky_t = torch.zeros(1, H)
+    spiky_t[0, ::12] = 10.0
+    spiky_p = spiky_t + torch.randn(1, H) * 1.0
+    yt = torch.cat([spiky_t] + [torch.zeros(1, H)] * n_flat)
+    yp = torch.cat([spiky_p] + [torch.full((1, H), 1e-3)] * n_flat)
+    return yp, yt
+
+
+@pytest.mark.parametrize("n_flat", [1, 4, 16, 31])
+def test_flat_windows_do_not_dominate_the_batch(n_flat):
+    yp, yt = _spiky_and_flat(n_flat)
+    per = dilate_per_sample(yp, yt, band=8)
+    spiky, flats = per[0], per[1:]
+    assert float(flats.max()) < float(spiky), (
+        f"a flat window scored {float(flats.max()):.3e} against the real "
+        f"window's {float(spiky):.3e} — the batch is measuring the gaps"
+    )
+
+
+@pytest.mark.parametrize("n_flat", [1, 4, 16, 31])
+def test_loss_is_never_negative(n_flat):
+    """A negative per-window loss lets the batch mean be driven down simply by
+    including more flat windows, which is not a signal about the forecast."""
+    yp, yt = _spiky_and_flat(n_flat)
+    per = dilate_per_sample(yp, yt, band=8)
+    assert float(per.min()) >= 0.0, f"negative loss: {float(per.min()):.3e}"
+
+
+def test_peaks_still_drive_the_gradient():
+    yp, yt = _spiky_and_flat(15)
+    yp = yp.requires_grad_(True)
+    dilate_per_sample(yp, yt, band=8).mean().backward()
+    g = yp.grad
+    assert torch.isfinite(g).all()
+    assert float(g[0].abs().sum()) > float(g[1:].abs().sum()), (
+        "fifteen flat windows carry more gradient than the one real window"
+    )
+
+
+def test_an_entirely_flat_batch_falls_back_to_mae():
+    """No window has any shape or timing, so there is nothing for soft-DTW to
+    measure and no scale to normalise against. Normalising anyway divided by
+    the absolute floor and returned ~1e6 for a trivially small error."""
+    H = 96
+    yt = torch.zeros(4, H)
+    yp = torch.full((4, H), 0.1)
+    got = float(dilate_per_sample(yp, yt, band=8).mean())
+    assert got == pytest.approx(0.1, abs=1e-6), f"expected plain MAE 0.1, got {got}"
+
+
+def test_flat_fallback_does_not_break_scale_invariance():
+    H = 96
+    vals = []
+    for amp in (1.0, 1e3, 1e6):
+        yt = torch.zeros(4, H)
+        yt[:, ::12] = amp
+        vals.append(float(dilate_per_sample(yt * 0.8, yt, band=8).mean()))
+    assert vals[0] == pytest.approx(vals[1], rel=1e-4)
+    assert vals[0] == pytest.approx(vals[2], rel=1e-4)

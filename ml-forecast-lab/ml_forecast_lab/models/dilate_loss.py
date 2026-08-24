@@ -57,9 +57,27 @@ import torch
 # Override per call / per backend with ``dilate_band``.
 _DEFAULT_BAND_CAP = 8
 
-# Floor for the per-window cost scale. A window that is entirely flat has zero
-# variance; without a floor the normalisation would divide by ~0.
+# Absolute floor for the per-window cost scale, used only when a whole batch
+# has no scale at all. A window that is entirely flat has zero variance;
+# without a floor the normalisation would divide by ~0.
 _MIN_COST_SCALE = 1e-8
+
+# A window whose variance falls below this fraction of the batch's mean
+# variance is treated as flat and floored there.
+#
+# Flooring at the absolute constant instead is what made this dangerous: an
+# all-zero window divides by 1e-8, so its cost is multiplied by 1e8. On a spiky
+# load — the workload this loss exists for — most windows ARE flat between
+# bursts, so they became the entire loss and the gradient from the peaks was
+# drowned out. Measured at H=96, band=8:
+#
+#     normal spiky window          var 7.6e+00   loss 1.4e-01
+#     all-zero window, pred 0.1    var 0.0e+00   loss 1.0e+06
+#     1 spiky + 4 flat windows     batch mean 0.094 -> 80.0
+#
+# 1% is low enough to leave genuinely quiet-but-varying windows alone, and high
+# enough that a dead-flat one cannot dominate its neighbours.
+_FLAT_WINDOW_FLOOR_FRACTION = 0.01
 
 
 def _soft_dtw_value_scalar(
@@ -298,15 +316,54 @@ def dilate_per_sample(
     # consistent effect across the whole range.
     #
     # Detached, so this is a normalisation rather than a gradient path.
-    scale = y_true.detach().var(dim=-1, keepdim=True, unbiased=False)
-    scale = scale.clamp_min(_MIN_COST_SCALE).unsqueeze(-1)  # (B, 1, 1)
+    # The per-window variance is floored against the BATCH's own scale, not a
+    # constant — see _FLAT_WINDOW_FLOOR_FRACTION. A flat window has variance
+    # exactly 0, and a constant floor turns that into a 1e8 amplifier that
+    # swamps every real window beside it.
+    #
+    # Flooring against the batch keeps the loss scale-invariant (the floor
+    # scales with the data exactly as the variance does) while giving a flat
+    # window a denominator in the same units as its neighbours.
+    var = y_true.detach().var(dim=-1, keepdim=True, unbiased=False)   # (B, 1)
+
+    # An ENTIRELY flat batch has no scale to normalise against — every window
+    # is constant, so there is no shape, no timing, and nothing for soft-DTW to
+    # measure. Normalising anyway divides by the absolute floor and returns
+    # ~1e6 for a trivially small error. Fall back to plain MAE in raw units,
+    # matching the H < 2 branch above.
+    if float(var.max()) <= _MIN_COST_SCALE:
+        return torch.abs(y_pred - y_true).reshape(B, -1).mean(dim=-1)
+
+    batch_ref = var.mean().clamp_min(_MIN_COST_SCALE)
+    scale = var.clamp_min(batch_ref * _FLAT_WINDOW_FLOOR_FRACTION)
+    scale = scale.clamp_min(_MIN_COST_SCALE).unsqueeze(-1)            # (B, 1, 1)
     D = D / scale
+
+    # A flat target window has no shape and no timing to match, so soft-DTW has
+    # nothing to say about it — and asking anyway is actively harmful. It is
+    # also the common case here: a spiky load is mostly flat between bursts.
+    #
+    # Those windows fall back to a point loss, exactly as the H < 2 case above
+    # does. It is expressed as a normalised MEAN SQUARED error so it lands in
+    # the same units as the shape term (which is soft-DTW over D, already
+    # divided by the variance scale), rather than mixing raw and normalised
+    # quantities in one batch mean.
+    #
+    # Without this, flooring alone left flat windows able to go NEGATIVE — a
+    # soft-min with a large effective gamma dips below zero — so a batch mean
+    # could be driven down simply by having more flat windows in it.
+    flat = (var <= batch_ref * _FLAT_WINDOW_FLOOR_FRACTION).squeeze(-1)  # (B,)
+    point = ((y_pred - y_true) ** 2).mean(dim=-1) / batch_ref            # (B,)
+
+    def _with_flat_fallback(value: "torch.Tensor") -> "torch.Tensor":
+        """Substitute the point loss on windows with no shape to match."""
+        return torch.where(flat, point, value)
 
     # Shape term — normalise by H so gamma stays meaningful across horizons.
     shape = _soft_dtw_value(D, gamma, band) / float(H)  # (B,)
 
     if alpha >= 1.0:
-        return shape
+        return _with_flat_fallback(shape)
 
     # Temporal term — the soft alignment is exactly d(soft-DTW)/dD. Weight it
     # by the squared off-diagonal distance so drift from "on time" is penalised.
@@ -317,9 +374,9 @@ def dilate_per_sample(
             shape.sum(), D, create_graph=True, retain_graph=True,
         )[0]  # (B, H, H)
     except RuntimeError:
-        return shape
+        return _with_flat_fallback(shape)
 
     idx = torch.arange(H, device=D.device, dtype=D.dtype)
     omega = (idx.view(H, 1) - idx.view(1, H)) ** 2 / float(H * H)  # (H, H)
     temporal = (align * omega.unsqueeze(0)).sum(dim=(1, 2))  # (B,)
-    return alpha * shape + (1.0 - alpha) * temporal
+    return _with_flat_fallback(alpha * shape + (1.0 - alpha) * temporal)
