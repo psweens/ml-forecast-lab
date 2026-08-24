@@ -39,6 +39,15 @@ positionally on a gap-compacted series instead makes the lag drift off 24
 hours: a sensor with a genuine 0.99 daily rhythm reads 0.06 at a 5% hole rate
 and goes negative at 10%.
 
+Anything slower than a day is filtered out first, because a plain lag-24h
+correlation cannot separate a daily rhythm from a trend — every slowly-varying
+signal correlates with itself at every lag. Without that step a pure linear
+ramp with no cycle at all reads 1.00 and a random walk 0.97, both of which
+would be reported as a strong daily pattern. An EV charged three evenings a
+week correctly reads ~0.0 (yesterday tells you nothing about today), while a
+hot-water tank that reheats on weekdays only reads 0.81 — five days in seven
+repeating is a daily pattern worth exploiting.
+
 ## 2.49.0
 
 ### Added

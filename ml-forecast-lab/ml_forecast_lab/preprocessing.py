@@ -1104,7 +1104,35 @@ def daily_autocorrelation(
     s = pd.to_numeric(pd.Series(on_grid), errors="coerce")
     if lag < 1 or s.size <= 2 * lag:
         return None
-    paired = pd.concat([s, s.shift(lag)], axis=1).dropna()
+
+    # Remove everything slower than a day before correlating.
+    #
+    # A raw lag-24h correlation cannot tell a daily rhythm from a trend: any
+    # slowly-varying signal correlates with itself at every lag. Measured on
+    # the raw form — a pure linear ramp with no cycle at all read 1.000, a
+    # random walk 0.968, and a purely WEEKLY rhythm 0.627, all of which would
+    # be reported as a daily pattern and push the user toward seasonal metrics
+    # and calendar features that cannot help them.
+    #
+    # Subtracting a one-day centred rolling mean is a high-pass filter at
+    # exactly the scale of interest: a full daily cycle averages to ~0 over a
+    # day so it survives intact, while a trend, a random walk or a weekly
+    # component is tracked by the rolling mean and cancels. `min_periods` lets
+    # the filter tolerate the recorder gaps this function exists to survive.
+    baseline = s.rolling(lag, center=True, min_periods=max(2, lag // 2)).mean()
+    resid = s - baseline
+
+    # A signal with no within-day structure leaves a residual that is pure
+    # numerical dust; correlating that yields a meaningless number. Compare
+    # against the original scale rather than an absolute floor, so this holds
+    # for a sensor in watts and the same sensor in kilowatts.
+    ref = float(s.std(skipna=True))
+    if not np.isfinite(ref) or ref <= 0:
+        return None
+    if float(resid.std(skipna=True) or 0.0) < 1e-6 * ref:
+        return 0.0
+
+    paired = pd.concat([resid, resid.shift(lag)], axis=1).dropna()
     if len(paired) < 2:
         return None
     a, b = paired.iloc[:, 0], paired.iloc[:, 1]

@@ -421,3 +421,61 @@ class TestSpikinessIsReciprocalDutyCycle:
             f"expected the same load to fall out of the top band once it sits "
             f"on a baseline; got {readings}"
         )
+
+
+class TestDailyAutocorrelationIsNotFooledByTrend:
+    """A raw lag-24h correlation cannot tell a daily rhythm from a trend: any
+    slowly-varying signal correlates with itself at every lag.
+
+    Measured on the undetrended form, a pure linear ramp with no cycle at all
+    read 1.000 and a random walk 0.968 — both reported as a strong daily
+    pattern, pushing the user toward seasonal metrics and calendar features
+    that cannot help. Subtracting a one-day centred rolling mean removes
+    anything slower than a day while leaving the within-day shape intact.
+    """
+
+    @staticmethod
+    def _idx(n=60 * 48):
+        return pd.date_range("2024-06-15", periods=n, freq="30min")
+
+    @pytest.mark.parametrize("name,build", [
+        ("linear trend", lambda t, n, rng: t / n),
+        ("slow drift + noise", lambda t, n, rng: t / n * 3 + rng.normal(0, .05, n)),
+        ("random walk", lambda t, n, rng: np.cumsum(rng.normal(0, .1, n))),
+        ("white noise", lambda t, n, rng: rng.normal(0, 1, n)),
+    ])
+    def test_signals_without_a_daily_cycle_read_near_zero(self, name, build):
+        idx = self._idx()
+        n = len(idx)
+        r = daily_autocorrelation(
+            pd.Series(build(np.arange(n), n, np.random.default_rng(0)), index=idx), 30
+        )
+        assert abs(r) < 0.2, f"{name} reported a daily rhythm of {r:.3f}"
+
+    def test_a_genuine_rhythm_survives_a_strong_trend(self):
+        """Removing the trend must not remove the signal with it — a sensor
+        whose usage is climbing still has its daily shape."""
+        idx = self._idx()
+        t = np.arange(len(idx))
+        y = np.sin(t / 48 * 2 * np.pi) + t / len(idx) * 6      # trend dominates in amplitude
+        assert daily_autocorrelation(pd.Series(y, index=idx), 30) > 0.9
+
+    def test_a_weekly_only_load_is_not_called_daily(self):
+        """An EV charged three evenings a week has no daily pattern —
+        yesterday tells you nothing about today."""
+        idx = self._idx()
+        y = np.zeros(len(idx))
+        for d in range(60):
+            if d % 7 in (1, 3, 5):
+                y[d * 48 + 36:d * 48 + 44] = 7.0
+        assert daily_autocorrelation(pd.Series(y, index=idx), 30) < 0.2
+
+    def test_a_weekday_only_rhythm_still_counts_as_daily(self):
+        """Five days in seven repeating IS a daily pattern worth exploiting."""
+        idx = self._idx()
+        y = np.zeros(len(idx))
+        for d in range(60):
+            if d % 7 < 5:
+                for s0 in (12, 36):
+                    y[d * 48 + s0:d * 48 + s0 + 2] = 3.0
+        assert daily_autocorrelation(pd.Series(y, index=idx), 30) > 0.7
