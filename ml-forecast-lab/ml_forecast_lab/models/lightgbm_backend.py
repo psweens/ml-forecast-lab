@@ -205,6 +205,11 @@ class LightGBMModel(ForecastModel):
             "mae": "regression_l1",
             "huber": "huber",
             "tweedie": "tweedie",
+            # 'dilate' is a neural shape+time loss with no tree analogue; for a
+            # spiky target the tree's peak-appropriate objective is Tweedie, so
+            # loss_fn='dilate' maps trees → Tweedie (mirrors the neural↔tree
+            # split surfaced in Smart Setup's per-family loss breakdown).
+            "dilate": "tweedie",
         }
         objective = objective_map.get(self.loss_fn, "huber")
         params = {
