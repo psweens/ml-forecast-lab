@@ -1123,6 +1123,13 @@ class MLForecastLabApp:
                 return self._rollback_cached_model(experiment_name)
             self.web_app.state.appstate.rollback_callback = _rollback_trigger
 
+            # Reset callback — drops the cached model when an experiment's
+            # target sensor is replaced so a stale model can't forecast the
+            # new signal. Synchronous; the web route awaits nothing here.
+            self.web_app.state.appstate.reset_model_callback = (
+                self._reset_cached_model
+            )
+
             # Pre-flight data sanity report callback for the Settings tab.
             async def _data_report_trigger(experiment_name: str) -> dict:
                 exp_cfg = next(
@@ -5176,6 +5183,28 @@ class MLForecastLabApp:
             return True, f"Rolled back to {model_name} trained {meta['trained_at']}"
         except Exception as e:
             return False, f"Rollback restore failed: {e}"
+
+    def _reset_cached_model(self, exp_name: str) -> None:
+        """Drop the trained model for *exp_name* from memory and disk.
+
+        Used when an experiment's target sensor is replaced: the cached model
+        (keyed by experiment name, not by target) was trained on the old
+        signal, so leaving it in place would let a forecast cycle publish
+        predictions for the new sensor from the wrong weights. Removing both
+        the live ``_cached_models`` entry and the persisted weights — including
+        the ``previous/`` rollback generation, which is equally stale — forces
+        a clean retrain. Best-effort: a failed disk delete is logged, never
+        raised, so it can't break the target-replace request.
+        """
+        import shutil
+        self._cached_models.pop(exp_name, None)
+        try:
+            model_dir = self._cached_model_dir(exp_name)
+            if model_dir.exists():
+                shutil.rmtree(model_dir, ignore_errors=True)
+                logger.info(f"Cleared cached model for '{exp_name}' at {model_dir}")
+        except Exception as e:
+            logger.warning(f"Could not remove cached model dir for {exp_name}: {e}")
 
     async def _run_forecast_cycle(self):
         """

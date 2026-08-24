@@ -221,3 +221,61 @@ class TestSameCovariateRespectsLaggedValueKey:
         b = {"entity": "weather.x", "role": "lagged",
              "future_value_key": "temperature"}
         assert _same_covariate(a, b) is True
+
+
+class TestReplaceExperimentTarget:
+    """`replace_experiment_target` rewrites target_entity and reports the
+    previous value so the caller can clear the now-stale derived state."""
+
+    def _write(self, tmp_path: Path, target="sensor.old") -> Path:
+        cfg = tmp_path / "mlfl.yaml"
+        cfg.write_text(yaml.safe_dump({
+            "experiments": [
+                {"name": "exp", "target_entity": target,
+                 "covariates": [{"entity": "sensor.temp", "role": "lagged"}]},
+            ],
+        }))
+        return cfg
+
+    def test_replaces_and_returns_previous(self, tmp_path):
+        from ml_forecast_lab.config import replace_experiment_target
+        cfg = self._write(tmp_path)
+        previous = replace_experiment_target(cfg, "exp", "sensor.new")
+        assert previous == "sensor.old"
+        data = yaml.safe_load(cfg.read_text())
+        assert data["experiments"][0]["target_entity"] == "sensor.new"
+        # Other settings are preserved.
+        assert data["experiments"][0]["covariates"][0]["entity"] == "sensor.temp"
+
+    def test_strips_whitespace(self, tmp_path):
+        from ml_forecast_lab.config import replace_experiment_target
+        cfg = self._write(tmp_path)
+        replace_experiment_target(cfg, "exp", "  sensor.new  ")
+        data = yaml.safe_load(cfg.read_text())
+        assert data["experiments"][0]["target_entity"] == "sensor.new"
+
+    def test_noop_when_unchanged_returns_previous(self, tmp_path):
+        from ml_forecast_lab.config import replace_experiment_target
+        cfg = self._write(tmp_path, target="sensor.same")
+        assert replace_experiment_target(cfg, "exp", "sensor.same") == "sensor.same"
+
+    def test_missing_experiment_returns_none(self, tmp_path):
+        from ml_forecast_lab.config import replace_experiment_target
+        cfg = self._write(tmp_path)
+        assert replace_experiment_target(cfg, "nope", "sensor.new") is None
+        # File untouched.
+        data = yaml.safe_load(cfg.read_text())
+        assert data["experiments"][0]["target_entity"] == "sensor.old"
+
+    def test_empty_target_rejected(self, tmp_path):
+        from ml_forecast_lab.config import replace_experiment_target
+        cfg = self._write(tmp_path)
+        with pytest.raises(ValueError):
+            replace_experiment_target(cfg, "exp", "   ")
+
+    @pytest.mark.parametrize("bad", ["no_domain", "sensor.", ".obj", "Sensor.X", "a.b.c"])
+    def test_malformed_entity_rejected(self, tmp_path, bad):
+        from ml_forecast_lab.config import replace_experiment_target
+        cfg = self._write(tmp_path)
+        with pytest.raises(ValueError):
+            replace_experiment_target(cfg, "exp", bad)
