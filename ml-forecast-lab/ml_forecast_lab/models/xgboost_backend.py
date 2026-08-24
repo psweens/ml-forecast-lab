@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from .base import ForecastModel
+from .base import ForecastModel, resolve_tree_loss_for_target
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +233,9 @@ class XGBoostModel(ForecastModel):
             # peak-appropriate Tweedie objective for spiky targets.
             "dilate": "reg:tweedie",
         }
-        objective = objective_map.get(self.loss_fn, "reg:pseudohubererror")
+        # Tweedie rejects negative labels; demote on a signed target.
+        _loss = resolve_tree_loss_for_target(self.loss_fn, y_train, self.name)
+        objective = objective_map.get(_loss, "reg:pseudohubererror")
         regressor_kwargs = dict(
             n_estimators=self.n_estimators,
             max_depth=self.max_depth,

@@ -15,7 +15,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from .base import ForecastModel
+from .base import ForecastModel, resolve_tree_loss_for_target
 
 logger = logging.getLogger(__name__)
 
@@ -125,11 +125,14 @@ class CatBoostModel(ForecastModel):
         # CatBoost native loss-function names. mse → RMSE (CatBoost's
         # squared-error implementation), mae → MAE, huber takes a delta
         # parameter, tweedie takes a variance_power.
-        if self.loss_fn == "mse":
+        # Tweedie rejects negative labels; demote on a signed target so a whole
+        # benchmark does not fail. See resolve_tree_loss_for_target.
+        _loss = resolve_tree_loss_for_target(self.loss_fn, y_train, self.name)
+        if _loss == "mse":
             loss_function = "RMSE"
-        elif self.loss_fn == "mae":
+        elif _loss == "mae":
             loss_function = "MAE"
-        elif self.loss_fn in ("tweedie", "dilate"):
+        elif _loss in ("tweedie", "dilate"):
             # 'dilate' is a neural shape+time loss with no tree analogue → use
             # the peak-appropriate Tweedie objective for spiky targets.
             loss_function = f"Tweedie:variance_power={float(self.tweedie_variance_power):.3f}"
