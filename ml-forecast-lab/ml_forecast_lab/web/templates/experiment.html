@@ -841,9 +841,13 @@
                     <th>Interval MAE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Mean Absolute Error on the next-step (h=1) prediction — average magnitude of per-interval prediction errors. Lower is better. The ± value shows variation across CV folds.</span></span></th>
                     <th>Interval RMSE{{ " (" + units + ")" if units else "" }} <span class="info-tip">?<span class="tip-text">Root Mean Square Error on the next-step (h=1) prediction — penalises large per-interval errors more heavily than MAE. Lower is better.</span></span></th>
                     <th>Interval MASE <span class="info-tip">?<span class="tip-text">Mean Absolute Scaled Error on the next-step (h=1) prediction — error relative to a naive forecast. Below 1.0 means the model beats naive; above 1.0 means worse. Handles near-zero values reliably unlike MAPE.</span></span></th>
-                    {% if results and results.models and results.models[0].selection_metric
-                          and results.models[0].selection_metric not in ('mae', 'rmse', 'mase') %}
-                    <th>{{ results.models[0].selection_metric | replace('_', ' ') | title }} <span class="info-tip">?<span class="tip-text">The metric this experiment ranks by (Settings &rarr; Production metric). This is the number that decides the champion — the MAE / RMSE / MASE columns are shown for context and do not drive the ranking. Lower is better; the ± value is variation across CV folds.</span></span></th>
+                    {# The leaderboard loops over `models`, not `results.models` —
+                       keying off the wrong variable made this column silently
+                       never render (header short-circuited) while the matching
+                       cell raised UndefinedError. #}
+                    {% if models and models[0].selection_metric
+                          and models[0].selection_metric not in ('mae', 'rmse', 'mase') %}
+                    <th>{{ models[0].selection_metric | replace('_', ' ') | title }} <span class="info-tip">?<span class="tip-text">The metric this experiment ranks by (Settings &rarr; Production metric). This is the number that decides the champion — the MAE / RMSE / MASE columns are shown for context and do not drive the ranking. Lower is better; the ± value is variation across CV folds.</span></span></th>
                     {% endif %}
                     <th>Train Time <span class="info-tip">?<span class="tip-text">Average wall-clock training time per CV fold in seconds.</span></span></th>
                     <th>Mean Rank <span class="info-tip">?<span class="tip-text">Composite mean rank across CV folds (1.0 = ranked 1st in every fold). Lower is better. The bracketed numbers are a 95% bootstrap confidence interval over fold resamples — when two models' CIs overlap they're "tied within fold noise" and the leader badge isn't really meaningful. This is the Demšar-style averaging step only; the full Demšar (2006) Friedman/Nemenyi test does not apply to CV folds of one series — see <code>docs/RANKING_NOTES.md</code>.</span></span></th>
@@ -874,9 +878,10 @@
                         <span class="metric-value">{{ "%.2f" | format(model.mase.mean) }}</span>
                         <span class="metric-std">± {{ "%.2f" | format(model.mase.std) }}</span>
                     </td>
-                    {# Same condition as the header, driven by the same value, so the
-                       column count can never diverge from the cell count. #}
-                    {% if results.models[0].selection_metric and results.models[0].selection_metric not in ('mae', 'rmse', 'mase') %}
+                    {# Same expression as the header, so the cell count can never
+                       diverge from the column count. #}
+                    {% if models and models[0].selection_metric
+                          and models[0].selection_metric not in ('mae', 'rmse', 'mase') %}
                     <td>{% if model.selection_value %}{{ "%.4f" | format(model.selection_value.mean) }}<span style="color:var(--text-secondary);font-size:0.85em;"> ± {{ "%.4f" | format(model.selection_value.std) }}</span>{% else %}—{% endif %}</td>
                     {% endif %}
                     <td>{{ "%.1f" | format(model.train_time_seconds) }}s</td>
