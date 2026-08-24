@@ -516,11 +516,57 @@ class TestComparisonMulti:
         # Actual now reaches the same horizon as the live forecast (bin 47),
         # not the last recorder write (bin 40).
         assert last(actual) == last(app)
-        # The carried tail holds the running total flat (no afternoon energy).
-        peak = actual[last(actual)]
-        assert abs(actual[last(actual)] - peak) < 1e-6
+        # The carried tail holds flat at the value of the LAST REAL bin (40),
+        # not merely flat at whatever the tail happens to hold — the original
+        # assertion compared actual[last] against itself and passed on any
+        # value at all. Anchor on the display-space value at bin 40, since in
+        # cumulative view the plotted series is re-derived, not the raw total.
+        last_real = float(actual[40])
         carried = [actual[i] for i in range(41, len(actual)) if actual[i] is not None]
-        assert carried and all(abs(v - peak) < 1e-6 for v in carried)
+        assert carried, "expected a carried tail past the last recorder write"
+        assert all(abs(v - last_real) < 1e-6 for v in carried), (
+            f"carried tail should hold {last_real}, got {carried[:5]}"
+        )
+
+    def test_carried_points_are_display_only_and_never_scored(self, db):
+        """The held values are inferred, not observed. They belong on the chart
+        and nowhere else.
+
+        If they reach the scoring path the add-on ends up grading its own
+        forecast against a flat line it invented — and because the held points
+        are non-NaN they also defeat the dropna() filters that previously
+        excluded exactly those bins. On a sensor that has genuinely died, that
+        is a leaderboard computed almost entirely from fabricated actuals.
+        """
+        grid = _grid(48)
+        cum, s = [], 0.0
+        for i in range(48):
+            s += (1.0 if i <= 40 else 0.0)
+            cum.append(s)
+        ttbl = db.safe_table_name("sensor.pv_today_kwh")
+        db.store_history(ttbl, pd.DataFrame({"ds": grid[:41], "value": cum[:41]}))
+        for i, t_ in enumerate(grid):
+            delta = cum[i] - (cum[i - 1] if i > 0 else 0.0)
+            db.log_forecast(experiment="e", issued_at=t_ - timedelta(minutes=INTERVAL),
+                            targets=[t_], predictions=[delta + 0.01],
+                            model_name="lgb", model_version="v1")
+        specs = [_spec("sensor.dummy", "state", db.safe_table_name("sensor.dummy"))]
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, specs, GENEROUS_WINDOW, INTERVAL, "increment",
+            None, None, "cumulative", "kWh")
+
+        # The overlay is extended...
+        actual = res["overlay"]["actual"]
+        last = lambda a: max(i for i, v in enumerate(a) if v is not None)
+        assert last(actual) == last(res["overlay"]["app"])
+
+        # ...but scoring saw only the 41 real bins, not the 48 displayed ones.
+        scored_n = (res.get("app_self") or {}).get("n")
+        assert scored_n is not None
+        assert scored_n <= 41, (
+            f"scored {scored_n} bins from 41 real readings — carried points "
+            f"leaked into the metrics"
+        )
 
     def test_actual_not_extended_when_already_current(self, db):
         # When the actuals already reach the forecast horizon, carry-forward is

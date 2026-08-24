@@ -3592,6 +3592,9 @@ class HistoryDB:
         else:
             actual_canon = _legacy_eval(actual_raw, target_cumulative)
         actual_disp = _display(actual_canon)
+        # Chart-only view of the actuals. Identical to actual_disp unless the
+        # recorder-quiet carry-forward below has something to add.
+        actual_disp_overlay = actual_disp
 
         # Guard against grossly non-physical logged forecast values. A
         # log-transform inversion that overflows (np.expm1 of a diverged
@@ -3833,18 +3836,31 @@ class HistoryDB:
                     )
                     if len(fill_idx):
                         held = pd.Series(float(actual_raw.loc[last_valid]), index=fill_idx)
-                        actual_raw = pd.concat([actual_raw, held])
-                        actual_raw = actual_raw[
-                            ~actual_raw.index.duplicated(keep="first")
+                        carried_raw = pd.concat([actual_raw, held])
+                        carried_raw = carried_raw[
+                            ~carried_raw.index.duplicated(keep="first")
                         ].sort_index()
-                        # Re-derive the canonical + display from the held series.
+                        # DISPLAY ONLY. The held values are inferred, not
+                        # observed, so they are kept in a separate series that
+                        # feeds the chart overlay and nothing else.
+                        #
+                        # Rebinding actual_canon / actual_disp here — as this
+                        # originally did — silently routes them into every
+                        # scoring path downstream: the metrics block, the
+                        # head-to-head winner election, the daily-error series,
+                        # the lead curve and the skill table. The held points
+                        # are non-NaN, so they also defeat the dropna() filters
+                        # that previously excluded exactly those bins. On a
+                        # sensor that has genuinely died the add-on would then
+                        # be scoring its forecast against a flat line it
+                        # invented, which flatters or penalises it at random.
                         if unit_aware:
-                            actual_canon = _to_canon(
-                                actual_raw, t_dim, t_base, target_cumulative
+                            carried_canon = _to_canon(
+                                carried_raw, t_dim, t_base, target_cumulative
                             )
                         else:
-                            actual_canon = _legacy_eval(actual_raw, target_cumulative)
-                        actual_disp = _display(actual_canon)
+                            carried_canon = _legacy_eval(carried_raw, target_cumulative)
+                        actual_disp_overlay = _display(carried_canon)
 
         # --- drop user-excluded days from every series & frame ---
         # A day flagged as corrupt is removed from the actuals, this add-on's
@@ -3872,6 +3888,7 @@ class HistoryDB:
 
             actual_canon = _drop_excluded_series(actual_canon)
             actual_disp = _drop_excluded_series(actual_disp)
+            actual_disp_overlay = _drop_excluded_series(actual_disp_overlay)
             app_canon = _drop_excluded_series(app_canon)
             app_disp = _drop_excluded_series(app_disp)
             fdf = _drop_excluded_frame(fdf)
@@ -3888,7 +3905,7 @@ class HistoryDB:
 
         # --- shared overlay grid (union within the window) ---
         idx = pd.DatetimeIndex([])
-        for s in [actual_disp, app_disp] + [it["disp"] for it in ext_items]:
+        for s in [actual_disp_overlay, app_disp] + [it["disp"] for it in ext_items]:
             if s is not None and not s.empty:
                 idx = idx.union(s.index)
         if len(idx):
@@ -3905,7 +3922,7 @@ class HistoryDB:
         result["app_points"] = app_points
         result["overlay"] = {
             "ds": [_iso_utc(t) for t in idx],
-            "actual": _col(actual_disp),
+            "actual": _col(actual_disp_overlay),
             "app": _col(app_disp),
             "externals": [
                 {"entity": it["entity"], "label": it["label"],
