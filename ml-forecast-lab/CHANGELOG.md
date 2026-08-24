@@ -35,6 +35,27 @@ meaningful at any magnitude.
 backend emits `(B, H, Q)`, so the guard passed, the loss read the quantile axis
 as the horizon, and DLinear raised on its first batch — while also bypassing
 the pinball criterion that handles the 3-D case correctly.
+## 2.48.2
+
+### Added
+
+**Developer mode: the branch dropdown lists only branches with an open PR**,
+and an installed overlay whose PR has since closed is cleaned off the Pi
+automatically. Both API calls happen inside the same try, and the cleanup runs
+only after a successful PR fetch, so a rate-limit or a network failure can
+never remove a valid overlay.
+
+### Fixed
+
+**The stale-overlay cleanup no longer deletes the code the add-on is running
+from.** The boot script puts the overlay directory on `PYTHONPATH`, so when the
+overlay is what booted, that directory holds the running module along with the
+template and static directories resolved at startup. Removing it mid-request
+made the next render raise `TemplateNotFound` and every later function-local
+import fail — including the reload the UI suggested, so recovery needed the
+Supervisor page. The cleanup now checks whether the overlay is the running code
+and, if so, leaves it alone and says so, pointing at **Revert** (which pairs the
+same removal with a restart, and is why it is safe there).
 
 ## 2.48.1
 

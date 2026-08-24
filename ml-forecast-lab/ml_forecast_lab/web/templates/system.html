@@ -214,6 +214,13 @@
         the named branch. The bundled image is never modified; revert or turn
         off <code>developer_mode</code> to return to it.
     </p>
+    <p class="subtitle" style="margin-bottom:12px;font-size:0.85rem;">
+        The dropdown lists branches with an <strong>open pull request</strong>
+        (plus the default branch). When a branch's PR is merged or closed it
+        drops off the list, and if it was the one installed here its files are
+        removed from the Pi automatically (the add-on returns to the bundled
+        release on the next restart).
+    </p>
 
     {% if dev_installed %}
     <div class="stat-box" style="margin-bottom:12px;{% if dev_running %}border-color:#ea580c;{% endif %}">
@@ -334,17 +341,40 @@
         fetch(BASE_PATH + '/api/system/dev/branches')
         .then(r => r.json())
         .then(body => {
+            // An installed overlay whose branch no longer has an open PR was
+            // just cleaned off the Pi — tell the user and nudge a reload so
+            // the server-rendered "Active overlay" box refreshes.
+            // The overlay's PR is closed but it is the running code, so it
+            // was deliberately left in place — deleting it would break this
+            // very page. Tell the user to Revert, which restarts.
+            if (body.stale_overlay && body.stale_overlay.branch) {
+                _devStatus('The overlay you are running ("'
+                    + body.stale_overlay.branch + '") no longer has an open PR. '
+                    + 'Click Revert to restart onto the bundled release.',
+                    'var(--warning)');
+            }
+            if (body.removed_overlay && body.removed_overlay.branch) {
+                _devStatus('Removed the overlay for closed branch "'
+                    + body.removed_overlay.branch + '" (no open PR) — the Pi '
+                    + 'returns to the bundled release on the next restart. '
+                    + 'Reload to refresh this page.', 'var(--text)');
+            }
             if (!body.success || !body.branches || !body.branches.length) {
                 sel.innerHTML = '<option value="">'
-                    + (body.error ? 'Could not load — use manual entry' : 'No branches found')
+                    + (body.error ? 'Could not load — use manual entry'
+                       : 'No open-PR branches — use manual entry')
                     + '</option>';
                 return;
             }
             sel.innerHTML = '';
+            var prs = body.pull_requests || {};
             body.branches.forEach(function (name) {
                 var opt = document.createElement('option');
                 opt.value = name;
-                opt.textContent = name + (name === DEV_CURRENT_BRANCH ? '  (running)' : '');
+                var label = name;
+                if (prs[name] && prs[name].number) { label += '  (#' + prs[name].number + ')'; }
+                if (name === DEV_CURRENT_BRANCH) { label += '  (running)'; }
+                opt.textContent = label;
                 if (name === DEV_CURRENT_BRANCH) { opt.selected = true; }
                 sel.appendChild(opt);
             });
