@@ -23,6 +23,35 @@ purpose, but they were also being scored — so the chart reported error against
 a flat line the add-on had inferred rather than measured, on exactly the
 plateaued sensors the carry-forward exists for. The response now carries an
 observed-only series alongside the drawn one, and the chart scores from that.
+## 2.49.4
+
+### Fixed
+
+**The model trained for production is now the model the benchmark ranked.**
+An experiment's **Loss function** setting reached the tree backends only in the
+benchmark's cross-validation loop. Every other path — the holdout chart,
+production training, scheduled retrains, hyperparameter tuning and covariate
+analysis — went through a helper that returned early for anything not a neural
+network, so LightGBM, XGBoost and CatBoost silently trained with their default
+objective instead. A tree could therefore win the leaderboard under one
+objective and then be deployed under another. The helper now decides per
+setting rather than per model type: the loss applies to every backend that has
+one, while the optimiser stays neural-only.
+
+The same helper now also demotes Tweedie to Huber for neural backends, which
+the CV loop already did. Previously the two paths disagreed, and the neural
+backend quietly fell back to its own default for a name it did not recognise.
+
+**Selecting a peak-oriented loss no longer breaks the tree backends on a signed
+sensor.** Tweedie models a non-negative quantity, so the tree libraries reject
+negative labels — LightGBM raises `[tweedie]: at least one target label is
+negative` and takes the CV fold with it. Since `dilate` maps to Tweedie on
+trees, a loss the dropdown labels "neural only" could fail every tree backend
+in the benchmark. Common Home Assistant targets are signed: net grid power,
+temperature deltas, battery flow. The backends now check the actual training
+target and fall back to Huber with a warning when it goes negative, rather than
+trusting the `target_is_nonnegative` setting, which defaults to off and would
+have disabled Tweedie for everyone who never set it.
 
 ## 2.49.3
 

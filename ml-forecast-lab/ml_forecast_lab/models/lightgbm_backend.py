@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from .base import ForecastModel
+from .base import ForecastModel, resolve_tree_loss_for_target
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +211,10 @@ class LightGBMModel(ForecastModel):
             # split surfaced in Smart Setup's per-family loss breakdown).
             "dilate": "tweedie",
         }
-        objective = objective_map.get(self.loss_fn, "huber")
+        # Tweedie rejects negative labels; demote on a signed target so a
+        # whole benchmark does not hard-fail. See resolve_tree_loss_for_target.
+        _loss = resolve_tree_loss_for_target(self.loss_fn, y_train, self.name)
+        objective = objective_map.get(_loss, "huber")
         params = {
             "objective": objective,
             "metric": "rmse",

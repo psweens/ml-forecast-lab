@@ -384,3 +384,90 @@ class TestValidationUsesTheSameFormulaAsTraining:
         with torch.no_grad():
             val = float(dilate_per_sample(base.clone(), yt, alpha=alpha, band=8).mean())
         assert val == pytest.approx(train, rel=1e-6)
+# --------------------------------------------------------------------------- #
+# Tree backends: loss propagation and the Tweedie signed-target guard
+# --------------------------------------------------------------------------- #
+class TestTreeLossPropagation:
+    """The experiment's `loss_fn` must reach the tree backends everywhere, not
+    only in the benchmark CV loop.
+
+    `_apply_experiment_neural_params` blanket-returned for anything without
+    `is_neural`, but the tree backends each map `loss_fn` onto a native
+    objective. The CV loop sets it separately, so a tree was BENCHMARKED under
+    one objective and TRAINED FOR PRODUCTION under another — the holdout chart,
+    production training, retrain, tuning and covariate analysis all came
+    through the helper. The model publishing forecasts to HA was not the model
+    the leaderboard ranked.
+    """
+
+    class _Cfg:
+        loss_fn = "tweedie"
+        optimiser = "adam"
+        patience = None
+
+    def test_tree_receives_the_experiment_loss(self):
+        from ml_forecast_lab.main import _apply_experiment_neural_params
+        from ml_forecast_lab.models.lightgbm_backend import LightGBMModel
+        m = LightGBMModel()
+        _apply_experiment_neural_params(m, self._Cfg())
+        assert m.loss_fn == "tweedie"
+
+    def test_optimiser_stays_neural_only(self):
+        """Trees have no optimiser; the per-attribute gate must not hand them
+        one just because the loss gate opened."""
+        from ml_forecast_lab.main import _apply_experiment_neural_params
+        from ml_forecast_lab.models.lightgbm_backend import LightGBMModel
+        m = LightGBMModel()
+        _apply_experiment_neural_params(m, self._Cfg())
+        assert not hasattr(m, "optimiser") or getattr(m, "optimiser", None) != "adam"
+
+    def test_neural_tweedie_is_demoted_here_too(self):
+        """There is no torch Tweedie. The CV loop demotes it; so must this, or
+        the two paths train different objectives and the backend silently
+        falls back to its own default for an unrecognised name."""
+        from ml_forecast_lab.main import _apply_experiment_neural_params
+        from ml_forecast_lab.models.lstm_backend import LSTMModel
+        m = LSTMModel()
+        _apply_experiment_neural_params(m, self._Cfg())
+        assert m.loss_fn == "huber"
+
+
+class TestTweedieSignedTargetGuard:
+    """Tweedie models a non-negative quantity, so every tree library rejects
+    negative labels. Signed targets are ordinary in HA — net grid power,
+    temperature delta, battery flow — and `dilate` maps to Tweedie on trees, so
+    a loss the UI labels "neural only" hard-failed the tree backends on every
+    CV fold of such an experiment.
+    """
+
+    @pytest.mark.parametrize("loss", ["tweedie", "dilate"])
+    def test_demotes_on_a_signed_target(self, loss):
+        from ml_forecast_lab.models.base import resolve_tree_loss_for_target
+        y = np.array([-1.0, 0.5, 2.0, 3.0])
+        assert resolve_tree_loss_for_target(loss, y, "lightgbm") == "huber"
+
+    @pytest.mark.parametrize("loss", ["tweedie", "dilate"])
+    def test_leaves_a_non_negative_target_alone(self, loss):
+        from ml_forecast_lab.models.base import resolve_tree_loss_for_target
+        y = np.array([0.0, 0.5, 2.0, 3.0])
+        assert resolve_tree_loss_for_target(loss, y, "lightgbm") == loss
+
+    def test_does_not_touch_other_losses(self):
+        from ml_forecast_lab.models.base import resolve_tree_loss_for_target
+        y = np.array([-1.0, 1.0])
+        for loss in ("mse", "mae", "huber"):
+            assert resolve_tree_loss_for_target(loss, y, "lightgbm") == loss
+
+    def test_lightgbm_fits_a_signed_target_instead_of_raising(self):
+        """The end-to-end case: on main this raised LightGBMError
+        '[tweedie]: at least one target label is negative' and took the whole
+        benchmark fold with it."""
+        lgb = pytest.importorskip("lightgbm")
+        from ml_forecast_lab.models.lightgbm_backend import LightGBMModel
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(200, 4))
+        y = rng.normal(size=200)                       # signed
+        m = LightGBMModel(n_estimators=5)
+        m.set_params(loss_fn="dilate")
+        m.fit(X, y)                                    # must not raise
+        assert np.isfinite(m.predict(X[:5])).all()
