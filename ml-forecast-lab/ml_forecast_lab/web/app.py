@@ -4865,7 +4865,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "log_transform": lambda v: bool(v),
             "forecast_every_minutes": lambda v: int(v) if int(v) >= 1 else None,
             "retrain_every_hours": lambda v: float(v) if float(v) >= 0.1 else None,
-            "production_metric": lambda v: v if v in ("mae", "rmse", "mase", "seasonal_mase") else None,
+            "production_metric": lambda v: v if v in (
+                "mae", "rmse", "mase", "seasonal_mase",
+                "peak_weighted_mae", "pinball_q90",
+            ) else None,
             "loss_fn": lambda v: v if v in ("mse", "mae", "huber", "tweedie") else None,
             "optimiser": lambda v: v if v in ("adamw", "adam") else None,
             # v2.41.0: daily_loss_weight / loss_balance validators

@@ -537,3 +537,195 @@ class TestMeanRankScoring:
             f"Paired bootstrap should preserve rank-sum=3 invariant: "
             f"a_high={a_high}, b_low={b_low}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Peak-aware metric + selection ("stop flattening my spikes")
+# --------------------------------------------------------------------------- #
+def _spiky_load(days=30, per_day=48, reheats=(14, 34, 44), seed=0):
+    """A realistic intermittent load: mostly off, a few reheats a day at
+    varying heights. ~94% zeros — the regime real 30-minute hot-water, EV and
+    appliance sensors actually sit in."""
+    rng = np.random.default_rng(seed)
+    n = days * per_day
+    y = np.zeros(n)
+    spikes = []
+    for d in range(days):
+        for slot in reheats:
+            i = d * per_day + slot
+            y[i] = float(rng.uniform(6, 14))
+            spikes.append(i)
+    return y, np.array(spikes)
+
+
+def test_peak_weighted_prefers_peak_hitter_where_mae_prefers_undershooter():
+    """The discriminating case: MAE crowns the model that undershoots the
+    peaks (because peaks are rare), while peak_weighted_mae crowns the one
+    that actually reaches them. This is the whole point of the metric.
+
+    Deliberately run at ~94% zeros rather than a short toy series: below
+    ~90% the plain p90 still separates from the median and the metric works
+    either way, so a small fixture cannot detect the degeneracy this guards.
+    """
+    reg = get_metric_registry()
+    yt, spikes = _spiky_load()
+    base = np.setdiff1d(np.arange(yt.size), spikes)
+
+    undershooter = np.zeros(yt.size)
+    undershooter[spikes] = yt[spikes] * 0.5      # misses every peak by half
+    peak_hitter = np.zeros(yt.size)
+    peak_hitter[spikes] = yt[spikes]             # nails the peaks
+    peak_hitter[base[:700]] = 0.9                # pays baseline noise to do it
+
+    assert reg.compute("mae", yt, undershooter) < reg.compute("mae", yt, peak_hitter)
+    assert (reg.compute("peak_weighted_mae", yt, peak_hitter)
+            < reg.compute("peak_weighted_mae", yt, undershooter))
+
+
+def test_peak_weighted_mae_does_not_degenerate_on_zero_heavy_target():
+    """Regression guard. On a zero-heavy target the p90 sits inside the flat
+    baseline, so the naive `p90 - median` scale collapses and the metric
+    silently becomes plain MAE — on exactly the sensors it exists for. It
+    must anchor the scale on the active part instead."""
+    reg = get_metric_registry()
+    yt, spikes = _spiky_load()
+    assert (yt == 0).mean() > 0.9, "fixture must be in the degenerate regime"
+
+    yp = np.zeros(yt.size)
+    yp[spikes] = yt[spikes] * 0.5
+
+    assert reg.compute("peak_weighted_mae", yt, yp) != pytest.approx(
+        reg.compute("mae", yt, yp)
+    ), "peak_weighted_mae collapsed to plain MAE on a spiky target"
+
+
+def test_peak_weighted_mae_degenerate_falls_back_to_mae():
+    """A genuinely constant target has no peaks to weight — MAE is honest."""
+    reg = get_metric_registry()
+    yt = np.array([3.0, 3.0, 3.0, 3.0, 3.0])
+    yp = np.array([2.0, 4.0, 3.0, 3.0, 1.0])
+    assert reg.compute("peak_weighted_mae", yt, yp) == pytest.approx(
+        reg.compute("mae", yt, yp)
+    )
+
+
+def test_peak_weighted_mae_falls_back_when_too_few_active_intervals():
+    """Too thin to estimate a peak scale from — fall back rather than weight
+    on a two-sample quantile."""
+    reg = get_metric_registry()
+    yt = np.zeros(50)
+    yt[[3, 20]] = 10.0
+    yp = np.zeros(50)
+    yp[[3, 20]] = 5.0
+    assert reg.compute("peak_weighted_mae", yt, yp) == pytest.approx(
+        reg.compute("mae", yt, yp)
+    )
+
+
+def test_pinball_q90_penalises_undershoot_more_than_overshoot():
+    reg = get_metric_registry()
+    yt = np.array([10.0, 10.0, 10.0, 10.0])
+    under = np.array([8.0, 8.0, 8.0, 8.0])
+    over = np.array([12.0, 12.0, 12.0, 12.0])
+    assert reg.compute("pinball_q90", yt, under) > reg.compute("pinball_q90", yt, over)
+
+
+def test_production_metric_weighted_makes_peak_champion_win():
+    """With production_metric=peak_weighted_mae, the model that wins on peaks
+    takes the crown even though it loses on mae/rmse — i.e. selection is no
+    longer dominated by the L1/L2 metrics that favour the smoother."""
+    from ml_forecast_lab.benchmark.runner import ModelResult
+
+    cfg = _make_experiment_cfg(
+        cv_folds=2, metrics=["mae", "rmse"],
+        production_metric="peak_weighted_mae",
+    )
+    runner = BenchmarkRunner(cfg, _make_feature_builder())
+    smoother = ModelResult(model_name="smoother")
+    chaser = ModelResult(model_name="chaser")
+    smoother.fold_metrics = [{"mae": 1.0, "rmse": 1.0, "peak_weighted_mae": 5.0}] * 2
+    chaser.fold_metrics = [{"mae": 2.0, "rmse": 2.0, "peak_weighted_mae": 1.0}] * 2
+
+    _, ranks, _, dnc = runner._compute_composite_ranks(
+        {"smoother": smoother, "chaser": chaser},
+        metric_source="fold_metrics", bootstrap_iters=10,
+    )
+    assert dnc == []
+    assert ranks["chaser"] == 1, (
+        f"peak-weighted selection metric should crown the peak-chaser; got {ranks}"
+    )
+
+
+def test_two_metric_weighting_is_neutral_keeps_mae_winner():
+    """Control: with only 2 ranking metrics the production weight collapses to
+    1 (no over-weighting), so a normal benchmark still picks the mae winner —
+    the weighting must not invert ordinary results."""
+    from ml_forecast_lab.benchmark.runner import ModelResult
+
+    cfg = _make_experiment_cfg(
+        cv_folds=2, metrics=["mae", "rmse"], production_metric="mae",
+    )
+    runner = BenchmarkRunner(cfg, _make_feature_builder())
+    a = ModelResult(model_name="a")
+    b = ModelResult(model_name="b")
+    a.fold_metrics = [{"mae": 1.0, "rmse": 1.0}] * 2
+    b.fold_metrics = [{"mae": 2.0, "rmse": 2.0}] * 2
+    _, ranks, _, _ = runner._compute_composite_ranks(
+        {"a": a, "b": b}, metric_source="fold_metrics", bootstrap_iters=10,
+    )
+    assert ranks["a"] == 1
+
+
+def test_nan_production_metric_does_not_decide_the_ranking():
+    """A metric that computes to NaN must not silently rank models.
+
+    Every comparison against NaN is False, so `sorted` leaves dict insertion
+    order intact and the resulting ranks encode model-registry order rather
+    than accuracy. Harmless while each metric was one equal vote of N; not
+    harmless once the selection metric carries ~60% of the composite.
+
+    Constructed so the arbitrary order and the real order disagree: the worse
+    model is inserted first, so it would win on the NaN metric's insertion
+    ranking while losing on both real metrics.
+    """
+    from ml_forecast_lab.benchmark.runner import ModelResult
+
+    cfg = _make_experiment_cfg(
+        cv_folds=2, metrics=["mae", "rmse"], production_metric="seasonal_mase",
+    )
+    runner = BenchmarkRunner(cfg, _make_feature_builder())
+
+    worse = ModelResult(model_name="worse")
+    better = ModelResult(model_name="better")
+    worse.fold_metrics = [{"mae": 9.0, "rmse": 9.0, "seasonal_mase": float("nan")}] * 2
+    better.fold_metrics = [{"mae": 1.0, "rmse": 1.0, "seasonal_mase": float("nan")}] * 2
+
+    # "worse" first: with the NaN unhandled it takes rank 1 on the
+    # heavily-weighted selection metric purely by insertion order.
+    _, ranks, _, _ = runner._compute_composite_ranks(
+        {"worse": worse, "better": better},
+        metric_source="fold_metrics", bootstrap_iters=10,
+    )
+    assert ranks["better"] == 1, (
+        f"NaN selection metric decided the ranking by insertion order; got {ranks}"
+    )
+
+
+def test_missing_production_metric_still_ranks_last_not_first():
+    """The pre-existing sentinel behaviour must survive the NaN handling: a
+    model missing the metric entirely sorts last, it is not skipped."""
+    from ml_forecast_lab.benchmark.runner import ModelResult
+
+    cfg = _make_experiment_cfg(
+        cv_folds=2, metrics=["mae"], production_metric="mae",
+    )
+    runner = BenchmarkRunner(cfg, _make_feature_builder())
+    has = ModelResult(model_name="has")
+    lacks = ModelResult(model_name="lacks")
+    has.fold_metrics = [{"mae": 5.0}] * 2
+    lacks.fold_metrics = [{"rmse": 0.1}] * 2          # no 'mae' key at all
+    _, ranks, _, _ = runner._compute_composite_ranks(
+        {"lacks": lacks, "has": has},
+        metric_source="fold_metrics", bootstrap_iters=10,
+    )
+    assert ranks["has"] == 1
