@@ -435,6 +435,10 @@ class AppState:
         # initialised). Used by the per-experiment 'Roll back' button.
         self.rollback_callback = None
         self.cached_model_dir = None
+        # Drop a trained model (in-memory cache + on-disk weights) for one
+        # experiment. Wired by main.py; used when an experiment's target
+        # sensor is replaced so the stale model can't forecast the new signal.
+        self.reset_model_callback = None
         # Pre-flight data sanity check — see /experiment/{name}/data-report.
         self.data_report_callback = None
         # Strong references to fire-and-forget tasks. asyncio holds only a
@@ -2307,6 +2311,124 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
         logger.info(f"Deleted experiment '{name}'")
         return JSONResponse(content={"success": True, "redirect": "/"})
+
+    @app.post("/experiment/{name}/replace-target")
+    async def replace_target_route(name: str, request: Request):
+        """Replace an experiment's target sensor (``target_entity``).
+
+        Body: ``{"target_entity": "sensor.new_signal"}``.
+
+        Changing the target invalidates everything derived from the old
+        sensor: the trained/cached model, logged forecasts, benchmark scores
+        and the in-memory analysis caches were all computed against a
+        different series. We rewrite the YAML, then clear that stale state so
+        the UI and the next training cycle start clean rather than showing
+        metrics that silently belong to the previous sensor. The experiment
+        keeps its name, covariates and all other settings.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+
+        new_target = (body.get("target_entity") or "").strip()
+        if not new_target:
+            return JSONResponse(
+                content={"success": False, "error": "target_entity is required"}
+            )
+
+        from ml_forecast_lab.config import replace_experiment_target
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(
+                content={"success": False, "error": "Config file not found"}
+            )
+
+        try:
+            previous = replace_experiment_target(config_path, name, new_target)
+        except ValueError as e:
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
+        except Exception as e:
+            logger.error(f"Failed to replace target: {e}", exc_info=True)
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
+
+        if previous is None:
+            return JSONResponse(content={
+                "success": False,
+                "error": f"Experiment '{name}' not found in config",
+            })
+
+        exp_status = app.state.appstate.experiment_statuses[name]
+
+        # No-op: same sensor. Don't wipe history for a non-change.
+        if previous == new_target:
+            return JSONResponse(content={
+                "success": True, "changed": False,
+                "target_entity": new_target,
+            })
+
+        # Update the in-memory status and drop the now-stale training markers
+        # (they describe a model trained on the old sensor).
+        exp_status.target_entity = new_target
+        exp_status.best_model = None
+        exp_status.model_version = None
+        exp_status.last_benchmark_status = "pending"
+        exp_status.last_benchmark_timestamp = None
+        exp_status.last_error = None
+
+        # Clear in-memory analysis caches keyed by experiment name — every one
+        # was computed against the previous target. Mirrors the delete route.
+        st = app.state.appstate
+        st.benchmark_results.pop(name, None)
+        st.forecast_data.pop(name, None)
+        st.lab_forecast_data.pop(name, None)
+        st.feature_importances.pop(name, None)
+        st.covariate_analysis_results.pop(name, None)
+        st.tuning_results.pop(name, None)
+        st.tune_all_results.pop(name, None)
+
+        # Clear persisted, target-derived data. forecast_log /
+        # external_forecast_log / benchmark_results are keyed by experiment
+        # name; the old per-target actuals cache table is left in place
+        # (harmless and age-pruned) since other experiments may share it.
+        db = st.history_db
+        if db:
+            try:
+                db.delete_forecast_log(name)
+                db.delete_external_forecast_log(name)
+                db.delete_benchmark_result(name)
+            except Exception as e:
+                logger.warning(f"Failed to clear logs on target replace: {e}")
+
+        # Drop the trained model (in-memory + on-disk). Without this a forecast
+        # cycle could publish predictions for the new sensor using a model
+        # trained on the old one, since the cache is keyed by experiment name.
+        reset_cb = getattr(st, "reset_model_callback", None)
+        if reset_cb:
+            try:
+                reset_cb(name)
+            except Exception as e:
+                logger.warning(f"Failed to reset cached model on target replace: {e}")
+
+        logger.info(
+            f"Replaced target for '{name}': {previous} -> {new_target}"
+        )
+
+        # In production, kick off an immediate retrain against the new sensor
+        # so forecasts resume without waiting for the next scheduled cycle
+        # (mirrors the production-toggle behaviour).
+        if exp_status.mode == "production" and st.retrain_callback:
+            st.spawn(st.retrain_callback(name))
+            logger.info(f"Triggered retrain for {name} after target replace")
+
+        return JSONResponse(content={
+            "success": True, "changed": True,
+            "previous_target": previous,
+            "target_entity": new_target,
+        })
 
     async def _probe_weather_forecast_keys(
         ha_url: str, ha_token: str, entity_id: str, forecast_type: str,

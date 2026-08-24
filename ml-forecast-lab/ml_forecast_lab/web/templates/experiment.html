@@ -138,9 +138,26 @@
 
     <!-- Target -->
     <div class="settings-group">
-        <h3 class="settings-group-title">Target</h3>
-        <div class="settings-entity-display">
-            <span class="monospace">{{ exp_config.target_entity if exp_config else experiment.target_entity }}</span>
+        <h3 class="settings-group-title">Target
+            <span class="info-tip">?<span class="tip-text">The sensor this experiment predicts. You can replace it if the original was renamed, swapped for new hardware, or you want to point the same setup at a different signal. Replacing the target clears everything trained or measured against the old sensor (the cached model, logged forecasts, benchmark scores) — covariates and all other settings are kept.</span></span>
+        </h3>
+        <div class="settings-entity-display" style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;">
+            <span class="monospace" id="target-entity-display">{{ exp_config.target_entity if exp_config else experiment.target_entity }}</span>
+            <button type="button" class="btn btn-secondary" id="btn-change-target"
+                    onclick="toggleReplaceTarget(true)"
+                    style="padding:0.25rem 0.6rem;font-size:0.8rem;">Replace…</button>
+        </div>
+        <div class="add-cov-form" id="replace-target-form" style="display:none;margin-top:0.5rem;">
+            <div class="exp-field entity-search-wrapper">
+                <label class="field-label">New target sensor <span class="info-tip">?<span class="tip-text">Start typing to search your live HA entities. The new sensor must report the same kind of quantity for the experiment's existing settings (cumulative / units / activation) to still make sense — review the toggles below after replacing.</span></span></label>
+                <input type="text" class="setting-input" id="replace-target-input" placeholder="Search HA entities..."
+                       autocomplete="off" oninput="searchEntities(this)">
+                <div class="entity-search-results" style="display:none;"></div>
+            </div>
+            <div class="exp-field" style="align-self:end;display:flex;gap:0.5rem;">
+                <button class="btn btn-primary" onclick="replaceTarget()" style="padding:0.4rem 0.75rem;font-size:0.85rem;">Replace target</button>
+                <button class="btn btn-secondary" onclick="toggleReplaceTarget(false)" style="padding:0.4rem 0.75rem;font-size:0.85rem;">Cancel</button>
+            </div>
         </div>
         <div class="settings-row">
             <div class="settings-toggle-field">
@@ -2604,6 +2621,57 @@ window.showTab = function(el) {
             el.checked = !el.checked;
             _markFieldError(el, String(err));
             mlfl.toast('Save failed: ' + err, 'error');
+        });
+    };
+
+    // --- Replace target sensor ---
+    window.toggleReplaceTarget = function(show) {
+        var form = document.getElementById('replace-target-form');
+        var btn = document.getElementById('btn-change-target');
+        if (!form) return;
+        form.style.display = show ? '' : 'none';
+        if (btn) btn.style.display = show ? 'none' : '';
+        if (show) {
+            var input = document.getElementById('replace-target-input');
+            if (input) { input.value = ''; input.focus(); }
+        }
+    };
+
+    window.replaceTarget = function() {
+        var input = document.getElementById('replace-target-input');
+        var newTarget = input ? input.value.trim() : '';
+        if (!newTarget) { mlfl.toast('Pick a new target sensor', 'error'); return; }
+
+        var current = (document.getElementById('target-entity-display') || {}).textContent;
+        if (current && newTarget === current.trim()) {
+            mlfl.toast('That is already the target sensor', 'info');
+            return;
+        }
+        if (!window.confirm(
+            'Replace the target sensor with "' + newTarget + '"?\n\n' +
+            'This clears the trained model, logged forecasts and benchmark ' +
+            'results for this experiment — they were measured against the old ' +
+            'sensor. Covariates and all other settings are kept.'
+        )) { return; }
+
+        fetch(BASE + '/experiment/' + EXP_NAME + '/replace-target', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target_entity: newTarget })
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.success) {
+                mlfl.toast('Target replaced — reloading', 'success');
+                // A full reload is the simplest way to refresh every panel
+                // (charts, metrics, analysis) that was tied to the old sensor.
+                setTimeout(function() { window.location.reload(); }, 600);
+            } else {
+                mlfl.toast('Replace failed: ' + (result.error || 'unknown error'), 'error');
+            }
+        })
+        .catch(function(err) {
+            mlfl.toast('Replace failed: ' + err, 'error');
         });
     };
 

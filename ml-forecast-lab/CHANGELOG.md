@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.47.0
+
+**Replace an experiment's target sensor without recreating it.** The Settings
+tab's Target section now has a **Replace…** control: search your live HA
+entities, pick a new sensor, and the experiment retargets in place — keeping
+its name, covariates, and every other setting. Useful when the original sensor
+was renamed, swapped for new hardware, or you want to point the same model
+setup at a different signal.
+
+Because everything an experiment learns and measures is tied to its target,
+replacing it clears the state that belonged to the old sensor: the trained /
+cached model (in memory and on disk), the logged forecasts, the benchmark
+scores, and the in-memory analysis caches (covariate analysis, tuning,
+feature importance). A confirmation dialog spells this out before anything is
+deleted, and replacing with the *same* sensor is a no-op rather than a wipe.
+A production experiment retrains against the new sensor immediately so
+forecasts resume without waiting for the next scheduled cycle. The new target
+is validated as a `domain.object_id` entity_id so a typo is caught at the
+form rather than failing mid-pipeline.
+
 ## 2.46.2
 
 **Forecast Comparison: the "% of Typical" column is now "Error %".** The old
