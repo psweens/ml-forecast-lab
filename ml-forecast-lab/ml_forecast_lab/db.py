@@ -539,6 +539,9 @@ class HistoryDB:
         try:
             cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_grid_tmp")
             cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_vals_tmp")
+            # Built lazily by the daily-cumulative accuracy path for
+            # non-cumulative sensors — drop any stale copy on every rebuild.
+            cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_cum_tmp")
             since_sql = "WHERE SUBSTR(ds, 1, 19) >= ?" if since_str else ""
             since_params = (since_str,) if since_str else ()
             cursor.execute(
@@ -590,6 +593,7 @@ class HistoryDB:
         try:
             cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_grid_tmp")
             cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_vals_tmp")
+            cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_cum_tmp")
         except sqlite3.Error:
             pass
 
@@ -603,6 +607,7 @@ class HistoryDB:
         model_name: Optional[str] = None,
         model_version: Optional[str] = None,
         day_offset_hours: Optional[float] = None,
+        cumulative_source: bool = True,
     ) -> dict:
         """
         Compute forecast accuracy by lead time.
@@ -649,6 +654,7 @@ class HistoryDB:
                     experiment, actuals_table, max_age_days,
                     interval_minutes, model_name, model_version,
                     day_offset_hours=day_offset_hours,
+                    cumulative_source=cumulative_source,
                 )
             return self._get_forecast_accuracy_locked(
                 experiment, actuals_table, max_age_days, interval_minutes,
@@ -1033,9 +1039,25 @@ class HistoryDB:
         model_name: Optional[str] = None,
         model_version: Optional[str] = None,
         day_offset_hours: Optional[float] = None,
+        cumulative_source: bool = True,
     ) -> dict:
-        """Lead-time accuracy in **daily-cumulative space** for daily-
-        reset cumulative sensors.
+        """Lead-time accuracy in **daily-cumulative space**.
+
+        Two flavours, selected by ``cumulative_source``:
+
+        * ``cumulative_source=True`` (daily-reset cumulative sensors, e.g.
+          ``sensor.energy_today``): the actuals table already holds the
+          running daily total, so it is read directly — the ``seed`` and
+          the comparison value are raw readings.
+        * ``cumulative_source=False`` (instantaneous sensors, e.g. a kW
+          power reading): there is no cumulative actual to read, so the
+          running daily total is BUILT here by cumulatively summing the
+          per-interval actual values within each local day (reset at
+          midnight). The forecast side is identical — ``forecast_log``
+          stores the per-interval predicted value for both sensor kinds,
+          so summing it within the day gives the predicted running total.
+          This makes the per-interval ↔ cumulative accuracy switch
+          meaningful on every experiment, not just cumulative ones.
 
         For each (issued_at, target_dt, predicted) row we compute the
         ``predicted_cumulative`` at target_dt:
@@ -1070,6 +1092,23 @@ class HistoryDB:
         cutoff_str = (
             datetime.utcnow() - timedelta(days=max_age_days)
         ).strftime("%Y-%m-%d %H:%M:%S")
+        # Duration of one grid bin, in hours. When the running daily total is
+        # BUILT from an instantaneous sensor (cumulative_source=False) the
+        # per-interval actuals are RATES — an average over the bin, e.g. kW —
+        # so accumulating them into a total means multiplying by the bin
+        # length. Summing kW readings yields a number in kW, not kWh: at a
+        # 30-minute grid the naive sum overstates the daily total by 2x, at
+        # 5 minutes by 12x. The Comparison tab already handles this (see
+        # _to_canon's `dim == "power"` branch); this path did not.
+        #
+        # `pred_scale` applies the same factor to the predicted running total,
+        # since forecast_log stores per-interval predictions in the same rate
+        # space. Scaling both sides leaves every derived readout (nMAE, error
+        # %, bias sign, ranking) untouched — only the absolute numbers in the
+        # End-of-day tile move, from wrong to right. A genuinely cumulative
+        # sensor already reports a total, so its scale stays 1.0.
+        interval_hours = max(1, int(interval_minutes)) / 60.0
+        pred_scale = 1.0 if cumulative_source else interval_hours
         interval_sec = max(60, int(interval_minutes) * 60)
         bucket_min = max(1, int(interval_minutes))
 
@@ -1126,6 +1165,55 @@ class HistoryDB:
         ):
             return {"error": "could not build actuals grid"}
 
+        # The joins below read the running-daily-total ACTUAL from
+        # ``actuals_rel``. For a cumulative-source sensor that IS the raw
+        # grid (the sensor already reports the running total). For an
+        # instantaneous sensor we build it here by cumulatively summing
+        # the per-interval actual values within each local day (same day
+        # key + offset as the forecast side), so the seed and comparison
+        # land in the same running-total space as the summed predictions.
+        actuals_rel = "_mlfl_actuals_grid_tmp"
+        # Cumulative readings are non-negative by construction, so the
+        # raw path keeps the ``>= 0`` sanity guard. A summed-demand series
+        # can legitimately be small/zero but a hard ``>= 0`` would wrongly
+        # drop signed sensors, so the built path only requires non-NULL.
+        ag_guard = "AND ag.value >= 0" if cumulative_source else ""
+        typ_guard = "AND value >= 0" if cumulative_source else ""
+        if not cumulative_source:
+            if off_seconds == 0:
+                grid_day_expr = "SUBSTR(grid_dt, 1, 10)"
+            else:
+                grid_day_expr = (
+                    "strftime('%Y-%m-%d', "
+                    f"CAST(strftime('%s', grid_dt) AS INTEGER) + {off_seconds}, "
+                    "'unixepoch')"
+                )
+            try:
+                cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_cum_tmp")
+                cursor.execute(
+                    f"""
+                    CREATE TEMP TABLE _mlfl_actuals_cum_tmp AS
+                    SELECT grid_dt,
+                        SUM(value) OVER (
+                            PARTITION BY {grid_day_expr}
+                            ORDER BY grid_dt
+                        ) * {interval_hours} AS value
+                    FROM _mlfl_actuals_grid_tmp
+                    WHERE value IS NOT NULL
+                    """
+                )
+                cursor.execute(
+                    "CREATE INDEX _mlfl_actuals_cum_tmp_idx "
+                    "ON _mlfl_actuals_cum_tmp(grid_dt)"
+                )
+                actuals_rel = "_mlfl_actuals_cum_tmp"
+            except sqlite3.Error as e:
+                logger.warning(
+                    "Failed to build cumulative actuals grid (non-cumulative "
+                    "source); daily-cumulative accuracy unavailable: %s", e,
+                )
+                return {"error": "could not build cumulative actuals grid"}
+
         sql = f"""
             WITH forecast_base AS (
                 SELECT
@@ -1152,7 +1240,7 @@ class HistoryDB:
                          ELSE 0
                     END AS seed_value
                 FROM forecast_base fb
-                LEFT JOIN _mlfl_actuals_grid_tmp seed_a
+                LEFT JOIN {actuals_rel} seed_a
                     ON seed_a.grid_dt = fb.issued_grid
             ),
             forecast_cum AS (
@@ -1162,7 +1250,7 @@ class HistoryDB:
                         PARTITION BY experiment, model_name, model_version,
                                      issued_at, target_day
                         ORDER BY target_dt
-                    ) AS predicted_cumulative
+                    ) * {pred_scale} AS predicted_cumulative
                 FROM forecast_seeded fs
             )
             SELECT
@@ -1173,8 +1261,8 @@ class HistoryDB:
                 AVG(fc.predicted_cumulative - ag.value) AS me,
                 COUNT(*) AS n
             FROM forecast_cum fc
-            INNER JOIN _mlfl_actuals_grid_tmp ag ON ag.grid_dt = fc.target_dt
-            WHERE ag.value IS NOT NULL AND ag.value >= 0
+            INNER JOIN {actuals_rel} ag ON ag.grid_dt = fc.target_dt
+            WHERE ag.value IS NOT NULL {ag_guard}
             GROUP BY lead_bucket
             ORDER BY lead_bucket
         """
@@ -1242,7 +1330,7 @@ class HistoryDB:
                     SELECT fb.*,
                         COALESCE(seed_a.value, 0) AS seed_value
                     FROM forecast_base fb
-                    LEFT JOIN _mlfl_actuals_grid_tmp seed_a
+                    LEFT JOIN {actuals_rel} seed_a
                         ON seed_a.grid_dt = fb.issued_grid
                 ),
                 forecast_cum AS (
@@ -1251,7 +1339,7 @@ class HistoryDB:
                             PARTITION BY experiment, model_name, model_version,
                                          issued_at, target_day
                             ORDER BY target_dt
-                        ) AS predicted_cumulative
+                        ) * {pred_scale} AS predicted_cumulative
                     FROM forecast_seeded fs
                 ),
                 last_target_per_issuance AS (
@@ -1271,8 +1359,8 @@ class HistoryDB:
                     ON lt.issued_at = fc.issued_at
                    AND lt.target_day = fc.target_day
                    AND lt.last_target_dt = fc.target_dt
-                INNER JOIN _mlfl_actuals_grid_tmp ag ON ag.grid_dt = fc.target_dt
-                WHERE ag.value IS NOT NULL AND ag.value >= 0
+                INNER JOIN {actuals_rel} ag ON ag.grid_dt = fc.target_dt
+                WHERE ag.value IS NOT NULL {ag_guard}
                 """,
                 params[:-2],  # outer query has no lead_bucket binding
             )
@@ -1296,12 +1384,12 @@ class HistoryDB:
         typical = 0.0
         try:
             cursor.execute(
-                """
+                f"""
                 WITH daily_max AS (
                     SELECT SUBSTR(grid_dt, 1, 10) AS day,
                            MAX(value) AS day_max
-                    FROM _mlfl_actuals_grid_tmp
-                    WHERE value IS NOT NULL AND value >= 0
+                    FROM {actuals_rel}
+                    WHERE value IS NOT NULL {typ_guard}
                     GROUP BY day
                 )
                 SELECT AVG(day_max) FROM daily_max
@@ -3297,6 +3385,9 @@ class HistoryDB:
         model_version: Optional[str] = None,
         analysis_mode: str = "per_interval",
         target_unit: Optional[str] = None,
+        excluded_dates: Optional[list] = None,
+        reset_at: Optional[str] = None,
+        day_offset_hours: Optional[float] = None,
     ) -> dict:
         """Score this add-on's forecast against one or more external forecasts.
 
@@ -3315,11 +3406,29 @@ class HistoryDB:
         ``analysis_mode``: ``per_interval`` (per-bin demand, in the target's
         native unit) or ``cumulative`` (running daily total in kWh / the
         target unit). The lead-time curve is always per-interval.
+
+        ``excluded_dates``: local calendar dates (``YYYY-MM-DD``) to drop from
+        every series so a day of corrupt sensor data can't pollute the
+        comparison. ``reset_at``: a UTC "restart" floor — data before it is
+        ignored entirely, so the head-to-head starts fresh from that moment.
+        ``day_offset_hours``: UTC→HA-local offset so the excluded-date match
+        follows the same local day the rest of the tab buckets by.
         """
         import numpy as np
 
         now = datetime.utcnow()
         cutoff = now - pd.Timedelta(days=max_age_days)
+        # "Restart comparison" floor: ignore everything before reset_at so the
+        # comparison begins fresh from the restart point (the underlying logs
+        # and the Forecast Accuracy tab are untouched). Whichever of the
+        # rolling window / reset floor is more recent wins.
+        if reset_at:
+            try:
+                reset_ts = pd.Timestamp(str(reset_at).replace("Z", "").strip())
+                if pd.notna(reset_ts) and reset_ts > pd.Timestamp(cutoff):
+                    cutoff = reset_ts.to_pydatetime()
+            except (ValueError, TypeError):
+                logger.debug("Ignoring unparseable comparison reset_at %r", reset_at)
         cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
         now_str = now.strftime("%Y-%m-%d %H:%M:%S")
         bucket_min = max(1, int(interval_minutes))
@@ -3500,6 +3609,9 @@ class HistoryDB:
         else:
             actual_canon = _legacy_eval(actual_raw, target_cumulative)
         actual_disp = _display(actual_canon)
+        # Chart-only view of the actuals. Identical to actual_disp unless the
+        # recorder-quiet carry-forward below has something to add.
+        actual_disp_overlay = actual_disp
 
         # Guard against grossly non-physical logged forecast values. A
         # log-transform inversion that overflows (np.expm1 of a diverged
@@ -3701,9 +3813,116 @@ class HistoryDB:
                 "update_min": update_min,
             })
 
+        # --- carry the actual forward to the comparison horizon -----------
+        # HA's recorder dedups unchanged states, so a sensor whose value has
+        # plateaued writes no new rows — its cached series ends at the last
+        # *change*, not at wall-clock now. The canonical trigger is a
+        # cumulative daily total once generation stops for the day (e.g. a PV
+        # "energy today" sensor on a cloudy afternoon): the running total holds
+        # flat, the recorder goes quiet, and the cached actual stops mid-day.
+        # The app forecast is logged live every cycle and runs to ~now, so
+        # without this the actual line "just stops" mid-window while the
+        # forecasts march on. (A complete past day doesn't show this: its
+        # plateau is bracketed by the next midnight-reset row, so the per-day
+        # cumsum fills the internal gap — only the current partial day, whose
+        # plateau reaches the right edge, truncates.)
+        #
+        # Mirror the forecast pipeline's recorder-quiet carry-forward
+        # (main.py): hold the last cached value flat up to the latest bin any
+        # forecast/external covers (capped at now). The per-day cumsum and the
+        # diff reset guard handle a midnight reset inside the carried span, and
+        # a resumed real reading supersedes the hold (its first diff trips the
+        # reset guard). Bounding to the forecast extent — not unconditionally
+        # to now — keeps a long-stale series (the rolling window can be 30 days)
+        # from growing a fabricated flat tail, and makes this a no-op whenever
+        # the actuals are already current.
+        last_valid = actual_raw.last_valid_index() if actual_raw is not None else None
+        if last_valid is not None:
+            horizon = None
+            for s in [app_disp] + [it["disp"] for it in ext_items]:
+                if s is not None and not s.empty:
+                    m = s.index.max()
+                    horizon = m if horizon is None else max(horizon, m)
+            if horizon is not None:
+                now_floor = pd.Timestamp(now).floor(freq)
+                if horizon > now_floor:
+                    horizon = now_floor
+                if horizon > last_valid:
+                    fill_idx = pd.date_range(
+                        last_valid + pd.Timedelta(freq), horizon, freq=freq
+                    )
+                    if len(fill_idx):
+                        held = pd.Series(float(actual_raw.loc[last_valid]), index=fill_idx)
+                        carried_raw = pd.concat([actual_raw, held])
+                        carried_raw = carried_raw[
+                            ~carried_raw.index.duplicated(keep="first")
+                        ].sort_index()
+                        # DISPLAY ONLY. The held values are inferred, not
+                        # observed, so they are kept in a separate series that
+                        # feeds the chart overlay and nothing else.
+                        #
+                        # Rebinding actual_canon / actual_disp here — as this
+                        # originally did — silently routes them into every
+                        # scoring path downstream: the metrics block, the
+                        # head-to-head winner election, the daily-error series,
+                        # the lead curve and the skill table. The held points
+                        # are non-NaN, so they also defeat the dropna() filters
+                        # that previously excluded exactly those bins. On a
+                        # sensor that has genuinely died the add-on would then
+                        # be scoring its forecast against a flat line it
+                        # invented, which flatters or penalises it at random.
+                        if unit_aware:
+                            carried_canon = _to_canon(
+                                carried_raw, t_dim, t_base, target_cumulative
+                            )
+                        else:
+                            carried_canon = _legacy_eval(carried_raw, target_cumulative)
+                        actual_disp_overlay = _display(carried_canon)
+
+        # --- drop user-excluded days from every series & frame ---
+        # A day flagged as corrupt is removed from the actuals, this add-on's
+        # forecast AND every external before any overlay/metric/ranking is
+        # computed, so one bad day can't pollute the head-to-head. Matching is
+        # on the HA-local calendar date (same day key the rest of the tab uses
+        # via day_offset_hours).
+        excluded_set = {str(d).strip() for d in (excluded_dates or []) if str(d).strip()}
+        if excluded_set:
+            _off = pd.Timedelta(seconds=int(float(day_offset_hours or 0.0) * 3600))
+
+            def _drop_excluded_series(s):
+                if s is None or s.empty:
+                    return s
+                local_days = pd.Index(s.index + _off).strftime("%Y-%m-%d")
+                return s[~local_days.isin(excluded_set)]
+
+            def _drop_excluded_frame(df):
+                if df is None or df.empty or "target_dt" not in df.columns:
+                    return df
+                local_days = (
+                    pd.to_datetime(df["target_dt"], errors="coerce") + _off
+                ).dt.strftime("%Y-%m-%d")
+                return df[~local_days.isin(excluded_set)]
+
+            actual_canon = _drop_excluded_series(actual_canon)
+            actual_disp = _drop_excluded_series(actual_disp)
+            actual_disp_overlay = _drop_excluded_series(actual_disp_overlay)
+            app_canon = _drop_excluded_series(app_canon)
+            app_disp = _drop_excluded_series(app_disp)
+            fdf = _drop_excluded_frame(fdf)
+            # app_points / app_median_lead were computed pre-filter — refresh.
+            app_points = int(app_disp.notna().sum()) if app_disp is not None else 0
+            app_median_lead = _median_lead(fdf)
+            for it in ext_items:
+                it["canon"] = _drop_excluded_series(it["canon"])
+                it["disp"] = _drop_excluded_series(it["disp"])
+                it["edf"] = _drop_excluded_frame(it["edf"])
+
+        result["excluded_dates"] = sorted(excluded_set)
+        result["reset_at"] = (str(reset_at).strip() or None) if reset_at else None
+
         # --- shared overlay grid (union within the window) ---
         idx = pd.DatetimeIndex([])
-        for s in [actual_disp, app_disp] + [it["disp"] for it in ext_items]:
+        for s in [actual_disp_overlay, app_disp] + [it["disp"] for it in ext_items]:
             if s is not None and not s.empty:
                 idx = idx.union(s.index)
         if len(idx):
@@ -3720,7 +3939,7 @@ class HistoryDB:
         result["app_points"] = app_points
         result["overlay"] = {
             "ds": [_iso_utc(t) for t in idx],
-            "actual": _col(actual_disp),
+            "actual": _col(actual_disp_overlay),
             "app": _col(app_disp),
             "externals": [
                 {"entity": it["entity"], "label": it["label"],

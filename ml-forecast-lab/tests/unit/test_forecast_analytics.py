@@ -1005,3 +1005,75 @@ class TestModelVersion:
         )
         # Only v2 forecast rows should feed the chosen target.
         assert all(f["predicted"] in (17.0, 18.0) for f in traj_v2["forecasts"])
+
+
+class TestDailyCumulativeUnitScaling:
+    """A running daily total built from an instantaneous sensor must be in the
+    integrated unit, not the rate unit.
+
+    `forecast_log` and the actuals grid both hold per-interval RATES for an
+    instantaneous sensor (a kW power reading is an average over the bin).
+    Summing them without multiplying by the bin length yields a number in kW,
+    not kWh — at a 30-minute grid that overstates the day's total by 2x, at 5
+    minutes by 12x. Every derived readout (nMAE, error %, bias sign, ranking)
+    is invariant to the factor because it cancels, so only the absolute
+    End-of-day numbers were affected, which is why it went unnoticed.
+    """
+
+    @staticmethod
+    def _seed_constant_power(db, kw, interval_min, days=2):
+        """A sensor holding a constant `kw`, with a forecast that nails it."""
+        table = db.safe_table_name(f"sensor.p{int(kw * 10)}_{interval_min}")
+        per_day = (24 * 60) // interval_min
+        idx = pd.date_range("2024-06-15 00:00", periods=per_day * days,
+                            freq=f"{interval_min}min")
+        db.store_history(table, pd.DataFrame({"ds": idx, "value": [kw] * len(idx)}))
+        for t in idx:
+            db.log_forecast(
+                experiment="e", issued_at=t - timedelta(minutes=interval_min),
+                targets=[t], predictions=[kw],
+                model_name="m", model_version="v1",
+            )
+        return table
+
+    def _mean_actual(self, db, kw, interval_min):
+        table = self._seed_constant_power(db, kw, interval_min)
+        res = db.get_forecast_accuracy(
+            "e", table, max_age_days=3650, interval_minutes=interval_min,
+            evaluation_mode="daily_cumulative", cumulative_source=False,
+        )
+        return res["end_of_day"]["mean_actual"], res
+
+    def test_daily_total_is_energy_not_a_bin_count(self, db):
+        """A constant 2 kW load is 48 kWh a day whatever the grid resolution.
+
+        The running total over a day is a ramp from ~0 to 48 kWh, so its mean
+        is ~24 — and crucially that figure must not move when the grid changes.
+        Without the duration factor it tracks the BIN COUNT instead: ~24 at
+        60 min, ~48 at 30, ~96 at 15. Comparing resolutions against each other
+        is what catches it; the small residual spread below is the half-bin
+        discretisation of the ramp mean ((N+1)/2N), not a unit error.
+        """
+        got = {iv: self._mean_actual(db, 2.0, iv)[0] for iv in (15, 30, 60)}
+        expected = 2.0 * 24 / 2                      # ~24 kWh, any resolution
+        for iv, v in got.items():
+            assert v == pytest.approx(expected, rel=0.15), (
+                f"2 kW at a {iv}-minute grid reported {v}; expected ~{expected} "
+                f"kWh regardless of resolution. All: {got}"
+            )
+        spread = max(got.values()) / min(got.values())
+        assert spread < 1.15, (
+            f"daily total varies with grid resolution by {spread:.2f}x — it is "
+            f"tracking the bin count, not the energy. {got}"
+        )
+
+    def test_both_sides_are_scaled_identically(self, db):
+        """The forecast and the actual must take the same factor, or a perfect
+        forecast would show a large error."""
+        _, res = self._mean_actual(db, 2.0, 30)
+        assert res["end_of_day"]["mae"] == pytest.approx(0.0, abs=1e-6)
+        maes = res["lead_time_curve"]["mae"]
+        assert maes, "expected at least one lead bucket"
+        assert max(maes) == pytest.approx(0.0, abs=1e-6), (
+            f"a forecast matching the sensor exactly should score 0; got {maes}"
+        )

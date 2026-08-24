@@ -16,6 +16,7 @@ Every test seeds a small, deterministic actuals table + forecast_log
 
 import math
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -482,6 +483,106 @@ class TestComparisonMulti:
         cur.execute("SELECT COUNT(*) FROM external_forecast_log WHERE source='sensor.solcast'")
         assert cur.fetchone()[0] == 0
 
+    def test_actual_carried_forward_to_forecast_horizon(self, db):
+        # HA's recorder dedups unchanged states, so a cumulative daily total
+        # whose generation has stopped (a PV "energy today" sensor on a cloudy
+        # afternoon) writes no new rows — its cached series ends at the last
+        # change, mid-window. The forecast is logged live and runs further. The
+        # overlay must hold the last actual flat up to the forecast horizon so
+        # the actual line doesn't "just stop" mid-day while the forecast
+        # continues; in cumulative view that means the running total stays flat.
+        grid = _grid(48)
+        # Cumulative daily energy that plateaus after bin 40 (generation stops).
+        cum, s = [], 0.0
+        for i in range(48):
+            s += (1.0 if i <= 40 else 0.0)        # flat from bin 41 on
+            cum.append(s)
+        ttbl = db.safe_table_name("sensor.pv_today_kwh")
+        # The recorder only logs while the value changes → cache stops at bin 40.
+        db.store_history(ttbl, pd.DataFrame({"ds": grid[:41], "value": cum[:41]}))
+        # App forecast is logged live for the whole window, out to bin 47.
+        for i, t in enumerate(grid):
+            delta = cum[i] - (cum[i - 1] if i > 0 else 0.0)
+            db.log_forecast(experiment="e", issued_at=t - timedelta(minutes=INTERVAL),
+                            targets=[t], predictions=[delta + 0.01],
+                            model_name="lgb", model_version="v1")
+        specs = [_spec("sensor.dummy", "state", db.safe_table_name("sensor.dummy"))]
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, specs, GENEROUS_WINDOW, INTERVAL, "increment",
+            None, None, "cumulative", "kWh")
+        ds = res["overlay"]["ds"]
+        actual = res["overlay"]["actual"]
+        app = res["overlay"]["app"]
+        last = lambda a: max(i for i, v in enumerate(a) if v is not None)
+        # Actual now reaches the same horizon as the live forecast (bin 47),
+        # not the last recorder write (bin 40).
+        assert last(actual) == last(app)
+        # The carried tail holds flat at the value of the LAST REAL bin (40),
+        # not merely flat at whatever the tail happens to hold — the original
+        # assertion compared actual[last] against itself and passed on any
+        # value at all. Anchor on the display-space value at bin 40, since in
+        # cumulative view the plotted series is re-derived, not the raw total.
+        last_real = float(actual[40])
+        carried = [actual[i] for i in range(41, len(actual)) if actual[i] is not None]
+        assert carried, "expected a carried tail past the last recorder write"
+        assert all(abs(v - last_real) < 1e-6 for v in carried), (
+            f"carried tail should hold {last_real}, got {carried[:5]}"
+        )
+
+    def test_carried_points_are_display_only_and_never_scored(self, db):
+        """The held values are inferred, not observed. They belong on the chart
+        and nowhere else.
+
+        If they reach the scoring path the add-on ends up grading its own
+        forecast against a flat line it invented — and because the held points
+        are non-NaN they also defeat the dropna() filters that previously
+        excluded exactly those bins. On a sensor that has genuinely died, that
+        is a leaderboard computed almost entirely from fabricated actuals.
+        """
+        grid = _grid(48)
+        cum, s = [], 0.0
+        for i in range(48):
+            s += (1.0 if i <= 40 else 0.0)
+            cum.append(s)
+        ttbl = db.safe_table_name("sensor.pv_today_kwh")
+        db.store_history(ttbl, pd.DataFrame({"ds": grid[:41], "value": cum[:41]}))
+        for i, t_ in enumerate(grid):
+            delta = cum[i] - (cum[i - 1] if i > 0 else 0.0)
+            db.log_forecast(experiment="e", issued_at=t_ - timedelta(minutes=INTERVAL),
+                            targets=[t_], predictions=[delta + 0.01],
+                            model_name="lgb", model_version="v1")
+        specs = [_spec("sensor.dummy", "state", db.safe_table_name("sensor.dummy"))]
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, specs, GENEROUS_WINDOW, INTERVAL, "increment",
+            None, None, "cumulative", "kWh")
+
+        # The overlay is extended...
+        actual = res["overlay"]["actual"]
+        last = lambda a: max(i for i, v in enumerate(a) if v is not None)
+        assert last(actual) == last(res["overlay"]["app"])
+
+        # ...but scoring saw only the 41 real bins, not the 48 displayed ones.
+        scored_n = (res.get("app_self") or {}).get("n")
+        assert scored_n is not None
+        assert scored_n <= 41, (
+            f"scored {scored_n} bins from 41 real readings — carried points "
+            f"leaked into the metrics"
+        )
+
+    def test_actual_not_extended_when_already_current(self, db):
+        # When the actuals already reach the forecast horizon, carry-forward is
+        # a no-op: it must not fabricate a flat tail beyond the real data, and
+        # in particular must not extend a stale series across the (huge) window.
+        ttbl, e1, _ = self._seed(db)   # actuals + app share the same 48-bin grid
+        specs = [_spec("sensor.ext_state", "state", e1, label="Crude")]
+        res = db.get_external_forecast_comparison(
+            "e", ttbl, specs, GENEROUS_WINDOW, INTERVAL, "raw")
+        actual = res["overlay"]["actual"]
+        app = res["overlay"]["app"]
+        last = lambda a: max(i for i, v in enumerate(a) if v is not None)
+        assert last(actual) == last(app)            # no tail past the forecast
+        assert len(res["overlay"]["ds"]) <= 48 + 1  # window not blown up
+
 
 class TestComparisonBaselineAndWarmup:
     """v2.44.x additions: %-of-typical + daily metrics, and the 7-day
@@ -747,3 +848,52 @@ class TestComparisonEmptyStates:
         # actual exists but no app/external rows → head_to_head is None
         assert res["comparisons"][0]["head_to_head"] is None
         assert res["comparisons"][0]["n"] == 0
+
+
+class TestComparisonResetKeepsItsData:
+    """"Restart comparison" sets a `reset_at` floor; "Undo" clears it. That is
+    only honest if the captured externals survive the reset.
+
+    The reset handler used to hard-DELETE external_forecast_log. That changed
+    nothing a user could see — the floor already excludes pre-reset rows from
+    the comparison — while making the paired undo a lie: it restored the
+    marker, but the rows it pointed at were gone. The confirm dialog and the
+    config docstring both promised the logs were untouched.
+    """
+
+    def _seed_external(self, db, experiment="e", source="sensor.solcast", n=8):
+        issued = datetime(2024, 6, 15, 6, 0)
+        targets = [issued + timedelta(minutes=INTERVAL * (i + 1)) for i in range(n)]
+        return db.log_external_forecast(
+            experiment, source, issued, targets, [float(i) for i in range(n)]
+        )
+
+    def test_captures_are_readable_after_seeding(self, db):
+        assert self._seed_external(db) == 8
+
+    def test_only_an_explicit_delete_removes_captures(self, db):
+        """`delete_external_forecast_log` still exists and still works — it is
+        used when an experiment or its target is deleted, where the data really
+        is meaningless. What changed is that a *reset* no longer calls it."""
+        self._seed_external(db)
+        removed = db.delete_external_forecast_log("e")
+        assert removed == 8, "explicit delete should still purge"
+        assert self._seed_external(db) == 8, "table still usable afterwards"
+
+    def test_reset_handler_does_not_purge(self):
+        """Read the handler: the reset branch must not call the purge.
+
+        Asserted against the source rather than through the endpoint because
+        the route needs a full app + config fixture, and the property under
+        test is exactly 'this call is not made here'.
+        """
+        import re
+        src = (Path(__file__).resolve().parents[2]
+               / "ml_forecast_lab" / "web" / "app.py").read_text()
+        i = src.index('elif action == "reset":')
+        j = src.index('elif action == "clear_reset":', i)
+        reset_branch = src[i:j]
+        assert "delete_external_forecast_log" not in reset_branch, (
+            "the reset branch purges external_forecast_log again — undo cannot "
+            "restore what the reset deleted"
+        )

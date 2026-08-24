@@ -1,5 +1,63 @@
 # Changelog
 
+## 2.49.0
+
+### Added
+
+**A `daily_profile` model backend.** Forecasts the day's total and the
+within-day shape separately, then reconciles them — the shape comes from the
+most recent day, scaled by an EWMA of recent daily totals. Cheap enough to be
+free on a Pi, and a natural fit for a load with a consistent daily rhythm such
+as a hot-water tank. Its parameters (seasonal period, level days, level
+half-life, rescale cap) are exposed on the Models page.
+
+**The Forecast Accuracy per-interval ↔ daily-cumulative switch now appears on
+every experiment**, not only cumulative-source ones. For an instantaneous
+sensor the running daily total is built by integrating the per-interval values
+within each local day, for both the forecast and the actuals, so the two are
+compared in the same space.
+
+**Comparison data-quality controls.** Exclude a specific day from the
+head-to-head (one where the sensor was broken), or restart the comparison from
+now. Exclusions apply symmetrically to the actuals, this add-on's forecast and
+every external before any overlay, metric or ranking is computed, so one bad
+day cannot flatter anybody.
+
+**The Comparison chart's actual line no longer stops mid-day.** HA's recorder
+does not write a row for an unchanged value, so a plateaued sensor's cached
+history ends at its last *change* while the forecasts run on to now. The last
+reading is now held flat to the forecast horizon.
+
+### Fixed
+
+**The daily-cumulative total was in the wrong unit for instantaneous sensors.**
+The running total summed per-interval rates without multiplying by the interval
+length, so a kW sensor produced a figure in kW rather than kWh — overstated 2x
+on a 30-minute grid and 12x on a 5-minute one, and it tracked the grid
+resolution rather than the energy. Both the actuals and the predicted total are
+now integrated properly. Every derived readout (nMAE, error %, bias sign,
+ranking) is unchanged, because the factor cancels — only the absolute
+End-of-day numbers move.
+
+**"Restart comparison" no longer deletes what "Undo" claims to restore.** The
+reset hard-deleted the captured third-party forecasts while the confirm dialog,
+the config docstring and the paired undo action all said the logs were
+untouched. The `reset_at` floor already hides pre-reset rows, so the deletion
+changed nothing visible and only made undo a lie. The captures are kept.
+
+**The `daily_profile` backend could publish values the sensor has never
+recorded.** Its level rescale divides by the most recent day's total; if part
+of that day was zero-filled — a documented `idle_value: 0` config for EV
+chargers and solar pumps — the denominator collapses while the surviving
+samples keep full magnitude. Twelve zeroed hours saturated the rescale cap and
+published 2x the highest value ever seen. Since this is a shape-reuse model, its
+output is now bounded by the observed maximum; signed sensors are unaffected.
+
+**The carried-forward actuals are display-only.** They feed the chart and
+nothing else. Routing them into scoring — as the original did, by rebinding the
+series the metrics consume — would have the add-on grading its forecast against
+a flat line it invented, and because the held points are non-NaN they also
+defeated the filters that had excluded those bins.
 ## 2.48.3
 
 ### Added
