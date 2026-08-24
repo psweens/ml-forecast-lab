@@ -1092,6 +1092,23 @@ class HistoryDB:
         cutoff_str = (
             datetime.utcnow() - timedelta(days=max_age_days)
         ).strftime("%Y-%m-%d %H:%M:%S")
+        # Duration of one grid bin, in hours. When the running daily total is
+        # BUILT from an instantaneous sensor (cumulative_source=False) the
+        # per-interval actuals are RATES — an average over the bin, e.g. kW —
+        # so accumulating them into a total means multiplying by the bin
+        # length. Summing kW readings yields a number in kW, not kWh: at a
+        # 30-minute grid the naive sum overstates the daily total by 2x, at
+        # 5 minutes by 12x. The Comparison tab already handles this (see
+        # _to_canon's `dim == "power"` branch); this path did not.
+        #
+        # `pred_scale` applies the same factor to the predicted running total,
+        # since forecast_log stores per-interval predictions in the same rate
+        # space. Scaling both sides leaves every derived readout (nMAE, error
+        # %, bias sign, ranking) untouched — only the absolute numbers in the
+        # End-of-day tile move, from wrong to right. A genuinely cumulative
+        # sensor already reports a total, so its scale stays 1.0.
+        interval_hours = max(1, int(interval_minutes)) / 60.0
+        pred_scale = 1.0 if cumulative_source else interval_hours
         interval_sec = max(60, int(interval_minutes) * 60)
         bucket_min = max(1, int(interval_minutes))
 
@@ -1180,7 +1197,7 @@ class HistoryDB:
                         SUM(value) OVER (
                             PARTITION BY {grid_day_expr}
                             ORDER BY grid_dt
-                        ) AS value
+                        ) * {interval_hours} AS value
                     FROM _mlfl_actuals_grid_tmp
                     WHERE value IS NOT NULL
                     """
@@ -1233,7 +1250,7 @@ class HistoryDB:
                         PARTITION BY experiment, model_name, model_version,
                                      issued_at, target_day
                         ORDER BY target_dt
-                    ) AS predicted_cumulative
+                    ) * {pred_scale} AS predicted_cumulative
                 FROM forecast_seeded fs
             )
             SELECT
@@ -1322,7 +1339,7 @@ class HistoryDB:
                             PARTITION BY experiment, model_name, model_version,
                                          issued_at, target_day
                             ORDER BY target_dt
-                        ) AS predicted_cumulative
+                        ) * {pred_scale} AS predicted_cumulative
                     FROM forecast_seeded fs
                 ),
                 last_target_per_issuance AS (

@@ -7617,10 +7617,11 @@ window.showTab = function(el) {
 
     window.resetComparison = function() {
         if (!confirm('Restart the comparison from now?\n\n'
-            + 'This clears the accrued third-party forecast captures and hides '
-            + 'all comparison data from before this moment. Your Forecast '
-            + 'Accuracy tab and the underlying logs are NOT affected. You can '
-            + 'undo the restart afterwards.')) return;
+            + 'This hides all comparison data from before this moment, so the '
+            + 'head-to-head starts fresh. Nothing is deleted — your Forecast '
+            + 'Accuracy tab, the underlying logs and the captured third-party '
+            + 'forecasts are all kept, so you can undo this afterwards and get '
+            + 'the earlier comparison back.')) return;
         _postComparisonControl({action: 'reset'}).then(function(res){
             if (res.success) { mlfl.toast('Comparison restarted', 'success'); loadExternalComparison(); }
             else { mlfl.toast('Restart failed: ' + (res.error || 'unknown'), 'error'); }

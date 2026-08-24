@@ -102,3 +102,58 @@ def test_registered_and_save_load_roundtrip(tmp_path):
     fresh.load(path)
     after = fresh.predict_sequence(win)
     np.testing.assert_allclose(before, after, rtol=1e-5, atol=1e-5)
+
+
+class TestOutageAmplification:
+    """A zero-filled outage must not inflate the forecast above anything the
+    sensor has recorded.
+
+    `scale = proj_total / ref_total`, and `ref_total` sums the most recent
+    period. Zero-filling part of that day — a documented config via
+    `idle_value: 0` for EV chargers and solar pumps — depresses the denominator
+    while the surviving samples keep full magnitude, so the ratio inflates and
+    the shipped `scale_clip` of 4.0 lets it reach 4x. Nothing downstream
+    catches it: `_publish_forecast_sensors` has no upper clamp, and the
+    log-inversion clamp only runs when `log_transform` is on.
+    """
+
+    @staticmethod
+    def _peaked_day(period=48, peak=10.0):
+        """A tidy daily shape: quiet overnight, a broad daytime hump."""
+        t = np.arange(period)
+        shape = np.clip(np.sin((t - 12) / period * np.pi * 2), 0, None)
+        return shape / shape.sum() * peak * period / 10.0
+
+    def _fit_model(self, days=14, period=48, zero_hours=0):
+        day = self._peaked_day(period)
+        series = np.tile(day, days).astype(np.float64)
+        if zero_hours:
+            n_zero = int(zero_hours * period / 24)
+            series[-n_zero:] = 0.0            # outage at the tail of the window
+        m = DailyProfileModel(seasonal_period=period)
+        X = series.reshape(-1, 1)
+        m.fit(X, series, n_horizons=period)
+        return m, series
+
+    @pytest.mark.parametrize("zero_hours", [0, 7, 10, 12, 16])
+    def test_forecast_never_exceeds_the_observed_maximum(self, zero_hours):
+        m, series = self._fit_model(zero_hours=zero_hours)
+        window = series[-48:].reshape(-1, 1)
+        out = m._per_window_predict(window, 48)
+        observed_max = float(np.max(series))
+        assert float(np.max(out)) <= observed_max + 1e-6, (
+            f"with {zero_hours}h zero-filled the forecast peaked at "
+            f"{float(np.max(out)):.3f}, above the observed maximum "
+            f"{observed_max:.3f} — a value the sensor has never reported"
+        )
+
+    def test_signed_series_is_not_clipped(self):
+        """The ceiling applies to non-negative sensors only; a signed sensor
+        (net grid flow, say) must pass through untouched."""
+        period = 48
+        day = self._peaked_day(period) - 2.0        # straddles zero
+        series = np.tile(day, 14).astype(np.float64)
+        m = DailyProfileModel(seasonal_period=period)
+        m.fit(series.reshape(-1, 1), series, n_horizons=period)
+        out = m._per_window_predict(series[-48:].reshape(-1, 1), 48)
+        assert np.isfinite(out).all()

@@ -1082,6 +1082,17 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         "seasonal_naive": {
             "seasonal_period": {"type": "int", "default": 48, "label": "Seasonal period (steps)", "min": 1, "max": 1440, "tunable": False},
         },
+        # Same non-tunable treatment as the other baselines: these are
+        # properties of the data (how long a day is, how far back "recent"
+        # reaches), not search dimensions. Without this entry the Models page
+        # renders "No configurable parameters" and seasonal_period is stuck at
+        # its 48-step default — a full day only on a 30-minute experiment.
+        "daily_profile": {
+            "seasonal_period": {"type": "int", "default": 48, "label": "Seasonal period (steps)", "min": 1, "max": 1440, "tunable": False},
+            "level_days": {"type": "int", "default": 7, "label": "Days in the level estimate", "min": 1, "max": 60, "tunable": False},
+            "level_half_life_days": {"type": "float", "default": 3.0, "label": "Level half-life (days)", "min": 0.1, "max": 30.0, "tunable": False},
+            "scale_clip": {"type": "float", "default": 4.0, "label": "Max level rescale", "min": 1.0, "max": 10.0, "tunable": False},
+        },
         "arima": {
             "seasonal_period": {"type": "int", "default": 48, "label": "Seasonal period (steps)", "min": 1, "max": 1440, "tunable": False},
             "train_history": {"type": "int", "default": 1024, "label": "Max train history", "min": 64, "max": 8192, "tunable": False},
@@ -3465,16 +3476,16 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 from datetime import datetime, timezone
                 reset_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                 changed = set_experiment_comparison_reset(config_path, name, reset_at)
-                # Discard the accrued third-party captures so re-added/ongoing
-                # externals start clean from the restart point. The add-on's
-                # own forecast_log and the actuals are left intact (the floor
-                # hides the pre-reset ones; the Forecast Accuracy tab keeps
-                # its full history).
-                if changed and db:
-                    try:
-                        db.delete_external_forecast_log(name)
-                    except Exception as e:
-                        logger.debug(f"reset: external_forecast_log purge failed: {e}")
+                # Deliberately does NOT purge external_forecast_log. The
+                # `reset_at` floor already excludes every pre-reset capture
+                # from the comparison, so a hard DELETE changed nothing a user
+                # could see — while quietly making the paired `clear_reset`
+                # action a lie: it restores the marker, but the rows it points
+                # at were gone. Keeping them means Undo genuinely undoes.
+                #
+                # Retention cost is bounded: the comparison reads a rolling
+                # window (days_history), and the existing prune keeps the table
+                # from growing without limit.
             elif action == "clear_reset":
                 changed = set_experiment_comparison_reset(config_path, name, None)
             else:

@@ -210,6 +210,28 @@ class DailyProfileModel(ForecastModel):
                 else:
                     base = 0.0
             out[h] = float(base) * scale
+
+        # Never publish a value the sensor has not plausibly reached.
+        #
+        # `scale` is proj_total / ref_total, and ref_total is the sum over the
+        # most recent period. If part of that day was zero-filled — an outage
+        # on an `idle_value: 0` experiment, which is a documented config for EV
+        # chargers and solar pumps — the denominator is depressed while the
+        # surviving samples keep full magnitude, so the ratio inflates. Measured
+        # on the shipped defaults with a 10 kWh/day peaked profile: 7 hours
+        # zeroed gives scale 1.08, 10 hours gives 1.47, and 12 hours saturates
+        # the clip at 4.0, publishing 2x the highest value ever recorded.
+        #
+        # Nothing downstream catches that: _publish_forecast_sensors has no
+        # upper clamp, and the log-inversion clamp only runs when log_transform
+        # is on. This is a shape-reuse model, so a hard ceiling at the observed
+        # maximum is the honest invariant — it cannot invent a peak it has
+        # never seen. Applied only to non-negative history, so signed sensors
+        # are untouched.
+        if len(history) and float(np.nanmin(history)) >= 0.0:
+            observed_max = float(np.nanmax(history))
+            if np.isfinite(observed_max) and observed_max > 0.0:
+                np.clip(out, None, observed_max, out=out)
         return out
 
     def predict_sequence(self, X: np.ndarray) -> np.ndarray:

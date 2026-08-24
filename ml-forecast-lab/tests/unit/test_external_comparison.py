@@ -16,6 +16,7 @@ Every test seeds a small, deterministic actuals table + forecast_log
 
 import math
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -847,3 +848,52 @@ class TestComparisonEmptyStates:
         # actual exists but no app/external rows → head_to_head is None
         assert res["comparisons"][0]["head_to_head"] is None
         assert res["comparisons"][0]["n"] == 0
+
+
+class TestComparisonResetKeepsItsData:
+    """"Restart comparison" sets a `reset_at` floor; "Undo" clears it. That is
+    only honest if the captured externals survive the reset.
+
+    The reset handler used to hard-DELETE external_forecast_log. That changed
+    nothing a user could see — the floor already excludes pre-reset rows from
+    the comparison — while making the paired undo a lie: it restored the
+    marker, but the rows it pointed at were gone. The confirm dialog and the
+    config docstring both promised the logs were untouched.
+    """
+
+    def _seed_external(self, db, experiment="e", source="sensor.solcast", n=8):
+        issued = datetime(2024, 6, 15, 6, 0)
+        targets = [issued + timedelta(minutes=INTERVAL * (i + 1)) for i in range(n)]
+        return db.log_external_forecast(
+            experiment, source, issued, targets, [float(i) for i in range(n)]
+        )
+
+    def test_captures_are_readable_after_seeding(self, db):
+        assert self._seed_external(db) == 8
+
+    def test_only_an_explicit_delete_removes_captures(self, db):
+        """`delete_external_forecast_log` still exists and still works — it is
+        used when an experiment or its target is deleted, where the data really
+        is meaningless. What changed is that a *reset* no longer calls it."""
+        self._seed_external(db)
+        removed = db.delete_external_forecast_log("e")
+        assert removed == 8, "explicit delete should still purge"
+        assert self._seed_external(db) == 8, "table still usable afterwards"
+
+    def test_reset_handler_does_not_purge(self):
+        """Read the handler: the reset branch must not call the purge.
+
+        Asserted against the source rather than through the endpoint because
+        the route needs a full app + config fixture, and the property under
+        test is exactly 'this call is not made here'.
+        """
+        import re
+        src = (Path(__file__).resolve().parents[2]
+               / "ml_forecast_lab" / "web" / "app.py").read_text()
+        i = src.index('elif action == "reset":')
+        j = src.index('elif action == "clear_reset":', i)
+        reset_branch = src[i:j]
+        assert "delete_external_forecast_log" not in reset_branch, (
+            "the reset branch purges external_forecast_log again — undo cannot "
+            "restore what the reset deleted"
+        )
