@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.48.1
+
+### Fixed
+
+**The log-transform blow-up clamp now also covers cross-validation scoring and
+the forecast write path.** `clamp_forecast_blowup` moves from `main.py` to
+`preprocessing.py` (re-exported under its original private name, so all
+existing call sites and their tests are untouched) and is applied in two places
+that previously had none: `benchmark/runner.py`, before `compute_all`, so a
+fold whose log-inversion blew up can no longer contribute a 1e30 error that
+dominates the composite rank regardless of every other fold; and the
+`db.log_forecast` write path.
+
+`preprocessing.py` imports only stdlib plus numpy/pandas, so the new import in
+the benchmark runner costs nothing at startup.
+
 ## 2.48.0
 
 ### Added
