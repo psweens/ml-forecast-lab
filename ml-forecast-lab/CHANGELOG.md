@@ -4,6 +4,41 @@
 
 ### Fixed
 
+**The `daily_profile` backend predicted nothing.** The benchmark's CV loop
+builds *extended* windows — past observations followed by a zero-filled future
+block carrying only known-future features — but never told the backend where
+that split was, so it read the zero-filled tail as real history and returned
+all zeros in every fold. It scored exactly `mean|y|`, the trivial
+zero-forecast, which put it last on every leaderboard and made it impossible to
+promote. The holdout and production paths already passed the flags; only CV did
+not. Measured on a 21-day profile: predicted maximum 0.000 and MAE 1.0833
+before, 8.000 and 0.5417 after.
+
+**The metric that decides the champion is now shown.** Rankings are computed
+from `production_metric`, but the leaderboard only ever displayed MAE, RMSE and
+MASE — and the aggregation loop only covered `exp_cfg.metrics`, which has no UI
+control and is therefore always the factory default. Selecting Peak-weighted
+MAE or Pinball q90 reordered the table with every visible column contradicting
+it. This affected the **default** `seasonal_mase` too: the "Interval MASE"
+column is the 1-step `mase`, not the metric that ranks. The selection metric is
+now aggregated and gets its own column, shown when it is not already one of the
+three on display.
+
+**The Data Sanity Check no longer crashes on the case it exists for.** The
+panel called `.toFixed()` on values the no-data response omits, so pointing an
+experiment at a dead, mistyped or never-recorded entity produced a raw
+`TypeError` instead of the "No history rows found for this entity" warning the
+backend had already computed. Every numeric read is now guarded.
+
+**Daily rhythm and Spikiness now actually appear.** Both were computed and
+stored, but `compute_data_report` builds an explicit allow-list of keys rather
+than passing the analysis through, so they were dropped on the way out and the
+UI's `!= null` guards skipped both rows silently — no error, nothing to notice.
+
+## 2.49.2
+
+### Fixed
+
 **Daily rhythm and Spikiness never appeared in the Data Sanity Check.** Both
 were computed correctly and stored, but `compute_data_report` returns an
 explicit list of fields rather than passing the analysis through, so the two

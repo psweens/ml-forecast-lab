@@ -8,6 +8,8 @@ The invariants that matter:
   * the scale is clamped so a near-zero reference day can't blow up.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -157,3 +159,64 @@ class TestOutageAmplification:
         m.fit(series.reshape(-1, 1), series, n_horizons=period)
         out = m._per_window_predict(series[-48:].reshape(-1, 1), 48)
         assert np.isfinite(out).all()
+
+
+class TestExtendedWindowFlagsReachTheBackend:
+    """The benchmark builds EXTENDED windows — past observations followed by a
+    zero-filled future block carrying only known-future features. A backend
+    that reads the target channel must be told where that split is.
+
+    The holdout and production paths set `extended_window` / `past_window_size`;
+    the CV loop did not. Without them daily_profile read the zero-filled tail
+    as real history and predicted all zeros in every fold, scoring exactly
+    mean|y| — the trivial zero-forecast — so it ranked last and could never be
+    promoted. The feature was inert on the leaderboard while appearing to run.
+    """
+
+    @staticmethod
+    def _extended_windows(period=48, days=21):
+        day = np.r_[np.zeros(12), np.full(4, 5.0), np.zeros(20), np.full(4, 8.0), np.zeros(8)]
+        series = np.tile(day, days).astype(float)
+        X, y = [], []
+        for s in range(period, len(series) - period):
+            X.append(np.concatenate([series[s - period:s], np.zeros(period)]))
+            y.append(series[s:s + period])
+        X = np.array(X)
+        return X, np.array(y), X.reshape(X.shape[0], X.shape[1], 1)
+
+    def test_without_the_flags_it_predicts_nothing(self):
+        """Pins the failure mode itself, so a future refactor that drops the
+        kwargs again fails here rather than silently on the leaderboard."""
+        X, y, X3 = self._extended_windows()
+        m = DailyProfileModel(seasonal_period=48)
+        m.fit(X, y, n_horizons=48)
+        assert np.allclose(m.predict_sequence(X3[-5:]), 0.0)
+
+    def test_with_the_flags_it_predicts_the_profile(self):
+        X, y, X3 = self._extended_windows()
+        m = DailyProfileModel(seasonal_period=48)
+        m.fit(X, y, n_horizons=48, extended_window=True, past_window_size=48)
+        pred = m.predict_sequence(X3[-5:])
+        assert not np.allclose(pred, 0.0)
+        assert np.max(pred) > 1.0
+        # And it must beat the zero-forecast it was previously equivalent to.
+        mae = float(np.mean(np.abs(pred - y[-5:])))
+        zero_mae = float(np.mean(np.abs(y[-5:])))
+        assert mae < zero_mae * 0.9, (
+            f"MAE {mae:.4f} vs a zero-forecast's {zero_mae:.4f} — no better "
+            f"than predicting nothing"
+        )
+
+    def test_the_cv_loop_passes_both_flags(self):
+        """Structural guard on the producer side: the behavioural tests above
+        cannot see what the benchmark runner actually sends."""
+        import re
+        runner = (Path(__file__).resolve().parents[2]
+                  / "ml_forecast_lab" / "benchmark" / "runner.py").read_text()
+        i = runner.index("sequence_kwargs['sequence_data'] = seq_X")
+        block = runner[i:i + 1400]
+        for flag in ("extended_window", "past_window_size"):
+            assert f"sequence_kwargs['{flag}']" in block, (
+                f"the CV loop sets sequence_data but not {flag} — backends "
+                f"cannot locate the future block"
+            )
