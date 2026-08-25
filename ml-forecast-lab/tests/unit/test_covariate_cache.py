@@ -476,3 +476,46 @@ def test_prune_of_a_never_created_table_is_quiet(db, caplog):
         ))
 
     assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+def test_failed_backfill_is_retried_next_cycle(db):
+    """HA can time out on a two-year window. The backfill flag is monotone
+    once set, so marking the attempt before the fetch returns would burn
+    the single retry and cap the covariate at its old window for good."""
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc)
+    rows = _numeric_rows(now - timedelta(days=30), now)
+
+    class _FlakyIface(_RecordingIface):
+        def __init__(self, rows):
+            super().__init__(rows)
+            self.fail_next = False
+
+        async def get_history(self, entity_id, start, end, include_attributes=False):
+            if self.fail_next:
+                self.fail_next = False
+                raise RuntimeError("HA gateway timeout")
+            return await super().get_history(
+                entity_id, start, end, include_attributes=include_attributes,
+            )
+
+    iface = _FlakyIface(rows)
+    resolver = CovariateResolver(iface, history_db=db)
+    cov = {"entity_id": "sensor.x", "name": "x"}
+
+    # Warm a narrow window, then widen — with HA failing on that cycle.
+    _run(resolver.fetch_history(cov, now - timedelta(days=2), now, "30min"))
+    iface.fail_next = True
+    failed = _run(resolver.fetch_history(
+        cov, now - timedelta(days=10), now, "30min",
+    ))
+    assert failed.empty, "precondition: the widening fetch failed"
+
+    # The next cycle must try the full window again.
+    recovered = _run(resolver.fetch_history(
+        cov, now - timedelta(days=10), now + timedelta(minutes=30), "30min",
+    ))
+
+    assert recovered.index[-1] - recovered.index[0] >= pd.Timedelta(days=9), (
+        f"a transient HA failure must not permanently cancel the backfill; "
+        f"span is {recovered.index[-1] - recovered.index[0]}"
+    )

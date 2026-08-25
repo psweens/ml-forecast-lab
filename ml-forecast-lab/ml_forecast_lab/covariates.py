@@ -405,14 +405,18 @@ class CovariateResolver:
             if fetch_start.tzinfo is None:
                 fetch_start = fetch_start.tz_localize("UTC")
             fetch_start = fetch_start.to_pydatetime()
+        raw = await self.iface.get_history(
+            entity_id, fetch_start, end, include_attributes=include_attrs,
+        )
+        # Record the horizon only once the fetch has actually returned. HA
+        # can time out on a two-year window, and marking the attempt up
+        # front would burn the one retry: the flag is monotone (`start`
+        # moves forward every cycle), so a single 504 would cap the
+        # covariate at its old window permanently.
         if table is not None and full_window_fetch:
             self._backfill_horizon[table] = (
                 start_naive if horizon is None else min(horizon, start_naive)
             )
-
-        raw = await self.iface.get_history(
-            entity_id, fetch_start, end, include_attributes=include_attrs,
-        )
         new_df = normalise_history(raw, attribute_key=attribute_key)
         if (
             not new_df.empty
