@@ -5,10 +5,11 @@ Handles fetching historical and future covariate data from Home Assistant,
 with intelligent binary detection and adaptive resampling strategies.
 """
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -16,6 +17,54 @@ import pandas as pd
 from .ha_interface import HAInterface, normalise_history, state_to_float
 
 logger = logging.getLogger(__name__)
+
+
+CacheRetentionProvider = Callable[[str], int]
+"""``table_name -> days`` — how long a covariate cache table must be kept."""
+
+
+def cov_cache_raw_key(
+    entity_id: str, attribute_key: Optional[str] = None,
+) -> str:
+    """Unsanitised SQLite cache key for a covariate's raw observations.
+
+    Namespaced under ``cov_`` so a covariate never shares a table with the
+    same entity cached as a *target*, and suffixed with the attribute key
+    so two covariates reading different attributes of one weather entity
+    (``temperature`` vs ``cloud_coverage``) cache independently.
+
+    Module-level rather than a method because ``main`` needs the same key
+    to work out how long each table must be retained, and two copies of
+    this convention would drift. Sanitisation stays with the caller —
+    it needs a ``HistoryDB``.
+    """
+    raw_key = f"cov_{entity_id}"
+    if attribute_key:
+        raw_key = f"{raw_key}__{attribute_key}"
+    return raw_key
+
+
+def _covariate_window_is_covered(
+    cached: pd.DataFrame, start_naive: pd.Timestamp, freq: str,
+) -> bool:
+    """Does ``cached`` reach back to ``start_naive``?
+
+    One resample interval of slack: the oldest cached observation almost
+    never lands exactly on the window edge, and treating a few minutes'
+    shortfall as "not covered" would trigger a backfill on every widen-by-
+    nothing. An empty cache is never "covered" — but the caller already
+    does a full-window fetch in that case, so it costs nothing.
+    """
+    if cached is None or len(cached) == 0:
+        return False
+    try:
+        slack = pd.Timedelta(freq)
+    except (ValueError, TypeError):  # pragma: no cover - defensive
+        slack = pd.Timedelta(minutes=30)
+    oldest_cached = pd.Timestamp(cached["ds"].min())
+    if oldest_cached.tzinfo is not None:
+        oldest_cached = oldest_cached.tz_convert(None)
+    return oldest_cached <= pd.Timestamp(start_naive) + slack
 
 
 class CovariateResolver:
@@ -27,6 +76,7 @@ class CovariateResolver:
         covariate_configs: Optional[list[dict]] = None,
         history_db: Optional[Any] = None,
         cache_max_age_days: int = 365,
+        retention_provider: Optional[CacheRetentionProvider] = None,
     ):
         """
         Initialise covariate resolver.
@@ -48,12 +98,29 @@ class CovariateResolver:
                 HA recorder + network cost. When ``None`` (e.g. unit
                 tests), behaviour is the original full-window fetch.
             cache_max_age_days: Rolling-window bound for the per-covariate
-                cache tables, pruned after each fetch.
+                cache tables, pruned after each fetch. Used only when no
+                ``retention_provider`` is supplied.
+            retention_provider: Optional ``table_name -> days`` callable
+                resolving how long a given cache table must be kept.
+                Cache tables are keyed by ENTITY, not by experiment, so
+                two experiments on one sensor share a table and the
+                retention has to be the LARGEST ``max_age`` among them —
+                otherwise the shorter-lived experiment deletes history
+                the longer-lived one still trains on, and because HA's
+                recorder has its own purge window those rows are gone for
+                good. Consulted at prune time rather than at
+                construction, because the add-on rebinds a new
+                ``AppConfig`` on every config reload; a value frozen here
+                would ignore Settings edits until restart.
         """
         self.iface = iface
         self.covariate_configs = covariate_configs or []
         self.history_db = history_db
         self.cache_max_age_days = cache_max_age_days
+        self.retention_provider = retention_provider
+        # Per table, the oldest window start already requested from HA in
+        # this process. See the backfill note in `_fetch_raw_history`.
+        self._backfill_horizon: dict = {}
         logger.info(f"CovariateResolver initialised with {len(self.covariate_configs)} covariates")
 
     def _detect_binary(self, series: pd.Series) -> bool:
@@ -160,7 +227,7 @@ class CovariateResolver:
 
         try:
             df = await self._fetch_raw_history(
-                entity_id, start, end, attribute_key,
+                entity_id, start, end, attribute_key, freq,
             )
 
             if df.empty:
@@ -198,12 +265,35 @@ class CovariateResolver:
         series cached under ``safe_table_name(entity_id)``, and keyed by
         ``attribute_key`` so two covariates on the same entity reading
         different attributes (e.g. ``temperature`` vs ``cloud_coverage``)
-        cache independently.
+        cache independently. The unsanitised key comes from the
+        module-level ``cov_cache_raw_key`` so ``main`` can compute the
+        same table name when it resolves retention.
         """
-        raw_key = f"cov_{entity_id}"
-        if attribute_key:
-            raw_key = f"{raw_key}__{attribute_key}"
-        return self.history_db.safe_table_name(raw_key)
+        return self.history_db.safe_table_name(
+            cov_cache_raw_key(entity_id, attribute_key)
+        )
+
+    def _retention_days(self, table: str) -> int:
+        """Days of raw covariate history to keep in ``table``.
+
+        Delegates to ``retention_provider`` when one is configured so the
+        prune honours the largest ``max_age`` among every experiment
+        sharing this entity. A provider error falls back to the
+        constructor default rather than skipping the prune, and the
+        result is clamped to >= 1: ``max_age`` is unvalidated in
+        ``config.py``, and a hand-edited 0 or negative value would put the
+        cut-off in the future and delete the whole table.
+        """
+        fallback = max(1, int(self.cache_max_age_days))
+        if self.retention_provider is None:
+            return fallback
+        try:
+            return max(1, int(self.retention_provider(table)))
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug(
+                f"Covariate retention provider failed for {table}: {e}"
+            )
+            return fallback
 
     async def _fetch_raw_history(
         self,
@@ -211,6 +301,7 @@ class CovariateResolver:
         start: datetime,
         end: datetime,
         attribute_key: Optional[str],
+        freq: str = "30min",
     ) -> pd.DataFrame:
         """Return raw ``[ds, value]`` observations in ``[start, end]``.
 
@@ -224,6 +315,30 @@ class CovariateResolver:
         target's ``INSERT OR IGNORE`` semantics). Any cache error
         degrades to a full-window fetch so caching can never break a
         forecast cycle.
+
+        Two details beyond the plain cache-then-delta shape:
+
+        * **Widened windows are backfilled once.** A delta fetch anchored
+          on the newest cached row can only ever extend the cache
+          forwards. If the user raises ``days_history`` — from 14 days to
+          two years, say — the cached rows still stop where they always
+          did, and every later cycle asks HA only for the delta, so the
+          covariate is permanently capped at the *old* window even when
+          the recorder still holds the older rows. The first time a table
+          is seen with a ``start`` the cache does not reach, fetch the
+          full window instead; the table is then marked so this costs one
+          fetch per table per process, not one per cycle (a genuinely
+          young entity would otherwise re-fetch its whole window forever).
+        * **Retention is shared.** The prune boundary comes from
+          ``_retention_days`` rather than a per-experiment ``max_age``,
+          because the table is keyed by entity and several experiments
+          may be reading it.
+
+        The three SQLite calls run in a worker thread. ``HistoryDB``
+        serialises on a shared lock that a long analytics query may be
+        holding, and ``get_history`` is an unbounded ``SELECT`` — inline,
+        that would block the event loop once per covariate per cycle
+        (the same audit F9 reasoning the target path carries).
         """
         include_attrs = attribute_key is not None
 
@@ -243,7 +358,9 @@ class CovariateResolver:
         table: Optional[str] = None
         try:
             table = self._cov_cache_table(entity_id, attribute_key)
-            c = self.history_db.get_history(table)  # columns [ds, y]
+            c = await asyncio.to_thread(
+                self.history_db.get_history, table,
+            )  # columns [ds, y]
             if not c.empty:
                 c = c.rename(columns={"y": "value"})
                 c = c[c["ds"] >= start_naive]
@@ -254,18 +371,52 @@ class CovariateResolver:
             cached = pd.DataFrame(columns=["ds", "value"])
 
         # --- Determine the delta fetch start ---
-        if len(cached) > 0:
+        # Fetch the full window when the cache does not reach back to
+        # `start` AND this process has not already asked HA for a window
+        # reaching that far — otherwise a widened `days_history` would be
+        # capped at the old window forever. Tracking the horizon rather
+        # than a plain "done" flag matters twice over: a cold-cache fetch
+        # must not count as having covered a window it was never asked
+        # for, and a covariate whose history genuinely starts inside the
+        # window (a young entity, or one the recorder has purged) must not
+        # re-fetch its whole window every single cycle.
+        # `_covariate_window_is_covered` allows one resample interval of
+        # slack, since the oldest cached row rarely lands exactly on
+        # `start`.
+        horizon = self._backfill_horizon.get(table) if table else None
+        already_attempted = horizon is not None and horizon <= start_naive
+        needs_backfill = (
+            table is not None
+            and not already_attempted
+            and not _covariate_window_is_covered(cached, start_naive, freq)
+        )
+        full_window_fetch = len(cached) == 0 or needs_backfill
+        if full_window_fetch:
+            fetch_start = start
+            if needs_backfill and len(cached) > 0:
+                logger.info(
+                    f"Covariate cache for {entity_id} starts inside the "
+                    f"requested window — fetching the full window once to "
+                    f"backfill, then resuming delta fetches."
+                )
+        else:
             last_cached = cached["ds"].max()
             fetch_start = pd.Timestamp(last_cached)
             if fetch_start.tzinfo is None:
                 fetch_start = fetch_start.tz_localize("UTC")
             fetch_start = fetch_start.to_pydatetime()
-        else:
-            fetch_start = start
-
         raw = await self.iface.get_history(
             entity_id, fetch_start, end, include_attributes=include_attrs,
         )
+        # Record the horizon only once the fetch has actually returned. HA
+        # can time out on a two-year window, and marking the attempt up
+        # front would burn the one retry: the flag is monotone (`start`
+        # moves forward every cycle), so a single 504 would cap the
+        # covariate at its old window permanently.
+        if table is not None and full_window_fetch:
+            self._backfill_horizon[table] = (
+                start_naive if horizon is None else min(horizon, start_naive)
+            )
         new_df = normalise_history(raw, attribute_key=attribute_key)
         if (
             not new_df.empty
@@ -278,11 +429,15 @@ class CovariateResolver:
         if table is not None:
             try:
                 if not new_df.empty:
-                    self.history_db.store_history(table, new_df)
+                    await asyncio.to_thread(
+                        self.history_db.store_history, table, new_df,
+                    )
                 oldest = datetime.now(timezone.utc) - timedelta(
-                    days=self.cache_max_age_days,
+                    days=self._retention_days(table),
                 )
-                self.history_db.cleanup(table, oldest)
+                await asyncio.to_thread(
+                    self.history_db.cleanup, table, oldest,
+                )
             except Exception as e:  # pragma: no cover - defensive
                 logger.debug(f"Covariate cache write failed for {entity_id}: {e}")
 

@@ -58,7 +58,7 @@ The app searches these in order: explicit `--config-path` (development only) →
 | `retrain_every_hours` | float | inherits global | Per-experiment override of the retrain cadence. |
 | `country` | ISO code | unset | Two-letter country code for holiday features (`GB`, `US`, `DE`, …). Unset = no holiday feature. |
 | `units` | string | `""` | Target units (`W`, `kWh`, `%`, …). Shown in the UI and on published sensors. If left blank, the unit is auto-inherited from the target sensor's own `unit_of_measurement` in Home Assistant — so for most experiments you don't need to set this at all. |
-| `max_age` | int (days) | `365` | Cap on rows kept in the SQLite actuals cache. The cache is always-on (v2.33.1+); older rows are pruned each cycle. |
+| `max_age` | int (days) | `365` | Cap on rows kept in the SQLite cache for this experiment's target, covariates and state-mode external forecasts. The cache is always-on (v2.33.1+); older rows are pruned each cycle. Cache tables are keyed by entity, so when several experiments reference the same entity the table is pruned at the **largest** `max_age` among them (v2.50.0+) — a short-`max_age` experiment can no longer delete history a longer-lived one still trains on. Set this at least as large as `days_history`, or the cache is pruned back inside the window you train on. |
 | `publish_prefix` | string | `mlfl_` | Prefix for every companion sensor. Change only if you have a naming clash. |
 | `publish_name` | string | inherits `name` | Override the experiment's name when constructing companion sensor IDs. |
 
@@ -120,6 +120,20 @@ covariates:
 | `transform` | `log` \| `sqrt` \| `box_cox` | unset | Per-covariate transform before model input. |
 | `aggregation` | `mean` \| `sum` \| `max` \| `min` \| `last` | `mean` | Resampling method when aligning to `interval_minutes`. |
 | `is_binary` | bool | `false` | Marks 0/1 indicators (holiday flag, occupancy). Disables the rolling-statistic features for that signal. |
+
+**Covariate history and coverage.** Covariate history is cached in SQLite
+and extended incrementally each cycle, exactly as the target's is, so a
+covariate accumulates history beyond whatever window your HA recorder
+keeps. Where a covariate has no value for a training row — before its
+history begins, or across an outage — the value is carried forward (and
+back-filled at the leading edge) onto the target grid, so a covariate gap
+never deletes a training row. That fill is invisible to the model, so the
+covariate manifest reports the two separately: `obs=` counts grid points
+the entity actually reported on, `filled=` counts the rest. A binary
+covariate is a step function under HA's delta-storage recorder, where "no
+row" means "did not move" rather than "unknown", so its in-span holds
+count as observed; a binary that only appears part-way into the window is
+still reported at its true coverage.
 
 > **Note on `weather.*` entities and `role: lagged`** — a weather entity's
 > *state* is a categorical string (`partlycloudy`, `sunny`, `rainy`),
@@ -439,11 +453,12 @@ The SQLite forecast log is empty — either a fresh install, or `clear_forecast_
 
 ### Forecasts collapse to a flat line
 
-Three usual causes:
+Four usual causes:
 
 1. The target has a long stretch of identical values that the model is overfitting to. The Settings-tab Data sanity check surfaces zero-run length and missing-value rate.
 2. The covariates with `role: future` are returning `unavailable`. The `[COV]` log lines show how each covariate resolved per cycle. A weather entity that briefly stops exposing `forecast` will starve future covariates of values and the model defaults to a flat extrapolation.
-3. `recency_half_life_days` is too small for your data. Try setting it back to `0` (uniform weighting) on stable targets.
+3. A covariate is mostly gap-fill rather than data. The per-cycle **covariate manifest** in the `[APP]` log block reports each covariate's true coverage as `obs=<observed>/<grid points>`, measured *before* the gap fill. Below 90% it is marked ⚠; below 50% it is marked ⛔ and repeated as its own `WARNING` line. A covariate that is largely filled contributes a near-constant column, which the model learns to ignore — and which then behaves unpredictably in production once the entity's values start varying.
+4. `recency_half_life_days` is too small for your data. Try setting it back to `0` (uniform weighting) on stable targets.
 
 ### Out-of-memory on the Pi
 

@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
+from ml_forecast_lab.covariates import cov_cache_raw_key
 from ml_forecast_lab.db import HistoryDB
 
 
@@ -27,6 +28,117 @@ class TestSafeTableName:
         db = HistoryDB(tmp_db)
         with pytest.raises(ValueError, match="Invalid table name"):
             db.safe_table_name("")
+
+
+class TestCovariateTableNames:
+    """Covariate caches share `safe_table_name` with target caches, so the
+    `cov_` namespace has to keep them apart — and the retention map in
+    main.py computes these same names independently."""
+
+    def test_covariate_namespace_is_distinct_from_the_target(self, tmp_db):
+        db = HistoryDB(tmp_db)
+
+        assert db.safe_table_name("sensor.x") != db.safe_table_name(
+            cov_cache_raw_key("sensor.x", None)
+        )
+
+    def test_attribute_keys_cache_independently(self, tmp_db):
+        """Two covariates on one weather entity reading different
+        attributes must not share a table, or one shadows the other."""
+        db = HistoryDB(tmp_db)
+
+        assert db.safe_table_name(
+            cov_cache_raw_key("weather.met", "temperature")
+        ) != db.safe_table_name(
+            cov_cache_raw_key("weather.met", "cloud_coverage")
+        )
+
+    def test_value_key_separator_disambiguates(self, tmp_db):
+        db = HistoryDB(tmp_db)
+
+        assert db.safe_table_name(cov_cache_raw_key("sensor.x_y", None)) == (
+            "cov_sensor_x_y"
+        )
+        assert db.safe_table_name(cov_cache_raw_key("sensor.x", "y")) == (
+            "cov_sensor_x__y"
+        )
+
+    def test_known_collision_is_documented_not_silent(self, tmp_db):
+        """`safe_table_name` is not injective, and the double-underscore
+        separator is reachable inside a valid HA entity_id. These two
+        distinct covariates land in one table and would interleave their
+        values.
+
+        Left as-is deliberately: fixing it means renaming live tables, and
+        the retention map is unaffected because it folds table names
+        forward with `max` rather than parsing them back into entities. A
+        future hashing fix should update this test on purpose.
+        """
+        db = HistoryDB(tmp_db)
+
+        assert db.safe_table_name(
+            cov_cache_raw_key("sensor.foo__bar", None)
+        ) == db.safe_table_name(cov_cache_raw_key("sensor.foo", "bar"))
+
+    def test_cov_prefix_can_overflow_the_length_limit(self, tmp_db):
+        """`cov_` plus `__<key>` costs characters against the 128-char
+        table-name limit, so a name that is fine as a target can be
+        rejected as a covariate. It must raise rather than truncate into
+        another entity's table."""
+        db = HistoryDB(tmp_db)
+        entity = "sensor." + "a" * 120
+        assert db.safe_table_name(entity)
+
+        with pytest.raises(ValueError, match="Invalid table name"):
+            db.safe_table_name(cov_cache_raw_key(entity, "temperature"))
+
+
+class TestCleanupQuietPaths:
+    """The covariate cache prunes once per covariate per cycle, so the
+    no-op paths have to stay silent or they bury real problems."""
+
+    def test_missing_table_returns_zero_without_logging_an_error(
+        self, tmp_db, caplog,
+    ):
+        import logging
+
+        db = HistoryDB(tmp_db)
+
+        with caplog.at_level(logging.ERROR, logger="ml_forecast_lab.db"):
+            deleted = db.cleanup("cov_never_created", datetime(2024, 1, 1))
+
+        assert deleted == 0
+        assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+    def test_nothing_to_prune_does_not_log_at_info(self, tmp_db, caplog):
+        import logging
+
+        db = HistoryDB(tmp_db)
+        table = db.safe_table_name("sensor.fresh")
+        db.store_history(table, pd.DataFrame({
+            "ds": ["2026-05-01T00:00:00"], "value": [1.0],
+        }))
+
+        with caplog.at_level(logging.INFO, logger="ml_forecast_lab.db"):
+            deleted = db.cleanup(table, datetime(2024, 1, 1))
+
+        assert deleted == 0
+        assert [r for r in caplog.records if r.levelno >= logging.INFO] == []
+
+    def test_a_real_prune_still_logs(self, tmp_db, caplog):
+        import logging
+
+        db = HistoryDB(tmp_db)
+        table = db.safe_table_name("sensor.old")
+        db.store_history(table, pd.DataFrame({
+            "ds": ["2024-01-01T00:00:00"], "value": [1.0],
+        }))
+
+        with caplog.at_level(logging.INFO, logger="ml_forecast_lab.db"):
+            deleted = db.cleanup(table, datetime(2025, 1, 1))
+
+        assert deleted == 1
+        assert any("Deleted 1 old records" in r.message for r in caplog.records)
 
 
 class TestStoreAndRetrieve:
