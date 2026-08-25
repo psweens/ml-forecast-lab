@@ -1,5 +1,82 @@
 # Changelog
 
+## 2.50.0
+
+### Added
+
+**The covariate manifest now reports how much of each covariate is real.**
+A covariate with no value for a training row has that value carried forward
+onto the target grid, so a gap never deletes a row. Coverage was then measured
+*after* that fill, against the rows that survived `dropna` — rows that are
+non-NaN by construction — so it read 100% for everything. A covariate with ten
+days of history against a two-year window reported full coverage on about 1.4%
+real data, and the diagnostic that should have caught it was the one reporting
+it as healthy. The visible symptom was a covariate that ranked as useless in
+the benchmark and then behaved unpredictably in production, once its values
+actually started varying.
+
+The manifest now counts observations on the covariate's own resampled series,
+before any fill touches it, and prints `obs=<observed>/<grid points>` with the
+filled remainder alongside — marked ⚠ below 90% of the training window and ⛔
+below 50%, with the ⛔ cases repeated as their own `WARNING` line so they are
+visible without reading the INFO stream:
+
+```
+Covariate manifest for agile (3 configured, +1 physics):
+  ✓ sensor.outside_temp [lagged]  obs=673/673 (100.0%)  stale=12m  corr=+0.83
+  ⚠ sensor.tariff [lagged]  obs=571/673 (84.8%)  filled=102  stale=3.2h  ← coverage 84.8% < 90%
+  ⛔ sensor.new_meter [lagged]  obs=145/673 (21.5%)  filled=528  ← coverage 21.5% < 50% — the rest is forward/back-filled, not measured
+  ✓ sun_elevation [physics]  obs=673/673 (100.0%)  corr=+0.91
+  dropna: 673 rows → 671 kept (2 lost; biggest culprit: sensor_tariff 2 NaNs)
+```
+
+A grid point counts as observed when the entity reported within its own update
+cadence of that point, so a healthy hourly or three-hourly weather covariate on
+a 30-minute grid still reads 100% — a threshold that fires on correct setups is
+a threshold people learn to ignore. Filling, dropping and feature construction
+are unchanged; only the measurement is. A covariate that returns no history at
+all now appears in the manifest at 0% instead of being omitted from it, which
+was the one case the manifest could not show.
+
+### Fixed
+
+**A short-lived experiment can no longer delete history a long-lived one is
+training on.** SQLite cache tables are keyed by entity, not by experiment, so
+two experiments on the same sensor share one table — and it was pruned at
+whichever experiment happened to touch it last. An experiment with
+`max_age: 30` alongside one with `max_age: 365` truncated the shared table to
+30 days on every cycle, and because Home Assistant's recorder has its own, far
+shorter purge window, those rows were unrecoverable. Retention is now the
+largest `max_age` among every experiment referencing that entity, across all
+three roles it can hold — target, covariate, and state-mode external forecast —
+resolved from the live config so a Settings edit takes effect on the next cycle
+rather than at restart. A hand-edited `max_age` of `0` or a negative value is
+clamped to one day instead of putting the prune cut-off in the future and
+emptying the table.
+
+**Widening `days_history` no longer leaves a covariate stuck at the old
+window.** The covariate cache extends forwards from its newest row, so once a
+covariate had been cached for a 14-day window, raising `days_history` fetched
+only the delta and the covariate stayed capped at 14 days — permanently, even
+with the older rows still sitting in the recorder. The first cycle that asks
+for a window the cache does not reach now fetches the full window once; the
+horizon is remembered per table, so a covariate whose history genuinely starts
+inside the window does not re-fetch everything every cycle.
+
+**Pruning a covariate cache no longer logs an error for entities that have
+never cached anything.** The prune runs once per covariate per cycle, and on a
+table that does not exist yet it raised `no such table` — caught, but logged at
+ERROR with a full traceback, every cycle. It is now a debug-level no-op, and
+the routine "deleted 0 rows" line has dropped to debug too, so a real prune
+still stands out.
+
+### Changed
+
+Covariate cache reads and writes now run in a worker thread rather than on the
+event loop, matching what the target's cache already did. The database lock can
+be held by a long analytics query, and the cache read is an unbounded `SELECT`
+that ran once per covariate per cycle.
+
 ## 2.49.5
 
 ### Fixed

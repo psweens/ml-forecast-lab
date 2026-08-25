@@ -278,6 +278,127 @@ def _cov_column_name(cov_cfg, all_covs: Optional[list] = None) -> str:
     return f"{base}__{position + 1}"
 
 
+# --- Covariate coverage ------------------------------------------------
+# Traffic-light thresholds for the covariate manifest, as fixed percentages
+# of the training window. Deliberately constants rather than settings: they
+# exist to make a badly-covered covariate impossible to miss, and a tunable
+# threshold is just a tunable way to silence the warning.
+COV_COVERAGE_WARN_PCT = 90.0
+COV_COVERAGE_ALERT_PCT = 50.0
+
+# Mirrors ExperimentCfg.max_age. Used when no experiment in the live config
+# claims a given cache table.
+_DEFAULT_CACHE_MAX_AGE_DAYS = 365
+
+
+def _covariate_grid_coverage(
+    cov_series, grid, interval_minutes: int,
+) -> tuple:
+    """Count how many training rows a covariate actually observed.
+
+    Returns ``(observed_count, filled_count)``, which always sum to
+    ``len(grid)``. Pure — it never mutates ``cov_series`` and never
+    touches the training frame.
+
+    This exists because the number the manifest used to print was
+    measured *after* ``_fetch_and_preprocess`` forward- and back-fills the
+    covariate onto the target grid. That fill is deliberate (a covariate
+    gap must not delete a training row) but it makes the merged column
+    non-NaN everywhere, so counting non-NaN afterwards reports 100%
+    coverage for a covariate that is almost entirely fabricated — ten days
+    of history against a two-year window read as full coverage on ~1.4%
+    real data.
+
+    A grid point counts as *observed* when the covariate's own resampled
+    series has a value at or before it, within the covariate's own
+    observation cadence. Two reasons that beats a bare
+    ``cov_series.reindex(grid)``:
+
+    * **Cadence.** ``CovariateResolver._resample_covariate`` aggregates
+      with ``mean()``, which yields NaN for every grid bin holding no raw
+      row. A perfectly healthy hourly weather entity on a 30-minute grid
+      would score ~50% and a healthy three-hourly forecast entity ~17% —
+      permanent alerts on correct setups, which is how a diagnostic
+      teaches people to ignore it.
+    * **Phase.** Target and covariate are resampled independently, each
+      anchored to midnight of its own first day. ``interval_minutes`` is
+      validated only as ``>= 1``, so values that do not divide a day (7,
+      50) are reachable, and then the two grids share no label at all: a
+      dense, healthy covariate scores exactly 0.
+
+    The reach is ``max(interval_minutes, 2 x median observation gap)``,
+    which self-calibrates to whatever cadence the entity actually has.
+    ``method="ffill"`` cannot reach backwards, so a covariate that only
+    starts part-way into the window is never credited for the leading
+    stretch — precisely the case this measurement exists to catch.
+
+    Binary covariates are resampled upstream with ``last().ffill()``, so
+    their in-span holds are already values by the time this sees them:
+    for a binary, ``observed_count`` measures *span*, and an interior
+    outage is invisible. That is the right reading for a step function
+    under HA's delta-storage recorder ("no row" means "did not move", not
+    "unknown"), and a binary that only appears part-way in is still
+    caught.
+    """
+    n = len(grid)
+    if n == 0:
+        return 0, 0
+    if cov_series is None or len(cov_series) == 0:
+        return 0, n
+    obs = cov_series.dropna()
+    if obs.empty:
+        return 0, n
+
+    try:
+        step_min = max(1, int(interval_minutes))
+    except (TypeError, ValueError):
+        step_min = 30
+
+    # Normalise the covariate's index onto the grid's own convention.
+    # Both are tz-naive UTC in the pipeline today, but a mismatch would
+    # make `reindex` raise and the count silently read 0% — an alert
+    # about a covariate that is in fact perfectly healthy. Duplicate and
+    # unsorted labels get the same treatment: `reindex` refuses to work
+    # on an axis with duplicates, and this is a diagnostic, so it must
+    # never be the thing that takes a covariate out of training.
+    grid_tz = getattr(grid, "tz", None)
+    obs_tz = getattr(obs.index, "tz", None)
+    if obs_tz is not None and grid_tz is None:
+        obs = obs.copy()
+        obs.index = obs.index.tz_convert(None)
+    elif obs_tz is None and grid_tz is not None:
+        obs = obs.copy()
+        obs.index = obs.index.tz_localize("UTC").tz_convert(grid_tz)
+    if not obs.index.is_unique:
+        obs = obs[~obs.index.duplicated(keep="last")]
+    if not obs.index.is_monotonic_increasing:
+        obs = obs.sort_index()
+
+    if len(obs) >= 2:
+        gaps = obs.index.to_series().diff().dropna()
+        median_gap_min = float(gaps.dt.total_seconds().median()) / 60.0
+    else:
+        median_gap_min = float(step_min)
+    if not np.isfinite(median_gap_min):
+        median_gap_min = float(step_min)
+    reach_min = max(float(step_min), 2.0 * median_gap_min)
+
+    try:
+        on_grid = obs.reindex(
+            grid, method="ffill", tolerance=pd.Timedelta(minutes=reach_min),
+        )
+        observed = int(on_grid.notna().sum())
+    except Exception as e:  # pragma: no cover - unreachable via fetch_history
+        # Nothing left that should fail, but if the measurement cannot be
+        # taken, report full coverage rather than an alert: a diagnostic
+        # that cannot measure must not manufacture a complaint about data
+        # that may be fine.
+        logger.debug(f"Covariate coverage measurement failed: {e}")
+        return n, 0
+
+    return observed, n - observed
+
+
 def _assess_model_instability(
     fold_metrics_list: list,
     primary_metrics: list,
@@ -736,8 +857,13 @@ class MLForecastLabApp:
             # Initialise CovariateResolver
             from ml_forecast_lab.covariates import CovariateResolver
 
+            # A bound method, not a value: it reads the live config at
+            # prune time, so a Settings edit takes effect on the next
+            # cycle instead of at restart.
             self.covariate_resolver = CovariateResolver(
-                self.ha_interface, history_db=self.history_db,
+                self.ha_interface,
+                history_db=self.history_db,
+                retention_provider=self._retention_days_for_table,
             )
             logger.info("CovariateResolver initialised (covariate history cached)")
 
@@ -1848,6 +1974,97 @@ class MLForecastLabApp:
             "checked_at": now.isoformat(),
         }
 
+    def _retention_tables_for_experiment(self, exp) -> List[str]:
+        """Every entity-keyed cache table this experiment reads or writes.
+
+        Three roles, three namespaces — and note the field asymmetry the
+        covariate loop already works around: ``CovariateCfg`` names its
+        entity ``.entity`` while ``ExternalForecastCfg`` uses
+        ``.entity_id``. Attribute-mode external forecasts are excluded:
+        they log into ``external_forecast_log``, not an entity-keyed
+        table, so they have no retention stake here.
+        """
+        from ml_forecast_lab.covariates import cov_cache_raw_key
+
+        out: List[str] = []
+        if not self.history_db:
+            return out
+
+        def _add(raw_key) -> None:
+            try:
+                out.append(self.history_db.safe_table_name(raw_key))
+            except (ValueError, TypeError):
+                # Unsanitisable name — it was never cached under that
+                # name either, so it cannot be pruned and needs no entry.
+                pass
+
+        target = getattr(exp, "target_entity", None)
+        if target:
+            _add(target)
+
+        for spec in (getattr(exp, "external_forecasts", None) or []):
+            if (getattr(spec, "mode", "state") or "state") != "state":
+                continue
+            ent = getattr(spec, "entity_id", None)
+            if ent:
+                _add(ent)
+
+        for cov in (getattr(exp, "covariates", None) or []):
+            ent = getattr(cov, "entity", None)
+            if ent:
+                _add(cov_cache_raw_key(
+                    ent, getattr(cov, "future_value_key", None),
+                ))
+
+        return out
+
+    def _retention_days_for_table(self, table: Optional[str]) -> int:
+        """Days of history to keep in ``table``, across ALL experiments.
+
+        SQLite cache tables are keyed by entity, not by experiment, so two
+        experiments on the same sensor share one table. Pruning it at one
+        experiment's ``max_age`` deletes rows the other is still training
+        on — and because Home Assistant's recorder has its own, usually
+        far shorter, purge window, those rows are unrecoverable. Retention
+        is therefore the LARGEST ``max_age`` among every experiment
+        referencing the entity behind ``table``, in any role: target,
+        state-mode external forecast, or covariate.
+
+        Rebuilt from the live config on each call rather than cached:
+        ``load_config`` rebinds a new ``AppConfig`` on a timer and on
+        every Settings edit, so a map captured at construction would go
+        stale the moment a user adds an experiment. The scan is a few
+        dozen string operations.
+
+        Table names are computed forwards, per reference, and folded with
+        ``max`` — never parsed back into an entity. ``safe_table_name`` is
+        not injective (``sensor.foo__bar`` with no value key and
+        ``sensor.foo`` with value key ``bar`` both sanitise to
+        ``cov_sensor_foo__bar``), so inverting a table name would be
+        unsound; folding forwards means colliding references simply take
+        the larger retention, which is the safe direction.
+
+        ``max_age`` is unvalidated in ``config.py``, so a hand-edited 0 or
+        negative value is reachable and would put the cut-off in the
+        future and delete the entire table; clamp to >= 1.
+        """
+        if not table or not self.history_db:
+            return _DEFAULT_CACHE_MAX_AGE_DAYS
+
+        best: Optional[int] = None
+        for exp in (getattr(self.config, "experiments", None) or []):
+            try:
+                age = int(
+                    getattr(exp, "max_age", None) or _DEFAULT_CACHE_MAX_AGE_DAYS
+                )
+            except (TypeError, ValueError):
+                age = _DEFAULT_CACHE_MAX_AGE_DAYS
+            age = max(1, age)
+            if table in self._retention_tables_for_experiment(exp):
+                best = age if best is None else max(best, age)
+
+        return best if best is not None else _DEFAULT_CACHE_MAX_AGE_DAYS
+
     async def _fetch_and_preprocess(self, exp_cfg) -> Optional[pd.DataFrame]:
         """
         Fetch history and preprocess for an experiment.
@@ -1955,8 +2172,13 @@ class MLForecastLabApp:
             if inserted > 0:
                 logger.info(f"  Cached {inserted} new records in SQLite")
 
-            # Cleanup old records beyond max_age
-            oldest = now - timedelta(days=exp_cfg.max_age)
+            # Cleanup old records beyond the retention this table needs.
+            # NOT `exp_cfg.max_age`: the table is keyed by the target
+            # entity, so a second experiment on the same sensor with a
+            # longer max_age would silently have its history deleted here.
+            oldest = now - timedelta(
+                days=self._retention_days_for_table(table_name),
+            )
             await asyncio.to_thread(
                 self.history_db.cleanup, table_name, oldest,
             )
@@ -2163,6 +2385,23 @@ class MLForecastLabApp:
 
                     if cov_series.empty:
                         logger.warning(f"    No data for covariate {cov_cfg.entity}, skipping")
+                        # Record it. No column is added to `result` —
+                        # that behaviour is unchanged — but the manifest
+                        # has to be able to report 0%, or the very worst
+                        # coverage case is the one case it cannot show.
+                        cov_stats.append({
+                            "entity": cov_cfg.entity,
+                            "name": canonical_name,
+                            "role": cov_cfg.role,
+                            "raw_count": 0,
+                            "aligned_count": 0,
+                            "observed_count": 0,
+                            "filled_count": len(result.index),
+                            "grid_points": len(result.index),
+                            "last_ts": None,
+                            "no_history": True,
+                            "ok": True,
+                        })
                         continue
 
                     # Apply scaling factor if configured
@@ -2174,17 +2413,37 @@ class MLForecastLabApp:
                         from ml_forecast_lab.preprocessing import apply_transform
                         cov_series = apply_transform(cov_series, cov_cfg.transform)
 
-                    # Align to target index and merge
+                    # Align to target index and merge.
+                    #
+                    # MEASURE BEFORE FILLING. The two fill lines below are
+                    # unchanged and deliberate — a covariate gap must not
+                    # delete a training row — but they make the merged
+                    # column non-NaN everywhere, so counting non-NaN
+                    # afterwards reports full coverage for a covariate
+                    # that is almost entirely fabricated. The counts come
+                    # off `cov_series`, the covariate's own resampled
+                    # observations, before any fill touches them.
                     cov_name = cov_dict["name"]
+                    grid_points = len(result.index)
+                    observed_count, filled_count = _covariate_grid_coverage(
+                        cov_series, result.index, exp_cfg.interval_minutes,
+                    )
+
                     cov_aligned = cov_series.reindex(result.index, method="ffill")
                     # Back-fill any leading NaNs and forward-fill trailing ones
                     cov_aligned = cov_aligned.ffill().bfill()
                     result[cov_name] = cov_aligned
 
                     valid_count = result[cov_name].notna().sum()
+                    cov_pct = (
+                        100.0 * observed_count / grid_points
+                        if grid_points else 0.0
+                    )
                     logger.info(
                         f"    ✓ {cov_cfg.entity} → '{cov_name}': "
-                        f"{len(cov_series)} raw → {valid_count} aligned"
+                        f"{len(cov_series)} resampled → "
+                        f"{observed_count}/{grid_points} observed "
+                        f"({cov_pct:.1f}%), {filled_count} filled"
                         f"{f', scaled ×{cov_cfg.scale}' if cov_cfg.scale else ''}"
                     )
                     cov_stats.append({
@@ -2193,6 +2452,9 @@ class MLForecastLabApp:
                         "role": cov_cfg.role,
                         "raw_count": len(cov_series),
                         "aligned_count": int(valid_count),
+                        "observed_count": int(observed_count),
+                        "filled_count": int(filled_count),
+                        "grid_points": int(grid_points),
                         "last_ts": (
                             cov_series.index[-1]
                             if len(cov_series) else None
@@ -2235,6 +2497,11 @@ class MLForecastLabApp:
                             "role": "physics",
                             "raw_count": len(solar_df),
                             "aligned_count": int(result[col].notna().sum()),
+                            # Computed from the grid itself, so every
+                            # point is observed by construction.
+                            "observed_count": len(result.index),
+                            "filled_count": 0,
+                            "grid_points": len(result.index),
                             "last_ts": None,
                             "ok": True,
                         })
@@ -2307,6 +2574,13 @@ class MLForecastLabApp:
                 c for c in result.columns
                 if c != 'y' and result[c].notna().sum() == 0
             ]
+            # cov_stats is already built at this point, so an entry can
+            # name a column that is about to be dropped or zero-filled.
+            # Stamp the outcome so the manifest reports the column's
+            # actual fate rather than describing one that no longer exists.
+            stats_by_name = {
+                cs.get("name"): cs for cs in cov_stats if cs.get("ok")
+            }
             for col in empty_cols:
                 roles = cov_roles_by_name.get(col, {'lagged'})
                 has_future = bool(roles & {'future', 'both'})
@@ -2318,6 +2592,8 @@ class MLForecastLabApp:
                     # — the model just sees "no past signal" for this
                     # channel, which is the truth.
                     result[col] = 0.0
+                    if col in stats_by_name:
+                        stats_by_name[col]["fate"] = "zero-filled"
                     logger.warning(
                         "  Covariate '%s' (role=%s) had 0%% "
                         "historical coverage — filling past with 0 so "
@@ -2332,6 +2608,8 @@ class MLForecastLabApp:
                     # Lagged-only column with 0% coverage adds nothing.
                     # Drop it entirely so the dropna doesn't eat rows.
                     result = result.drop(columns=[col])
+                    if col in stats_by_name:
+                        stats_by_name[col]["fate"] = "dropped"
                     logger.warning(
                         "  Covariate '%s' (role=%s) had 0%% "
                         "historical coverage — dropping the column "
@@ -2430,10 +2708,14 @@ class MLForecastLabApp:
         )
 
         configured = len(exp_cfg.covariates or [])
+        # Count physics rows rather than inferring them by subtraction:
+        # failed covariates also occupy a cov_stats row, so the old
+        # `len(cov_stats) - configured` reported them as physics features.
+        n_physics = sum(1 for cs in cov_stats if cs.get("role") == "physics")
         header = (
             f"Covariate manifest for {exp_cfg.name} "
             f"({configured} configured"
-            f"{f', +{len(cov_stats) - configured} physics' if len(cov_stats) > configured else ''}):"
+            f"{f', +{n_physics} physics' if n_physics else ''}):"
         )
         lines = [header]
 
@@ -2447,25 +2729,61 @@ class MLForecastLabApp:
 
             name = cs["name"]
             role = cs["role"]
-            aligned = cs.get("aligned_count", 0)
+            flags = []
 
-            # Coverage: fraction of post-dropna rows this column was
-            # non-NaN on. For a column that was part of the reason rows
-            # got dropped, this reads 100% (survivors are by definition
-            # non-NaN); the dropna-culprit line below captures the
-            # pre-dropna perspective.
-            if name in result.columns and rows_after_dropna > 0:
-                post_valid = int(result[name].notna().sum())
-                coverage_pct = 100.0 * post_valid / rows_after_dropna
+            # Coverage: real observations vs grid points over the training
+            # window, measured BEFORE the ffill/bfill in
+            # `_fetch_and_preprocess`. The old reading counted non-NaN
+            # AFTER that fill, against the rows that survived dropna —
+            # rows that are non-NaN by construction — so it read ~100% for
+            # everything, including a covariate with ten days of history
+            # against a two-year window (~1.4% real).
+            grid_points = int(cs.get("grid_points") or 0)
+            observed = cs.get("observed_count")
+            filled = cs.get("filled_count")
+
+            if observed is not None and grid_points > 0:
+                coverage_pct = 100.0 * int(observed) / grid_points
+                cov_str = (
+                    f"obs={int(observed)}/{grid_points} "
+                    f"({coverage_pct:.1f}%)"
+                )
+                if filled:
+                    cov_str += f"  filled={int(filled)}"
             else:
+                # Entry without the coverage keys — keep a line rather
+                # than crash.
+                aligned = cs.get("aligned_count", 0)
                 coverage_pct = (
                     100.0 * aligned / rows_before_dropna
                     if rows_before_dropna else 0.0
                 )
+                cov_str = f"cov~{coverage_pct:.1f}% (aligned)"
+
+            if cs.get("no_history"):
+                flags.append("no history returned")
+            fate = cs.get("fate")
+            if fate:
+                flags.append(f"column {fate}")
+
+            if coverage_pct < COV_COVERAGE_ALERT_PCT:
+                level = "alert"
+                flags.append(
+                    f"coverage {coverage_pct:.1f}% "
+                    f"< {COV_COVERAGE_ALERT_PCT:.0f}% — the rest is "
+                    f"forward/back-filled, not measured"
+                )
+            elif coverage_pct < COV_COVERAGE_WARN_PCT:
+                level = "warn"
+                flags.append(
+                    f"coverage {coverage_pct:.1f}% "
+                    f"< {COV_COVERAGE_WARN_PCT:.0f}%"
+                )
+            else:
+                level = "ok"
 
             # Staleness: age of the most recent raw value.
             stale_str = ""
-            flags = []
             last_ts = cs.get("last_ts")
             if last_ts is not None:
                 last_ts_naive = (
@@ -2495,13 +2813,18 @@ class MLForecastLabApp:
                 else:
                     corr_str = "corr=const"
 
-            parts = [f"cov={coverage_pct:.1f}%"]
+            parts = [cov_str]
             if stale_str:
                 parts.append(stale_str)
             if corr_str:
                 parts.append(corr_str)
             flag_str = f"  ← {', '.join(flags)}" if flags else ""
-            marker = "⚠" if flags else "✓"
+            if level == "alert":
+                marker = "⛔"
+            elif flags:
+                marker = "⚠"
+            else:
+                marker = "✓"
             lines.append(
                 f"  {marker} {cs['entity']} [{role}]  "
                 f"{'  '.join(parts)}{flag_str}"
@@ -2532,6 +2855,33 @@ class MLForecastLabApp:
         lines.append(dropna_line)
 
         logger.info("\n".join(lines))
+
+        # The manifest is a single INFO record, so under the Logs tab's
+        # level filter none of it survives at WARNING. Emit the alert-level
+        # covariates as their own WARNING record so a column that is more
+        # than half invented is visible without reading the INFO stream.
+        # Deliberately no literal "ERROR"/"WARNING" token inside the
+        # manifest lines themselves — the Logs view colourises by naive
+        # substring and would re-tint the whole INFO block.
+        alerting = []
+        for cs in cov_stats:
+            if not cs.get("ok", False):
+                continue
+            gp = int(cs.get("grid_points") or 0)
+            if gp <= 0 or cs.get("observed_count") is None:
+                continue
+            pct = 100.0 * int(cs["observed_count"]) / gp
+            if pct < COV_COVERAGE_ALERT_PCT:
+                alerting.append(f"{cs['entity']} ({pct:.1f}%)")
+        if alerting:
+            logger.warning(
+                f"  ⛔ {exp_cfg.name}: covariate coverage below "
+                f"{COV_COVERAGE_ALERT_PCT:.0f}% of the training window for "
+                f"{len(alerting)} covariate(s): {', '.join(alerting)}. "
+                f"Values outside the observed span are forward/back-filled "
+                f"constants, not data — seed the cache, drop the covariate, "
+                f"or wait for the cache to accumulate."
+            )
 
     def _update_web_benchmark(
         self, exp_cfg, model_results, rankings, best_model_name,
@@ -5411,9 +5761,15 @@ class MLForecastLabApp:
                     table = self.history_db.safe_table_name(entity)
                     df = pd.DataFrame({"ds": [issued_naive], "value": [float(val)]})
                     await asyncio.to_thread(self.history_db.store_history, table, df)
-                    # Retention: keep the external cache bounded like actuals.
+                    # Retention: keep the external cache bounded like
+                    # actuals — and at the largest max_age among every
+                    # experiment sharing this entity, since state-mode
+                    # externals live in the same `safe_table_name`
+                    # namespace as targets.
                     oldest = datetime.now(timezone.utc).replace(tzinfo=None) \
-                        - timedelta(days=exp_cfg.max_age)
+                        - timedelta(
+                            days=self._retention_days_for_table(table),
+                        )
                     await asyncio.to_thread(
                         self.history_db.cleanup, table, oldest,
                     )

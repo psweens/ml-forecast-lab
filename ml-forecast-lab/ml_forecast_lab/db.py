@@ -253,8 +253,26 @@ class HistoryDB:
             )
             self.conn.commit()
             deleted = cursor.rowcount
-            logger.info(f"Deleted {deleted} old records from {table_name}")
+            if deleted:
+                logger.info(f"Deleted {deleted} old records from {table_name}")
+            else:
+                # Covariate caching prunes once per covariate per cycle,
+                # and the steady state is "nothing to delete". At INFO
+                # that is a line per covariate per cycle of pure noise.
+                logger.debug(f"Nothing to prune from {table_name}")
             return deleted
+        except sqlite3.OperationalError as e:
+            if "no such table" in str(e).lower():
+                # Nothing has ever been cached for this entity, so there
+                # is nothing to prune. A missing table is a no-op, not an
+                # error — and since the covariate prune runs every cycle,
+                # logging it at ERROR buries real problems under a
+                # per-cycle traceback.
+                logger.debug(f"cleanup: {table_name} does not exist yet")
+                return 0
+            logger.error(f"Error cleaning up {table_name}: {e}", exc_info=True)
+            self.conn.rollback()
+            return 0
         except sqlite3.Error as e:
             logger.error(f"Error cleaning up {table_name}: {e}", exc_info=True)
             self.conn.rollback()
