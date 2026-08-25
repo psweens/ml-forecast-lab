@@ -33,7 +33,10 @@ Covariate manifest for agile (3 configured, +1 physics):
 A grid point counts as observed when the entity reported within its own update
 cadence of that point, so a healthy hourly or three-hourly weather covariate on
 a 30-minute grid still reads 100% — a threshold that fires on correct setups is
-a threshold people learn to ignore. Filling, dropping and feature construction
+a threshold people learn to ignore. The cadence is taken from the 90th
+percentile of the entity's own observation gaps, not the median, so a covariate
+whose cache spans an integration or `scan_interval` change is judged by its
+slower reporting mode rather than by whichever mode happens to hold more gaps. Filling, dropping and feature construction
 are unchanged; only the measurement is. A covariate that returns no history at
 all now appears in the manifest at 0% instead of being omitted from it, which
 was the one case the manifest could not show.

@@ -541,3 +541,73 @@ class TestTrainingFrameUnchanged:
         ]
         assert len(alerts) == 1
         assert "sensor.new" in alerts[0].message
+
+
+class TestMixedCadence:
+    """An entity's cadence is not always constant. A covariate cached
+    across an integration or scan_interval change holds both cadences in
+    one series, and the gap distribution is bimodal with nothing between
+    the modes — so a median-based reach lands on whichever mode happens to
+    hold more gaps and can call a fully-reporting entity 31% covered."""
+
+    @staticmethod
+    def _mixed(grid, dense_hours):
+        slow = pd.date_range(
+            grid[0], grid[-1] - pd.Timedelta(hours=dense_hours), freq="6h",
+        )
+        fast = pd.date_range(
+            grid[-1] - pd.Timedelta(hours=dense_hours), grid[-1], freq=FREQ,
+        )
+        return _resampled(slow.append(fast))
+
+    @pytest.mark.parametrize("dense_hours", [72, 168, 240, 720])
+    def test_cadence_change_is_not_reported_as_a_gap(self, dense_hours):
+        """The entity reported across the whole window in every case, at
+        one cadence or the other. None of them is a coverage shortfall."""
+        grid = _grid(days=90, start="2026-01-01")
+        cov = self._mixed(grid, dense_hours)
+
+        observed, _ = _covariate_grid_coverage(cov, grid, INTERVAL)
+
+        assert _pct(observed, grid) >= COV_COVERAGE_ALERT_PCT, (
+            f"a cadence change must not read as a coverage alert; got "
+            f"{_pct(observed, grid):.1f}% with {dense_hours}h of dense data"
+        )
+
+    def test_repeated_outages_are_still_caught(self):
+        """The counterweight: the reach must not be so generous that a
+        genuinely flaky sensor reads as healthy. Fifty scattered six-hour
+        outages is 13% of the window."""
+        grid = _grid(days=90, start="2026-01-01")
+        rng = np.random.default_rng(11)
+        mask = np.ones(len(grid), bool)
+        for s in rng.choice(len(grid) - 12, 50, replace=False):
+            mask[s:s + 12] = False
+        cov = _resampled(grid[mask])
+
+        observed, _ = _covariate_grid_coverage(cov, grid, INTERVAL)
+
+        assert _pct(observed, grid) < COV_COVERAGE_WARN_PCT, (
+            f"repeated outages must still be visible; got "
+            f"{_pct(observed, grid):.1f}%"
+        )
+
+    def test_heavy_outages_degrade_proportionally(self):
+        """43% of ticks missing in six-hour blocks. Each outage is covered
+        by the carry-forward for its first hour and unobserved for the
+        remaining five, so ~64% is the honest reading — and the reach must
+        not inflate it back towards healthy."""
+        grid = _grid(days=90, start="2026-01-01")
+        rng = np.random.default_rng(11)
+        mask = np.ones(len(grid), bool)
+        for s in rng.choice(len(grid) - 12, 200, replace=False):
+            mask[s:s + 12] = False
+        assert 0.40 <= 1 - mask.mean() <= 0.46  # precondition
+        cov = _resampled(grid[mask])
+
+        observed, _ = _covariate_grid_coverage(cov, grid, INTERVAL)
+
+        assert 55.0 <= _pct(observed, grid) <= 70.0, (
+            f"expected roughly two thirds observed; got "
+            f"{_pct(observed, grid):.1f}%"
+        )

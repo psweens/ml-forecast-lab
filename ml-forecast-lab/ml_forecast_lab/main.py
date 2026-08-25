@@ -326,8 +326,22 @@ def _covariate_grid_coverage(
       50) are reachable, and then the two grids share no label at all: a
       dense, healthy covariate scores exactly 0.
 
-    The reach is ``max(interval_minutes, 2 x median observation gap)``,
-    which self-calibrates to whatever cadence the entity actually has.
+    The reach is ``max(interval_minutes, 2 x the 90th-percentile
+    observation gap)``, which self-calibrates to whatever cadence the
+    entity actually has. The 90th percentile rather than the median
+    because an entity's cadence is not always constant: a covariate cached
+    across an integration or ``scan_interval`` change holds both cadences
+    in one series, and the gap distribution is then bimodal with nothing
+    in between. A median lands on whichever mode happens to hold more
+    gaps, so seven days of 30-minute data appended to eighty-three days of
+    six-hourly data flips a fully-reporting entity from 100% to 31%. The
+    reach expresses how long one observation stays authoritative, and when
+    an entity has two normal cadences the honest answer is the slower one.
+    A high quantile rather than the maximum so that genuine outages — the
+    thing being measured — do not set the reach themselves: a sensor
+    missing 43% of the window in scattered six-hour outages still reads
+    62%.
+
     ``method="ffill"`` cannot reach backwards, so a covariate that only
     starts part-way into the window is never credited for the leading
     stretch — precisely the case this measurement exists to catch.
@@ -376,12 +390,12 @@ def _covariate_grid_coverage(
 
     if len(obs) >= 2:
         gaps = obs.index.to_series().diff().dropna()
-        median_gap_min = float(gaps.dt.total_seconds().median()) / 60.0
+        gap_min = float(gaps.dt.total_seconds().quantile(0.90)) / 60.0
     else:
-        median_gap_min = float(step_min)
-    if not np.isfinite(median_gap_min):
-        median_gap_min = float(step_min)
-    reach_min = max(float(step_min), 2.0 * median_gap_min)
+        gap_min = float(step_min)
+    if not np.isfinite(gap_min):
+        gap_min = float(step_min)
+    reach_min = max(float(step_min), 2.0 * gap_min)
 
     try:
         on_grid = obs.reindex(
