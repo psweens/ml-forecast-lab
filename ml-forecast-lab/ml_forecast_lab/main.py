@@ -761,6 +761,56 @@ def _holdout_display_from_windows(y_p: 'np.ndarray', target_len: int) -> 'np.nda
     return out
 
 
+def _holdout_display_from_kept_windows(
+    y_p: 'np.ndarray',
+    kept: 'np.ndarray',
+    slice_index,
+    window_size: int,
+    holdout_index,
+) -> 'np.ndarray':
+    """Timestamp-aware variant of :func:`_holdout_display_from_windows`.
+
+    Windows are now built over the complete-grid window frame with a label
+    mask, so (a) some windows may have been dropped where the holdout's
+    label was unmeasured, and (b) window position no longer equals holdout
+    row position when the holdout contains a gap. Each surviving window's
+    h=1 prediction is therefore placed at the holdout row whose timestamp
+    its label actually carries; the trailing rows no h=1 window can reach
+    are filled from the last window's h=2..H outputs, matched the same way.
+
+    On gap-free data every label matches positionally and this reduces to
+    exactly the legacy helper's output — pinned by a unit test.
+    """
+    out = np.full(len(holdout_index), np.nan, dtype=np.float32)
+    y_p = np.asarray(y_p)
+    kept = np.asarray(kept, dtype=int)
+    if len(kept) == 0:
+        return out
+
+    h1 = y_p if y_p.ndim == 1 else y_p[:, 0]
+    label_ts = slice_index[kept + window_size]
+    pos = holdout_index.get_indexer(label_ts)
+    hit = pos >= 0
+    out[pos[hit]] = h1[: len(label_ts)][hit].astype(np.float32)
+
+    # Tail fill: the LAST window's dense outputs land on the steps after
+    # its own h=1 label. Place h=1+k at the holdout row k grid steps
+    # later, where that row exists.
+    if y_p.ndim == 2 and y_p.shape[1] > 1:
+        last = y_p[-1]
+        last_ts = label_ts[-1]
+        step = slice_index[1] - slice_index[0] if len(slice_index) > 1 else None
+        if step is not None:
+            tail_ts = pd.DatetimeIndex(
+                [last_ts + step * k for k in range(1, last.shape[0])]
+            )
+            tail_pos = holdout_index.get_indexer(tail_ts)
+            for k, p_ in enumerate(tail_pos):
+                if p_ >= 0 and np.isnan(out[p_]):
+                    out[p_] = np.float32(last[1 + k])
+    return out
+
+
 def _apply_patience(model, exp_cfg, overrides=None) -> None:
     """v2.40.12: apply the per-experiment ``patience`` Setting to a model.
 
@@ -3892,6 +3942,8 @@ class MLForecastLabApp:
                         combined, model, fold_indices, epoch_callback=epoch_cb,
                         cancel_event=cancel_ev,
                         future_features_df=bench_future_features_df,
+                        window_frame=missing_report["window_frame"],
+                        window_label_mask=missing_report["window_label_mask"],
                     )
                 )
             except TrainingCancelled:
@@ -4144,6 +4196,17 @@ class MLForecastLabApp:
                             cov_cols = neural_covariate_columns(train_part.columns)
 
                             window_size = min(48, len(train_part) // 3)
+                            # Window source: the complete-grid frame, so a
+                            # label gap inside the training span cannot
+                            # time-warp a window. Sliced to the train
+                            # part's own wall-clock range; identical to
+                            # train_part when the data has no gaps.
+                            win_train_h = missing_report["window_frame"].loc[
+                                : train_part.index[-1]
+                            ]
+                            lm_train_h = missing_report["window_label_mask"].loc[
+                                : train_part.index[-1]
+                            ].to_numpy()
                             if window_size >= 12:
                                 # Match the production-cache path: build
                                 # an extended window with future-known
@@ -4160,10 +4223,10 @@ class MLForecastLabApp:
                                 include_sun_elevation = 'sun_elevation' in cov_cols
                                 include_clear_sky_ghi = 'clear_sky_ghi' in cov_cols
                                 future_cov_train = _collect_train_future_covariates(
-                                    train_part, exp_cfg,
+                                    win_train_h, exp_cfg,
                                 )
                                 hold_future_features_df = compute_known_future_features(
-                                    train_part.index,
+                                    win_train_h.index,
                                     add_temporal=True,
                                     country=getattr(exp_cfg, 'country', None),
                                     solar_lat_lon=solar_lat_lon,
@@ -4171,12 +4234,16 @@ class MLForecastLabApp:
                                     include_clear_sky_ghi=include_clear_sky_ghi,
                                     future_covariate_values=future_cov_train or None,
                                 )
-                                seq_X, seq_y, channel_names = create_sliding_windows(
-                                    train_part, target_col, window_size=window_size,
-                                    covariate_cols=cov_cols if cov_cols else None,
-                                    add_temporal=True,
-                                    horizon_steps=horizon_steps,
-                                    future_features_df=hold_future_features_df,
+                                seq_X, seq_y, channel_names, _kept_h = (
+                                    create_sliding_windows(
+                                        win_train_h, target_col,
+                                        window_size=window_size,
+                                        covariate_cols=cov_cols if cov_cols else None,
+                                        add_temporal=True,
+                                        horizon_steps=horizon_steps,
+                                        future_features_df=hold_future_features_df,
+                                        label_mask=lm_train_h,
+                                    )
                                 )
                                 hold_seq_kwargs['sequence_data'] = seq_X
                                 hold_seq_kwargs['channel_names'] = channel_names
@@ -4219,10 +4286,19 @@ class MLForecastLabApp:
                         from ml_forecast_lab.features import (
                             create_sliding_windows, compute_known_future_features,
                         )
-                        combined_holdout = pd.concat([
-                            train_part.iloc[-window_size:],
-                            holdout_part,
-                        ])
+                        # The bridge is the window_size grid rows before
+                        # the holdout, taken on the window frame's own
+                        # contiguous index — the old concat of supervised
+                        # tails could itself span a label gap.
+                        _wf = missing_report["window_frame"]
+                        _lm = missing_report["window_label_mask"]
+                        _ho_pos = _wf.index.get_loc(holdout_part.index[0])
+                        combined_holdout = _wf.iloc[
+                            max(0, _ho_pos - window_size):
+                        ]
+                        lm_holdout = _lm.iloc[
+                            max(0, _ho_pos - window_size):
+                        ].to_numpy()
                         # Mirror the training-side extended-window build so
                         # the inference seq_X matches the trained
                         # architecture (and future covariate values land
@@ -4262,24 +4338,32 @@ class MLForecastLabApp:
                         # crash on the entire holdout slice. We still
                         # take the h=1 column from the dense output
                         # for the display series.
-                        seq_X_ho, _, _ = create_sliding_windows(
+                        seq_X_ho, _, _, _kept_ho = create_sliding_windows(
                             combined_holdout, target_col, window_size=window_size,
                             covariate_cols=cov_cols if cov_cols else None,
                             add_temporal=True,
                             horizon_steps=horizon_steps,
                             future_features_df=ho_future_features_df,
+                            label_mask=lm_holdout,
+                            # Display series scores/plots the h=1 column;
+                            # requiring every horizon measured would blank
+                            # the chart near any gap.
+                            mask_horizons=[1],
                         )
                         y_p = m.predict_sequence(seq_X_ho)
                         _y_holdout_display = holdout_part[target_col].values.astype(np.float32)
-                        # Assemble a full-length display series: h=1 column for
-                        # the points that have a window, plus the last window's
-                        # h=2..H outputs for the trailing max_horizon-1 points
-                        # that don't (so neural lines span the whole holdout
-                        # instead of stopping ~future_periods points short —
-                        # the LSTM/CNN "not as far along as LightGBM" artifact).
-                        # Display-only; leaderboard metrics come from CV folds.
-                        y_p_display = _holdout_display_from_windows(
-                            y_p, len(_y_holdout_display),
+                        # Assemble a full-length display series: h=1 column
+                        # placed at the holdout row each window actually
+                        # predicts (matched by label timestamp, so a gap
+                        # cannot shift the whole line), plus the last
+                        # window's h=2..H outputs for the trailing points no
+                        # h=1 window can reach (so neural lines span the
+                        # whole holdout instead of stopping ~future_periods
+                        # points short). Display-only; leaderboard metrics
+                        # come from CV folds.
+                        y_p_display = _holdout_display_from_kept_windows(
+                            y_p, _kept_ho, combined_holdout.index,
+                            window_size, holdout_part.index,
                         )
                         _holdout_ts = holdout_timestamps
                     else:
@@ -4539,11 +4623,18 @@ class MLForecastLabApp:
                 solar_lat_lon = loc if loc is not None else None
                 include_sun_elevation = 'sun_elevation' in raw_cov_cols_prod
                 include_clear_sky_ghi = 'clear_sky_ghi' in raw_cov_cols_prod
+                # Windows over the complete-grid frame with a label
+                # mask: inputs are unbroken time spans (invented y cells
+                # flagged via the y_missing channel), and a window is a
+                # training sample only when every horizon label was
+                # actually measured.
+                _win_prod = missing_report["window_frame"]
+                _lm_prod = missing_report["window_label_mask"].to_numpy()
                 future_cov_prod = _collect_train_future_covariates(
-                    combined, exp_cfg,
+                    _win_prod, exp_cfg,
                 )
                 prod_future_features_df = compute_known_future_features(
-                    combined.index,
+                    _win_prod.index,
                     add_temporal=True,
                     country=getattr(exp_cfg, 'country', None),
                     solar_lat_lon=solar_lat_lon,
@@ -4551,12 +4642,13 @@ class MLForecastLabApp:
                     include_clear_sky_ghi=include_clear_sky_ghi,
                     future_covariate_values=future_cov_prod or None,
                 )
-                seq_X, seq_y, channel_names = create_sliding_windows(
-                    combined, 'target', window_size=window_size_prod,
+                seq_X, seq_y, channel_names, _ = create_sliding_windows(
+                    _win_prod, 'target', window_size=window_size_prod,
                     covariate_cols=raw_cov_cols_prod if raw_cov_cols_prod else None,
                     add_temporal=True,
                     horizon_steps=horizon_steps_prod,
                     future_features_df=prod_future_features_df,
+                    label_mask=_lm_prod,
                 )
                 seq_kwargs['sequence_data'] = seq_X
                 seq_kwargs['channel_names'] = channel_names
@@ -4679,8 +4771,13 @@ class MLForecastLabApp:
                     future_covariate_values=future_cov_inf or None,
                 )
 
+            # The window frame's tail up to last_ts: contiguous grid
+            # rows, so the model's 24 h of context is 24 h of wall clock
+            # even when the target has a recent outage (imputed there,
+            # and flagged via the y_missing channel).
             last_window, _ = build_inference_window(
-                combined, 'target', window_size=past_window_size_prod,
+                missing_report["window_frame"].loc[:last_ts],
+                'target', window_size=past_window_size_prod,
                 covariate_cols=raw_cov_cols_prod if raw_cov_cols_prod else None,
                 add_temporal=True,
                 future_features_df=inference_future_features_df,
@@ -5346,8 +5443,10 @@ class MLForecastLabApp:
                 # The matching inference-side call in _forecast_with_cached
                 # fetches the HA forecast attribute for real-future
                 # timestamps.
+                _win_rt = missing_report["window_frame"]
+                _lm_rt = missing_report["window_label_mask"].to_numpy()
                 future_cov_for_neural = _collect_train_future_covariates(
-                    combined, exp_cfg
+                    _win_rt, exp_cfg
                 )
                 neural_future_cov_names = list(future_cov_for_neural)
                 if neural_future_cov_names:
@@ -5357,7 +5456,7 @@ class MLForecastLabApp:
                     )
 
                 future_features_df = compute_known_future_features(
-                    combined.index,
+                    _win_rt.index,
                     add_temporal=True,
                     country=getattr(exp_cfg, 'country', None),
                     solar_lat_lon=solar_lat_lon,
@@ -5365,11 +5464,16 @@ class MLForecastLabApp:
                     include_clear_sky_ghi=include_clear_sky_ghi,
                     future_covariate_values=future_cov_for_neural or None,
                 )
-                seq_X, seq_y, channel_names = create_sliding_windows(
-                    combined, 'target', window_size=window_size,
+                # Windows over the complete-grid frame with a label mask:
+                # inputs are unbroken time spans (invented y cells flagged
+                # via the y_missing channel), and a window is a training
+                # sample only when every horizon label was measured.
+                seq_X, seq_y, channel_names, _ = create_sliding_windows(
+                    _win_rt, 'target', window_size=window_size,
                     covariate_cols=raw_cov_cols if raw_cov_cols else None,
                     add_temporal=True, horizon_steps=horizon_steps,
                     future_features_df=future_features_df,
+                    label_mask=_lm_rt,
                 )
                 seq_kwargs['sequence_data'] = seq_X
                 # Cache the per-channel meaning so the forecast cycle can
@@ -5688,11 +5792,17 @@ class MLForecastLabApp:
 
             meta = {
                 # schema_version bumped to 2 in v2.37 to force a re-train
-                # after the neural-PV root-cause fixes (PF1-PF9). Old
-                # caches written under schema_version=1 are silently
-                # ignored on load and a fresh training cycle is scheduled
-                # — see docs/investigations/2026-05-neural-pv.md.
-                "schema_version": 2,
+                # after the neural-PV root-cause fixes (PF1-PF9), and to 3
+                # in v2.51.0: sequence models now train on complete-grid
+                # windows (causally-imputed y inputs, y_missing channel,
+                # measured-labels-only) and the inference window is built
+                # the same way, so a model trained on the old punctured
+                # windows would be served inputs from a different
+                # distribution than it was fitted on. Old caches are
+                # silently ignored on load and a fresh training cycle is
+                # scheduled — see docs/investigations/2026-05-neural-pv.md
+                # for the v2.37 precedent.
+                "schema_version": 3,
                 "addon_version": __version__,
                 "model_name": cache["model_name"],
                 "feature_cols": list(cache["feature_cols"]),
@@ -5766,11 +5876,11 @@ class MLForecastLabApp:
                 # degenerate anchors / collapsed backcasts, so loading them
                 # would just re-publish the broken forecasts that PF1-PF9
                 # were designed to fix. Force re-train by ignoring them.
-                if meta.get("schema_version") != 2:
+                if meta.get("schema_version") != 3:
                     logger.info(
                         f"  Cached model for {exp_cfg.name} has schema "
-                        f"v{meta.get('schema_version')}, ignoring (v2.37 "
-                        f"PF1-PF9 fixes require schema_version=2 — a fresh "
+                        f"v{meta.get('schema_version')}, ignoring (v2.51.0 "
+                        f"complete-grid windows require schema_version=3 — a fresh "
                         f"benchmark + retrain will be scheduled)"
                     )
                     continue
@@ -6861,9 +6971,12 @@ class MLForecastLabApp:
         # Fetch FRESH data so lag features and last_ts are current.
         # `_grid_y` is the complete-grid target — including the rows whose
         # label is missing — kept separately from `combined` so the
-        # recursive lag buffer can be seeded on true time offsets. It stays
-        # None on the cached-frame fallback, where no grid is available.
+        # recursive lag buffer can be seeded on true time offsets, and
+        # `_fresh_window_frame` is the fully-imputed grid frame the neural
+        # inference window is built over. Both stay None on the
+        # cached-frame fallback, where no grid is available.
         _grid_y = None
+        _fresh_window_frame = None
         try:
             df_fresh = await self._fetch_and_preprocess(exp_cfg)
             if df_fresh is None:
@@ -6895,6 +7008,7 @@ class MLForecastLabApp:
                 label="forecast",
             )
             _grid_y = df_fresh["y"]
+            _fresh_window_frame = _fresh_missing_report["window_frame"]
             logger.debug(f"  Fresh data: {len(combined)} samples, last={combined.index[-1]}")
         except Exception as e:
             logger.warning(f"  Fresh data fetch failed, using cached data: {e}")
@@ -7047,8 +7161,17 @@ class MLForecastLabApp:
                     include_clear_sky_ghi='clear_sky_ghi' in future_feature_cols,
                     future_covariate_values=future_cov_for_inference or None,
                 )
+            # The window's context comes from the complete-grid window
+            # frame when the fresh fetch produced one: contiguous rows up
+            # to last_ts, target causally imputed across any recent
+            # outage, invented cells flagged via the y_missing channel.
+            # The cached-frame fallback has no grid to rebuild from and
+            # keeps the legacy supervised tail.
+            _win_src = combined
+            if _fresh_window_frame is not None:
+                _win_src = _fresh_window_frame.loc[:last_ts]
             seq_X_prod, ch_names_now = build_inference_window(
-                combined, 'target', window_size=window_size,
+                _win_src, 'target', window_size=window_size,
                 covariate_cols=raw_cov_cols if raw_cov_cols else None,
                 add_temporal=True,
                 future_features_df=future_features_df,
@@ -7598,15 +7721,27 @@ class MLForecastLabApp:
                 future_periods_val = getattr(exp_cfg, 'future_periods', 48)
                 _horizon_steps = list(range(1, future_periods_val + 1))
 
+                _win_tune = _tuning_missing_report["window_frame"]
+                _lm_tune = _tuning_missing_report["window_label_mask"]
                 precomputed_sequences = {}
                 for fi, (train_idx, _test_idx) in enumerate(fold_indices):
-                    df_train_raw = combined.iloc[train_idx]
-                    _ws = min(48, len(df_train_raw) // 3)
+                    _sup_train = combined.iloc[train_idx]
+                    # Fold windows over the complete-grid frame, sliced to
+                    # the fold's own wall-clock span, with the label mask —
+                    # same treatment as the benchmark runner's fold path.
+                    df_train_raw = _win_tune.loc[
+                        _sup_train.index[0]:_sup_train.index[-1]
+                    ]
+                    _lm_fold = _lm_tune.loc[
+                        _sup_train.index[0]:_sup_train.index[-1]
+                    ].to_numpy()
+                    _ws = min(48, len(_sup_train) // 3)
                     if _ws >= 12:
-                        _sX, _sY, _cnames = create_sliding_windows(
+                        _sX, _sY, _cnames, _ = create_sliding_windows(
                             df_train_raw, target_col, window_size=_ws,
                             covariate_cols=_neural_cov_cols if _neural_cov_cols else None,
                             add_temporal=True, horizon_steps=_horizon_steps,
+                            label_mask=_lm_fold,
                         )
                         precomputed_sequences[fi] = {
                             'seq_X': _sX, 'seq_y': _sY,
@@ -8011,22 +8146,38 @@ class MLForecastLabApp:
                     _ho_cov_cols = pc_fold.get('neural_cov_cols', [])
                     _ho_horizon_steps = pc_fold.get('horizon_steps', list(range(1, int(getattr(exp_cfg, 'future_periods', 48)) + 1)))
                     if _ho_window_size >= 12:
-                        df_train_ho = combined.iloc[:split_80]
-                        sX, sY, ch = create_sliding_windows(
+                        # Same complete-grid treatment as everywhere else:
+                        # train windows may not read an unmeasured label,
+                        # and test windows are placed by the timestamp of
+                        # the label they predict.
+                        _win_t = _tuning_missing_report["window_frame"]
+                        _lm_t = _tuning_missing_report["window_label_mask"]
+                        _split_ts = combined.index[split_80 - 1]
+                        df_train_ho = _win_t.loc[:_split_ts]
+                        sX, sY, ch, _ = create_sliding_windows(
                             df_train_ho, 'target', window_size=_ho_window_size,
                             covariate_cols=_ho_cov_cols if _ho_cov_cols else None,
                             add_temporal=True, horizon_steps=_ho_horizon_steps,
+                            label_mask=_lm_t.loc[:_split_ts].to_numpy(),
                         )
                         _ho_seq_train = {'seq_X': sX, 'seq_y': sY, 'channel_names': ch}
-                        # Test windows: bridge across train/test boundary for context
-                        n_bridge = min(_ho_window_size, split_80)
-                        df_test_ho = combined.iloc[split_80 - n_bridge:]
-                        tX, _, _ = create_sliding_windows(
+                        # Test windows: bridge across train/test boundary for
+                        # context — window_size grid rows on the frame's own
+                        # contiguous index.
+                        _te_pos = _win_t.index.get_loc(combined.index[split_80])
+                        df_test_ho = _win_t.iloc[max(0, _te_pos - _ho_window_size):]
+                        tX, _, _, _kept_te = create_sliding_windows(
                             df_test_ho, 'target', window_size=_ho_window_size,
                             covariate_cols=_ho_cov_cols if _ho_cov_cols else None,
                             add_temporal=True, horizon_steps=[1],
+                            label_mask=_lm_t.iloc[
+                                max(0, _te_pos - _ho_window_size):
+                            ].to_numpy(),
                         )
                         _ho_seq_test = tX
+                        _ho_test_label_ts = df_test_ho.index[
+                            np.asarray(_kept_te) + _ho_window_size
+                        ]
                         logger.info(
                             f"  Holdout sliding windows: train={sX.shape}, test={tX.shape}"
                         )
@@ -8050,9 +8201,19 @@ class MLForecastLabApp:
                     p = m.predict_sequence(_ho_seq_test)
                     if p.ndim == 2:
                         p = p[:, 0]  # h=1 predictions
-                    # Align to test actuals
+                    # Align to test actuals by the timestamp each window's
+                    # label carries — exact under gaps, and identical to
+                    # the old tail-trim when the data has none.
                     n_test = len(y_te_h)
-                    p = p[-n_test:] if len(p) >= n_test else np.concatenate([np.full(n_test - len(p), np.nan), p])
+                    aligned = np.full(n_test, np.nan, dtype=np.float64)
+                    _pos = combined.index[split_80:].get_indexer(
+                        _ho_test_label_ts
+                    )
+                    _hit = _pos >= 0
+                    aligned[_pos[_hit]] = np.asarray(p, dtype=np.float64)[
+                        : len(_ho_test_label_ts)
+                    ][_hit]
+                    p = aligned
                 else:
                     # Tree path: flat features
                     m.fit(X_tr_h, y_tr_h)
@@ -8273,14 +8434,23 @@ class MLForecastLabApp:
                             if window_size < 12:
                                 return float('nan'), float('nan'), float('nan')
 
+                            # Complete-grid frame for this arm, so the arms
+                            # are compared on windows that are true time
+                            # spans; a window trains only when every
+                            # horizon label was measured.
+                            _win_arm = _arm_missing_report["window_frame"]
+                            _lm_arm = _arm_missing_report["window_label_mask"]
+                            _split_ts = df_train_part.index[-1]
+
                             # Train: dense horizons so the model learns to
                             # predict h=1..future_periods (matches production)
-                            seq_X_tr, seq_y_tr, channel_names = create_sliding_windows(
-                                df_train_part, target_col,
+                            seq_X_tr, seq_y_tr, channel_names, _ = create_sliding_windows(
+                                _win_arm.loc[:_split_ts], target_col,
                                 window_size=window_size,
                                 covariate_cols=seq_cov_cols if seq_cov_cols else None,
                                 add_temporal=True,
                                 horizon_steps=dense_horizons,
+                                label_mask=_lm_arm.loc[:_split_ts].to_numpy(),
                             )
                             if len(seq_y_tr) == 0:
                                 return float('nan'), float('nan'), float('nan')
@@ -8301,24 +8471,40 @@ class MLForecastLabApp:
                                 channel_names=channel_names,
                             )
 
-                            # Test: bridge train tail + test, use h=1 for
-                            # full coverage with one window per test row
-                            bridge = pd.concat([
-                                df_train_part.iloc[-window_size:],
-                                df_test_part,
-                            ])
-                            seq_X_te, _, _ = create_sliding_windows(
+                            # Test: bridge is window_size grid rows before
+                            # the test span, on the frame's own contiguous
+                            # index; predictions land on the test row whose
+                            # timestamp their label carries.
+                            _te_pos = _win_arm.index.get_loc(
+                                df_test_part.index[0]
+                            )
+                            bridge = _win_arm.iloc[
+                                max(0, _te_pos - window_size):
+                            ]
+                            seq_X_te, _, _, _kept_te = create_sliding_windows(
                                 bridge, target_col,
                                 window_size=window_size,
                                 covariate_cols=seq_cov_cols if seq_cov_cols else None,
                                 add_temporal=True,
                                 horizon_steps=[1],
+                                label_mask=_lm_arm.iloc[
+                                    max(0, _te_pos - window_size):
+                                ].to_numpy(),
                             )
                             y_pred_full = model.predict_sequence(seq_X_te)
                             if y_pred_full.ndim == 2:
-                                y_pred_flat = y_pred_full[:, 0].astype(np.float32)
+                                _h1 = y_pred_full[:, 0].astype(np.float32)
                             else:
-                                y_pred_flat = y_pred_full.astype(np.float32)
+                                _h1 = y_pred_full.astype(np.float32)
+                            _label_ts = bridge.index[
+                                np.asarray(_kept_te) + window_size
+                            ]
+                            _pos = df_test_part.index.get_indexer(_label_ts)
+                            _hit = _pos >= 0
+                            y_pred_flat = np.full(
+                                len(df_test_part), np.nan, dtype=np.float32,
+                            )
+                            y_pred_flat[_pos[_hit]] = _h1[: len(_label_ts)][_hit]
 
                             y_te = df_test_part[target_col].values.astype(np.float32)
                             y_tr_for_naive = df_train_part[target_col].values.astype(np.float32)
@@ -8346,12 +8532,12 @@ class MLForecastLabApp:
                         if len(y_te) == 0:
                             return float('nan'), float('nan'), float('nan')
 
-                        mae_val = float(np.mean(np.abs(y_te - y_pred_flat)))
-                        rmse_val = float(np.sqrt(np.mean((y_te - y_pred_flat) ** 2)))
+                        mae_val = float(np.nanmean(np.abs(y_te - y_pred_flat)))
+                        rmse_val = float(np.sqrt(np.nanmean((y_te - y_pred_flat) ** 2)))
                         # MASE: scale by naive 1-step forecast error from train
                         naive_err = float(np.mean(np.abs(np.diff(y_tr_for_naive))))
                         mase_val = (
-                            float(np.mean(np.abs(y_te - y_pred_flat)) / naive_err)
+                            float(np.nanmean(np.abs(y_te - y_pred_flat)) / naive_err)
                             if naive_err > 0 else float('nan')
                         )
                         return mae_val, rmse_val, mase_val

@@ -180,12 +180,14 @@ def neural_covariate_columns(
     """
     The columns a sequence backend should receive as extra input channels.
 
-    Everything that is not a calendar feature, not a target-derived feature,
+    Everything that is not a calendar feature, not a target-derived lag,
     and not the target itself. Sequence models window over the raw target,
-    so the engineered lags say nothing they cannot already see — and
-    ``TARGET_MISSING_COLUMN`` describes those lags, so it goes with them.
-    Covariate indicators do stay: a masked covariate is exactly the kind of
-    thing a sequence model should be told about.
+    so the engineered lags say nothing they cannot already see. The
+    missingness indicators DO stay — ``TARGET_MISSING_COLUMN`` included:
+    windows are built over the window frame, whose target is causally
+    imputed across label gaps, and its per-row ``y_missing`` is the
+    channel that tells the model which of those y inputs were invented.
+    A masked covariate rides along for the same reason.
 
     Kept in one place because the same filter is needed at five call sites
     (benchmark, holdout, production training, cached forecast, CV runner)
@@ -199,8 +201,6 @@ def neural_covariate_columns(
         if c in ENGINEERED_TEMPORAL_COLUMNS:
             continue
         if c.startswith('y_lag_'):
-            continue
-        if c == TARGET_MISSING_COLUMN:
             continue
         out.append(c)
     return out
@@ -775,7 +775,9 @@ def create_sliding_windows(
     add_temporal: bool = True,
     horizon_steps: Optional[List[int]] = None,
     future_features_df: Optional[pd.DataFrame] = None,
-) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    label_mask=None,
+    mask_horizons: Optional[List[int]] = None,
+):
     """
     Create sliding window sequences from raw time series for LSTM/CNN.
 
@@ -818,6 +820,24 @@ def create_sliding_windows(
         had to phase-disambiguate horizons from a single linear
         projection.
 
+    label_mask : array-like of bool, optional
+        Aligned with ``df``'s rows; True where the row's target value was
+        actually measured. When provided, ``df`` is expected to be the
+        *window frame* — a complete time grid whose target has been
+        causally imputed so window INPUTS are unbroken time spans — and a
+        window is kept only when every label row it is scored against is
+        True. Window contents are features and may be imputed; the values
+        a window is trained or scored against are labels and never are.
+        The return value grows a fourth element: the kept sample indices
+        into the unfiltered window enumeration, so callers can align
+        per-window quantities (sample weights, label timestamps).
+    mask_horizons : list of int, optional
+        Which horizon steps' labels must be measured for a window to
+        survive ``label_mask``. Defaults to every step in
+        ``horizon_steps``: at training time all of them enter the loss.
+        Evaluation windows are scored only at h=1, so requiring all 48
+        would discard scoreable predictions — those callers pass ``[1]``.
+
     Returns
     -------
     X : np.ndarray
@@ -829,6 +849,8 @@ def create_sliding_windows(
         (n_samples, n_horizons) when horizon_steps is provided.
     channel_names : list of str
         Names of the channels in X.
+    kept : np.ndarray, only when ``label_mask`` is provided
+        Original sample indices of the surviving windows.
     """
     # Build channel list
     channel_names = [target_col]
@@ -916,6 +938,32 @@ def create_sliding_windows(
         else:
             y[i] = data[i + window_size, target_idx]
 
+    if label_mask is not None:
+        lm = np.asarray(label_mask, dtype=bool)
+        if len(lm) != n_total:
+            raise ValueError(
+                f'label_mask has {len(lm)} rows but df has {n_total}'
+            )
+        if horizon_steps is not None:
+            steps = mask_horizons if mask_horizons is not None else horizon_steps
+            label_pos = np.add.outer(
+                np.arange(n_samples) + window_size,
+                np.asarray(steps, dtype=int) - 1,
+            )
+            valid = lm[label_pos].all(axis=1)
+        else:
+            valid = lm[np.arange(n_samples) + window_size]
+        kept = np.flatnonzero(valid)
+        n_dropped = n_samples - len(kept)
+        if n_dropped:
+            logger.info(
+                f'Dropped {n_dropped} of {n_samples} windows whose label '
+                f'rows were not measured; {len(kept)} remain.'
+            )
+        X = X[valid]
+        y = y[valid]
+        n_samples = len(kept)
+
     horizon_info = f", horizons={horizon_steps}" if horizon_steps else ""
     extend_info = f" +{extend_by} future positions" if extend_by else ""
     logger.debug(
@@ -924,6 +972,8 @@ def create_sliding_windows(
         f"{channel_names}{horizon_info})"
     )
 
+    if label_mask is not None:
+        return X, y, channel_names, kept
     return X, y, channel_names
 
 

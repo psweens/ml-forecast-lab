@@ -165,6 +165,14 @@ after an outage has a `y_lag_48` that reaches into it. That is a feature,
 so it is masked, imputed and flagged via a single aggregate `y_missing`
 column, and the row survives.
 
+Sequence backends follow the same rule in their own shape. Their sliding
+windows are built over the complete time grid — never over the row-selected
+frame, where a window could silently span a label gap — with the target
+causally imputed across gaps and a per-row `y_missing` channel marking the
+invented inputs. A window is a training sample only when every horizon
+label it is fitted against was measured; a window whose labels land in a
+gap is dropped, never trained on an invented value.
+
 > **Note on `weather.*` entities and `role: lagged`** — a weather entity's
 > *state* is a categorical string (`partlycloudy`, `sunny`, `rainy`),
 > not numeric. Using a weather entity with `role: lagged` produces

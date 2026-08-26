@@ -1353,8 +1353,16 @@ def resolve_missingness(
         The supervised frame, and a report with ``grid_rows``,
         ``warmup_rows``, ``label_gap_rows``, ``supervised_rows``,
         ``imputed_cells`` (per column, counted over surviving rows),
-        ``indicator_cols``, ``dropped_indicators``, ``empty_cols`` and
-        ``label_gap_spans``.
+        ``indicator_cols``, ``dropped_indicators``, ``empty_cols``,
+        ``label_gap_spans``, and — for the sequence-model path —
+        ``window_frame`` and ``window_label_mask``. The window frame is
+        the complete grid from the warm-up anchor onward, fully imputed
+        (target included, causally), so windows built over it are true
+        time spans; its label mask is True exactly where the label was
+        measured. Its ``y_missing`` column, when emitted, is per-row —
+        "the y at this row is invented" — where the supervised frame's is
+        the aggregate over target-derived features, because each frame's
+        consumer reads the target differently.
     """
     if not isinstance(frame, pd.DataFrame):
         raise TypeError('frame must be a pandas DataFrame')
@@ -1376,7 +1384,10 @@ def resolve_missingness(
         'label_gap_spans': [],
     }
     if n_rows == 0:
-        return frame.copy(), report
+        empty = frame.copy()
+        report['window_frame'] = empty
+        report['window_label_mask'] = pd.Series(dtype=bool)
+        return empty, report
 
     out = frame.copy()
     columns = list(out.columns)
@@ -1444,7 +1455,15 @@ def resolve_missingness(
     )
     keep &= ~label_missing
 
-    out = out.loc[keep]
+    # The pre-selection frame, kept for the window frame below. `.loc[keep]`
+    # allocates a new object, so this is a reference, not a copy.
+    grid_imputed = out
+    anchor = report['warmup_rows']
+
+    # Explicit copy: with `grid_imputed` still holding the parent, a bare
+    # .loc[keep] would be a pandas child view and every indicator write
+    # below would raise SettingWithCopyWarning.
+    out = out.loc[keep].copy()
     report['supervised_rows'] = len(out)
 
     # --- 4. Emit indicators for surviving gaps ----------------------------
@@ -1455,12 +1474,14 @@ def resolve_missingness(
     # bit-identical — no surviving imputed cell, no new column.
     n_keep = int(keep.sum())
     candidates: dict = {}
+    grid_candidates: dict = {}
     target_flag = np.zeros(n_keep, dtype=bool)
     for col in columns:
         mask = masks.get(col)
         if mask is None:
             continue
-        surviving = mask.to_numpy()[keep]
+        grid_mask = mask.to_numpy()
+        surviving = grid_mask[keep]
         n_imputed = int(surviving.sum())
         if n_imputed == 0:
             continue
@@ -1480,9 +1501,17 @@ def resolve_missingness(
                 "using %r instead.", col, name,
             )
         candidates[name] = surviving
+        grid_candidates[name] = grid_mask
 
-    if target_flag.any():
+    # The window frame's target flag is per-row — "the y at THIS row is
+    # invented" — because a sequence model consumes raw y directly, not
+    # the lag columns the supervised frame's aggregate flag describes. A
+    # label gap that survives into the window span therefore also forces
+    # the indicator into existence, even when (as with a trailing outage)
+    # no surviving row carries a flagged lag.
+    if target_flag.any() or bool((label_missing[anchor:]).any()):
         candidates[TARGET_MISSING_COLUMN] = target_flag
+        grid_candidates[TARGET_MISSING_COLUMN] = label_missing
 
     if required_indicators is None:
         emit = list(candidates)
@@ -1517,6 +1546,39 @@ def resolve_missingness(
             continue
         out[name] = zeros if values is None else values.astype(np.float32)
         report['indicator_cols'].append(name)
+
+    # --- 5. Window frame for sequence backends ----------------------------
+    #
+    # Sequence models window over consecutive rows of raw y, so handing
+    # them the supervised frame silently time-warps every window that
+    # spans a label gap: 48 rows of "24 hours" quietly become 24 hours
+    # plus the outage. They get the complete grid instead — warm-up
+    # trimmed, every feature imputed, and the target causally imputed the
+    # same way the recursive lag buffer is seeded — with a per-row label
+    # mask so the window builder can refuse to read an invented value as
+    # a *label*. Window contents are features and may be imputed; the
+    # horizon values a window is scored against are labels and never are.
+    #
+    # On a gap-free frame this is row-for-row identical to the supervised
+    # frame, which is what keeps windows bit-identical there.
+    win = grid_imputed.iloc[anchor:].copy()
+    if label_missing.any():
+        y_input, _ = causal_impute(frame[target_col])
+        win[target_col] = y_input.iloc[anchor:]
+    win_zeros = np.zeros(len(win), dtype=np.float32)
+    for name in report['indicator_cols']:
+        grid_vals = grid_candidates.get(name)
+        if grid_vals is None:
+            if name in frame_columns:
+                # Same rule as above: a real data column keeps its values.
+                continue
+            win[name] = win_zeros
+        else:
+            win[name] = grid_vals[anchor:].astype(np.float32)
+    report['window_frame'] = win
+    report['window_label_mask'] = pd.Series(
+        ~label_missing[anchor:], index=win.index,
+    )
 
     return out, report
 

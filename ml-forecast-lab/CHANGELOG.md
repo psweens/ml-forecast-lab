@@ -31,14 +31,29 @@ This needed no covariate to trigger — the default `gap_handling: interpolate`
 leaves anything over `gap_max_minutes` (90) as NaN — so it affected any
 experiment whose sensor had ever stopped reporting for a couple of hours.
 
-Scope: this covers the tabular feature path — the lags, rolling statistics and
-periodic lags every backend receives, and the recursive tree forecaster.
-Sequence backends window over consecutive rows of the supervised frame, so
-after unsupervised rows are removed a window can still span a label gap.
-Training a sequence model across missing labels is unsound however the frame is
-built, and segmenting windows to contiguous supervised runs is a model-layer
-change that belongs in its own release; the loud target-gap warning below is
-the interim mitigation.
+Sequence backends get the same correction, because their failure was the same
+failure in a different shape: windows are positional too, so a window built
+over the supervised frame silently spanned any label gap inside it — 48 rows
+of "24 hours" that were really 24 hours plus the outage, in training, in every
+CV fold, in the holdout chart and in the live inference window. Windows are
+now built over a dedicated *window frame*: the complete grid from the warm-up
+anchor onward, every feature imputed, and the target causally imputed the same
+way the recursive lag buffer is seeded. Invented y inputs are visible to the
+model through a per-row `y_missing` channel, and — the same role rule as
+everywhere else — a window becomes a training sample only when every horizon
+label it would be fitted against was actually measured, so no fabricated label
+ever enters a sequence loss either. Evaluation windows require only the h=1
+label they are scored on, and their predictions are paired with test rows by
+the timestamp of the label each window actually carries, so a gap can no
+longer shift a whole evaluation series off by its own length. On gap-free
+data the windows are bit-identical to the previous behaviour. Cached models
+carry `schema_version` 3: a model trained on the old punctured windows is
+discarded on upgrade and retrained rather than served inputs from a
+distribution it never saw. The one refinement deliberately left for later is
+per-horizon loss masking, which would *keep* the partially-labelled windows
+near a gap by masking only the unmeasured horizons out of the loss — a
+backend-layer change; until then those windows are dropped, which fabricates
+nothing and merely trains on slightly fewer samples.
 
 **A masked gap no longer reaches the model as a physically meaningful zero.**
 `gap_handling: mask` has been offered for several releases, but

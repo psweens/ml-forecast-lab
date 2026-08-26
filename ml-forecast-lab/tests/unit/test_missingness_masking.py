@@ -898,6 +898,157 @@ class TestInferenceContract:
         assert not any(imputed)
 
 
+class TestWindowFrame:
+    """Sequence models window over consecutive rows, so they get their own
+    frame: the complete grid from the warm-up anchor onward, every feature
+    imputed, the target causally imputed, and a per-row label mask. Window
+    contents are features and may be imputed; the horizon values a window
+    is trained or scored against are labels and never are."""
+
+    def test_gap_free_window_frame_is_the_supervised_frame(self):
+        idx = _grid()
+        out, report = _resolved(
+            pd.DataFrame({"y": _target(idx), "cov": _target(idx, seed=3)})
+        )
+        assert report["window_frame"].equals(out)
+        assert bool(report["window_label_mask"].all())
+
+    def test_window_frame_is_contiguous_and_complete(self):
+        idx = _grid()
+        y = _target(idx)
+        y.iloc[600:612] = np.nan
+        cov = _target(idx, seed=4)
+        cov.iloc[300:500] = np.nan
+        out, report = _resolved(pd.DataFrame({"y": y, "cov": cov}))
+        win = report["window_frame"]
+
+        assert len(set(np.diff(win.index.values))) == 1
+        assert not win.isna().to_numpy().any()
+        assert len(win) == len(out) + 12, (
+            "the label-gap rows survive as window inputs"
+        )
+
+    def test_window_target_flag_is_per_row_not_aggregate(self):
+        """The supervised frame's y_missing is the OR over target-derived
+        features — the honest flag for a row of lags. A window's target
+        channel is raw y, so its honest flag is "the y at THIS row is
+        invented", which is a strict subset."""
+        idx = _grid()
+        y = _target(idx)
+        y.iloc[600:612] = np.nan
+        out, report = _resolved(pd.DataFrame({"y": y}))
+        win = report["window_frame"]
+
+        assert int(win[TARGET_MISSING_COLUMN].sum()) == 12
+        assert int(out[TARGET_MISSING_COLUMN].sum()) > 12
+        mask = report["window_label_mask"]
+        assert (
+            win[TARGET_MISSING_COLUMN].to_numpy()
+            == (~mask).to_numpy().astype(np.float32)
+        ).all()
+
+    def test_window_labels_are_never_imputed_values(self):
+        """The end-to-end guarantee: build real training windows from the
+        frame and check every label in seq_y is a measured y value."""
+        idx = _grid()
+        y = _target(idx)
+        y.iloc[600:612] = np.nan
+        _, report = _resolved(pd.DataFrame({"y": y}))
+        win = report["window_frame"]
+        lm = report["window_label_mask"].to_numpy()
+
+        from ml_forecast_lab.features import create_sliding_windows
+        H = list(range(1, 49))
+        _, seq_y, _, kept = create_sliding_windows(
+            win, "target", window_size=48, add_temporal=True,
+            horizon_steps=H, label_mask=lm,
+        )
+        assert len(kept) > 0
+        for row, k in enumerate(kept):
+            for h in (1, 24, 48):
+                ts = win.index[k + 48 + h - 1]
+                assert not pd.isna(y.loc[ts]), "label row must be measured"
+                assert seq_y[row, h - 1] == pytest.approx(y.loc[ts])
+
+    def test_every_kept_window_is_a_true_time_span(self):
+        idx = _grid()
+        y = _target(idx)
+        y.iloc[600:612] = np.nan
+        _, report = _resolved(pd.DataFrame({"y": y}))
+        win = report["window_frame"]
+        lm = report["window_label_mask"].to_numpy()
+
+        from ml_forecast_lab.features import create_sliding_windows
+        _, _, _, kept = create_sliding_windows(
+            win, "target", window_size=48, add_temporal=True,
+            horizon_steps=[1], label_mask=lm,
+        )
+        step = pd.Timedelta(minutes=INTERVAL)
+        assert all(
+            win.index[k + 47] - win.index[k] == 47 * step for k in kept
+        )
+
+    def test_the_supervised_frame_would_have_warped_windows(self):
+        """Guards the guard: windowing the supervised frame across the
+        same gap produces windows whose 48 rows span more than 24 hours.
+        If this stops failing, the tests above prove nothing."""
+        idx = _grid()
+        y = _target(idx)
+        y.iloc[600:612] = np.nan
+        out, _ = _resolved(pd.DataFrame({"y": y}))
+        step = pd.Timedelta(minutes=INTERVAL)
+        warped = sum(
+            1 for i in range(len(out) - 48)
+            if out.index[i + 47] - out.index[i] != 47 * step
+        )
+        assert warped > 0
+
+    def test_trailing_gap_reaches_the_inference_window(self):
+        """A recent outage: the frame's tail up to the last measured label
+        is contiguous grid rows with imputed, flagged y — the sequence
+        analogue of the recursive path's _seed_lag_buffer."""
+        idx = _grid()
+        y = _target(idx)
+        y.iloc[-30:-10] = np.nan
+        out, report = _resolved(pd.DataFrame({"y": y}))
+        win = report["window_frame"]
+        last_ts = out.index[-1]
+        tail = win.loc[:last_ts].iloc[-48:]
+        assert len(tail) == 48
+        assert (
+            tail.index[-1] - tail.index[0]
+            == 47 * pd.Timedelta(minutes=INTERVAL)
+        )
+        assert int(tail[TARGET_MISSING_COLUMN].sum()) == 20
+
+
+class TestEvaluationWindowMask:
+    def test_eval_windows_require_only_the_scored_label(self):
+        """Training windows need every horizon label measured — they all
+        enter the loss. Evaluation windows are scored at h=1 only, and
+        requiring all 48 would discard scoreable predictions near a gap."""
+        idx = _grid()
+        y = _target(idx)
+        y.iloc[600:612] = np.nan
+        _, report = _resolved(pd.DataFrame({"y": y}))
+        win = report["window_frame"]
+        lm = report["window_label_mask"].to_numpy()
+
+        from ml_forecast_lab.features import create_sliding_windows
+        H = list(range(1, 49))
+        _, _, _, kept_strict = create_sliding_windows(
+            win, "target", window_size=48, add_temporal=True,
+            horizon_steps=H, label_mask=lm,
+        )
+        _, _, _, kept_eval = create_sliding_windows(
+            win, "target", window_size=48, add_temporal=True,
+            horizon_steps=H, label_mask=lm, mask_horizons=[1],
+        )
+        assert len(kept_eval) > len(kept_strict)
+        # And each eval window's h=1 label is measured.
+        assert all(lm[k + 48] for k in kept_eval)
+
+
 # ---------------------------------------------------------------------
 # CV fold feature rebuild
 # ---------------------------------------------------------------------
@@ -958,7 +1109,12 @@ class TestFoldFeatureRebuild:
 # ---------------------------------------------------------------------
 
 class TestNeuralChannels:
-    def test_covariate_indicators_are_channels_but_the_target_flag_is_not(self):
+    def test_every_indicator_is_a_channel_including_the_target_flag(self):
+        """Sequence models window over raw y, and the window frame's y is
+        causally imputed across label gaps — so the per-row y_missing is
+        exactly the channel that tells the model which of its y inputs
+        were invented. Engineered lags stay out: the window already IS
+        the history they summarise."""
         cols = [
             "target", "hour_sin", "is_holiday", "y_lag_1", "y_lag_1_missing",
             "y_rolling_mean_6", "cov", f"cov{MISSING_SUFFIX}",
@@ -966,7 +1122,7 @@ class TestNeuralChannels:
         ]
         out = neural_covariate_columns(cols)
         assert f"cov{MISSING_SUFFIX}" in out
-        assert TARGET_MISSING_COLUMN not in out
+        assert TARGET_MISSING_COLUMN in out
         assert "y_lag_1" not in out and "y_lag_1_missing" not in out
         assert "hour_sin" not in out and "target" not in out
         # Unchanged for the columns that existed before this spec.
