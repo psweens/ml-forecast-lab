@@ -93,6 +93,13 @@ in both files, with its CHANGELOG entry.
 - **No bump** — repo-internal changes users never receive: tests, CLAUDE.md,
   `docs/` (the maintainer shelf), CI.
 
+### PR, comment, and commit hygiene
+
+Do not append "Generated with Claude Code" footers, session links
+(`claude.ai/code/session_...`), or any other AI-attribution boilerplate to PR
+bodies, PR/issue comments, or commit messages in this repository — maintainer
+preference. A `Co-Authored-By:` trailer on commits is fine.
+
 ### Documentation ships with the change
 
 A PR that changes behaviour updates every shelf it touches in that same PR —
