@@ -74,6 +74,34 @@ version whenever a change alters what a cached model would be fed at inference.
 
 Release commits follow `v<version>: lowercase one-line summary`.
 
+### Version assignment (what a PR bumps)
+
+Because Supervisor offers updates straight off `main`, merging a version bump
+*is* releasing it — so the bump belongs in the same PR as the change it ships,
+in both files, with its CHANGELOG entry.
+
+- **Patch (2.y.Z)** — fixes and diagnostics that do not change what any model
+  is fed or how rankings are computed: UI, logging, analytics queries,
+  manifest wording.
+- **Minor (2.Y.0)** — anything a user's results can move on: changed feature
+  construction or preprocessing, benchmark/ranking behaviour, new config
+  fields or covariate roles, adding/removing a backend, anything that bumps
+  the model-cache `schema_version`. Corrective releases that shift benchmark
+  results ship as their own minor so the shift is attributable to one update.
+- **Major** — has stayed at 2 for the whole public history; treat it as a
+  maintainer decision, never assign it yourself.
+- **No bump** — repo-internal changes users never receive: tests, CLAUDE.md,
+  `docs/` (the maintainer shelf), CI.
+
+### Documentation ships with the change
+
+A PR that changes behaviour updates every shelf it touches in that same PR —
+CHANGELOG entry, `README.md`/`DOCS.md` where user-visible, `docs/` where the
+design changed — never as a follow-up. The backend-count guard
+(`tests/unit/test_backend_count.py`) is the enforced instance of this rule;
+for everything else it is convention, so check before pushing: does any prose
+still describe the old behaviour?
+
 ## CHANGELOG conventions (read before writing an entry)
 
 The CHANGELOG is **user-facing release notes for HA users, not a design record**. House style:

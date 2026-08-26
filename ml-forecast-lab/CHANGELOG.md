@@ -2,189 +2,77 @@
 
 ## 2.51.0
 
+**After updating:** every experiment retrains once on first start — cached
+models from earlier versions are deliberately discarded, because they were
+trained on the mis-timed inputs fixed below. Forecast publishing pauses for
+about one training cycle per experiment, then resumes. Benchmark rankings may
+move for experiments whose history has gaps; that is the fix taking effect,
+not a regression. Experiments with complete data are unaffected — their
+feature matrices, row counts and training windows are bit-identical to
+v2.50.0.
+
+The full defect analysis, design rationale, and verification record live in
+[docs/investigations/2026-08-missingness-masking.md](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-08-missingness-masking.md).
+
 ### Fixed
 
-**A gap in the target no longer changes what a lag feature means.** Lags are
-positional — `y_lag_48` is `target.shift(48)` — so they only mean "24 hours ago"
-if the rows either side of them are consecutive half-hours. Preprocessing ended
-by deleting every row the recorder had no value for, and features were built
-afterwards, on the punctured frame. A six-hour outage anywhere in the window
-therefore redefined `y_lag_48` as "24 hours plus the outage ago" for every row
-after it, and the same for the rolling windows and the same-time-yesterday
-lags. Nothing surfaced: the columns were populated, plausible, and wrong. On a
-ten-day window with one six-hour gap, 38 of 413 rows carried a `y_lag_48` that
-was not the value 24 hours earlier.
+**A gap in your sensor's history no longer corrupts what the model learns
+from the rest of it.** Any recorder outage longer than `gap_max_minutes`
+(default 90) deleted rows *before* lag features were built, so "the value 24
+hours ago" silently became "24 hours plus the outage ago" for every row after
+the gap — plausible numbers, wrong meaning. On a 10-day window with one
+six-hour gap, 38 of 413 training rows carried a wrong 24-hour lag. Features
+are now computed on the complete timeline first; rows without a measured
+sensor value are excluded afterwards and their values are never invented. The
+same correction applies inside benchmark CV folds and to the lag history the
+live forecast starts from.
 
-Features are now built on the complete grid, before any row is removed, and row
-selection happens once, afterwards. The same reordering fixes the per-fold
-rebuild inside the benchmark and tuning harnesses, which recomputed the rolling
-statistics and periodic lags positionally on each CV fold and so reintroduced
-the defect at scoring time; those shifts are now taken on the fold's own time
-grid. The recursive forecaster's lag buffer is seeded from the complete grid
-too, so `buf[-48]` is genuinely 24 hours back at inference and not just 48
-surviving rows. `load_subtract` with `on_missing: drop` deleted rows after
-resampling and so punctured the grid before any of this ran; those rows are now
-restored as unmeasured, which both keeps the index contiguous and makes them
-visible to the diagnostics that previously reported such a frame as clean.
+**Neural models no longer train across those gaps either.** Their sliding
+windows could silently span an outage — a "24-hour" input window that really
+covered days (47 of 757 windows on a 20-day frame with one six-hour gap).
+Windows are now built on the true timeline, any filled-in history inside a
+window is flagged to the model through a dedicated channel, and a window is
+only ever trained against values the sensor actually reported.
 
-This needed no covariate to trigger — the default `gap_handling: interpolate`
-leaves anything over `gap_max_minutes` (90) as NaN — so it affected any
-experiment whose sensor had ever stopped reporting for a couple of hours.
+**A covariate with a short history no longer trains as an invented
+constant.** Its oldest value used to be copied backwards across the entire
+window, so ten days of history against a two-year target trained as one
+constant for ~99% of rows. A value is now held only as long as the entity's
+own reporting cadence justifies; beyond that the cell is imputed from the
+covariate's own past and flagged. The manifest's `obs=` count and the data
+the model sees are now read from the same series, so they can no longer
+disagree (the manifest's `filled=` field is renamed `masked=`).
 
-Sequence backends get the same correction, because their failure was the same
-failure in a different shape: windows are positional too, so a window built
-over the supervised frame silently spanned any label gap inside it — 48 rows
-of "24 hours" that were really 24 hours plus the outage, in training, in every
-CV fold, in the holdout chart and in the live inference window. Windows are
-now built over a dedicated *window frame*: the complete grid from the warm-up
-anchor onward, every feature imputed, and the target causally imputed the same
-way the recursive lag buffer is seeded. Invented y inputs are visible to the
-model through a per-row `y_missing` channel, and — the same role rule as
-everywhere else — a window becomes a training sample only when every horizon
-label it would be fitted against was actually measured, so no fabricated label
-ever enters a sequence loss either. Evaluation windows require only the h=1
-label they are scored on, and their predictions are paired with test rows by
-the timestamp of the label each window actually carries, so a gap can no
-longer shift a whole evaluation series off by its own length. On gap-free
-data the windows are bit-identical to the previous behaviour. Cached models
-carry `schema_version` 3: a model trained on the old punctured windows is
-discarded on upgrade and retrained rather than served inputs from a
-distribution it never saw. The one refinement deliberately left for later is
-per-horizon loss masking, which would *keep* the partially-labelled windows
-near a gap by masking only the unmeasured horizons out of the loss — a
-backend-layer change; until then those windows are dropped, which fabricates
-nothing and merely trains on slightly fewer samples.
-
-**A masked gap no longer reaches the model as a physically meaningful zero.**
-`gap_handling: mask` has been offered for several releases, but
-`np.nan_to_num(X, nan=0.0)` sat at every feature-matrix boundary, so a masked
-gap arrived at every backend as `0.0` — a worse fabrication than the fill it
-replaced, because zero is a real reading for most sensors and sits at the
-extreme of their range. The codebase already recorded this failure in a comment
-about the v2.27.10 regression, where a covariate landed at 0 after
-`nan_to_num` and the tree simply stopped using it.
-
-Missing data now resolves by role, before it reaches any boundary:
-
-- A missing **label** means the row cannot be a supervised sample. It is
-  excluded from training, scoring and conformal calibration, and it is **never
-  imputed**. Imputing a label teaches the model something false and then scores
-  it against that fabrication — and because imputed values are smooth, they are
-  unusually easy to predict, so every backend is flattered and the composite
-  ranking starts rewarding whichever model best reproduces the imputation
-  scheme.
-- A missing **feature** — a covariate, or a lag that reaches into a target gap
-  — is masked, flagged and imputed, so its row survives. Imputing a feature
-  adds noise the model can learn to discount, which is what the flag is for.
-
-Imputation is an expanding median over strictly prior observations. A statistic
-computed over the whole window would leak the scored fold into training,
-because the CV harness splits *after* preprocessing; an expanding one is
-leak-free by construction and gives the same answer however the folds are
-drawn. A binary covariate is held rather than averaged, since the median of an
-even split is 0.5 — a value that appears in no observed row of a channel that
-is either on or off.
-
-A leading gap has no prior observation and takes the first observed value — a
-single scalar from the boundary, a small real leak accepted deliberately, and
-flagged across the whole leading region so the model has an explicit signal to
-discount the column there. Be clear about what that means for the case above:
-a covariate whose history sits entirely at the *end* of the window is still
-trained on that one constant across the leading 99%, bit for bit what the old
-back-fill produced. What is new there is the flag, not the value. Interior and
-trailing gaps do change, because those have prior observations to impute from.
-
-Warm-up is counted from the first measured label rather than from the first
-grid row. Counting from row 0 left the first genuinely supervised row after a
-leading target outage with its lag features unfilled, and the leading-gap rule
-then filled them from the first observed value — which for `y_lag_k` is a later
-label. That row would have been handed its own answer as a feature.
-
-The `nan_to_num` calls remain as a backstop, but now log a `WARNING` naming the
-offending columns when one actually fires. They were silently absorbing bugs,
-which is how the v2.27.10 regression survived a release.
-
-**A covariate with ten days of history no longer trains as a constant for the
-other two years.** Covariate alignment ended with `.ffill().bfill()`, which
-propagated the oldest available value backwards across the entire window. The
-previous release made this *visible* — the manifest stopped reporting 100%
-coverage for a column that was almost entirely invented — but deliberately left
-the fill in place. It is now bounded: a value is held forward only for as long
-as it is authoritative, which is the entity's own update cadence, taken from
-the 90th percentile of its observation gaps. Past that the grid point is masked,
-imputed and flagged.
-
-The bound is measured from the entity's cadence rather than the grid's, so a
-perfectly healthy hourly weather entity on a 30-minute grid, or a three-hourly
-forecast entity, is still fully observed — a threshold that fires on correct
-setups is one people learn to ignore, and here it would mask a good covariate
-out of the model rather than merely warn about it. The manifest's `obs=` count
-and the mask the model sees are now read off the same series, so the diagnostic
-cannot drift from the frame again.
-
-**A NaN in the accuracy data no longer takes down the whole Forecast Accuracy
-view.** A Python NaN binds to SQLite as NULL, and the accuracy queries joined
-forecasts to actuals with no NULL guard in raw mode (and a one-sided guard in
-increment mode). A lead bucket whose only pairs involved a NULL value then had
-`AVG()` return NULL while `COUNT(*)` still counted the rows, and the `round()`
-on the way out aborted the entire accuracy prep — logged as *"Forecast accuracy
-prep failed: type NoneType doesn't define `__round__` method"* — so the
-published accuracy sensor silently read 0. One bad stored actual was enough,
-and it kept being enough on every cycle until it aged out of the window. NULL
-pairs are now excluded in the SQL on both sides of the join (in the pooled
-curve, the per-cohort curves, the revision tile and both daily-cumulative
-queries), and the Python layer additionally skips any bucket that still comes
-back NULL rather than letting one row abort the view.
+**The Forecast Accuracy view no longer breaks on one bad stored value.** A
+single unreadable value in the logged forecasts or cached actuals aborted the
+entire accuracy calculation every cycle — logged as *"Forecast accuracy prep
+failed: type NoneType doesn't define `__round__` method"* — and the accuracy
+sensor sat at 0. Such pairs are now skipped individually; the rest of the
+view computes normally.
 
 ### Added
 
-**Missingness indicators.** A covariate with gaps gains a companion
-`<name>_missing` column — `1` where the value was imputed, `0` where it was
-measured. Every target-derived feature shares one aggregate `y_missing`
-instead of a companion each: a single target gap makes every lag, rolling
-statistic and diff gappy at once, so per-column flags would be roughly two
-dozen near-constant columns whose *set* changes every cycle as the history
-window slides over the gap — and an unstable column list breaks a cached model
-outright.
+**Missing-data indicator columns.** A covariate with gaps gains a companion
+`<name>_missing` column (1 = value was filled in, 0 = measured), and all
+target-derived features share one aggregate `y_missing`. Columns appear only
+when there is something to flag, so experiments with complete data gain
+nothing. Every backend receives them — trees can split on the flag, neural
+models get it as an input channel — so models can discount invented values
+instead of mistaking them for measurements.
 
-Indicators appear only where there is something to flag, so an experiment with
-complete data gains no columns at all. At inference the set is pinned to
-whatever the trained model was fitted on, because which columns have gaps is a
-property of the window and the window slides between a retrain and the next
-forecast — the trained set is stored with the model rather than re-derived from
-the column names, so an entity legitimately called `binary_sensor.pump_missing`
-is not mistaken for a flag and zeroed. A forecast row carries the indicator
-value the last measured row had, unless a real future value arrives for that
-timestamp, in which case it is 0: the flag has to answer the same question at
-inference that it answered in training, or every published row sits in a regime
-the model barely saw. Every backend gets the same matrix: trees split on the
-flag, and neural and classical backends receive it as a clean channel.
-
-**Loud warnings where the data undermines the experiment.** A target gap now
-emits a `WARNING` naming the outage and the supervised rows lost — a holed
-target is a broken experiment, whereas a holed covariate is merely a weak one,
-and the two deserve different volume. A covariate that is absent for entire CV
-folds emits its own `WARNING` naming them: those folds benchmark a
-covariate-free model, so the composite ranking averages across two different
-problems and "best model" is chosen partly on folds where the covariate did not
-exist. This is surfaced rather than silently corrected, because the folds
-genuinely differ.
+**Loud warnings where the data undermines the experiment.** A gap in the
+target now logs a WARNING naming the outage and the training rows it costs. A
+covariate absent for entire CV folds logs its own WARNING, because those
+folds benchmark a covariate-free model and the leaderboard is then averaging
+across two different problems.
 
 ### Changed
 
-**Benchmark results may move for any experiment with incomplete data, and this
-is the point.** Backends were previously compared on a matrix whose lags were
-misaligned across gaps and whose masked cells arrived as zero; they are now
-compared on one where lags are true time offsets and masked cells are flagged
-and causally imputed. Rankings computed on the old matrix were measuring
-something else. Experiments whose data has no gaps are unaffected: the feature
-matrix and training-row count are bit-identical to the previous release, and no
-indicator column is added.
-
-The covariate-ablation view also changes. A "Without *x*" arm previously kept
-`x`'s interaction terms — `x_x_hour_sin` and `x_x_hour_cos` are built once over
-the full frame — so the arm was not actually without `x` and its MAE delta was
-not attributable to it. Those terms are now dropped with the covariate.
+**Benchmark rankings may move for experiments with gaps — deliberately.**
+Backends were previously compared on misaligned lags and gaps disguised as
+zeros; rankings computed on that matrix measured the wrong thing. The
+Covariate Analysis view also changes: a "Without *x*" arm now genuinely
+excludes *x*'s interaction features, so its MAE delta is attributable to *x*.
 
 ## 2.50.0
 
