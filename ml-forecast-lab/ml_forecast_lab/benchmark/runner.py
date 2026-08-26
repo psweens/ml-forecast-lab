@@ -407,9 +407,14 @@ class BenchmarkRunner:
                 test_timestamps = pd.DatetimeIndex([])
                 train_timestamps = pd.DatetimeIndex([])
 
-            # Split data
-            df_train = df.iloc[train_idx].reset_index(drop=True)
-            df_test = df.iloc[test_idx].reset_index(drop=True)
+            # Split data. The DatetimeIndex is kept: the feature builder
+            # rebuilds rolling statistics and periodic lags per fold, and
+            # without timestamps those shifts are positional — "48 rows
+            # back" rather than "24 hours back" — which is wrong on any
+            # frame whose rows are the supervised subset of a gappy grid.
+            # Nothing downstream of here reads the index positionally.
+            df_train = df.iloc[train_idx]
+            df_test = df.iloc[test_idx]
 
             # Build features
             try:
@@ -485,13 +490,13 @@ class BenchmarkRunner:
                 else:
                     try:
                         from ml_forecast_lab.features import create_sliding_windows
+                        from ml_forecast_lab.features import (
+                            neural_covariate_columns,
+                        )
                         target_col = 'target'
-                        engineered = {
-                            'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
-                            'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
-                        }
-                        engineered.update(c for c in df_train.columns if c.startswith('y_lag_'))
-                        neural_cov_cols = [c for c in df_train.columns if c not in engineered and c != target_col]
+                        neural_cov_cols = neural_covariate_columns(
+                            df_train.columns,
+                        )
 
                         # Use DENSE horizons matching the production training and
                         # holdout-chart paths so the leaderboard, holdout chart,

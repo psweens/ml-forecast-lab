@@ -1140,3 +1140,412 @@ def daily_autocorrelation(
         return None
     r = a.corr(b)
     return None if pd.isna(r) else float(r)
+
+
+# --- Missingness resolution ------------------------------------------------
+#
+# Everything below decides what a model is shown where data is absent. Two
+# rules, and the split between them is the whole design:
+#
+#   * A missing **label** means the row cannot be a supervised sample. It is
+#     excluded, never imputed. Imputing a label teaches the model something
+#     false and then scores it against that fabrication — and because imputed
+#     values are smooth, they are unusually easy to predict, so every backend
+#     is flattered and the composite ranking starts rewarding whichever model
+#     best reproduces the imputation scheme. Conformal bands would calibrate
+#     on fabricated residuals for the same reason.
+#   * A missing **feature** is masked, flagged and imputed. Imputing a feature
+#     adds noise the model can learn to discount, which is what the flag is
+#     for.
+
+
+# Suffix for the companion indicator column. Mirrors
+# ``features.MISSING_SUFFIX``; both are pinned equal by a unit test.
+MISSING_SUFFIX = '_missing'
+
+# Feature columns ``build_features`` derives from the target itself. Their
+# gaps all trace back to one cause — a hole in ``y`` — so they share a single
+# indicator instead of each carrying its own. One target gap otherwise emits
+# roughly two dozen companions, most of them a handful of non-zero cells in
+# tens of thousands of rows, and the *set* of them changes every cycle as the
+# history window slides over the gap. A feature matrix whose column list is
+# unstable between a retrain and the next forecast is worse than a coarse
+# flag: the cached channel order stops matching and the forecast is refused.
+TARGET_FEATURE_PREFIXES = ('y_lag_', 'y_rolling_')
+TARGET_FEATURE_NAMES = ('y_diff_1',)
+TARGET_MISSING_COLUMN = 'y' + MISSING_SUFFIX
+
+
+def is_target_derived_feature(column: str, target_col: str = 'target') -> bool:
+    """Whether ``column`` is a feature computed from the target's own history."""
+    if column == target_col:
+        return False
+    return (
+        column.startswith(TARGET_FEATURE_PREFIXES)
+        or column in TARGET_FEATURE_NAMES
+    )
+
+
+
+def is_binary_column(series: pd.Series) -> bool:
+    """Whether every observed value of ``series`` is 0 or 1.
+
+    A binary covariate is a step function: upstream it is resampled with
+    ``last().ffill()`` under a recorder where "no row" means "did not move".
+    An expanding median over such a column returns 0.5 whenever an even
+    number of prior observations splits evenly — a value the model never
+    sees in any observed row of that channel, and meaningless for a state
+    that is either on or off.
+    """
+    obs = series.dropna()
+    if obs.empty:
+        return False
+    return bool(np.isin(obs.to_numpy(), (0.0, 1.0)).all())
+
+
+def causal_impute(
+    series: pd.Series,
+    method: str = 'median',
+) -> Tuple[pd.Series, pd.Series]:
+    """
+    Fill a feature column's gaps using only observations that precede them.
+
+    ``method='hold'`` carries the last prior observation forward instead of
+    taking an expanding median — equally leak-free, and the only in-domain
+    answer for a binary channel.
+
+    Returns ``(filled, imputed_mask)`` where ``imputed_mask`` is True exactly
+    where a value was invented.
+
+    Imputing with a statistic computed over the whole window would leak
+    test-fold information into training, because the CV harness splits
+    *after* preprocessing: a median taken over all of 2026 is partly a
+    summary of the fold being scored. An expanding median over strictly
+    prior observations is leak-free by construction and, unlike a per-fold
+    statistic, gives the same answer no matter how the folds are drawn.
+
+    Leading gaps have no prior observation, so they take the first observed
+    value — a single scalar drawn from the boundary. That is a small, real
+    leak and it is accepted deliberately: the flag is 1 across the whole
+    leading region, so the model has an explicit signal to discount the
+    column there. It is recorded here so it is not mistaken for an oversight.
+
+    A column with no observations at all cannot be imputed from itself; it
+    is filled with 0.0 and flagged everywhere, which is what the caller
+    wants for a covariate that returned no usable history.
+    """
+    missing = series.isna()
+    if not missing.any():
+        return series, missing
+
+    observed = series.dropna()
+    if observed.empty:
+        # Nothing to impute from. 0.0 with the flag raised for every row is
+        # honest: the column carries no information and says so.
+        return series.fillna(0.0), missing
+
+    # ``expanding().median()`` at row t includes row t; the shift makes it
+    # strictly prior. NaNs are skipped, so the statistic is over observed
+    # values only.
+    #
+    # Only the prefix up to the last gap is ever read, and the expanding
+    # median is the expensive part of the whole missingness step — on a
+    # two-year half-hourly window it is most of the cost, and it runs on
+    # every forecast tick. A gap early in a long window then costs a
+    # fraction of the full pass instead of all of it.
+    last_gap = int(np.flatnonzero(missing.to_numpy())[-1])
+    head = series.iloc[: last_gap + 1]
+    if method == 'hold':
+        prior = head.ffill().shift(1)
+    else:
+        prior = head.expanding().median().shift(1)
+    filled = series.copy()
+    filled.iloc[: last_gap + 1] = head.fillna(prior)
+    # Leading region — no prior observation existed.
+    filled = filled.fillna(float(observed.iloc[0]))
+    return filled, missing
+
+
+def _interaction_base(
+    column: str, frame_columns, exclude=(),
+) -> Optional[Tuple[str, str]]:
+    """Split ``<base>_x_hour_sin`` into ``(base, 'hour_sin')`` when both exist.
+
+    ``build_features`` emits one interaction pair per covariate. Their NaNs
+    are exactly the base column's NaNs, so a separate indicator for each
+    would triple the column cost of a gappy covariate and say nothing new —
+    and the honest imputed value for the interaction is the imputed base
+    times the (always known) time term, not a median of the product.
+    """
+    if column in exclude:
+        # A covariate of the source frame, not something build_features
+        # produced. Rebuilding it as base x factor would overwrite every
+        # one of its real measurements, not just its gaps.
+        return None
+    for factor in ('hour_sin', 'hour_cos'):
+        suffix = f'_x_{factor}'
+        if column.endswith(suffix) and factor in frame_columns:
+            base = column[: -len(suffix)]
+            if base in frame_columns:
+                return base, factor
+    return None
+
+
+def resolve_missingness(
+    frame: pd.DataFrame,
+    target_col: str,
+    warmup_rows: int,
+    missing_suffix: str = MISSING_SUFFIX,
+    required_indicators: Optional[Sequence[str]] = None,
+    source_columns: Optional[Sequence[str]] = None,
+) -> Tuple[pd.DataFrame, dict]:
+    """
+    Turn a feature frame built on a complete grid into supervised rows.
+
+    Expects ``frame`` to span an unbroken time grid — features built before
+    any row was deleted, so ``shift(k)`` is a true time offset. Performs, in
+    order:
+
+    1. **Impute features** over the whole grid, causally (see
+       :func:`causal_impute`), recording which cells were invented.
+    2. **Drop warm-up rows** — the leading rows whose features are
+       structurally undefined for want of history, not missing from the
+       data. See :func:`ml_forecast_lab.features.feature_warmup_rows`.
+    3. **Drop label gaps** — rows whose target is NaN. These can never be
+       supervised samples and their labels are never invented.
+    4. **Emit indicators** — a ``<name>_missing`` companion column, 1 where
+       the cell was imputed and 0 elsewhere, for each covariate that still
+       has an imputed cell among the surviving rows, plus a single
+       ``y_missing`` covering every target-derived feature. A covariate with
+       no gaps gains no companion, so a complete experiment gains no columns
+       at all and its matrix is unchanged.
+
+    Parameters
+    ----------
+    frame : pd.DataFrame
+        Features plus ``target_col`` plus covariates, on a complete grid.
+    target_col : str
+        The label column. Never imputed, never flagged.
+    warmup_rows : int
+        Leading rows to drop before anything else is judged.
+    missing_suffix : str, default '_missing'
+        Suffix for the companion indicator columns.
+    required_indicators : sequence of str, optional
+        Emit exactly these indicator columns, in this order, instead of the
+        ones the data happens to call for — zero-filled where nothing was
+        imputed. Inference passes the set the trained model was fitted on,
+        because which columns have gaps is a property of the *window*: a
+        history window that slides past an outage between a retrain and the
+        next forecast would otherwise change the feature matrix's shape out
+        from under a cached model. Anything measured but not required is
+        still imputed, just not reported to the model, and is named in the
+        report's ``dropped_indicators``.
+    source_columns : sequence of str, optional
+        Columns that came from the data rather than from
+        ``build_features`` — the covariates. Named so that a covariate
+        called e.g. ``foo_x_hour_sin`` is not mistaken for the interaction
+        term of a covariate called ``foo`` and overwritten with the
+        product of the two.
+
+    Returns
+    -------
+    (pd.DataFrame, dict)
+        The supervised frame, and a report with ``grid_rows``,
+        ``warmup_rows``, ``label_gap_rows``, ``supervised_rows``,
+        ``imputed_cells`` (per column, counted over surviving rows),
+        ``indicator_cols``, ``dropped_indicators``, ``empty_cols`` and
+        ``label_gap_spans``.
+    """
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError('frame must be a pandas DataFrame')
+    if target_col not in frame.columns:
+        raise ValueError(f'target_col {target_col!r} not in frame.columns')
+
+    n_rows = len(frame)
+    warmup_rows = int(max(0, min(int(warmup_rows), n_rows)))
+
+    report: dict = {
+        'grid_rows': n_rows,
+        'warmup_rows': warmup_rows,
+        'label_gap_rows': 0,
+        'supervised_rows': 0,
+        'imputed_cells': {},
+        'indicator_cols': [],
+        'dropped_indicators': [],
+        'empty_cols': [],
+        'label_gap_spans': [],
+    }
+    if n_rows == 0:
+        return frame.copy(), report
+
+    out = frame.copy()
+    columns = list(out.columns)
+    frame_columns = set(columns)
+    source_columns = set(source_columns or ())
+
+    # --- 1. Impute features causally, over the whole grid ------------------
+    #
+    # Over the whole grid, not over the surviving rows: a row that cannot be
+    # a supervised sample (its label is missing) still holds perfectly good
+    # *feature* observations, and dropping it first would hide them from the
+    # expanding statistic. Strictly-prior is preserved either way.
+    masks: dict = {}
+    deferred_interactions: list = []
+    for col in columns:
+        if col == target_col:
+            continue
+        series = out[col]
+        if not series.isna().any():
+            continue
+        interaction = _interaction_base(col, frame_columns, source_columns)
+        if interaction is not None:
+            # Handled after the base column is imputed.
+            deferred_interactions.append((col, interaction))
+            continue
+        if series.notna().sum() == 0:
+            report['empty_cols'].append(col)
+        filled, mask = causal_impute(
+            series, method='hold' if is_binary_column(series) else 'median',
+        )
+        out[col] = filled
+        masks[col] = mask
+
+    for col, (base, factor) in deferred_interactions:
+        # Rebuild from the imputed base rather than imputing the product, so
+        # the interaction stays exactly base x factor at every row — the same
+        # identity build_features guarantees.
+        out[col] = out[base] * out[factor]
+        if out[col].isna().any():
+            filled, mask = causal_impute(out[col])
+            out[col] = filled
+            masks[col] = mask
+
+    # --- 2 & 3. Select supervised rows ------------------------------------
+    #
+    # Warm-up is counted from the first *measured* label, not from row 0.
+    # A window that opens with a target outage has no history behind it
+    # either, so the rows just after that outage are warm-up in exactly the
+    # sense this drops for — and treating them as a gap instead would send
+    # every target-derived feature down `causal_impute`'s leading branch,
+    # which fills from the first observed value. For `y_lag_k` that value
+    # IS a later label, so the first supervised row would be handed its own
+    # answer as a feature.
+    label_missing = out[target_col].isna().to_numpy()
+    keep = np.ones(n_rows, dtype=bool)
+    measured = np.flatnonzero(~label_missing)
+    first_measured = int(measured[0]) if measured.size else n_rows
+    if warmup_rows or first_measured:
+        keep[: min(n_rows, first_measured + warmup_rows)] = False
+    report['warmup_rows'] = int(min(n_rows, first_measured + warmup_rows))
+
+    report['label_gap_rows'] = int((label_missing & keep).sum())
+    report['label_gap_spans'] = _describe_gap_spans(
+        out.index, label_missing & keep,
+    )
+    keep &= ~label_missing
+
+    out = out.loc[keep]
+    report['supervised_rows'] = len(out)
+
+    # --- 4. Emit indicators for surviving gaps ----------------------------
+    #
+    # Decided after the row selection, not before: a column whose only NaNs
+    # sat in the warm-up region has nothing left to flag, and a constant-zero
+    # indicator is pure noise. This is also what keeps a gap-free experiment
+    # bit-identical — no surviving imputed cell, no new column.
+    n_keep = int(keep.sum())
+    candidates: dict = {}
+    target_flag = np.zeros(n_keep, dtype=bool)
+    for col in columns:
+        mask = masks.get(col)
+        if mask is None:
+            continue
+        surviving = mask.to_numpy()[keep]
+        n_imputed = int(surviving.sum())
+        if n_imputed == 0:
+            continue
+        report['imputed_cells'][col] = n_imputed
+        if is_target_derived_feature(col, target_col):
+            # Folded into the one aggregate flag — see TARGET_FEATURE_PREFIXES.
+            target_flag |= surviving
+            continue
+        name = f'{col}{missing_suffix}'
+        if name in frame_columns:
+            # A real covariate already owns that name. Never silently
+            # overwrite it — the collision is astronomically unlikely but
+            # a clobbered covariate would be invisible.
+            name = f'{col}{missing_suffix}_flag'
+            logger.warning(
+                "Indicator column for %r collided with an existing column; "
+                "using %r instead.", col, name,
+            )
+        candidates[name] = surviving
+
+    if target_flag.any():
+        candidates[TARGET_MISSING_COLUMN] = target_flag
+
+    if required_indicators is None:
+        emit = list(candidates)
+    else:
+        emit = list(required_indicators)
+        report['dropped_indicators'] = [
+            name for name in candidates if name not in set(emit)
+        ]
+        if report['dropped_indicators']:
+            logger.warning(
+                "Missingness indicators %s were measured but are not in the "
+                "trained model's feature set; their gaps are imputed but "
+                "unflagged for this cycle.", report['dropped_indicators'],
+            )
+
+    zeros = np.zeros(n_keep, dtype=np.float32)
+    for name in emit:
+        values = candidates.get(name)
+        if values is None and name in frame_columns:
+            # A pinned name that this frame did not measure a gap for AND
+            # that is a real column of the input. Zero-filling it would
+            # overwrite live measurements with a constant the model never
+            # trained on — the exact train/serve skew the pin exists to
+            # prevent. The column is already present and correct, so leave
+            # it alone.
+            logger.warning(
+                "Indicator %r is also a data column in this frame; leaving "
+                "its measured values in place rather than zero-filling it.",
+                name,
+            )
+            report['indicator_cols'].append(name)
+            continue
+        out[name] = zeros if values is None else values.astype(np.float32)
+        report['indicator_cols'].append(name)
+
+    return out, report
+
+
+def _describe_gap_spans(index, mask, limit: int = 3) -> list:
+    """Summarise a boolean mask as contiguous runs, longest first.
+
+    Returns at most ``limit`` entries of ``(start, end, n_rows)``. Used to
+    make the target-gap warning name the actual outage rather than just
+    counting rows.
+    """
+    mask = np.asarray(mask, dtype=bool)
+    if not mask.any():
+        return []
+    spans = []
+    start = None
+    for i, flag in enumerate(mask):
+        if flag and start is None:
+            start = i
+        elif not flag and start is not None:
+            spans.append((start, i - 1))
+            start = None
+    if start is not None:
+        spans.append((start, len(mask) - 1))
+    spans.sort(key=lambda s: s[1] - s[0], reverse=True)
+    out = []
+    for lo, hi in spans[:limit]:
+        try:
+            out.append((index[lo], index[hi], hi - lo + 1))
+        except Exception:  # pragma: no cover - non-indexable index
+            out.append((lo, hi, hi - lo + 1))
+    return out

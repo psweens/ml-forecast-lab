@@ -317,29 +317,44 @@ class TestEdgeCases:
         assert cov.index.tz is not None
 
 
-class TestFillBehaviourUnchanged:
-    """The spec is explicit: filling, dropping and feature construction do
-    not change — only the measurement does. This is the cheap direct guard
-    on that, following the source-contract precedent in
-    tests/unit/test_preprocessing.py."""
+class TestMaskingContract:
+    """A covariate is now held forward only for as long as it is
+    authoritative, and the number the manifest prints is read off the very
+    series the model is handed. Source-contract guards on both, following
+    the precedent in tests/unit/test_preprocessing.py."""
 
     @staticmethod
     def _main_source() -> str:
         root = Path(__file__).resolve().parents[2]
         return (root / "ml_forecast_lab" / "main.py").read_text()
 
-    def test_covariate_fill_expressions_are_verbatim(self):
+    def test_the_unbounded_fill_is_gone(self):
+        """The line this replaces propagated the oldest available value
+        backwards across the whole window, so ten days of history against a
+        two-year target trained as a constant for ~99% of rows."""
         src = self._main_source()
-        assert 'cov_series.reindex(result.index, method="ffill")' in src
-        assert "cov_aligned = cov_aligned.ffill().bfill()" in src
+        assert "cov_aligned = cov_aligned.ffill().bfill()" not in src
+        assert 'cov_series.reindex(result.index, method="ffill")' not in src
 
-    def test_measurement_happens_before_the_fill(self):
+    def test_merge_uses_the_bounded_alignment(self):
         src = self._main_source()
-        measure = src.index("observed_count, filled_count = _covariate_grid_coverage")
-        fill = src.index('cov_aligned = cov_series.reindex(result.index, method="ffill")')
-        assert measure < fill, (
-            "coverage must be measured before the fill, or it measures the fill"
-        )
+        assert "cov_aligned = _align_covariate_to_grid(" in src
+
+    def test_measurement_and_mask_are_the_same_series(self):
+        """If these two ever diverge the manifest can report coverage the
+        model was never given, which is the failure the previous release
+        fixed once already."""
+        src = self._main_source()
+        align = src.index("cov_aligned = _align_covariate_to_grid(")
+        count = src.index("observed_count = int(cov_aligned.notna().sum())")
+        assert align < count
+
+    def test_coverage_helper_delegates_to_the_alignment(self):
+        root = Path(__file__).resolve().parents[2]
+        src = (root / "ml_forecast_lab" / "main.py").read_text()
+        body = src[src.index("def _covariate_grid_coverage("):]
+        body = body[: body.index("\ndef ", 1)]
+        assert "_align_covariate_to_grid(" in body
 
     def test_thresholds_are_fixed_constants(self):
         assert COV_COVERAGE_WARN_PCT == 90.0
@@ -530,9 +545,18 @@ class TestTrainingFrameUnchanged:
             result = _run(app._fetch_and_preprocess(exp))
 
         assert result is not None and len(result) > 400, (
-            "the fill is unchanged, so no training row is lost"
+            "a covariate gap is masked, not deleted, so no row is lost"
         )
-        assert int(result["new"].isna().sum()) == 0
+        # The leading stretch — before the covariate's first observation —
+        # is masked rather than back-filled with a value from the future.
+        # It is not dropped: resolve_missingness imputes it downstream and
+        # raises the column's indicator over exactly these rows.
+        masked = int(result["new"].isna().sum())
+        assert masked > 300, (
+            "a covariate with one day of history against a ten-day window "
+            "should be mostly masked, not mostly invented"
+        )
+        assert masked < len(result), "the observed span must survive"
         assert "⛔ sensor.new" in caplog.text
         assert "(100.0%)" not in caplog.text.split("sensor.new")[1][:120]
         alerts = [
