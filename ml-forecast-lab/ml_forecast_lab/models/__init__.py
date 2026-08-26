@@ -54,6 +54,15 @@ _optional_imports = {
     'TTMModel': 'ttm_backend',
 }
 
+# Single source of truth for how many backends are wired in. The READMEs
+# advertise this number in prose, and tests/unit/test_backend_count.py fails
+# when they drift — update the docs in the same change that adds or removes
+# a backend. Runtime registration filters this list by importability, so
+# ``len(get_registry().list_available())`` can be smaller on a lean install
+# (e.g. chronos/ttm are absent on armv7); the wired count is the honest
+# number to advertise because it is what a full install gets.
+WIRED_BACKENDS = tuple(_optional_imports.keys())
+
 for _cls_name, _module in _optional_imports.items():
     try:
         _mod = __import__(f'ml_forecast_lab.models.{_module}', fromlist=[_cls_name])
@@ -66,6 +75,7 @@ __all__ = [
     'ModelResult',
     'ModelRegistry',
     'get_registry',
+    'WIRED_BACKENDS',
 ] + list(_optional_imports.keys())
 
 logger = logging.getLogger(__name__)
