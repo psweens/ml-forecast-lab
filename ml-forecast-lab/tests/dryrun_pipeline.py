@@ -1,6 +1,6 @@
 """End-to-end dry-run of the ML Forecast Lab pipeline against synthetic data.
 
-For each of the 24 registered model backends:
+For every registered model backend:
   1. Instantiate via the model registry.
   2. Verify get_params / set_params round-trip with every entry in the
      ``MODEL_PARAM_SCHEMA`` default block.

@@ -21,7 +21,7 @@ def test_homepage_renders(client):
 
 
 def test_models_page_renders(client):
-    """`GET /models` lists all 24 model backends."""
+    """`GET /models` lists the registered model backends."""
     resp = client.get("/models")
     assert resp.status_code == 200
     assert "ML Forecast Lab" in resp.text

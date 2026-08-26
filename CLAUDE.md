@@ -5,8 +5,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 ML Forecast Lab is a Home Assistant app (add-on) that forecasts any HA sensor: it benchmarks
-~29 time-series model backends on the sensor's history, promotes a winner, retrains it on
-schedule, and publishes calibrated forecasts (with 80% conformal bands) back to HA as sensors.
+a fleet of time-series model backends on the sensor's history, promotes a winner, retrains it
+on schedule, and publishes calibrated forecasts (with 80% conformal bands) back to HA as
+sensors. Never write a literal backend count in code or docs: `models.WIRED_BACKENDS` is the
+single source of truth and `tests/unit/test_backend_count.py` fails any README/DOCS claim (or
+pinned docstring) that drifts from it — update the prose in the same change that adds or
+removes a backend.
 Target hardware is a Raspberry Pi 5 (8 GB, no GPU, ARM64), which drives most performance
 decisions. The intended user mindset is "benchmark once, run forever".
 
@@ -94,7 +98,7 @@ The CHANGELOG is **user-facing release notes for HA users, not a design record**
 | `features.py` | `build_features` (lags/rolling/temporal), sliding-window builders, warm-up arithmetic, neural channel selection |
 | `covariates.py` | `CovariateResolver` — covariate history fetch/cache and future-forecast resolution |
 | `benchmark/runner.py` | `BenchmarkRunner` — CV folds (positional indices), per-fold training/eval for all backends |
-| `models/` | Registry of ~29 backends behind one interface; `is_neural` splits tabular vs sequence handling; optional deps degrade gracefully (chronos/ttm absent on armv7) |
+| `models/` | Registry of backends behind one interface (`WIRED_BACKENDS` is the count of record); `is_neural` splits tabular vs sequence handling; optional deps degrade gracefully (chronos/ttm absent on armv7) |
 | `db.py` | `HistoryDB` (SQLite): history cache, forecast log, accuracy/coverage analytics. Tables are keyed by **entity**, so experiments sharing a sensor share a table; retention is the max across them |
 | `web/app.py` | FastAPI UI + API (what the smoke tests boot) |
 | `ha_interface.py` | HA REST history/state access, `normalise_history` |
