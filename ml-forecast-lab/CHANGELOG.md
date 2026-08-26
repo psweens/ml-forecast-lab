@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.51.1
+
+### Changed
+
+**The v2.51.0 release notes were rewritten for readability.** No functional
+changes: models, forecasts, rankings, and cached models are untouched, and
+updating from 2.51.0 does not trigger a retrain. The 2.51.0 entry below now
+leads with what to expect after updating; the full technical analysis moved
+to the repository's `docs/investigations/` folder. The advertised model
+backend count is now verified against the code by a test, so it can no
+longer drift.
+
 ## 2.51.0
 
 **After updating:** every experiment retrains once on first start — cached
