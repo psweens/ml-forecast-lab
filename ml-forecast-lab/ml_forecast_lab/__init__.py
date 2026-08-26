@@ -14,13 +14,20 @@ from .ha_interface import (
 # Core modules: configuration, preprocessing, and features
 from .config import AppConfig, CovariateCfg, ExperimentCfg, SubtractCfg, load_config
 from .features import (
+    MISSING_SUFFIX,
+    TARGET_MISSING_COLUMN,
     build_features,
+    default_lag_windows,
+    feature_warmup_rows,
+    neural_covariate_columns,
     prepare_train_test,
+    rebuild_fold_features,
     reshape_for_sequence,
 )
 from .preprocessing import (
     LoadSubtractError,
     align_series,
+    causal_impute,
     apply_load_subtract,
     apply_log_transform,
     apply_transform,
@@ -30,10 +37,11 @@ from .preprocessing import (
     invert_transform,
     power_to_energy,
     resample_to_grid,
+    resolve_missingness,
     subtract_series,
 )
 
-__version__ = "2.50.0"
+__version__ = "2.51.0"
 
 __all__ = [
     # Legacy
@@ -63,8 +71,17 @@ __all__ = [
     "LoadSubtractError",
     "power_to_energy",
     "align_series",
+    # Missingness: masking, indicators and causal imputation
+    "causal_impute",
+    "resolve_missingness",
+    "MISSING_SUFFIX",
+    "TARGET_MISSING_COLUMN",
     # Core features
     "build_features",
+    "default_lag_windows",
+    "feature_warmup_rows",
+    "neural_covariate_columns",
     "prepare_train_test",
+    "rebuild_fold_features",
     "reshape_for_sequence",
 ]

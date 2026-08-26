@@ -62,6 +62,150 @@ def is_holiday(date: pd.Timestamp, country: Optional[str]) -> bool:
     return date.date() in _holiday_cache[cache_key]
 
 
+# Suffix used for the companion indicator column that marks which cells of a
+# feature column were imputed rather than observed. Emitted only for columns
+# that actually have gaps, so a complete experiment gains no columns at all.
+# See ``preprocessing.resolve_missingness``.
+MISSING_SUFFIX = '_missing'
+
+
+def default_lag_windows(interval_minutes: int) -> List[int]:
+    """
+    Rolling-statistic window sizes, in rows, for a given sampling interval.
+
+    Pick rolling windows by their hour-of-history meaning rather than by row
+    count. At 30-min interval this resolves to [6, 24, 72] — the legacy
+    default — and at 5-min interval it scales to [36, 144, 432] so the
+    longest window still spans 36 h. Without this the model never sees the
+    daily seasonality on small intervals.
+    """
+    steps_per_hour = max(1, 60 // max(interval_minutes, 1))
+    return [
+        max(2, 3 * steps_per_hour),    # ~3 h
+        max(3, 12 * steps_per_hour),   # ~12 h
+        max(4, 36 * steps_per_hour),   # ~36 h
+    ]
+
+
+def feature_warmup_rows(
+    n_rows: int,
+    interval_minutes: int,
+    n_lags: int = 12,
+    lag_windows: Optional[List[int]] = None,
+    ghi_gated: bool = False,
+) -> int:
+    """
+    Leading rows of a :func:`build_features` frame that can never be complete.
+
+    The longest-reaching feature decides it: ``y_lag_k`` is first defined at
+    row ``k``, a rolling statistic over ``w`` rows of ``target.shift(1)`` is
+    first defined at row ``w``, and ``y_diff_1`` at row 2. Every row before
+    the maximum of those has a structurally undefined feature — not a gap in
+    the data, just not enough history yet.
+
+    That distinction is the whole point of this function. Once missing
+    *features* are imputed rather than dropped (see
+    ``preprocessing.resolve_missingness``), something still has to delete
+    the warm-up rows, or a frame that used to start at row ``k`` would
+    suddenly start at row 0 with ``k`` rows of invented lags — and the
+    training-row count would change for experiments that have no gaps at
+    all. Warm-up is dropped; everything after it is masked, flagged and
+    imputed.
+
+    ``n_rows`` is needed because :func:`build_features` only emits the
+    periodic lags when they fit inside the frame.
+
+    Parameters
+    ----------
+    ghi_gated : bool, default False
+        Whether ``build_features`` will apply the clear-sky gate, i.e.
+        whether ``clear_sky_ghi`` is a column of the frame. It changes the
+        answer: ``_gate_by_past_ghi`` writes ``0.0`` wherever the shifted
+        GHI is not positive, and a shifted GHI that reaches off the front
+        of the series is NaN, so ``NaN > 0`` is False and every warm-up
+        cell of every gated column becomes ``0.0`` rather than NaN. The
+        gated columns — all the lags and ``y_diff_1`` — therefore impose no
+        warm-up at all on a solar experiment, and only the ungated rolling
+        statistics do. Counting them anyway silently deletes real
+        supervised rows from every PV experiment.
+
+    Returns
+    -------
+    int
+        Row count, clamped to ``[0, n_rows]``.
+    """
+    if n_rows <= 0:
+        return 0
+    if lag_windows is None:
+        lag_windows = default_lag_windows(interval_minutes)
+
+    # Rolling statistics over target.shift(1): first valid row is the window.
+    # Never gated, so they always count.
+    reach = 0
+    for window in lag_windows:
+        reach = max(reach, int(window))
+
+    if not ghi_gated:
+        # y_lag_1..n_lags, and y_diff_1's target.shift(2).
+        reach = max(reach, int(n_lags), 2)
+        # Periodic lags — emitted only when they fit (mirrors build_features).
+        steps_per_day = max(1, 1440 // max(interval_minutes, 1))
+        for d in (1, 2):
+            lag_steps = steps_per_day * d
+            if lag_steps <= n_rows:
+                reach = max(reach, lag_steps)
+
+    return int(min(reach, n_rows))
+
+
+# Feature columns that ``build_features`` derives from the calendar rather
+# than from a covariate. Sequence backends receive these as their own
+# channels via ``add_temporal=True``, so they must not be offered a second
+# time as covariate channels.
+ENGINEERED_TEMPORAL_COLUMNS = frozenset({
+    'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
+    'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
+})
+
+# The single indicator that covers every target-derived feature — the lags,
+# the rolling statistics and y_diff_1 — rather than one companion per
+# column. See ``preprocessing.resolve_missingness`` for why it is aggregated.
+TARGET_MISSING_COLUMN = 'y' + MISSING_SUFFIX
+
+
+def neural_covariate_columns(
+    columns,
+    target_col: str = 'target',
+) -> List[str]:
+    """
+    The columns a sequence backend should receive as extra input channels.
+
+    Everything that is not a calendar feature, not a target-derived lag,
+    and not the target itself. Sequence models window over the raw target,
+    so the engineered lags say nothing they cannot already see. The
+    missingness indicators DO stay — ``TARGET_MISSING_COLUMN`` included:
+    windows are built over the window frame, whose target is causally
+    imputed across label gaps, and its per-row ``y_missing`` is the
+    channel that tells the model which of those y inputs were invented.
+    A masked covariate rides along for the same reason.
+
+    Kept in one place because the same filter is needed at five call sites
+    (benchmark, holdout, production training, cached forecast, CV runner)
+    and the cached channel order must agree between them, or a forecast is
+    refused for a channel-name mismatch.
+    """
+    out: List[str] = []
+    for c in columns:
+        if c == target_col:
+            continue
+        if c in ENGINEERED_TEMPORAL_COLUMNS:
+            continue
+        if c.startswith('y_lag_'):
+            continue
+        out.append(c)
+    return out
+
+
 def build_features(
     df: pd.DataFrame,
     target_col: str,
@@ -134,17 +278,7 @@ def build_features(
         raise ValueError(f'interval_minutes must be >= 1, got {interval_minutes}')
 
     if lag_windows is None:
-        # Pick rolling windows by their hour-of-history meaning rather than
-        # by row count. At 30-min interval this resolves to [6, 24, 72] —
-        # the legacy default — and at 5-min interval it scales to [36, 144,
-        # 432] so the longest window still spans 36 h. Without this the
-        # model never sees the daily seasonality on small intervals.
-        steps_per_hour = max(1, 60 // max(interval_minutes, 1))
-        lag_windows = [
-            max(2, 3 * steps_per_hour),    # ~3 h
-            max(3, 12 * steps_per_hour),   # ~12 h
-            max(4, 36 * steps_per_hour),   # ~36 h
-        ]
+        lag_windows = default_lag_windows(interval_minutes)
 
     features = pd.DataFrame(index=df.index)
 
@@ -232,7 +366,13 @@ def build_features(
     else:
         features['y_diff_1'] = raw_diff.where(ghi_col.shift(1) > 0, 0.0)
 
-    # Interaction features — covariate × time-of-day
+    # Interaction features — covariate × time-of-day.
+    #
+    # Every non-target column gets one, including a covariate whose name
+    # happens to end in `_missing`. Missingness indicators are created
+    # downstream by ``preprocessing.resolve_missingness``, after this runs,
+    # so they never reach here — and excluding columns by name suffix would
+    # silently strip a real covariate's interactions instead.
     cov_cols = [c for c in df.columns if c != target_col]
     for col in cov_cols:
         features[f'{col}_x_hour_sin'] = df[col] * features['hour_sin']
@@ -249,6 +389,81 @@ def build_features(
     )
 
     return features
+
+
+def rebuild_fold_features(
+    df_out: pd.DataFrame,
+    target_col: str,
+    interval_minutes: int,
+    rolling_windows: List[int],
+    steps_per_day: int,
+) -> pd.DataFrame:
+    """
+    Recompute a CV fold's rolling statistics and periodic lags, on time.
+
+    The benchmark and tuning harnesses rebuild these columns per fold rather
+    than reusing the ones :func:`build_features` produced. ``shift`` and
+    ``rolling`` are positional, so on a frame whose rows are the *surviving*
+    supervised samples, "48 rows back" is 48 rows back — not 24 hours back —
+    the moment the target has an outage anywhere inside the fold. Fixing lag
+    construction upstream and leaving this alone would fix training and then
+    score it with the broken features.
+
+    So the recompute happens on the fold's own complete grid: reindex to
+    ``interval_minutes``, causally impute the target for *feature*
+    construction only, compute, and select back onto the rows the fold
+    actually holds. The labels are untouched — nothing fabricated is ever
+    scored — and on a fold with no gaps the reindex is a no-op, so the
+    features are bit-identical to what this produced before.
+
+    Falls back to the plain positional recompute when the frame has no
+    DatetimeIndex (test fixtures pass a RangeIndex).
+
+    Mutates and returns ``df_out``.
+    """
+    from ml_forecast_lab.preprocessing import causal_impute
+
+    target = df_out[target_col]
+    index = df_out.index
+    grid = None
+    if isinstance(index, pd.DatetimeIndex) and len(index) > 1:
+        try:
+            grid = pd.date_range(
+                index[0], index[-1], freq=f'{max(1, int(interval_minutes))}min',
+            )
+        except Exception:
+            grid = None
+
+    if grid is not None and len(grid) > len(index):
+        on_grid, _ = causal_impute(target.reindex(grid))
+    else:
+        on_grid = target
+        grid = index
+
+    shifted = on_grid.shift(1)
+    for window in rolling_windows:
+        df_out[f'y_rolling_mean_{window}'] = (
+            shifted.rolling(window=window).mean().reindex(index)
+        )
+        df_out[f'y_rolling_std_{window}'] = (
+            shifted.rolling(window=window).std().reindex(index)
+        )
+        df_out[f'y_rolling_max_{window}'] = (
+            shifted.rolling(window=window).max().reindex(index)
+        )
+    for d in (1, 2):
+        lag_steps = steps_per_day * d
+        # Guard against len(target), not len(grid): matches what
+        # build_features emitted, so the fold never invents a column the
+        # trained feature list does not have.
+        if lag_steps <= len(target):
+            df_out[f'y_lag_{lag_steps}'] = (
+                on_grid.shift(lag_steps).reindex(index)
+            )
+    df_out['y_diff_1'] = (
+        (on_grid.shift(1) - on_grid.shift(2)).reindex(index)
+    )
+    return df_out
 
 
 def compute_known_future_features(
@@ -560,7 +775,9 @@ def create_sliding_windows(
     add_temporal: bool = True,
     horizon_steps: Optional[List[int]] = None,
     future_features_df: Optional[pd.DataFrame] = None,
-) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    label_mask=None,
+    mask_horizons: Optional[List[int]] = None,
+):
     """
     Create sliding window sequences from raw time series for LSTM/CNN.
 
@@ -603,6 +820,24 @@ def create_sliding_windows(
         had to phase-disambiguate horizons from a single linear
         projection.
 
+    label_mask : array-like of bool, optional
+        Aligned with ``df``'s rows; True where the row's target value was
+        actually measured. When provided, ``df`` is expected to be the
+        *window frame* — a complete time grid whose target has been
+        causally imputed so window INPUTS are unbroken time spans — and a
+        window is kept only when every label row it is scored against is
+        True. Window contents are features and may be imputed; the values
+        a window is trained or scored against are labels and never are.
+        The return value grows a fourth element: the kept sample indices
+        into the unfiltered window enumeration, so callers can align
+        per-window quantities (sample weights, label timestamps).
+    mask_horizons : list of int, optional
+        Which horizon steps' labels must be measured for a window to
+        survive ``label_mask``. Defaults to every step in
+        ``horizon_steps``: at training time all of them enter the loss.
+        Evaluation windows are scored only at h=1, so requiring all 48
+        would discard scoreable predictions — those callers pass ``[1]``.
+
     Returns
     -------
     X : np.ndarray
@@ -614,6 +849,8 @@ def create_sliding_windows(
         (n_samples, n_horizons) when horizon_steps is provided.
     channel_names : list of str
         Names of the channels in X.
+    kept : np.ndarray, only when ``label_mask`` is provided
+        Original sample indices of the surviving windows.
     """
     # Build channel list
     channel_names = [target_col]
@@ -701,6 +938,32 @@ def create_sliding_windows(
         else:
             y[i] = data[i + window_size, target_idx]
 
+    if label_mask is not None:
+        lm = np.asarray(label_mask, dtype=bool)
+        if len(lm) != n_total:
+            raise ValueError(
+                f'label_mask has {len(lm)} rows but df has {n_total}'
+            )
+        if horizon_steps is not None:
+            steps = mask_horizons if mask_horizons is not None else horizon_steps
+            label_pos = np.add.outer(
+                np.arange(n_samples) + window_size,
+                np.asarray(steps, dtype=int) - 1,
+            )
+            valid = lm[label_pos].all(axis=1)
+        else:
+            valid = lm[np.arange(n_samples) + window_size]
+        kept = np.flatnonzero(valid)
+        n_dropped = n_samples - len(kept)
+        if n_dropped:
+            logger.info(
+                f'Dropped {n_dropped} of {n_samples} windows whose label '
+                f'rows were not measured; {len(kept)} remain.'
+            )
+        X = X[valid]
+        y = y[valid]
+        n_samples = len(kept)
+
     horizon_info = f", horizons={horizon_steps}" if horizon_steps else ""
     extend_info = f" +{extend_by} future positions" if extend_by else ""
     logger.debug(
@@ -709,6 +972,8 @@ def create_sliding_windows(
         f"{channel_names}{horizon_info})"
     )
 
+    if label_mask is not None:
+        return X, y, channel_names, kept
     return X, y, channel_names
 
 

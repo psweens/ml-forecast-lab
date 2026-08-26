@@ -124,16 +124,54 @@ covariates:
 **Covariate history and coverage.** Covariate history is cached in SQLite
 and extended incrementally each cycle, exactly as the target's is, so a
 covariate accumulates history beyond whatever window your HA recorder
-keeps. Where a covariate has no value for a training row — before its
-history begins, or across an outage — the value is carried forward (and
-back-filled at the leading edge) onto the target grid, so a covariate gap
-never deletes a training row. That fill is invisible to the model, so the
-covariate manifest reports the two separately: `obs=` counts grid points
-the entity actually reported on, `filled=` counts the rest. A binary
-covariate is a step function under HA's delta-storage recorder, where "no
-row" means "did not move" rather than "unknown", so its in-span holds
-count as observed; a binary that only appears part-way into the window is
-still reported at its true coverage.
+keeps. A covariate's value is carried forward onto the target grid, but
+only for as long as it is authoritative — the entity's own update cadence,
+taken from the 90th percentile of its observation gaps. Past that, and
+before its history begins, the grid point is **masked**: the covariate gap
+never deletes a training row, but the model is told which rows were
+measured rather than being handed a value invented by an unbounded fill
+(v2.51.0+). The covariate manifest reports the two separately: `obs=`
+counts grid points the entity actually reported on, `masked=` counts the
+rest, and the two numbers come off the very series the model is given, so
+the diagnostic and the training frame cannot disagree.
+
+Masked cells are filled with an expanding median over the covariate's own
+strictly prior observations — leak-free by construction, and the same
+value no matter how the CV folds are drawn — and the column gains a
+companion `<name>_missing` indicator, `1` where the value was imputed and
+`0` where it was measured. The indicator appears only for covariates that
+actually have gaps, so a complete experiment gains no columns at all.
+Every backend receives the same matrix, so trees can split on the flag and
+neural and classical backends get it as a clean channel.
+
+A binary covariate is a step function under HA's delta-storage recorder,
+where "no row" means "did not move" rather than "unknown", so its in-span
+holds count as observed; a binary that only appears part-way into the
+window is still reported at its true coverage.
+
+**Target gaps.** A gap in the *target* is treated differently, because it
+is a different kind of problem. A row with no measured label cannot be a
+supervised sample, so it is excluded from training and scoring — and its
+label is never imputed. Imputing a label would teach the model something
+false and then score it against that fabrication; imputed values are also
+smooth and therefore unusually easy to predict, so every backend would be
+flattered and the leaderboard would start rewarding whichever model best
+reproduces the imputation. Conformal bands would calibrate on fabricated
+residuals for the same reason. Target gaps get their own `WARNING` naming
+the outage and the supervised rows lost.
+
+*Features* derived from a target gap are a separate matter: a row 24 hours
+after an outage has a `y_lag_48` that reaches into it. That is a feature,
+so it is masked, imputed and flagged via a single aggregate `y_missing`
+column, and the row survives.
+
+Sequence backends follow the same rule in their own shape. Their sliding
+windows are built over the complete time grid — never over the row-selected
+frame, where a window could silently span a label gap — with the target
+causally imputed across gaps and a per-row `y_missing` channel marking the
+invented inputs. A window is a training sample only when every horizon
+label it is fitted against was measured; a window whose labels land in a
+gap is dropped, never trained on an invented value.
 
 > **Note on `weather.*` entities and `role: lagged`** — a weather entity's
 > *state* is a categorical string (`partlycloudy`, `sunny`, `rainy`),
@@ -235,7 +273,7 @@ Only collects data while the experiment is in **production** (that's when this a
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `gap_handling` | `interpolate` \| `ffill` \| `mask` | `interpolate` | What to do with gaps after resampling. `interpolate` linear-fills short gaps and leaves long ones as NaN. `ffill` propagates the last value (legacy). `mask` leaves every gap as NaN so the row is dropped downstream. |
+| `gap_handling` | `interpolate` \| `ffill` \| `mask` | `interpolate` | What to do with gaps after resampling. `interpolate` linear-fills short gaps and leaves long ones as NaN. `ffill` propagates the last value (legacy). `mask` leaves every gap as NaN. A gap that survives as NaN removes the row from training only when it is in the **target**; a gap in a covariate or a lag feature is masked, flagged and imputed instead (v2.51.0+). Features are built before any row is removed, so a gap never shifts what a lag means. |
 | `gap_max_minutes` | int | `90` | Maximum gap that `interpolate` will bridge. Longer gaps fall through to NaN. |
 | `outlier_method` | `quantile` \| `mad` \| `off` | `quantile` | Outlier-clipping strategy. `quantile` clips the upper tail; `mad` uses the Iglewicz-Hoaglin robust bound (more forgiving on heavy-tailed legitimate data like rainfall); `off` disables clipping. |
 | `outlier_quantile` | float | `0.999` | Upper-tail quantile for `outlier_method: quantile`. Lower this if your target has a clean upper bound. |
@@ -457,7 +495,7 @@ Four usual causes:
 
 1. The target has a long stretch of identical values that the model is overfitting to. The Settings-tab Data sanity check surfaces zero-run length and missing-value rate.
 2. The covariates with `role: future` are returning `unavailable`. The `[COV]` log lines show how each covariate resolved per cycle. A weather entity that briefly stops exposing `forecast` will starve future covariates of values and the model defaults to a flat extrapolation.
-3. A covariate is mostly gap-fill rather than data. The per-cycle **covariate manifest** in the `[APP]` log block reports each covariate's true coverage as `obs=<observed>/<grid points>`, measured *before* the gap fill. Below 90% it is marked ⚠; below 50% it is marked ⛔ and repeated as its own `WARNING` line. A covariate that is largely filled contributes a near-constant column, which the model learns to ignore — and which then behaves unpredictably in production once the entity's values start varying.
+3. A covariate is mostly imputed rather than data. The per-cycle **covariate manifest** in the `[APP]` log block reports each covariate's true coverage as `obs=<observed>/<grid points>`, read off the same series the model is handed. Below 90% it is marked ⚠; below 50% it is marked ⛔ and repeated as its own `WARNING` line. A mostly-masked covariate carries almost no signal; its `<name>_missing` indicator tells the model so, but the honest fix is to seed the cache or drop the covariate. If the covariate is absent for whole CV folds, a `WARNING` names those folds — those folds benchmark a covariate-free model, so the leaderboard is averaging across two different problems.
 4. `recency_half_life_days` is too small for your data. Try setting it back to `0` (uniform weighting) on stable targets.
 
 ### Out-of-memory on the Pi

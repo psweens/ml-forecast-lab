@@ -348,6 +348,8 @@ class BenchmarkRunner:
         precomputed_sequences: dict = None,
         cancel_event: Any = None,
         future_features_df: Optional[pd.DataFrame] = None,
+        window_frame: Optional[pd.DataFrame] = None,
+        window_label_mask: Optional[pd.Series] = None,
     ) -> ModelResult:
         """
         Run a single model across all CV folds.
@@ -355,7 +357,20 @@ class BenchmarkRunner:
         Parameters
         ----------
         df : pd.DataFrame
-            Full time series data.
+            Full time series data (the supervised frame — measured labels
+            only).
+        window_frame : pd.DataFrame, optional
+            The complete-grid frame from ``resolve_missingness`` for
+            sequence backends: contiguous in time, target causally
+            imputed, missingness flagged per row. Sliding windows are
+            positional, so building them over ``df`` silently time-warps
+            every window that spans a label gap; folds slice this frame
+            by timestamp instead. When absent (legacy callers, test
+            fixtures with a RangeIndex) windows fall back to ``df``.
+        window_label_mask : pd.Series, optional
+            True where the window frame's label was measured. Training
+            windows require every horizon label measured; evaluation
+            windows only the h=1 label they are scored on.
         model : ForecastModel
             Model instance with fit and predict methods.
         fold_indices : list[tuple[np.ndarray, np.ndarray]]
@@ -407,9 +422,14 @@ class BenchmarkRunner:
                 test_timestamps = pd.DatetimeIndex([])
                 train_timestamps = pd.DatetimeIndex([])
 
-            # Split data
-            df_train = df.iloc[train_idx].reset_index(drop=True)
-            df_test = df.iloc[test_idx].reset_index(drop=True)
+            # Split data. The DatetimeIndex is kept: the feature builder
+            # rebuilds rolling statistics and periodic lags per fold, and
+            # without timestamps those shifts are positional — "48 rows
+            # back" rather than "24 hours back" — which is wrong on any
+            # frame whose rows are the supervised subset of a gappy grid.
+            # Nothing downstream of here reads the index positionally.
+            df_train = df.iloc[train_idx]
+            df_test = df.iloc[test_idx]
 
             # Build features
             try:
@@ -485,13 +505,13 @@ class BenchmarkRunner:
                 else:
                     try:
                         from ml_forecast_lab.features import create_sliding_windows
+                        from ml_forecast_lab.features import (
+                            neural_covariate_columns,
+                        )
                         target_col = 'target'
-                        engineered = {
-                            'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
-                            'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
-                        }
-                        engineered.update(c for c in df_train.columns if c.startswith('y_lag_'))
-                        neural_cov_cols = [c for c in df_train.columns if c not in engineered and c != target_col]
+                        neural_cov_cols = neural_covariate_columns(
+                            df_train.columns,
+                        )
 
                         # Use DENSE horizons matching the production training and
                         # holdout-chart paths so the leaderboard, holdout chart,
@@ -501,12 +521,34 @@ class BenchmarkRunner:
                         horizon_steps = list(range(1, future_periods + 1))
 
                         if target_col in df_train.columns:
-                            # Use original df slice (with DatetimeIndex) for temporal features
+                            # The fold's window source. With a window frame,
+                            # slice it by the fold's own time span — it is a
+                            # superset of the supervised rows, so the slice
+                            # covers exactly the fold's wall-clock range and
+                            # every window inside it is a true time span.
+                            # The embargo is honoured by construction: the
+                            # slice ends at the fold's last supervised row,
+                            # so no window can read a label beyond it.
                             df_train_raw = df.iloc[train_idx]
+                            train_label_mask = None
+                            if (
+                                window_frame is not None
+                                and window_label_mask is not None
+                                and isinstance(df.index, pd.DatetimeIndex)
+                                and len(df_train_raw) > 0
+                            ):
+                                _t0 = df_train_raw.index[0]
+                                _t1 = df_train_raw.index[-1]
+                                df_train_raw = window_frame.loc[_t0:_t1]
+                                train_label_mask = (
+                                    window_label_mask.loc[_t0:_t1].to_numpy()
+                                )
                             # Match holdout/production path: cap window at 48
                             # (24h at 30-min). Larger windows hurt small-fold CV
-                            # by reducing effective sample size.
-                            window_size = min(48, len(df_train_raw) // 3)
+                            # by reducing effective sample size. Sized from the
+                            # supervised row count so a gap cannot inflate the
+                            # window relative to the data that trains it.
+                            window_size = min(48, len(df.iloc[train_idx]) // 3)
                             if window_size >= 12:
                                 # v2.41.0 (audit F8): pass the same
                                 # future-known features production
@@ -518,13 +560,27 @@ class BenchmarkRunner:
                                 # ones — model selection was made on a
                                 # different input pipeline than the
                                 # champion runs in production.
-                                seq_X, seq_y, channel_names = create_sliding_windows(
-                                    df_train_raw, target_col, window_size=window_size,
-                                    covariate_cols=neural_cov_cols if neural_cov_cols else None,
-                                    add_temporal=True,
-                                    horizon_steps=horizon_steps,
-                                    future_features_df=future_features_df,
-                                )
+                                if train_label_mask is not None:
+                                    seq_X, seq_y, channel_names, _kept = (
+                                        create_sliding_windows(
+                                            df_train_raw, target_col,
+                                            window_size=window_size,
+                                            covariate_cols=neural_cov_cols if neural_cov_cols else None,
+                                            add_temporal=True,
+                                            horizon_steps=horizon_steps,
+                                            future_features_df=future_features_df,
+                                            label_mask=train_label_mask,
+                                        )
+                                    )
+                                else:
+                                    seq_X, seq_y, channel_names = create_sliding_windows(
+                                        df_train_raw, target_col, window_size=window_size,
+                                        covariate_cols=neural_cov_cols if neural_cov_cols else None,
+                                        add_temporal=True,
+                                        horizon_steps=horizon_steps,
+                                        future_features_df=future_features_df,
+                                    )
+                                    _kept = None
                                 sequence_kwargs['sequence_data'] = seq_X
                                 sequence_kwargs['channel_names'] = channel_names
                                 # The windows built above are EXTENDED — past
@@ -545,7 +601,26 @@ class BenchmarkRunner:
                                 y_train = seq_y
                                 X_train = X_train[-len(seq_y):]
                                 if sample_weights is not None:
-                                    sample_weights = sample_weights[-len(seq_y):]
+                                    if _kept is not None:
+                                        # Recency weight per window, at the
+                                        # position its labels occupy in the
+                                        # fold. Bit-identical to the tail
+                                        # slice below when nothing was
+                                        # dropped; with drops, each window
+                                        # keeps the weight of its own
+                                        # position instead of inheriting a
+                                        # neighbour's.
+                                        _n_flat = len(sample_weights)
+                                        _n_all = len(df_train_raw) - window_size - (
+                                            max(horizon_steps) if horizon_steps else 0
+                                        ) + (1 if horizon_steps else 0)
+                                        _pos = np.clip(
+                                            _n_flat - _n_all + _kept,
+                                            0, _n_flat - 1,
+                                        )
+                                        sample_weights = sample_weights[_pos]
+                                    else:
+                                        sample_weights = sample_weights[-len(seq_y):]
                                 logger.debug(
                                     f'Sliding windows for {model.name}: '
                                     f'{seq_X.shape[1]} steps × {seq_X.shape[2]} channels, '
@@ -619,12 +694,57 @@ class BenchmarkRunner:
                         # those rows out of TRAINING; test-input
                         # context may legitimately include them.
                         test_start = int(test_idx[0])
-                        n_bridge = min(window_size, test_start)
-                        bridge_idx = np.concatenate([
-                            np.arange(test_start - n_bridge, test_start),
-                            test_idx,
-                        ])
-                        df_combined_test = df.iloc[bridge_idx]
+                        test_label_mask = None
+                        if (
+                            window_frame is not None
+                            and window_label_mask is not None
+                            and isinstance(df.index, pd.DatetimeIndex)
+                        ):
+                            # Window frame path: the bridge is simply the
+                            # window_size grid rows before the fold, taken
+                            # by position on the frame's own contiguous
+                            # index — so a bridge can no longer span a
+                            # label gap and silently hand the model a
+                            # time-warped context.
+                            _fold_t0 = df.index[test_idx[0]]
+                            _fold_t1 = df.index[test_idx[-1]]
+                            _wf_pos = window_frame.index.get_loc(_fold_t0)
+                            _start_pos = max(0, _wf_pos - window_size)
+                            _end_pos = window_frame.index.get_loc(_fold_t1)
+                            df_combined_test = window_frame.iloc[
+                                _start_pos:_end_pos + 1
+                            ]
+                            test_label_mask = window_label_mask.iloc[
+                                _start_pos:_end_pos + 1
+                            ].to_numpy()
+                        else:
+                            n_bridge = min(window_size, test_start)
+                            bridge_idx = np.concatenate([
+                                np.arange(test_start - n_bridge, test_start),
+                                test_idx,
+                            ])
+                            df_combined_test = df.iloc[bridge_idx]
+
+                        def _align_to_measured_labels(y_pred, kept):
+                            """Pair each surviving window's h=1 prediction
+                            with the measured test row it predicts, by
+                            timestamp. Exact in every gap scenario, and the
+                            identity when nothing was dropped."""
+                            nonlocal y_test, test_timestamps
+                            label_ts = df_combined_test.index[
+                                np.asarray(kept) + window_size
+                            ]
+                            scoreable = np.isin(
+                                label_ts.values, test_timestamps.values,
+                            )
+                            y_pred = y_pred[scoreable]
+                            wanted = np.isin(
+                                test_timestamps.values,
+                                label_ts.values[scoreable],
+                            )
+                            y_test = y_test[wanted]
+                            test_timestamps = test_timestamps[wanted]
+                            return y_pred
 
                         if future_features_df is not None and horizon_steps:
                             # Extended-window parity (audit F8): the
@@ -638,19 +758,41 @@ class BenchmarkRunner:
                             # test row i), so y_test / timestamps are
                             # head-trimmed — a tail trim here would
                             # shift every pair by future_periods − 1.
-                            seq_X_test, _, _ = create_sliding_windows(
-                                df_combined_test, 'target', window_size=window_size,
-                                covariate_cols=neural_cov_cols if neural_cov_cols else None,
-                                add_temporal=True,
-                                horizon_steps=horizon_steps,
-                                future_features_df=future_features_df,
-                            )
+                            if test_label_mask is not None:
+                                seq_X_test, _, _, _kept_t = (
+                                    create_sliding_windows(
+                                        df_combined_test, 'target',
+                                        window_size=window_size,
+                                        covariate_cols=neural_cov_cols if neural_cov_cols else None,
+                                        add_temporal=True,
+                                        horizon_steps=horizon_steps,
+                                        future_features_df=future_features_df,
+                                        label_mask=test_label_mask,
+                                        # Scored at h=1 only — requiring all
+                                        # 48 measured would discard
+                                        # scoreable predictions near a gap.
+                                        mask_horizons=[1],
+                                    )
+                                )
+                            else:
+                                seq_X_test, _, _ = create_sliding_windows(
+                                    df_combined_test, 'target', window_size=window_size,
+                                    covariate_cols=neural_cov_cols if neural_cov_cols else None,
+                                    add_temporal=True,
+                                    horizon_steps=horizon_steps,
+                                    future_features_df=future_features_df,
+                                )
+                                _kept_t = None
                             y_pred_full = model.predict_sequence(seq_X_test)
                             if y_pred_full.ndim == 2:
                                 y_pred = y_pred_full[:, 0]
                             else:
                                 y_pred = y_pred_full
-                            if len(y_pred) < len(y_test):
+                            if _kept_t is not None:
+                                y_pred = _align_to_measured_labels(
+                                    y_pred, _kept_t,
+                                )
+                            elif len(y_pred) < len(y_test):
                                 y_test = y_test[:len(y_pred)]
                                 test_timestamps = test_timestamps[:len(y_pred)]
                         else:
@@ -659,12 +801,25 @@ class BenchmarkRunner:
                             # was trained with dense horizons so y_pred still has
                             # shape (n, future_periods); we take the h=1 column
                             # for ranking. This matches the holdout-chart path.
-                            seq_X_test, _, _ = create_sliding_windows(
-                                df_combined_test, 'target', window_size=window_size,
-                                covariate_cols=neural_cov_cols if neural_cov_cols else None,
-                                add_temporal=True,
-                                horizon_steps=[1],
-                            )
+                            if test_label_mask is not None:
+                                seq_X_test, _, _, _kept_t = (
+                                    create_sliding_windows(
+                                        df_combined_test, 'target',
+                                        window_size=window_size,
+                                        covariate_cols=neural_cov_cols if neural_cov_cols else None,
+                                        add_temporal=True,
+                                        horizon_steps=[1],
+                                        label_mask=test_label_mask,
+                                    )
+                                )
+                            else:
+                                seq_X_test, _, _ = create_sliding_windows(
+                                    df_combined_test, 'target', window_size=window_size,
+                                    covariate_cols=neural_cov_cols if neural_cov_cols else None,
+                                    add_temporal=True,
+                                    horizon_steps=[1],
+                                )
+                                _kept_t = None
                             y_pred_full = model.predict_sequence(seq_X_test)
                             # Reduce to h=1 (1D) so the metric path treats this
                             # like every other model — same shape as tree models.
@@ -672,11 +827,15 @@ class BenchmarkRunner:
                                 y_pred = y_pred_full[:, 0]
                             else:
                                 y_pred = y_pred_full
+                            if _kept_t is not None:
+                                y_pred = _align_to_measured_labels(
+                                    y_pred, _kept_t,
+                                )
                             # y_test stays as the original 1D test fold values.
                             # Make sure shapes match (drop any leading rows the
                             # window builder couldn't fit, which shouldn't happen
                             # with horizon_steps=[1] but be defensive).
-                            if len(y_pred) != len(y_test):
+                            elif len(y_pred) != len(y_test):
                                 y_test = y_test[-len(y_pred):]
                     except Exception:
                         y_pred = model.predict(X_test)

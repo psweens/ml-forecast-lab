@@ -806,3 +806,103 @@ class TestForecastLogBlowupGuard:
         )
         assert n == 4
 
+
+
+class TestAccuracySurvivesNullValues:
+    """A Python NaN binds to SQLite as NULL. One NaN prediction (or one
+    NULL actual) used to make its whole lead bucket's AVG() return NULL
+    while COUNT(*) still counted the rows, and the round() on the way out
+    aborted the entire accuracy prep: "Forecast accuracy prep failed:
+    type NoneType doesn't define __round__ method". The published
+    accuracy sensor then silently read 0."""
+
+    @staticmethod
+    def _seed(db, nan_predictions=False, nan_actuals=False):
+        db.ensure_forecast_log_table()
+        grid = pd.date_range("2026-08-20 10:00", periods=5, freq="30min")
+        actual_vals = [10.0, 12.0, 15.0, 16.0, 18.0]
+        if nan_actuals:
+            actual_vals = [float("nan")] * len(actual_vals)
+        db.store_history("sensor_load", pd.DataFrame({
+            "ds": grid, "value": actual_vals,
+        }))
+
+        predictions = [2.0, 3.0, 1.0, 2.0]
+        if nan_predictions:
+            predictions = [float("nan")] * len(predictions)
+        db.log_forecast(
+            experiment="demand",
+            issued_at=grid[0],
+            targets=list(grid[1:]),
+            predictions=predictions,
+            model_name="m1",
+            model_version="v1",
+        )
+
+    @pytest.mark.parametrize("mode", ["raw", "increment"])
+    def test_nan_predictions_do_not_crash_the_prep(self, tmp_db, mode):
+        db = HistoryDB(tmp_db)
+        self._seed(db, nan_predictions=True)
+
+        result = db.get_forecast_accuracy(
+            experiment="demand", actuals_table="sensor_load",
+            max_age_days=30, interval_minutes=30, evaluation_mode=mode,
+        )
+
+        assert "error" not in result or "No actuals" not in str(
+            result.get("error", "")
+        )
+        curve = result.get("lead_time_curve", {})
+        assert curve.get("mae", []) == [], (
+            "every prediction was NULL, so no bucket has a measurable "
+            "pair and the curve must be empty — not a crash, and not a "
+            "bucket of Nones"
+        )
+        assert None not in (curve.get("mae") or [])
+
+    def test_nan_actuals_do_not_crash_the_prep(self, tmp_db):
+        db = HistoryDB(tmp_db)
+        self._seed(db, nan_actuals=True)
+
+        result = db.get_forecast_accuracy(
+            experiment="demand", actuals_table="sensor_load",
+            max_age_days=30, interval_minutes=30, evaluation_mode="raw",
+        )
+        curve = result.get("lead_time_curve", {})
+        assert None not in (curve.get("mae") or [])
+
+    def test_one_nan_among_real_rows_only_loses_that_pair(self, tmp_db):
+        """The guard must exclude the NULL pair, not the whole window.
+
+        `log_forecast` drops the non-finite prediction at insert (and the
+        column is NOT NULL), so this row never reaches the table — the
+        three real pairs must still score, and score exactly."""
+        db = HistoryDB(tmp_db)
+        db.ensure_forecast_log_table()
+        grid = pd.date_range("2026-08-20 10:00", periods=5, freq="30min")
+        db.store_history("sensor_load", pd.DataFrame({
+            "ds": grid, "value": [10.0, 12.0, 15.0, 16.0, 18.0],
+        }))
+        db.log_forecast(
+            experiment="demand", issued_at=grid[0], targets=list(grid[1:]),
+            predictions=[12.0, float("nan"), 16.0, 18.0],
+            model_name="m1", model_version="v1",
+        )
+
+        result = db.get_forecast_accuracy(
+            experiment="demand", actuals_table="sensor_load",
+            max_age_days=30, interval_minutes=30, evaluation_mode="raw",
+        )
+        curve = result.get("lead_time_curve", {})
+        assert sum(curve.get("sample_count") or []) == 3
+        assert all(m == pytest.approx(0.0) for m in curve["mae"])
+
+    def test_cohort_curves_also_survive(self, tmp_db):
+        db = HistoryDB(tmp_db)
+        self._seed(db, nan_predictions=True)
+        result = db.get_forecast_accuracy(
+            experiment="demand", actuals_table="sensor_load",
+            max_age_days=30, interval_minutes=30, evaluation_mode="raw",
+        )
+        for cohort in result.get("cohorts") or []:
+            assert None not in cohort["lead_time_curve"]["mae"]

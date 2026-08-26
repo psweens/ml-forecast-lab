@@ -62,6 +62,13 @@ def _stat(name="c0", entity="sensor.c0", observed=GRID, **extra) -> dict:
 
 def _emit(app, caplog, cov_stats, result=None, exp=None,
           before=GRID, after=GRID, nan_counts=None):
+    """``before``/``after`` are grid rows and supervised rows respectively.
+
+    Covariate gaps no longer delete rows — they are masked, flagged and
+    imputed — so the only thing that separates the two numbers is a target
+    with no measurement, and ``nan_counts`` reports masked covariate cells
+    rather than rows about to be dropped.
+    """
     result = result if result is not None else _frame("c0")
     with caplog.at_level(logging.INFO, logger="ml_forecast_lab.main"):
         app._log_covariate_manifest(
@@ -69,9 +76,9 @@ def _emit(app, caplog, cov_stats, result=None, exp=None,
             cov_stats=cov_stats,
             result=result,
             now=NOW,
-            rows_before_dropna=before,
-            rows_after_dropna=after,
-            pre_drop_nan_counts=nan_counts if nan_counts is not None else {"c0": 0},
+            grid_rows=before,
+            supervised_rows=after,
+            masked_counts=nan_counts if nan_counts is not None else {"c0": 0},
         )
     return caplog.text
 
@@ -89,16 +96,16 @@ class TestCoverageIsReportedHonestly:
         assert "(1.5%)" in text
         assert "100.0%" not in text
 
-    def test_filled_count_is_shown(self, app, caplog):
+    def test_masked_count_is_shown(self, app, caplog):
         text = _emit(app, caplog, [_stat(observed=150)])
 
-        assert "filled=50" in text
+        assert "masked=50" in text
 
-    def test_full_coverage_omits_the_filled_field(self, app, caplog):
+    def test_full_coverage_omits_the_masked_field(self, app, caplog):
         text = _emit(app, caplog, [_stat(observed=GRID)])
 
         assert "obs=200/200 (100.0%)" in text
-        assert "filled=" not in text
+        assert "masked=" not in text
 
 
 class TestTrafficLights:
@@ -179,15 +186,20 @@ class TestTrafficLights:
 
 
 class TestRobustness:
-    def test_dropna_culprit_line_is_preserved(self, app, caplog):
+    def test_supervised_row_line_names_the_most_masked_covariate(
+        self, app, caplog,
+    ):
+        """Rows are lost only to the target now — a covariate gap is masked
+        and imputed, never a deletion — so the line reports supervised rows
+        and reports the covariate's masked cells as a separate quantity."""
         text = _emit(
             app, caplog, [_stat(observed=GRID)],
             before=100, after=60, nan_counts={"c0": 40},
         )
 
-        assert "dropna: 100 rows → 60 kept" in text
-        assert "40 lost" in text
-        assert "biggest culprit: c0 40 NaNs" in text
+        assert "supervised: 60 of 100 grid rows" in text
+        assert "40 unmeasured target" in text
+        assert "most-masked covariate: c0 40 cells" in text
 
     def test_failed_fetch_entry_does_not_raise(self, app, caplog):
         text = _emit(app, caplog, [{
