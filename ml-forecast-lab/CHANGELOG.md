@@ -107,6 +107,20 @@ out of the model rather than merely warn about it. The manifest's `obs=` count
 and the mask the model sees are now read off the same series, so the diagnostic
 cannot drift from the frame again.
 
+**A NaN in the accuracy data no longer takes down the whole Forecast Accuracy
+view.** A Python NaN binds to SQLite as NULL, and the accuracy queries joined
+forecasts to actuals with no NULL guard in raw mode (and a one-sided guard in
+increment mode). A lead bucket whose only pairs involved a NULL value then had
+`AVG()` return NULL while `COUNT(*)` still counted the rows, and the `round()`
+on the way out aborted the entire accuracy prep — logged as *"Forecast accuracy
+prep failed: type NoneType doesn't define `__round__` method"* — so the
+published accuracy sensor silently read 0. One bad stored actual was enough,
+and it kept being enough on every cycle until it aged out of the window. NULL
+pairs are now excluded in the SQL on both sides of the join (in the pooled
+curve, the per-cohort curves, the revision tile and both daily-cumulative
+queries), and the Python layer additionally skips any bucket that still comes
+back NULL rather than letting one row abort the view.
+
 ### Added
 
 **Missingness indicators.** A covariate with gaps gains a companion

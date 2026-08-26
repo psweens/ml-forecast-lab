@@ -773,12 +773,18 @@ class HistoryDB:
                 "actuals_vals AS "
                 "(SELECT grid_dt, value FROM _mlfl_actuals_vals_tmp)"
             )
-            # Only actuals can be NULL (adjacency guard) or negative
-            # (midnight reset). Forecasts are passthrough so neither
-            # check applies on the fv side — applying ≥0 to the forecast
-            # was the silent half of the previous bug, hiding rows where
-            # the spurious 2nd difference went negative.
+            # Actuals can be NULL (adjacency guard) or negative
+            # (midnight reset). The ≥0 check stays actuals-only —
+            # applying it to the forecast was the silent half of the
+            # v2.40.7 bug, hiding rows where the spurious 2nd
+            # difference went negative — but the NULL check applies to
+            # BOTH sides: a Python NaN binds to SQLite as NULL, so one
+            # NaN prediction makes its whole lead bucket's AVG return
+            # NULL while COUNT(*) still counts the rows, and the
+            # round() on the way out then aborts the entire accuracy
+            # prep with "type NoneType doesn't define __round__".
             mode_filter = (
+                "AND fv.value IS NOT NULL "
                 "AND av.value IS NOT NULL AND av.value >= 0"
             )
         else:
@@ -786,7 +792,11 @@ class HistoryDB:
                 "actuals_vals AS "
                 "(SELECT grid_dt, value FROM _mlfl_actuals_grid_tmp)"
             )
-            mode_filter = ""
+            # Raw mode had no guard at all — same NULL-vs-round failure
+            # as above, from either side of the join.
+            mode_filter = (
+                "AND fv.value IS NOT NULL AND av.value IS NOT NULL"
+            )
 
         # Forecast passthrough — predicted is already a per-interval
         # delta when source_is_cumulative (the only case where
@@ -839,6 +849,11 @@ class HistoryDB:
             logger.error(f"Forecast accuracy query failed: {e}", exc_info=True)
             return {"error": str(e)}
 
+        # The NULL guards in mode_filter should make a NULL aggregate
+        # impossible, but this function renders a user-facing chart, so
+        # a bucket that somehow still comes back NULL is skipped rather
+        # than allowed to abort the whole accuracy prep.
+        lead_rows = [r for r in lead_rows if r[1] is not None]
         lead_time_curve = {
             "lead_minutes": [r[0] for r in lead_rows],
             "mae": [round(r[1], 4) for r in lead_rows],
@@ -892,6 +907,10 @@ class HistoryDB:
             # lead_time_curve in the same shape as the pooled one.
             cohort_map: dict = {}
             for mn, mv, lb, mae, rmse, me_val, n in cohort_rows:
+                if mae is None:
+                    # No measurable pairs despite n counted rows — every
+                    # value in the bucket was NULL. Nothing to plot.
+                    continue
                 key = (mn, mv)
                 if key not in cohort_map:
                     cohort_map[key] = {
@@ -968,7 +987,12 @@ class HistoryDB:
             rev_row = None
 
         revision = {}
-        if rev_row and rev_row[4] > 0:
+        # rev_row[4] is COUNT(*), which counts rows whether or not their
+        # values were NULL — the MAEs themselves must also be checked.
+        if (
+            rev_row and rev_row[4] > 0
+            and rev_row[0] is not None and rev_row[1] is not None
+        ):
             first_mae = round(rev_row[0], 4)
             last_mae = round(rev_row[1], 4)
             improvement = round((1 - last_mae / first_mae) * 100, 1) if first_mae > 0 else 0
@@ -1280,7 +1304,8 @@ class HistoryDB:
                 COUNT(*) AS n
             FROM forecast_cum fc
             INNER JOIN {actuals_rel} ag ON ag.grid_dt = fc.target_dt
-            WHERE ag.value IS NOT NULL {ag_guard}
+            WHERE ag.value IS NOT NULL
+              AND fc.predicted_cumulative IS NOT NULL {ag_guard}
             GROUP BY lead_bucket
             ORDER BY lead_bucket
         """
@@ -1308,6 +1333,7 @@ class HistoryDB:
             )
             return {"error": str(e)}
 
+        lead_rows = [r for r in lead_rows if r[1] is not None]
         lead_time_curve = {
             "lead_minutes": [r[0] for r in lead_rows],
             "mae": [round(r[1], 4) for r in lead_rows],
@@ -1378,12 +1404,13 @@ class HistoryDB:
                    AND lt.target_day = fc.target_day
                    AND lt.last_target_dt = fc.target_dt
                 INNER JOIN {actuals_rel} ag ON ag.grid_dt = fc.target_dt
-                WHERE ag.value IS NOT NULL {ag_guard}
+                WHERE ag.value IS NOT NULL
+                  AND fc.predicted_cumulative IS NOT NULL {ag_guard}
                 """,
                 params[:-2],  # outer query has no lead_bucket binding
             )
             row = cursor.fetchone()
-            if row and row[4]:
+            if row and row[4] and row[0] is not None:
                 end_of_day = {
                     "mae": round(row[0], 4),
                     "me": round(row[1], 4),
