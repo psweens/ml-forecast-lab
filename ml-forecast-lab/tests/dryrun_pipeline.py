@@ -261,15 +261,22 @@ def main():
         ("tsmixer", "tsmixer_backend", "TSMixerModel"),
         ("timemixer", "timemixer_backend", "TimeMixerModel"),
         ("sparsetsf", "sparsetsf_backend", "SparseTSFModel"),
+        ("xpatch", "xpatch_backend", "XPatchModel"),
+        ("segrnn", "segrnn_backend", "SegRNNModel"),
         ("patchtst", "patchtst_backend", "PatchTSTModel"),
         ("itransformer", "itransformer_backend", "iTransformerModel"),
         ("crossformer", "crossformer_backend", "CrossformerModel"),
         ("timesnet", "timesnet_backend", "TimesNetModel"),
         ("tft", "tft_backend", "TFTModel"),
+        ("timexer", "timexer_backend", "TimeXerModel"),
+        ("moderntcn", "moderntcn_backend", "ModernTCNModel"),
         ("seasonal_naive", "seasonal_naive_backend", "SeasonalNaiveModel"),
+        ("daily_profile", "daily_profile_backend", "DailyProfileModel"),
         ("arima", "statsforecast_backend", "ARIMAModel"),
         ("ets", "statsforecast_backend", "ETSModel"),
         ("theta", "statsforecast_backend", "ThetaModel"),
+        # chronos_bolt / ttm are deliberately absent: zero-shot foundation
+        # backends would download pretrained weights on first use.
     ]
     for short, mod, cls in backends:
         try:
