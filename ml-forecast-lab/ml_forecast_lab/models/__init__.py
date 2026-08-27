@@ -40,6 +40,7 @@ _optional_imports = {
     'TimeMixerModel': 'timemixer_backend',
     'SparseTSFModel': 'sparsetsf_backend',
     'XPatchModel': 'xpatch_backend',
+    'CycleNetModel': 'cyclenet_backend',
     'PatchTSTModel': 'patchtst_backend',
     'iTransformerModel': 'itransformer_backend',
     'CrossformerModel': 'crossformer_backend',

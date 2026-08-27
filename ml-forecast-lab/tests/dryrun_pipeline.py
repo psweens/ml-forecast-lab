@@ -263,6 +263,7 @@ def main():
         ("sparsetsf", "sparsetsf_backend", "SparseTSFModel"),
         ("xpatch", "xpatch_backend", "XPatchModel"),
         ("segrnn", "segrnn_backend", "SegRNNModel"),
+        ("cyclenet", "cyclenet_backend", "CycleNetModel"),
         ("patchtst", "patchtst_backend", "PatchTSTModel"),
         ("itransformer", "itransformer_backend", "iTransformerModel"),
         ("crossformer", "crossformer_backend", "CrossformerModel"),

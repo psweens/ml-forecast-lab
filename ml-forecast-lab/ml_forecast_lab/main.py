@@ -1180,6 +1180,7 @@ class MLForecastLabApp:
                 ("timemixer", "timemixer_backend", "TimeMixerModel"),
                 ("sparsetsf", "sparsetsf_backend", "SparseTSFModel"),
                 ("xpatch", "xpatch_backend", "XPatchModel"),
+                ("cyclenet", "cyclenet_backend", "CycleNetModel"),
                 ("patchtst", "patchtst_backend", "PatchTSTModel"),
                 ("itransformer", "itransformer_backend", "iTransformerModel"),
                 ("crossformer", "crossformer_backend", "CrossformerModel"),
@@ -4193,6 +4194,7 @@ class MLForecastLabApp:
                         try:
                             from ml_forecast_lab.features import (
                                 create_sliding_windows, compute_known_future_features,
+                                grid_step_index,
                             )
                             target_col = 'target'
                             cov_cols = neural_covariate_columns(train_part.columns)
@@ -4256,6 +4258,14 @@ class MLForecastLabApp:
                                 # future-block extension).
                                 hold_seq_kwargs['extended_window'] = True
                                 hold_seq_kwargs['past_window_size'] = window_size
+                                # Absolute grid position of each window's
+                                # first row, for phase-aware backends
+                                # (cyclenet).
+                                _steps_h = grid_step_index(
+                                    win_train_h.index, _kept_h,
+                                )
+                                if _steps_h is not None:
+                                    hold_seq_kwargs['window_step_index'] = _steps_h
                                 hold_seq_kwargs['future_feature_cols'] = list(
                                     hold_future_features_df.columns
                                 )
@@ -4287,6 +4297,10 @@ class MLForecastLabApp:
                         # Bridge fold boundary: prepend train tail for holdout context
                         from ml_forecast_lab.features import (
                             create_sliding_windows, compute_known_future_features,
+                            grid_step_index,
+                        )
+                        from ml_forecast_lab.models.base import (
+                            predict_sequence_with_context,
                         )
                         # The bridge is the window_size grid rows before
                         # the holdout, taken on the window frame's own
@@ -4352,7 +4366,10 @@ class MLForecastLabApp:
                             # the chart near any gap.
                             mask_horizons=[1],
                         )
-                        y_p = m.predict_sequence(seq_X_ho)
+                        y_p = predict_sequence_with_context(
+                            m, seq_X_ho,
+                            grid_step_index(combined_holdout.index, _kept_ho),
+                        )
                         _y_holdout_display = holdout_part[target_col].values.astype(np.float32)
                         # Assemble a full-length display series: h=1 column
                         # placed at the holdout row each window actually
@@ -4612,6 +4629,7 @@ class MLForecastLabApp:
         if is_neural:
             from ml_forecast_lab.features import (
                 create_sliding_windows, compute_known_future_features,
+                grid_step_index,
             )
             raw_cov_cols_prod = neural_covariate_columns(combined.columns)
             window_size_prod = min(48, len(combined) // 3)
@@ -4644,7 +4662,7 @@ class MLForecastLabApp:
                     include_clear_sky_ghi=include_clear_sky_ghi,
                     future_covariate_values=future_cov_prod or None,
                 )
-                seq_X, seq_y, channel_names, _ = create_sliding_windows(
+                seq_X, seq_y, channel_names, _kept_prod = create_sliding_windows(
                     _win_prod, 'target', window_size=window_size_prod,
                     covariate_cols=raw_cov_cols_prod if raw_cov_cols_prod else None,
                     add_temporal=True,
@@ -4656,6 +4674,11 @@ class MLForecastLabApp:
                 seq_kwargs['channel_names'] = channel_names
                 seq_kwargs['extended_window'] = True
                 seq_kwargs['past_window_size'] = window_size_prod
+                # Absolute grid position of each window's first row, for
+                # phase-aware backends (cyclenet).
+                _steps_prod = grid_step_index(_win_prod.index, _kept_prod)
+                if _steps_prod is not None:
+                    seq_kwargs['window_step_index'] = _steps_prod
                 seq_kwargs['future_feature_cols'] = list(prod_future_features_df.columns)
                 if future_cov_prod:
                     seq_kwargs['future_covariate_names'] = list(future_cov_prod)
@@ -4694,6 +4717,10 @@ class MLForecastLabApp:
             # docstring for the rationale.
             from ml_forecast_lab.features import (
                 build_inference_window, compute_known_future_features,
+                grid_step_index,
+            )
+            from ml_forecast_lab.models.base import (
+                predict_sequence_with_context,
             )
 
             # window_size here is the EFFECTIVE seq_X width (past + future
@@ -4777,16 +4804,26 @@ class MLForecastLabApp:
             # rows, so the model's 24 h of context is 24 h of wall clock
             # even when the target has a recent outage (imputed there,
             # and flagged via the y_missing channel).
+            _frame_tail_prod = missing_report["window_frame"].loc[:last_ts]
             last_window, _ = build_inference_window(
-                missing_report["window_frame"].loc[:last_ts],
+                _frame_tail_prod,
                 'target', window_size=past_window_size_prod,
                 covariate_cols=raw_cov_cols_prod if raw_cov_cols_prod else None,
                 add_temporal=True,
                 future_features_df=inference_future_features_df,
             )
+            # The single inference window's first row sits window_size
+            # rows before the frame tail's end — its absolute grid
+            # position feeds phase-aware backends (cyclenet).
+            _steps_inf = grid_step_index(
+                _frame_tail_prod.index,
+                [len(_frame_tail_prod) - past_window_size_prod],
+            )
 
             def _predict_multihead():
-                return model.predict_sequence(last_window)
+                return predict_sequence_with_context(
+                    model, last_window, _steps_inf,
+                )
 
             multi_pred = await asyncio.get_running_loop().run_in_executor(
                 None, _predict_multihead
@@ -5470,7 +5507,7 @@ class MLForecastLabApp:
                 # inputs are unbroken time spans (invented y cells flagged
                 # via the y_missing channel), and a window is a training
                 # sample only when every horizon label was measured.
-                seq_X, seq_y, channel_names, _ = create_sliding_windows(
+                seq_X, seq_y, channel_names, _kept_rt = create_sliding_windows(
                     _win_rt, 'target', window_size=window_size,
                     covariate_cols=raw_cov_cols if raw_cov_cols else None,
                     add_temporal=True, horizon_steps=horizon_steps,
@@ -5500,6 +5537,12 @@ class MLForecastLabApp:
                 # use, before the future-position extension.
                 seq_kwargs['extended_window'] = True
                 seq_kwargs['past_window_size'] = window_size
+                # Absolute grid position of each window's first row, for
+                # phase-aware backends (cyclenet).
+                from ml_forecast_lab.features import grid_step_index
+                _steps_rt = grid_step_index(_win_rt.index, _kept_rt)
+                if _steps_rt is not None:
+                    seq_kwargs['window_step_index'] = _steps_rt
                 seq_kwargs['future_feature_cols'] = list(future_features_df.columns)
                 # Sub-list — just the columns that came from user
                 # covariates with role in (future, both). The
@@ -7039,6 +7082,10 @@ class MLForecastLabApp:
         if is_neural and 'sequence_data' in seq_kwargs:
             from ml_forecast_lab.features import (
                 build_inference_window, compute_known_future_features,
+                grid_step_index,
+            )
+            from ml_forecast_lab.models.base import (
+                predict_sequence_with_context,
             )
             cached_seq_len = seq_kwargs['sequence_data'].shape[1]
             # Caches written before extended-window support set neither flag
@@ -7211,9 +7258,20 @@ class MLForecastLabApp:
                 return
             # build_inference_window already returns shape (1, window, ch).
             last_window = seq_X_prod
+            # The single inference window's first row sits window_size
+            # rows before the source tail's end — its absolute grid
+            # position feeds phase-aware backends (cyclenet).
+            _steps_tick = grid_step_index(
+                _win_src.index, [len(_win_src) - window_size],
+            )
 
             loop = asyncio.get_running_loop()
-            multi_pred = await loop.run_in_executor(None, lambda: model.predict_sequence(last_window))
+            multi_pred = await loop.run_in_executor(
+                None,
+                lambda: predict_sequence_with_context(
+                    model, last_window, _steps_tick,
+                ),
+            )
             multi_pred = multi_pred.ravel()
 
             # Neural models trained with dense horizons output all
@@ -7739,18 +7797,24 @@ class MLForecastLabApp:
                     ].to_numpy()
                     _ws = min(48, len(_sup_train) // 3)
                     if _ws >= 12:
-                        _sX, _sY, _cnames, _ = create_sliding_windows(
+                        _sX, _sY, _cnames, _kept_tu = create_sliding_windows(
                             df_train_raw, target_col, window_size=_ws,
                             covariate_cols=_neural_cov_cols if _neural_cov_cols else None,
                             add_temporal=True, horizon_steps=_horizon_steps,
                             label_mask=_lm_fold,
                         )
+                        from ml_forecast_lab.features import grid_step_index
                         precomputed_sequences[fi] = {
                             'seq_X': _sX, 'seq_y': _sY,
                             'channel_names': _cnames,
                             'window_size': _ws,
                             'neural_cov_cols': _neural_cov_cols,
                             'horizon_steps': _horizon_steps,
+                            # Absolute grid position of each window's first
+                            # row, for phase-aware backends (cyclenet).
+                            'window_step_index': grid_step_index(
+                                df_train_raw.index, _kept_tu,
+                            ),
                         }
                         logger.info(
                             f"  Pre-computed sliding windows: "
@@ -8139,10 +8203,13 @@ class MLForecastLabApp:
             # reconstruct the temporal structure the model needs.
             _ho_seq_train = None
             _ho_seq_test = None
+            _ho_seq_test_steps = None
             _ho_window_size = None
             if _is_neural_model:
                 try:
-                    from ml_forecast_lab.features import create_sliding_windows
+                    from ml_forecast_lab.features import (
+                        create_sliding_windows, grid_step_index,
+                    )
                     pc_fold = (precomputed_sequences or {}).get(0, {})
                     _ho_window_size = pc_fold.get('window_size', min(48, split_80 // 3))
                     _ho_cov_cols = pc_fold.get('neural_cov_cols', [])
@@ -8156,13 +8223,20 @@ class MLForecastLabApp:
                         _lm_t = _tuning_missing_report["window_label_mask"]
                         _split_ts = combined.index[split_80 - 1]
                         df_train_ho = _win_t.loc[:_split_ts]
-                        sX, sY, ch, _ = create_sliding_windows(
+                        sX, sY, ch, _kept_ho_tr = create_sliding_windows(
                             df_train_ho, 'target', window_size=_ho_window_size,
                             covariate_cols=_ho_cov_cols if _ho_cov_cols else None,
                             add_temporal=True, horizon_steps=_ho_horizon_steps,
                             label_mask=_lm_t.loc[:_split_ts].to_numpy(),
                         )
-                        _ho_seq_train = {'seq_X': sX, 'seq_y': sY, 'channel_names': ch}
+                        _ho_seq_train = {
+                            'seq_X': sX, 'seq_y': sY, 'channel_names': ch,
+                            # Absolute grid positions for phase-aware
+                            # backends (cyclenet).
+                            'window_step_index': grid_step_index(
+                                df_train_ho.index, _kept_ho_tr,
+                            ),
+                        }
                         # Test windows: bridge across train/test boundary for
                         # context — window_size grid rows on the frame's own
                         # contiguous index.
@@ -8177,6 +8251,9 @@ class MLForecastLabApp:
                             ].to_numpy(),
                         )
                         _ho_seq_test = tX
+                        _ho_seq_test_steps = grid_step_index(
+                            df_test_ho.index, _kept_te,
+                        )
                         _ho_test_label_ts = df_test_ho.index[
                             np.asarray(_kept_te) + _ho_window_size
                         ]
@@ -8199,8 +8276,14 @@ class MLForecastLabApp:
                         _ho_seq_train['seq_y'],
                         sequence_data=_ho_seq_train['seq_X'],
                         channel_names=_ho_seq_train['channel_names'],
+                        window_step_index=_ho_seq_train.get('window_step_index'),
                     )
-                    p = m.predict_sequence(_ho_seq_test)
+                    from ml_forecast_lab.models.base import (
+                        predict_sequence_with_context,
+                    )
+                    p = predict_sequence_with_context(
+                        m, _ho_seq_test, _ho_seq_test_steps,
+                    )
                     if p.ndim == 2:
                         p = p[:, 0]  # h=1 predictions
                     # Align to test actuals by the timestamp each window's
@@ -8417,7 +8500,12 @@ class MLForecastLabApp:
                             # models in covariate analysis are crippled (flat
                             # features only, no residual prediction) and
                             # the covariate comparison becomes meaningless.
-                            from ml_forecast_lab.features import create_sliding_windows
+                            from ml_forecast_lab.features import (
+                                create_sliding_windows, grid_step_index,
+                            )
+                            from ml_forecast_lab.models.base import (
+                                predict_sequence_with_context,
+                            )
 
                             target_col = 'target'
                             engineered = set(_engineered)
@@ -8446,7 +8534,7 @@ class MLForecastLabApp:
 
                             # Train: dense horizons so the model learns to
                             # predict h=1..future_periods (matches production)
-                            seq_X_tr, seq_y_tr, channel_names, _ = create_sliding_windows(
+                            seq_X_tr, seq_y_tr, channel_names, _kept_arm = create_sliding_windows(
                                 _win_arm.loc[:_split_ts], target_col,
                                 window_size=window_size,
                                 covariate_cols=seq_cov_cols if seq_cov_cols else None,
@@ -8471,6 +8559,11 @@ class MLForecastLabApp:
                                 feature_names=feature_cols,
                                 sequence_data=seq_X_tr,
                                 channel_names=channel_names,
+                                # Absolute grid positions for phase-aware
+                                # backends (cyclenet).
+                                window_step_index=grid_step_index(
+                                    _win_arm.loc[:_split_ts].index, _kept_arm,
+                                ),
                             )
 
                             # Test: bridge is window_size grid rows before
@@ -8493,7 +8586,10 @@ class MLForecastLabApp:
                                     max(0, _te_pos - window_size):
                                 ].to_numpy(),
                             )
-                            y_pred_full = model.predict_sequence(seq_X_te)
+                            y_pred_full = predict_sequence_with_context(
+                                model, seq_X_te,
+                                grid_step_index(bridge.index, _kept_te),
+                            )
                             if y_pred_full.ndim == 2:
                                 _h1 = y_pred_full[:, 0].astype(np.float32)
                             else:

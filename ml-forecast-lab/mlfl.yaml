@@ -88,6 +88,7 @@ experiments:
       # - "sparsetsf"               # Sparse Time-Series Forecasting (Lin et al., 2024)
       # - "segrnn"                  # Segment Recurrent Neural Network (Lin et al., 2023)
       # - "xpatch"                  # Exponential-decomposition dual-stream (Stitsyuk & Choi, 2025)
+      # - "cyclenet"                # Residual Cycle Forecasting (Lin et al., 2024)
       # - "patchtst"                # Patch Time-Series Transformer (Nie et al., 2023)
       # - "itransformer"            # Inverted Transformer (Liu et al., 2024)
       # - "crossformer"             # Cross-variable Transformer (Zhang & Yan, 2023)

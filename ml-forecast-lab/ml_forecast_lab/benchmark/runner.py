@@ -14,7 +14,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from ml_forecast_lab.models.base import ForecastModel, TrainingCancelled
+from ml_forecast_lab.models.base import (
+    ForecastModel, TrainingCancelled, predict_sequence_with_context,
+)
 from ml_forecast_lab.preprocessing import clamp_forecast_blowup
 
 from .metrics import MetricRegistry, get_metric_registry
@@ -491,6 +493,8 @@ class BenchmarkRunner:
                     # Reuse pre-computed sliding windows
                     sequence_kwargs['sequence_data'] = pc_fold['seq_X']
                     sequence_kwargs['channel_names'] = pc_fold.get('channel_names', [])
+                    if pc_fold.get('window_step_index') is not None:
+                        sequence_kwargs['window_step_index'] = pc_fold['window_step_index']
                     y_train = pc_fold['seq_y']
                     X_train = X_train[-len(y_train):]
                     if sample_weights is not None:
@@ -598,6 +602,18 @@ class BenchmarkRunner:
                                 # ranking last, and never being promotable.
                                 sequence_kwargs['extended_window'] = True
                                 sequence_kwargs['past_window_size'] = window_size
+                                # Absolute grid position of each window's
+                                # first row, for phase-aware backends
+                                # (cyclenet). Epoch-anchored, so the fold
+                                # slice's offset cannot shift it.
+                                from ml_forecast_lab.features import grid_step_index
+                                _steps = grid_step_index(
+                                    df_train_raw.index,
+                                    _kept if _kept is not None
+                                    else np.arange(len(seq_X)),
+                                )
+                                if _steps is not None:
+                                    sequence_kwargs['window_step_index'] = _steps
                                 y_train = seq_y
                                 X_train = X_train[-len(seq_y):]
                                 if sample_weights is not None:
@@ -666,7 +682,10 @@ class BenchmarkRunner:
             y_train_metric = y_train  # 1D for tree, will be reduced to h=1 for neural
             try:
                 if 'sequence_data' in sequence_kwargs and model.is_neural and window_size:
-                    yp = model.predict_sequence(sequence_kwargs['sequence_data'])
+                    yp = predict_sequence_with_context(
+                        model, sequence_kwargs['sequence_data'],
+                        sequence_kwargs.get('window_step_index'),
+                    )
                     if yp.ndim == 2:
                         y_pred_train = yp[:, 0]
                     else:
@@ -783,7 +802,15 @@ class BenchmarkRunner:
                                     future_features_df=future_features_df,
                                 )
                                 _kept_t = None
-                            y_pred_full = model.predict_sequence(seq_X_test)
+                            from ml_forecast_lab.features import grid_step_index
+                            y_pred_full = predict_sequence_with_context(
+                                model, seq_X_test,
+                                grid_step_index(
+                                    df_combined_test.index,
+                                    _kept_t if _kept_t is not None
+                                    else np.arange(len(seq_X_test)),
+                                ),
+                            )
                             if y_pred_full.ndim == 2:
                                 y_pred = y_pred_full[:, 0]
                             else:
@@ -820,7 +847,15 @@ class BenchmarkRunner:
                                     horizon_steps=[1],
                                 )
                                 _kept_t = None
-                            y_pred_full = model.predict_sequence(seq_X_test)
+                            from ml_forecast_lab.features import grid_step_index
+                            y_pred_full = predict_sequence_with_context(
+                                model, seq_X_test,
+                                grid_step_index(
+                                    df_combined_test.index,
+                                    _kept_t if _kept_t is not None
+                                    else np.arange(len(seq_X_test)),
+                                ),
+                            )
                             # Reduce to h=1 (1D) so the metric path treats this
                             # like every other model — same shape as tree models.
                             if y_pred_full.ndim == 2:

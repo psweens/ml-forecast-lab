@@ -1,10 +1,10 @@
 # Model Guide — Picking Backends to Benchmark
 
-ML Forecast Lab ships with 31 model backends. You don't need all of them — that's a lot of compute for a Pi, and many overlap in behaviour. This guide is a practical "which should I enable?" pre-flight that takes about 5 minutes to read.
+ML Forecast Lab ships with 32 model backends. You don't need all of them — that's a lot of compute for a Pi, and many overlap in behaviour. This guide is a practical "which should I enable?" pre-flight that takes about 5 minutes to read.
 
 The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add more once you've seen how those do on your data. If you have almost no history yet, add `chronos_bolt` — it forecasts zero-shot from pretrained weights and needs no training data at all.
 
-## The 31 backends at a glance
+## The 32 backends at a glance
 
 | Family | Backend | Strength | Weakness | Speed |
 |---|---|---|---|---|
@@ -24,6 +24,7 @@ The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add 
 | Linear / MLP | `tide` | Time-series Dense Encoder (Das 2023), strong on covariate-heavy targets | Tuning-sensitive | Fast |
 | Linear / MLP | `sparsetsf` | Sparse TS Forecasting, parameter-efficient | Newer paper | Very fast |
 | Linear / MLP | `xpatch` | EMA seasonal-trend decomposition, dual CNN + MLP streams (Stitsyuk & Choi, AAAI 2025) — tracks level shifts faster than DLinear's moving average | Newer — less battle-tested | Fast |
+| Linear / MLP | `cyclenet` | Learns the daily/weekly cycle explicitly as a trainable buffer and forecasts only the residual (Lin et al. 2024, NeurIPS Spotlight) — built for strongly periodic sensors | Needs a stable cycle (`cycle_len` = steps per cycle); aperiodic targets gain nothing | Very fast |
 | Frequency-domain | `fits` | ~10k params, frequency-domain interpolation | Niche — wins on highly seasonal targets | Very fast |
 | N-BEATS | `nbeats` | Neural basis expansion — strong empirical record | Heavy, slow training | Slow |
 | N-BEATS | `nhits` | Neural hierarchical interpolation, often beats N-BEATS | Same | Slow |
@@ -47,13 +48,13 @@ The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add 
 **Then pick by data shape:**
 
 - **<2 weeks of history** → trees (`lightgbm`, `xgboost`), `seasonal_naive`, and the zero-shot foundation models (`chronos_bolt`, `ttm`). Supervised neural models will overfit; the foundation models don't train on your data at all, so they're immune — this is the cold-start niche they were added for.
-- **2 weeks – 2 months** → add `lstm`, `cnn`, `dlinear`, `nlinear`, `moderntcn`, `segrnn`, `xpatch`. Skip the heavy transformers.
+- **2 weeks – 2 months** → add `lstm`, `cnn`, `dlinear`, `nlinear`, `moderntcn`, `segrnn`, `xpatch`, `cyclenet`. Skip the heavy transformers.
 - **2 months – 6 months** → add `nhits`, `patchtst`, `tide`, `tsmixer`, `timexer`. This is the sweet spot for the modern architectures.
 - **>6 months** → also try `tft`, `crossformer`, `timemixer` if you want to invest the compute.
 
 **Then pick by target characteristics:**
 
-- **Strong daily / weekly seasonality** (e.g. household load, water demand): trees + `nhits` + `fits` are usually winners.
+- **Strong daily / weekly seasonality** (e.g. household load, water demand): trees + `nhits` + `fits` are usually winners; `cyclenet` is built for exactly this shape (set `cycle_len` to your steps-per-day, e.g. 48 at 30-min sampling).
 - **Noisy, sparse, low SNR** (e.g. EV charging, intermittent appliances): trees + `seasonal_naive`. Neural models often struggle here — the noise overwhelms the signal. To train the neural backends to keep their peaks instead of flattening them, set `loss_fn: dilate` (or the Guided **"catching the peaks"** answer) — it scores shape and timing separately so a slightly-mistimed spike isn't double-penalised (costs more training time).
 - **Daily total matters more than within-day timing** (e.g. hot-water / heat energy, daily demand): add `daily_profile` — it forecasts the recent day's shape scaled toward a projected daily total, so it tracks big-vs-small days where a flat seasonal-naive can't.
 - **Covariate-driven** (e.g. heating ~ outside temp, solar ~ irradiance): `tide`, `tft`, `tsmixer`, `timexer` shine when the target is mostly explained by external features — `timexer` is the only transformer in the catalogue designed *specifically* around exogenous variables.
@@ -66,14 +67,14 @@ A typical 60-day, 30-min experiment with default hyperparameters takes roughly:
 
 | Tier | Backends | Per-fold time |
 |---|---|---|
-| Fast | `seasonal_naive`, `dlinear`, `nlinear`, `theta`, `fits`, `sparsetsf`, `chronos_bolt`*, `ttm`* | < 5s |
+| Fast | `seasonal_naive`, `dlinear`, `nlinear`, `theta`, `fits`, `sparsetsf`, `cyclenet`, `chronos_bolt`*, `ttm`* | < 5s |
 | Medium | `lightgbm`, `xgboost`, `cnn`, `gru`, `segrnn`, `xpatch`, `tsmixer`, `timemixer`, `moderntcn`, `timexer` | 5–30s |
 | Slow | `lstm`, `nbeats`, `nhits`, `patchtst`, `itransformer`, `tide`, `arima`, `ets`, `catboost`, `timesnet` | 30s–2min |
 | Very slow | `tft`, `crossformer` | 2–10min |
 
 \* Zero-shot — no training happens at all; "fit" is a weight load (first ever use also downloads the pretrained weights from the Hugging Face Hub, ~5–30 MB, cached afterwards). Inference per window is a single CPU forward pass.
 
-With 5 CV folds, multiply each by 5. A "throw everything at it" benchmark with all 31 backends enabled takes 1-2 hours on a Pi 5. A more reasonable setup with 6-8 selected backends finishes in 10-20 minutes.
+With 5 CV folds, multiply each by 5. A "throw everything at it" benchmark with all 32 backends enabled takes 1-2 hours on a Pi 5. A more reasonable setup with 6-8 selected backends finishes in 10-20 minutes.
 
 ## Pragmatic starter sets
 
