@@ -112,7 +112,7 @@ The UI re-reads `mlfl.yaml` on each request, so hand edits and UI changes can be
 ## Next
 
 - [DOCS.md](DOCS.md) — full configuration reference, web-UI tour, operations (logs, backup, rollback, reset), and the long-form troubleshooting list.
-- [docs/MODEL_GUIDE.md](https://github.com/psweens/ml-forecast-lab/blob/main/docs/MODEL_GUIDE.md) — which of the 29 backends to enable for your data shape and Pi compute budget.
+- [docs/MODEL_GUIDE.md](https://github.com/psweens/ml-forecast-lab/blob/main/docs/MODEL_GUIDE.md) — which of the 32 backends to enable for your data shape and Pi compute budget.
 - [CHANGELOG.md](CHANGELOG.md) — release notes.
 
 ## Support

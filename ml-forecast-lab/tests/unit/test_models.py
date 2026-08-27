@@ -742,6 +742,334 @@ class TestModernTCN:
         assert restored._past_window_size == 16
 
 
+class TestSegRNN:
+    def test_fit_predict_with_sequence_data(self):
+        from ml_forecast_lab.models.segrnn_backend import SegRNNModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = SegRNNModel(d_model=8, epochs=5, patience=3)
+        result = model.fit(X_flat, y, sequence_data=seq_data)
+        assert model.is_fitted
+        assert "best_val_loss" in result
+
+    def test_multi_horizon_predict_sequence(self):
+        from ml_forecast_lab.models.segrnn_backend import SegRNNModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random((100, 12)).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = SegRNNModel(d_model=8, epochs=3, patience=2)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        preds = model.predict_sequence(seq_data[:7])
+        assert preds.shape == (7, 12)
+        assert not np.any(np.isnan(preds))
+
+    def test_horizon_not_multiple_of_seg_len(self):
+        # PMF decodes ceil(H / seg_len) segments and slices the tail; a
+        # horizon that isn't a segment multiple must not change the output
+        # contract.
+        from ml_forecast_lab.models.segrnn_backend import SegRNNModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((80, 24, 3)).astype(np.float32)
+        y = rng.random((80, 7)).astype(np.float32)
+        X_flat = rng.random((80, 10)).astype(np.float32)
+        model = SegRNNModel(seg_len=5, d_model=8, epochs=3, patience=2)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        preds = model.predict_sequence(seq_data[:4])
+        assert preds.shape == (4, 7)
+        assert not np.any(np.isnan(preds))
+
+    def test_seg_len_clamped_to_window(self):
+        # A seg_len longer than the window degrades to one whole-window
+        # segment instead of failing.
+        from ml_forecast_lab.models.segrnn_backend import SegRNNModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((80, 12, 2)).astype(np.float32)
+        y = rng.random((80, 4)).astype(np.float32)
+        X_flat = rng.random((80, 10)).astype(np.float32)
+        model = SegRNNModel(seg_len=48, d_model=8, epochs=3, patience=2)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        assert model._model.seg_len == 12
+        preds = model.predict_sequence(seq_data[:3])
+        assert preds.shape == (3, 4)
+
+    def test_z_score_standardisation_stored(self):
+        from ml_forecast_lab.models.segrnn_backend import SegRNNModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = SegRNNModel(d_model=8, epochs=3, patience=2, use_revin=False)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        assert model._channel_mean is not None
+        assert model._channel_std is not None
+        assert model._channel_mean.shape == (3,)
+
+    def test_z_score_skipped_when_revin_enabled(self):
+        from ml_forecast_lab.models.segrnn_backend import SegRNNModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = SegRNNModel(d_model=8, epochs=3, patience=2, use_revin=True)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        assert model._channel_mean is None
+        assert model._channel_std is None
+
+    def test_save_load_roundtrip(self, tmp_path):
+        from ml_forecast_lab.models.segrnn_backend import SegRNNModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random((100, 8)).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = SegRNNModel(d_model=8, epochs=3, patience=2)
+        model.fit(X_flat, y, sequence_data=seq_data, past_window_size=16)
+        preds = model.predict_sequence(seq_data[:5])
+        path = str(tmp_path / "segrnn.bin")
+        model.save(path)
+        restored = SegRNNModel()
+        restored.load(path)
+        preds2 = restored.predict_sequence(seq_data[:5])
+        assert np.allclose(preds, preds2)
+        assert restored._past_window_size == 16
+
+
+class TestXPatch:
+    def test_fit_predict_with_sequence_data(self):
+        from ml_forecast_lab.models.xpatch_backend import XPatchModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = XPatchModel(epochs=5, patience=3)
+        result = model.fit(X_flat, y, sequence_data=seq_data)
+        assert model.is_fitted
+        assert "best_val_loss" in result
+
+    def test_multi_horizon_predict_sequence(self):
+        from ml_forecast_lab.models.xpatch_backend import XPatchModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random((100, 12)).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = XPatchModel(epochs=3, patience=2)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        preds = model.predict_sequence(seq_data[:7])
+        assert preds.shape == (7, 12)
+        assert not np.any(np.isnan(preds))
+
+    def test_ema_decomposition_identity_on_constant_series(self):
+        # The EMA of a constant series is the series itself, so the seasonal
+        # residual must be exactly zero — pins the closed-form cumsum EMA
+        # against its recursive definition.
+        import torch
+        from ml_forecast_lab.models.xpatch_backend import _XPatchNet
+        net = _XPatchNet(seq_len=24, n_channels=2, patch_len=8, stride=4,
+                         ema_alpha=0.3, n_horizons=4, use_revin=False)
+        x = torch.full((3, 24, 2), 5.0)
+        trend = net._ema(x)
+        assert torch.allclose(trend, x, atol=1e-5)
+
+    def test_ema_matches_recursive_definition(self):
+        import torch
+        from ml_forecast_lab.models.xpatch_backend import _XPatchNet
+        net = _XPatchNet(seq_len=16, n_channels=1, patch_len=8, stride=4,
+                         ema_alpha=0.3, n_horizons=4, use_revin=False)
+        torch.manual_seed(0)
+        x = torch.rand(2, 16, 1)
+        trend = net._ema(x)
+        s = x[:, 0, :]
+        for t in range(x.shape[1]):
+            if t > 0:
+                s = 0.3 * x[:, t, :] + 0.7 * s
+            assert torch.allclose(trend[:, t, :], s, atol=1e-5)
+
+    def test_single_horizon_trend_stream_guard(self):
+        # H == 1 makes the trend stream's second average-pool meaningless
+        # (it would pool a length-1 vector to length 0) — the guard skips it.
+        from ml_forecast_lab.models.xpatch_backend import XPatchModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((80, 24, 3)).astype(np.float32)
+        y = rng.random(80).astype(np.float32)
+        X_flat = rng.random((80, 10)).astype(np.float32)
+        model = XPatchModel(epochs=3, patience=2)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        preds = model.predict_sequence(seq_data[:5])
+        assert preds.shape == (5,)
+        assert not np.any(np.isnan(preds))
+
+    def test_z_score_standardisation_stored(self):
+        from ml_forecast_lab.models.xpatch_backend import XPatchModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = XPatchModel(epochs=3, patience=2, use_revin=False)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        assert model._channel_mean is not None
+        assert model._channel_std is not None
+        assert model._channel_mean.shape == (3,)
+
+    def test_z_score_skipped_when_revin_enabled(self):
+        from ml_forecast_lab.models.xpatch_backend import XPatchModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = XPatchModel(epochs=3, patience=2, use_revin=True)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        assert model._channel_mean is None
+        assert model._channel_std is None
+
+    def test_save_load_roundtrip(self, tmp_path):
+        from ml_forecast_lab.models.xpatch_backend import XPatchModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random((100, 8)).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = XPatchModel(epochs=3, patience=2)
+        model.fit(X_flat, y, sequence_data=seq_data, past_window_size=16)
+        preds = model.predict_sequence(seq_data[:5])
+        path = str(tmp_path / "xpatch.bin")
+        model.save(path)
+        restored = XPatchModel()
+        restored.load(path)
+        preds2 = restored.predict_sequence(seq_data[:5])
+        assert np.allclose(preds, preds2)
+        assert restored._past_window_size == 16
+
+
+class TestCycleNet:
+    def test_fit_predict_with_sequence_data(self):
+        from ml_forecast_lab.models.cyclenet_backend import CycleNetModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = CycleNetModel(cycle_len=12, epochs=5, patience=3)
+        result = model.fit(X_flat, y, sequence_data=seq_data)
+        assert model.is_fitted
+        assert "best_val_loss" in result
+
+    def test_multi_horizon_predict_sequence_with_steps(self):
+        from ml_forecast_lab.models.cyclenet_backend import CycleNetModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random((100, 12)).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        steps = np.arange(1000, 1100, dtype=np.int64)
+        model = CycleNetModel(cycle_len=12, epochs=3, patience=2)
+        model.fit(X_flat, y, sequence_data=seq_data, window_step_index=steps)
+        preds = model.predict_sequence(seq_data[:7], window_step_index=steps[:7])
+        assert preds.shape == (7, 12)
+        assert not np.any(np.isnan(preds))
+
+    def test_cycle_gather_wraps_modulo(self):
+        import torch
+        from ml_forecast_lab.models.cyclenet_backend import _RecurrentCycle
+        q = _RecurrentCycle(cycle_len=4, n_channels=1)
+        with torch.no_grad():
+            q.data.copy_(torch.tensor([[0.0], [1.0], [2.0], [3.0]]))
+        out = q(torch.tensor([2], dtype=torch.long), 6)
+        assert out.squeeze(-1).tolist() == [[2.0, 3.0, 0.0, 1.0, 2.0, 3.0]]
+
+    def test_phase_shifts_the_prediction(self):
+        # Same window content at a different absolute phase must read a
+        # different segment of the learned cycle — the property the whole
+        # window_step_index plumbing exists to deliver.
+        import torch
+        from ml_forecast_lab.models.cyclenet_backend import _CycleNetNet
+        net = _CycleNetNet(seq_len=24, n_channels=2, cycle_len=12,
+                           model_type='linear', d_hidden=8, n_horizons=6,
+                           use_revin=False)
+        with torch.no_grad():
+            net.cycle_queue.data.copy_(
+                torch.arange(24, dtype=torch.float32).reshape(12, 2)
+            )
+        net.eval()
+        x = torch.zeros(1, 24, 2)
+        with torch.no_grad():
+            out_a = net(x, torch.tensor([0], dtype=torch.long))
+            out_b = net(x, torch.tensor([6], dtype=torch.long))
+            out_c = net(x, torch.tensor([12], dtype=torch.long))
+        assert not torch.allclose(out_a, out_b)
+        # A full cycle apart is the same phase — outputs must match.
+        assert torch.allclose(out_a, out_c)
+
+    def test_predict_without_steps_after_real_fit_warns(self, caplog):
+        import logging
+        from ml_forecast_lab.models.cyclenet_backend import CycleNetModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((80, 24, 2)).astype(np.float32)
+        y = rng.random((80, 4)).astype(np.float32)
+        X_flat = rng.random((80, 10)).astype(np.float32)
+        model = CycleNetModel(cycle_len=12, epochs=2, patience=2)
+        model.fit(X_flat, y, sequence_data=seq_data,
+                  window_step_index=np.arange(500, 580, dtype=np.int64))
+        with caplog.at_level(logging.WARNING,
+                             logger="ml_forecast_lab.models.cyclenet_backend"):
+            model.predict_sequence(seq_data[:3])
+        assert any("cycle phase is misaligned" in r.message
+                   for r in caplog.records)
+
+    def test_step_index_length_mismatch_raises(self):
+        from ml_forecast_lab.models.cyclenet_backend import CycleNetModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((50, 24, 2)).astype(np.float32)
+        y = rng.random((50, 4)).astype(np.float32)
+        X_flat = rng.random((50, 10)).astype(np.float32)
+        model = CycleNetModel(cycle_len=12, epochs=2, patience=2)
+        with pytest.raises(ValueError, match="window_step_index"):
+            model.fit(X_flat, y, sequence_data=seq_data,
+                      window_step_index=np.arange(7))
+
+    def test_z_score_standardisation_stored(self):
+        from ml_forecast_lab.models.cyclenet_backend import CycleNetModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = CycleNetModel(cycle_len=12, epochs=3, patience=2, use_revin=False)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        assert model._channel_mean is not None
+        assert model._channel_std is not None
+        assert model._channel_mean.shape == (3,)
+
+    def test_z_score_skipped_when_revin_enabled(self):
+        from ml_forecast_lab.models.cyclenet_backend import CycleNetModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random(100).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        model = CycleNetModel(cycle_len=12, epochs=3, patience=2, use_revin=True)
+        model.fit(X_flat, y, sequence_data=seq_data)
+        assert model._channel_mean is None
+        assert model._channel_std is None
+
+    def test_save_load_roundtrip_preserves_phase(self, tmp_path):
+        from ml_forecast_lab.models.cyclenet_backend import CycleNetModel
+        rng = np.random.default_rng(42)
+        seq_data = rng.random((100, 24, 3)).astype(np.float32)
+        y = rng.random((100, 8)).astype(np.float32)
+        X_flat = rng.random((100, 10)).astype(np.float32)
+        steps = np.arange(2000, 2100, dtype=np.int64)
+        model = CycleNetModel(cycle_len=12, epochs=3, patience=2)
+        model.fit(X_flat, y, sequence_data=seq_data, past_window_size=16,
+                  window_step_index=steps)
+        preds = model.predict_sequence(seq_data[:5], window_step_index=steps[:5])
+        path = str(tmp_path / "cyclenet.bin")
+        model.save(path)
+        restored = CycleNetModel()
+        restored.load(path)
+        preds2 = restored.predict_sequence(seq_data[:5],
+                                           window_step_index=steps[:5])
+        assert np.allclose(preds, preds2)
+        assert restored._past_window_size == 16
+        assert restored._fit_had_step_index is True
+
+
 class _FakeChronosPipeline:
     """Stand-in matching ChronosBoltPipeline.predict_quantiles's contract:
     returns (quantiles, mean) where mean repeats each context's last value.

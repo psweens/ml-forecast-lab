@@ -767,6 +767,45 @@ def reshape_for_sequence(
     return X_seq
 
 
+def grid_step_index(index, positions=None) -> Optional[np.ndarray]:
+    """Epoch-anchored grid-step number of selected rows of a regular grid.
+
+    Returns ``index.asi8 // step_ns`` (int64) at ``positions`` — the number
+    of whole grid steps between the Unix epoch and each row. Because the
+    anchor is the epoch rather than the frame, two windows covering the
+    same wall-clock rows get identical values no matter which frame slice
+    they were built from: retention trimming, fold bridging, and cache
+    reload cannot shift it. That is what makes it a safe absolute phase
+    for cycle-aware backends (``cyclenet``): ``step mod cycle_len`` is the
+    row's stable position within a daily/weekly cycle.
+
+    Parameters
+    ----------
+    index : pd.DatetimeIndex
+        The window source frame's index (a complete regular grid).
+    positions : array-like of int, optional
+        Row positions of each window's FIRST timestep — ``kept`` from
+        ``create_sliding_windows`` in label-mask mode, or
+        ``np.arange(n_windows)`` otherwise. When omitted, every row's
+        step number is returned.
+
+    Returns
+    -------
+    np.ndarray of int64, or None when the index is not a DatetimeIndex
+    with at least two rows (no grid step to infer) — callers skip the
+    kwarg and phase-aware backends fall back to relative indexing.
+    """
+    if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
+        return None
+    step_ns = int((index[1] - index[0]).value)
+    if step_ns <= 0:
+        return None
+    vals = index.asi8
+    if positions is not None:
+        vals = vals[np.asarray(positions, dtype=int)]
+    return (vals // step_ns).astype(np.int64)
+
+
 def create_sliding_windows(
     df: pd.DataFrame,
     target_col: str,

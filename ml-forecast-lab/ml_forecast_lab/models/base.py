@@ -426,6 +426,23 @@ def resolve_tree_loss_for_target(loss_fn: str, y, model_name: str = "tree") -> s
     return loss_fn
 
 
+def predict_sequence_with_context(model, X, window_step_index=None):
+    """Call ``model.predict_sequence``, forwarding per-window grid-step
+    indices only to backends that declare ``needs_window_step_index``.
+
+    Every call site that builds sliding windows goes through this instead
+    of calling ``predict_sequence`` directly, so a phase-aware backend
+    (cyclenet) receives the absolute grid position of each window while
+    every other backend keeps the bare ``(X)`` signature untouched.
+    ``window_step_index`` comes from ``features.grid_step_index``; None
+    (index unavailable) degrades to the bare call and the backend's own
+    relative-phase fallback.
+    """
+    if getattr(model, 'needs_window_step_index', False) and window_step_index is not None:
+        return model.predict_sequence(X, window_step_index=window_step_index)
+    return model.predict_sequence(X)
+
+
 class ForecastModel(ABC):
     """
     Abstract base class for all time-series forecast models.

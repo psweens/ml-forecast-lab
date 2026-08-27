@@ -1,5 +1,51 @@
 # Changelog
 
+## 2.52.0
+
+### Added
+
+**Three new trainable model backends — the catalogue grows from 29 to 32.**
+All are lightweight supervised architectures that train on your sensor's
+own history in seconds-to-minutes on a Pi 5, and all see your covariates
+(weather forecasts, calendar features) through the same extended-window
+mechanism as the rest of the neural fleet:
+
+- **`segrnn`** — SegRNN (Lin et al. 2023). The input window is cut into
+  segments and each segment becomes one GRU step, so a 2-day window
+  takes a handful of recurrence steps instead of hundreds — the trick
+  that made RNNs competitive again on long horizons. The forecast is
+  decoded in parallel (one learnable position embedding per output
+  segment), avoiding the error accumulation of step-by-step rollout.
+  A different animal from the wired `lstm` / `gru` despite the shared
+  GRU cell, at a fraction of their training cost.
+- **`xpatch`** — xPatch (Stitsyuk & Choi, AAAI 2025). Splits the window
+  into trend and seasonality with an exponential moving average — unlike
+  `dlinear`'s fixed moving-average kernel, the EMA tracks level shifts
+  quickly — then forecasts the two parts with separate streams: a
+  patch-based CNN for the seasonal shape, a small MLP for the trend.
+  Well suited to short, noisy histories.
+- **`cyclenet`** — CycleNet (Lin et al. 2024, NeurIPS Spotlight). Learns
+  the sensor's daily/weekly cycle explicitly as a trainable buffer,
+  subtracts it from each window, forecasts only the residual with a
+  linear (or small MLP) head, and adds the cycle back for the horizon.
+  For strongly periodic sensors — household power, solar, temperature —
+  this hands the model the periodic structure outright. Set `cycle_len`
+  to your steps-per-cycle (48 for daily at 30-min sampling); like
+  `seasonal_period` on the classical backends it's a data-cadence
+  setting, not a tunable. To align the learned cycle to real
+  time-of-day, the training and forecast pipeline now passes each
+  window's absolute grid position (derived from timestamps) to backends
+  that ask for it — a new plumbing lane that is a no-op for every other
+  backend: their inputs, windows, and results are bit-identical.
+
+All three ship with the standard house kit (RevIN with past-only stats,
+AdamW + cosine annealing, best-model checkpointing, hyperparameter
+tuning support) and appear in the model catalogue and parameter editor.
+Enable them by adding `segrnn` / `xpatch` / `cyclenet` to
+`models_enabled`. Existing
+experiments, rankings, and cached models are untouched — nothing
+retrains on update.
+
 ## 2.51.1
 
 ### Changed

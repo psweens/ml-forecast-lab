@@ -1073,6 +1073,34 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
             "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
         },
+        "segrnn": {
+            "seg_len": {"type": "int", "default": 12, "label": "Segment length", "min": 2, "max": 96},
+            "d_model": {"type": "int", "default": 64, "label": "Model dimension", "min": 8, "max": 512},
+            "dropout": {"type": "float", "default": 0.1, "label": "Dropout", "min": 0.0, "max": 0.8, "step": 0.05},
+            "learning_rate": {"type": "float", "default": 3e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
+        },
+        "xpatch": {
+            "patch_len": {"type": "int", "default": 8, "label": "Patch length", "min": 2, "max": 48},
+            "stride": {"type": "int", "default": 4, "label": "Stride", "min": 1, "max": 24},
+            "ema_alpha": {"type": "float", "default": 0.3, "label": "EMA smoothing (alpha)", "min": 0.01, "max": 0.99, "step": 0.01},
+            "learning_rate": {"type": "float", "default": 2e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
+        },
+        # cycle_len is non-tunable for the same reason as seasonal_period on
+        # the classical backends: it's a data-cadence property (steps per
+        # dominant cycle, e.g. 48 for daily at 30-min sampling), not a
+        # hyperparameter to search over.
+        "cyclenet": {
+            "cycle_len": {"type": "int", "default": 48, "label": "Cycle length (steps)", "min": 2, "max": 672, "tunable": False},
+            "model_type": {"type": "select", "default": "linear", "label": "Residual head", "options": ["linear", "mlp"], "tunable": False},
+            "d_hidden": {"type": "int", "default": 64, "label": "MLP hidden size", "min": 8, "max": 512},
+            "learning_rate": {"type": "float", "default": 5e-4, "label": "Learning rate", "min": 1e-6, "max": 0.01, "step": 1e-5},
+            "batch_size": {"type": "int", "default": 64, "label": "Batch size", "min": 8, "max": 512, "tunable": False},
+            "loss_fn": {"type": "select", "default": "mse", "label": "Loss function", "options": ["mse", "mae", "huber"], "tunable": False},
+        },
         # `seasonal_period` is marked non-tunable on the classical backends:
         # it's a data-cadence property (set once based on sampling rate, e.g.
         # 48 for half-hourly daily, 168 for hourly weekly), not a hyperparameter
@@ -1279,6 +1307,15 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         {"name": "moderntcn", "display_name": "ModernTCN", "model_type": "PyTorch",
          "description": "Modernised pure-convolution backbone with large-kernel depthwise temporal mixing.",
          "speed": "⚡ Fast", "best_for": "Transformer-class accuracy at convolution cost"},
+        {"name": "segrnn", "display_name": "SegRNN", "model_type": "PyTorch",
+         "description": "Segment-wise GRU encoding with parallel multi-step decoding.",
+         "speed": "⚡ Fast", "best_for": "Long horizons at RNN cost — far fewer recurrence steps than LSTM/GRU"},
+        {"name": "xpatch", "display_name": "xPatch", "model_type": "PyTorch",
+         "description": "EMA seasonal-trend decomposition with dual CNN + MLP streams.",
+         "speed": "⚡ Fast", "best_for": "Short, noisy histories with level shifts"},
+        {"name": "cyclenet", "display_name": "CycleNet", "model_type": "PyTorch",
+         "description": "Learnable-cycle removal with a linear/MLP residual forecaster (RCF).",
+         "speed": "⚡ Very Fast", "best_for": "Strongly periodic sensors — daily power, solar, temperature"},
         {"name": "chronos_bolt", "display_name": "Chronos-Bolt", "model_type": "Foundation",
          "description": "Amazon's pretrained zero-shot forecaster — no training on your data.",
          "speed": "⚡ Fast", "best_for": "Cold start with little history; strong zero-shot accuracy"},
