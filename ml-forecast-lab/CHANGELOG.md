@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.52.0
+
+### Added
+
+**Two new trainable model backends — the catalogue grows from 29 to 31.**
+Both are lightweight supervised architectures that train on your sensor's
+own history in seconds-to-minutes on a Pi 5, and both see your covariates
+(weather forecasts, calendar features) through the same extended-window
+mechanism as the rest of the neural fleet:
+
+- **`segrnn`** — SegRNN (Lin et al. 2023). The input window is cut into
+  segments and each segment becomes one GRU step, so a 2-day window
+  takes a handful of recurrence steps instead of hundreds — the trick
+  that made RNNs competitive again on long horizons. The forecast is
+  decoded in parallel (one learnable position embedding per output
+  segment), avoiding the error accumulation of step-by-step rollout.
+  A different animal from the wired `lstm` / `gru` despite the shared
+  GRU cell, at a fraction of their training cost.
+- **`xpatch`** — xPatch (Stitsyuk & Choi, AAAI 2025). Splits the window
+  into trend and seasonality with an exponential moving average — unlike
+  `dlinear`'s fixed moving-average kernel, the EMA tracks level shifts
+  quickly — then forecasts the two parts with separate streams: a
+  patch-based CNN for the seasonal shape, a small MLP for the trend.
+  Well suited to short, noisy histories.
+
+Both ship with the standard house kit (RevIN with past-only stats,
+AdamW + cosine annealing, best-model checkpointing, hyperparameter
+tuning support) and appear in the model catalogue and parameter editor.
+Enable them by adding `segrnn` / `xpatch` to `models_enabled`. Existing
+experiments, rankings, and cached models are untouched — nothing
+retrains on update.
+
 ## 2.51.1
 
 ### Changed

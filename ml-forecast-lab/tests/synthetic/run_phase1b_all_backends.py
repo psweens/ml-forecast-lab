@@ -120,6 +120,8 @@ def _all_backends() -> List[Tuple[str, type]]:
         ("nhits", "nhits_backend", "NHiTSModel"),
         ("timexer", "timexer_backend", "TimeXerModel"),
         ("moderntcn", "moderntcn_backend", "ModernTCNModel"),
+        ("segrnn", "segrnn_backend", "SegRNNModel"),
+        ("xpatch", "xpatch_backend", "XPatchModel"),
         # chronos_bolt / ttm are deliberately absent: zero-shot foundation
         # backends take no gradient steps, so the epochs-based harness has
         # nothing to exercise, and a benchmark run here would trigger a

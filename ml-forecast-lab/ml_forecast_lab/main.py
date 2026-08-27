@@ -1169,6 +1169,7 @@ class MLForecastLabApp:
             _optional_backends = [
                 ("catboost", "catboost_backend", "CatBoostModel"),
                 ("gru", "gru_backend", "GRUModel"),
+                ("segrnn", "segrnn_backend", "SegRNNModel"),
                 ("dlinear", "dlinear_backend", "DLinearModel"),
                 ("nlinear", "nlinear_backend", "NLinearModel"),
                 ("fits", "fits_backend", "FITSModel"),
@@ -1178,6 +1179,7 @@ class MLForecastLabApp:
                 ("tsmixer", "tsmixer_backend", "TSMixerModel"),
                 ("timemixer", "timemixer_backend", "TimeMixerModel"),
                 ("sparsetsf", "sparsetsf_backend", "SparseTSFModel"),
+                ("xpatch", "xpatch_backend", "XPatchModel"),
                 ("patchtst", "patchtst_backend", "PatchTSTModel"),
                 ("itransformer", "itransformer_backend", "iTransformerModel"),
                 ("crossformer", "crossformer_backend", "CrossformerModel"),

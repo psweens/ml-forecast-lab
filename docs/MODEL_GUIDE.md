@@ -1,10 +1,10 @@
 # Model Guide — Picking Backends to Benchmark
 
-ML Forecast Lab ships with 29 model backends. You don't need all of them — that's a lot of compute for a Pi, and many overlap in behaviour. This guide is a practical "which should I enable?" pre-flight that takes about 5 minutes to read.
+ML Forecast Lab ships with 31 model backends. You don't need all of them — that's a lot of compute for a Pi, and many overlap in behaviour. This guide is a practical "which should I enable?" pre-flight that takes about 5 minutes to read.
 
 The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add more once you've seen how those do on your data. If you have almost no history yet, add `chronos_bolt` — it forecasts zero-shot from pretrained weights and needs no training data at all.
 
-## The 28 backends at a glance
+## The 31 backends at a glance
 
 | Family | Backend | Strength | Weakness | Speed |
 |---|---|---|---|---|
@@ -13,6 +13,7 @@ The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add 
 | Tree | `catboost` | Robust to default hyperparams, handles categorical natively | Slow on Pi | Slow |
 | Recurrent | `lstm` | Captures long temporal dependencies, well-understood | Can be unstable on small data, slow vs newer linear baselines | Medium |
 | Recurrent | `gru` | Lighter than LSTM, often comparable | Same caveats as LSTM | Medium |
+| Recurrent | `segrnn` | Segment-wise GRU with parallel multi-step decoding (Lin et al. 2023) — long-horizon accuracy at a fraction of LSTM/GRU recurrence steps | Newer — less battle-tested | Fast |
 | Convolutional | `cnn` | WaveNet-style dilated causal convs, strong on cyclical patterns | Less interpretable than trees | Medium |
 | Convolutional | `timesnet` | 2D-vision backbone for time series, captures multi-period seasonality | Heavy, ~2-3× slower than CNN | Slow |
 | Convolutional | `moderntcn` | Modernised large-kernel TCN (Luo & Wang 2024, ICLR) — transformer-class accuracy at convolution cost | Newer — less battle-tested | Fast |
@@ -22,6 +23,7 @@ The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add 
 | Linear / MLP | `timemixer` | Multi-scale TSMixer variant | Same | Fast |
 | Linear / MLP | `tide` | Time-series Dense Encoder (Das 2023), strong on covariate-heavy targets | Tuning-sensitive | Fast |
 | Linear / MLP | `sparsetsf` | Sparse TS Forecasting, parameter-efficient | Newer paper | Very fast |
+| Linear / MLP | `xpatch` | EMA seasonal-trend decomposition, dual CNN + MLP streams (Stitsyuk & Choi, AAAI 2025) — tracks level shifts faster than DLinear's moving average | Newer — less battle-tested | Fast |
 | Frequency-domain | `fits` | ~10k params, frequency-domain interpolation | Niche — wins on highly seasonal targets | Very fast |
 | N-BEATS | `nbeats` | Neural basis expansion — strong empirical record | Heavy, slow training | Slow |
 | N-BEATS | `nhits` | Neural hierarchical interpolation, often beats N-BEATS | Same | Slow |
@@ -45,7 +47,7 @@ The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add 
 **Then pick by data shape:**
 
 - **<2 weeks of history** → trees (`lightgbm`, `xgboost`), `seasonal_naive`, and the zero-shot foundation models (`chronos_bolt`, `ttm`). Supervised neural models will overfit; the foundation models don't train on your data at all, so they're immune — this is the cold-start niche they were added for.
-- **2 weeks – 2 months** → add `lstm`, `cnn`, `dlinear`, `nlinear`, `moderntcn`. Skip the heavy transformers.
+- **2 weeks – 2 months** → add `lstm`, `cnn`, `dlinear`, `nlinear`, `moderntcn`, `segrnn`, `xpatch`. Skip the heavy transformers.
 - **2 months – 6 months** → add `nhits`, `patchtst`, `tide`, `tsmixer`, `timexer`. This is the sweet spot for the modern architectures.
 - **>6 months** → also try `tft`, `crossformer`, `timemixer` if you want to invest the compute.
 
@@ -65,13 +67,13 @@ A typical 60-day, 30-min experiment with default hyperparameters takes roughly:
 | Tier | Backends | Per-fold time |
 |---|---|---|
 | Fast | `seasonal_naive`, `dlinear`, `nlinear`, `theta`, `fits`, `sparsetsf`, `chronos_bolt`*, `ttm`* | < 5s |
-| Medium | `lightgbm`, `xgboost`, `cnn`, `gru`, `tsmixer`, `timemixer`, `moderntcn`, `timexer` | 5–30s |
+| Medium | `lightgbm`, `xgboost`, `cnn`, `gru`, `segrnn`, `xpatch`, `tsmixer`, `timemixer`, `moderntcn`, `timexer` | 5–30s |
 | Slow | `lstm`, `nbeats`, `nhits`, `patchtst`, `itransformer`, `tide`, `arima`, `ets`, `catboost`, `timesnet` | 30s–2min |
 | Very slow | `tft`, `crossformer` | 2–10min |
 
 \* Zero-shot — no training happens at all; "fit" is a weight load (first ever use also downloads the pretrained weights from the Hugging Face Hub, ~5–30 MB, cached afterwards). Inference per window is a single CPU forward pass.
 
-With 5 CV folds, multiply each by 5. A "throw everything at it" benchmark with all 28 backends enabled takes 1-2 hours on a Pi 5. A more reasonable setup with 6-8 selected backends finishes in 10-20 minutes.
+With 5 CV folds, multiply each by 5. A "throw everything at it" benchmark with all 31 backends enabled takes 1-2 hours on a Pi 5. A more reasonable setup with 6-8 selected backends finishes in 10-20 minutes.
 
 ## Pragmatic starter sets
 
