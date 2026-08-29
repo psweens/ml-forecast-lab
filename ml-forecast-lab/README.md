@@ -2,7 +2,7 @@
 
 **Multi-model machine learning forecasting for Home Assistant.**
 
-Train and benchmark 29 forecasting backends on any HA sensor, then promote the winner. The app retrains it on schedule and publishes forecasts back to Home Assistant as companion sensors with calibrated 80% prediction bands.
+Train and benchmark 32 forecasting backends on any HA sensor, then promote the winner. The app retrains it on schedule and publishes forecasts back to Home Assistant as companion sensors with calibrated 80% prediction bands.
 
 The intended workflow is **benchmark once, run forever**. After the initial benchmark, production mode is set-and-forget; re-benchmark only when the sensor's behaviour drifts or you want to try newer architectures.
 
