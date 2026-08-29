@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.52.1
+
+### Fixed
+
+**The README's opening line advertised 29 backends; the catalogue has 32.**
+The 2.52.0 release added three backends and updated every count claim in
+the docs except the tagline on the app's Info tab, which still read
+"29 forecasting backends". The guard test that pins these claims to the
+wired registry only recognised "N backends" / "N model backends", so
+"N forecasting backends" slipped past it. The tagline now says 32, and the
+guard accepts one word between the number and "backends" so this wording
+can't drift silently again. Documentation only — no model, benchmark, or
+forecast behaviour changes.
+
 ## 2.52.0
 
 ### Added
