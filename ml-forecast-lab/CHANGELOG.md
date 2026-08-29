@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.52.1
+
+### Fixed
+
+**The verdict headline no longer vouches for checks the page itself marks as
+ungraded.** During accuracy cold-start (no lead bucket has 10 scored samples
+yet) the Accuracy chip shows "—" and the tile says "cold-start estimate", yet
+with Calibration and Stability both good the headline still read "Looking
+healthy — forecasts are accurate, bands are calibrated, runs agree." — and
+could flip to "Something looks off" the moment the tenth sample landed,
+without any change in forecast behaviour. When one or two checks are still
+ungraded, the headline now claims only what the graded chips support, e.g.
+"Bands are calibrated and runs agree — accuracy still warming up." The
+all-graded and warming-up wordings are unchanged.
+
 ## 2.52.0
 
 ### Added

@@ -4217,6 +4217,24 @@ window.showTab = function(el) {
         if (statuses.length === 0) {
             headline.textContent = 'Warming up — first verdict available after a few production cycles.';
             headline.setAttribute('data-status', 'unknown');
+        } else if (worst === 'good' && statuses.length < 3) {
+            // v2.52.1: with a chip still ungraded (accuracy cold-start,
+            // bands calibrating) the all-known wording asserted checks
+            // the page itself renders as "—" — and flipped to "Something
+            // looks off" the moment the chip graded in. Claim only the
+            // graded chips and name what is still warming up.
+            var goodClauses = [];
+            if (accStatus === 'good') goodClauses.push('forecasts are accurate');
+            if (covStatus === 'good') goodClauses.push('bands are calibrated');
+            if (stabStatus === 'good') goodClauses.push('runs agree');
+            var warming = [];
+            if (accStatus === 'unknown') warming.push('accuracy');
+            if (covStatus === 'unknown') warming.push('calibration');
+            if (stabStatus === 'unknown') warming.push('stability');
+            var partial = goodClauses.join(' and ') + ' — '
+                + warming.join(' and ') + ' still warming up.';
+            headline.textContent = partial.charAt(0).toUpperCase() + partial.slice(1);
+            headline.setAttribute('data-status', 'good');
         } else if (worst === 'good') {
             headline.textContent = 'Looking healthy — forecasts are accurate, bands are calibrated, runs agree.';
             headline.setAttribute('data-status', 'good');
