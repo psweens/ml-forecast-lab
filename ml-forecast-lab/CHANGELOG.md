@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.52.1
+
+### Fixed
+
+**The verdict headline no longer vouches for checks the page itself marks as
+ungraded.** During accuracy cold-start (no lead bucket has 10 scored samples
+yet) the Accuracy chip shows "—" and the tile says "cold-start estimate", yet
+with Calibration and Stability both good the headline still read "Looking
+healthy — forecasts are accurate, bands are calibrated, runs agree." — and
+could flip to "Something looks off" the moment the tenth sample landed,
+without any change in forecast behaviour. When one or two checks are still
+ungraded, the headline now claims only what the graded chips support, e.g.
+"Bands are calibrated and runs agree — accuracy still warming up." The
+all-graded and warming-up wordings are unchanged.
+
+**The README's opening line advertised 29 backends; the catalogue has 32.**
+The 2.52.0 release added three backends and updated every count claim in
+the docs except the tagline on the app's Info tab, which still read
+"29 forecasting backends". The guard test that pins these claims to the
+wired registry only recognised "N backends" / "N model backends", so
+"N forecasting backends" slipped past it. The tagline now says 32, and the
+guard accepts one word between the number and "backends" so this wording
+can't drift silently again. Documentation only — no model, benchmark, or
+forecast behaviour changes.
+
 ## 2.52.0
 
 ### Added

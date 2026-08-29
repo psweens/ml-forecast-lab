@@ -8,6 +8,10 @@ Prose cannot be computed, so it is guarded instead: ``models.WIRED_BACKENDS``
 the single source of truth, and every "N backends" claim in the user-facing
 docs must equal its length. Adding or removing a backend now fails this test
 until the docs are updated in the same change.
+
+v2.52.1: the claim regex also accepts one word between the number and
+"backends" — the app README's "29 forecasting backends" tagline had slipped
+through the original "N [model] backends" pattern and shipped stale in 2.52.0.
 """
 from __future__ import annotations
 
@@ -29,7 +33,12 @@ DOC_PATHS = [
     APP_DIR / "DOCS.md",
 ]
 
-COUNT_CLAIM = re.compile(r"\b(\d+)\s+(?:model\s+)?backends\b", re.IGNORECASE)
+# v2.52.1: one optional word may sit between the number and "backends" —
+# "29 forecasting backends" drifted past the earlier (?:model\s+)? form. Any
+# "N <word> backends" phrase in the guarded docs is treated as a claim about
+# the total wired count; qualify subset counts differently (e.g. "17 of the
+# neural backends") if one is ever needed.
+COUNT_CLAIM = re.compile(r"\b(\d+)\s+(?:[a-z-]+\s+)?backends\b", re.IGNORECASE)
 
 
 def _claims(path: Path):
