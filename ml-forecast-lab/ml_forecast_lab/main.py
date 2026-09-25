@@ -1546,6 +1546,19 @@ class MLForecastLabApp:
                 return await self.compute_data_report(exp_cfg)
             self.web_app.state.appstate.data_report_callback = _data_report_trigger
 
+            # Replay bundle export (v2.52.2) — records the training-frame
+            # pipeline's inputs for offline reproduction; see replay.py.
+            async def _replay_bundle_trigger(experiment_name: str) -> Optional[bytes]:
+                exp_cfg = next(
+                    (e for e in self.config.experiments if e.name == experiment_name),
+                    None,
+                )
+                if exp_cfg is None:
+                    return None
+                from ml_forecast_lab.replay import capture_bundle
+                return await capture_bundle(self, exp_cfg)
+            self.web_app.state.appstate.replay_bundle_callback = _replay_bundle_trigger
+
             # Cached-model directory accessor — lets the web layer check
             # whether a "previous" version exists for the rollback button
             # without duplicating the slugify logic.
@@ -2353,12 +2366,18 @@ class MLForecastLabApp:
 
         return best if best is not None else _DEFAULT_CACHE_MAX_AGE_DAYS
 
-    async def _fetch_and_preprocess(self, exp_cfg) -> Optional[pd.DataFrame]:
+    async def _fetch_and_preprocess(
+        self, exp_cfg, now: Optional[datetime] = None,
+    ) -> Optional[pd.DataFrame]:
         """
         Fetch history and preprocess for an experiment.
 
         Returns DataFrame with DatetimeIndex and 'y' column containing the
         preprocessed target values, ready for feature engineering.
+
+        ``now`` pins the wall clock the history window is anchored to.
+        v2.52.2: replay bundles pass the captured instant so a replay asks
+        for exactly the window the capture did; production leaves it unset.
         """
         from ml_forecast_lab.ha_interface import normalise_history
         from ml_forecast_lab.preprocessing import (
@@ -2371,7 +2390,8 @@ class MLForecastLabApp:
             _describe_gap_spans,
         )
 
-        now = datetime.now(timezone.utc)
+        if now is None:
+            now = datetime.now(timezone.utc)
         start = now - timedelta(days=exp_cfg.days_history)
         freq = f"{exp_cfg.interval_minutes}min"
         table_name = self.history_db.safe_table_name(exp_cfg.target_entity) if self.history_db else None
@@ -5368,9 +5388,175 @@ class MLForecastLabApp:
         finally:
             self._update_running = False
 
+    def _production_model_name(self, exp_cfg) -> str:
+        """The backend a retrain trains: the pinned production model, else
+        the benchmark winner, else the first enabled backend."""
+        prod_model_name = exp_cfg.production_model
+        if not prod_model_name and self.web_app:
+            bench = self.web_app.state.appstate.benchmark_results.get(exp_cfg.name)
+            if bench and bench.best_model_name:
+                prod_model_name = bench.best_model_name
+        if not prod_model_name:
+            prod_model_name = exp_cfg.models_enabled[0] if exp_cfg.models_enabled else "lightgbm"
+        return prod_model_name
+
+    async def _prepare_training_frame(self, exp_cfg, now: Optional[datetime] = None):
+        """Fetch, build features and resolve missingness for a retrain.
+
+        Returns ``(grid_df, combined, missing_report)`` or ``None`` when the
+        fetch produced nothing. v2.52.2: shared by ``_retrain_and_cache`` and
+        the replay tool (``ml_forecast_lab.replay``), so a replay exercises
+        the production frame construction rather than a copy of it.
+        """
+        from ml_forecast_lab.features import build_features
+
+        df = await self._fetch_and_preprocess(exp_cfg, now=now)
+        if df is None:
+            return None
+        features_df = build_features(
+            df, target_col="y",
+            interval_minutes=exp_cfg.interval_minutes,
+            country=exp_cfg.country,
+        )
+        combined, missing_report = _supervised_frame(
+            df, features_df, exp_cfg, label="retrain",
+        )
+        return df, combined, missing_report
+
+    async def _build_training_windows(self, exp_cfg, combined, missing_report):
+        """Build the extended (past + future-known) neural training windows.
+
+        Returns ``(seq_X, seq_y, channel_names, seq_kwargs)``, or ``None``
+        when the frame is too short for a 12-step past window (the caller
+        then trains on the tabular matrix). v2.52.2: extracted from
+        ``_retrain_and_cache`` unchanged so the replay tool builds windows
+        through the same code.
+        """
+        from ml_forecast_lab.features import (
+            create_sliding_windows, compute_known_future_features,
+        )
+
+        raw_cov_cols = neural_covariate_columns(combined.columns)
+        window_size = min(48, len(combined) // 3)
+        # Train with dense horizons (1, 2, ..., future_periods) so the
+        # multi-head output covers every forecast step directly — no
+        # interpolation or autoregression needed at inference time.
+        future_periods = getattr(exp_cfg, 'future_periods', 48)
+        horizon_steps = list(range(1, future_periods + 1))
+        if window_size < 12:
+            return None
+        seq_kwargs: dict = {}
+        # Extend each training window with future-known features at
+        # horizon positions. Without this, a multi-horizon neural
+        # head has only the past window to project from, and a
+        # single linear layer (NLinear / SparseTSF) cannot
+        # disambiguate "horizon h" from "absolute hour at h" because
+        # h corresponds to different absolute hours across windows
+        # ending at different times — the weights are forced into a
+        # phase-smeared compromise. LSTM/CNN hit the same wall via
+        # their pooled-context → linear head and tend to collapse
+        # to the unconditional mean. Tree models avoid the issue
+        # because their recursive inference path already passes
+        # future temporal/solar features per horizon row; this
+        # change brings the neural path to parity.
+        loc = await self._get_site_location()
+        solar_lat_lon = loc if loc is not None else None
+        include_sun_elevation = 'sun_elevation' in raw_cov_cols
+        include_clear_sky_ghi = 'clear_sky_ghi' in raw_cov_cols
+
+        # User-configured future-role covariates (e.g. Solcast PV
+        # forecast, met.no weather). The tree (recursive) inference
+        # path always saw these at horizon positions via
+        # ``future_cov_values``; the neural extended-window path
+        # historically did not, so neural backends were
+        # information-starved relative to tree backends in
+        # benchmarks. At training time the "future" positions are
+        # actually past timestamps we have ground-truth observations
+        # for — use the in-sample historical values from ``combined``.
+        # The matching inference-side call in _forecast_with_cached
+        # fetches the HA forecast attribute for real-future
+        # timestamps.
+        _win_rt = missing_report["window_frame"]
+        _lm_rt = missing_report["window_label_mask"].to_numpy()
+        future_cov_for_neural = _collect_train_future_covariates(
+            _win_rt, exp_cfg
+        )
+        neural_future_cov_names = list(future_cov_for_neural)
+        if neural_future_cov_names:
+            logger.info(
+                f"  Neural future covariates (horizon-aware): "
+                f"{neural_future_cov_names}"
+            )
+
+        future_features_df = compute_known_future_features(
+            _win_rt.index,
+            add_temporal=True,
+            country=getattr(exp_cfg, 'country', None),
+            solar_lat_lon=solar_lat_lon,
+            include_sun_elevation=include_sun_elevation,
+            include_clear_sky_ghi=include_clear_sky_ghi,
+            future_covariate_values=future_cov_for_neural or None,
+        )
+        # Windows over the complete-grid frame with a label mask:
+        # inputs are unbroken time spans (invented y cells flagged
+        # via the y_missing channel), and a window is a training
+        # sample only when every horizon label was measured.
+        seq_X, seq_y, channel_names, _kept_rt = create_sliding_windows(
+            _win_rt, 'target', window_size=window_size,
+            covariate_cols=raw_cov_cols if raw_cov_cols else None,
+            add_temporal=True, horizon_steps=horizon_steps,
+            future_features_df=future_features_df,
+            label_mask=_lm_rt,
+        )
+        seq_kwargs['sequence_data'] = seq_X
+        # Cache the per-channel meaning so the forecast cycle can
+        # verify it's feeding the model channels in the SAME order
+        # they were trained on. Without this, a covariate fetch
+        # that silently re-orders (e.g. a transient empty cov_series
+        # at one tick, or a future build_features rearrangement)
+        # would make NLinear/DLinear/etc. predict from mis-labelled
+        # channels and produce nonsense (e.g. spurious early-morning
+        # peaks) with no error raised. Backend fit() methods accept
+        # **kwargs and silently ignore unknown keys, so passing
+        # channel_names through is harmless during training; it's
+        # only consumed by _forecast_with_cached. Matches what the
+        # benchmark-holdout path has done for two minor releases.
+        seq_kwargs['channel_names'] = channel_names
+        # Mark this cache as carrying an extended (past + future)
+        # window so _forecast_with_cached knows to rebuild the
+        # inference tensor the same way. Old caches that pre-date
+        # this flag take the legacy path (past window only). The
+        # split index lets inference know where the past window
+        # ends — it's the size we asked create_sliding_windows to
+        # use, before the future-position extension.
+        seq_kwargs['extended_window'] = True
+        seq_kwargs['past_window_size'] = window_size
+        # Absolute grid position of each window's first row, for
+        # phase-aware backends (cyclenet).
+        from ml_forecast_lab.features import grid_step_index
+        _steps_rt = grid_step_index(_win_rt.index, _kept_rt)
+        if _steps_rt is not None:
+            seq_kwargs['window_step_index'] = _steps_rt
+        seq_kwargs['future_feature_cols'] = list(future_features_df.columns)
+        # Sub-list — just the columns that came from user
+        # covariates with role in (future, both). The
+        # deterministic columns (temporal, solar physics) can
+        # be recomputed at inference from the future_index
+        # alone; these need a HA history / forecast fetch.
+        if neural_future_cov_names:
+            seq_kwargs['future_covariate_names'] = list(
+                neural_future_cov_names
+            )
+        logger.info(
+            f"  Extended training windows: "
+            f"{window_size} past + {len(horizon_steps)} future "
+            f"= {seq_X.shape[1]} steps × {seq_X.shape[2]} channels, "
+            f"future cols={list(future_features_df.columns)}"
+        )
+        return seq_X, seq_y, channel_names, seq_kwargs
+
     async def _retrain_and_cache(self, exp_cfg):
         """Train a production model and cache it for fast forecast cycles."""
-        from ml_forecast_lab.features import build_features
         from ml_forecast_lab.models.base import TrainingCancelled
 
         logger.info(f"  Retraining {exp_cfg.name}...")
@@ -5394,17 +5580,10 @@ class MLForecastLabApp:
                 )
 
         # Fetch and prepare data
-        df = await self._fetch_and_preprocess(exp_cfg)
-        if df is None:
+        prepared = await self._prepare_training_frame(exp_cfg)
+        if prepared is None:
             return
-        features_df = build_features(
-            df, target_col="y",
-            interval_minutes=exp_cfg.interval_minutes,
-            country=exp_cfg.country,
-        )
-        combined, missing_report = _supervised_frame(
-            df, features_df, exp_cfg, label="retrain",
-        )
+        df, combined, missing_report = prepared
 
         feature_cols = [c for c in combined.columns if c != "target"]
         X = combined[feature_cols].values.astype(np.float32)
@@ -5412,13 +5591,7 @@ class MLForecastLabApp:
         y = combined["target"].values.astype(np.float32)
 
         # Determine production model
-        prod_model_name = exp_cfg.production_model
-        if not prod_model_name and self.web_app:
-            bench = self.web_app.state.appstate.benchmark_results.get(exp_cfg.name)
-            if bench and bench.best_model_name:
-                prod_model_name = bench.best_model_name
-        if not prod_model_name:
-            prod_model_name = exp_cfg.models_enabled[0] if exp_cfg.models_enabled else "lightgbm"
+        prod_model_name = self._production_model_name(exp_cfg)
 
         # Create and configure model
         model = self.model_registry.create(prod_model_name)
@@ -5441,124 +5614,11 @@ class MLForecastLabApp:
         is_neural = model.is_neural
         seq_kwargs = {}
         if is_neural:
-            from ml_forecast_lab.features import (
-                create_sliding_windows, compute_known_future_features,
+            windows = await self._build_training_windows(
+                exp_cfg, combined, missing_report,
             )
-            raw_cov_cols = neural_covariate_columns(combined.columns)
-            window_size = min(48, len(combined) // 3)
-            # Train with dense horizons (1, 2, ..., future_periods) so the
-            # multi-head output covers every forecast step directly — no
-            # interpolation or autoregression needed at inference time.
-            future_periods = getattr(exp_cfg, 'future_periods', 48)
-            horizon_steps = list(range(1, future_periods + 1))
-            if window_size >= 12:
-                # Extend each training window with future-known features at
-                # horizon positions. Without this, a multi-horizon neural
-                # head has only the past window to project from, and a
-                # single linear layer (NLinear / SparseTSF) cannot
-                # disambiguate "horizon h" from "absolute hour at h" because
-                # h corresponds to different absolute hours across windows
-                # ending at different times — the weights are forced into a
-                # phase-smeared compromise. LSTM/CNN hit the same wall via
-                # their pooled-context → linear head and tend to collapse
-                # to the unconditional mean. Tree models avoid the issue
-                # because their recursive inference path already passes
-                # future temporal/solar features per horizon row; this
-                # change brings the neural path to parity.
-                loc = await self._get_site_location()
-                solar_lat_lon = loc if loc is not None else None
-                include_sun_elevation = 'sun_elevation' in raw_cov_cols
-                include_clear_sky_ghi = 'clear_sky_ghi' in raw_cov_cols
-
-                # User-configured future-role covariates (e.g. Solcast PV
-                # forecast, met.no weather). The tree (recursive) inference
-                # path always saw these at horizon positions via
-                # ``future_cov_values``; the neural extended-window path
-                # historically did not, so neural backends were
-                # information-starved relative to tree backends in
-                # benchmarks. At training time the "future" positions are
-                # actually past timestamps we have ground-truth observations
-                # for — use the in-sample historical values from ``combined``.
-                # The matching inference-side call in _forecast_with_cached
-                # fetches the HA forecast attribute for real-future
-                # timestamps.
-                _win_rt = missing_report["window_frame"]
-                _lm_rt = missing_report["window_label_mask"].to_numpy()
-                future_cov_for_neural = _collect_train_future_covariates(
-                    _win_rt, exp_cfg
-                )
-                neural_future_cov_names = list(future_cov_for_neural)
-                if neural_future_cov_names:
-                    logger.info(
-                        f"  Neural future covariates (horizon-aware): "
-                        f"{neural_future_cov_names}"
-                    )
-
-                future_features_df = compute_known_future_features(
-                    _win_rt.index,
-                    add_temporal=True,
-                    country=getattr(exp_cfg, 'country', None),
-                    solar_lat_lon=solar_lat_lon,
-                    include_sun_elevation=include_sun_elevation,
-                    include_clear_sky_ghi=include_clear_sky_ghi,
-                    future_covariate_values=future_cov_for_neural or None,
-                )
-                # Windows over the complete-grid frame with a label mask:
-                # inputs are unbroken time spans (invented y cells flagged
-                # via the y_missing channel), and a window is a training
-                # sample only when every horizon label was measured.
-                seq_X, seq_y, channel_names, _kept_rt = create_sliding_windows(
-                    _win_rt, 'target', window_size=window_size,
-                    covariate_cols=raw_cov_cols if raw_cov_cols else None,
-                    add_temporal=True, horizon_steps=horizon_steps,
-                    future_features_df=future_features_df,
-                    label_mask=_lm_rt,
-                )
-                seq_kwargs['sequence_data'] = seq_X
-                # Cache the per-channel meaning so the forecast cycle can
-                # verify it's feeding the model channels in the SAME order
-                # they were trained on. Without this, a covariate fetch
-                # that silently re-orders (e.g. a transient empty cov_series
-                # at one tick, or a future build_features rearrangement)
-                # would make NLinear/DLinear/etc. predict from mis-labelled
-                # channels and produce nonsense (e.g. spurious early-morning
-                # peaks) with no error raised. Backend fit() methods accept
-                # **kwargs and silently ignore unknown keys, so passing
-                # channel_names through is harmless during training; it's
-                # only consumed by _forecast_with_cached. Matches what the
-                # benchmark-holdout path has done for two minor releases.
-                seq_kwargs['channel_names'] = channel_names
-                # Mark this cache as carrying an extended (past + future)
-                # window so _forecast_with_cached knows to rebuild the
-                # inference tensor the same way. Old caches that pre-date
-                # this flag take the legacy path (past window only). The
-                # split index lets inference know where the past window
-                # ends — it's the size we asked create_sliding_windows to
-                # use, before the future-position extension.
-                seq_kwargs['extended_window'] = True
-                seq_kwargs['past_window_size'] = window_size
-                # Absolute grid position of each window's first row, for
-                # phase-aware backends (cyclenet).
-                from ml_forecast_lab.features import grid_step_index
-                _steps_rt = grid_step_index(_win_rt.index, _kept_rt)
-                if _steps_rt is not None:
-                    seq_kwargs['window_step_index'] = _steps_rt
-                seq_kwargs['future_feature_cols'] = list(future_features_df.columns)
-                # Sub-list — just the columns that came from user
-                # covariates with role in (future, both). The
-                # deterministic columns (temporal, solar physics) can
-                # be recomputed at inference from the future_index
-                # alone; these need a HA history / forecast fetch.
-                if neural_future_cov_names:
-                    seq_kwargs['future_covariate_names'] = list(
-                        neural_future_cov_names
-                    )
-                logger.info(
-                    f"  Extended training windows: "
-                    f"{window_size} past + {len(horizon_steps)} future "
-                    f"= {seq_X.shape[1]} steps × {seq_X.shape[2]} channels, "
-                    f"future cols={list(future_features_df.columns)}"
-                )
+            if windows is not None:
+                seq_X, seq_y, _channel_names, seq_kwargs = windows
                 # v2.37 PF1-PF9 diagnostic — surfaces the exact knobs the
                 # neural backend will receive in fit(). When a user reports
                 # "the LSTM forecast is still flat after the v2.37 upgrade"

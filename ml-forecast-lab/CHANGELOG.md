@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.52.2
+
+### Added
+
+**Experiments can export a replay bundle that reproduces their data pipeline
+offline.** A report of wrong, flat or zero forecasts could only be
+investigated by reading code or rebuilding the case from synthetic data: the
+optional per-retrain debug dump recorded the training table after
+resampling, feature construction and missing-value handling had already
+run, so the stages most likely to be at fault could not be re-run. The
+Settings tab now has a **Download replay bundle** button. It runs the
+retrain data fetch, records every response from Home Assistant and the
+history cache along with the experiment settings and clock time, and saves
+them with the pipeline's output as a zip. Nothing is trained and the cache
+is not modified. The bundle contains the experiment's sensor history and the
+HA site coordinates — see DOCS.md, "Sending a replay bundle with a bug
+report". No model, benchmark or forecast behaviour changes.
+
 ## 2.52.1
 
 ### Fixed

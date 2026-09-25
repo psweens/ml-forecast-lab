@@ -136,6 +136,21 @@
         <div id="data-report-detail" style="display:none;margin-top:0.75rem;font-size:0.85rem;"></div>
     </div>
 
+    <!-- Replay bundle export (v2.52.2). Records what the training pipeline
+         fetches so a maintainer can re-run it offline; read-only. -->
+    <div class="settings-group">
+        <h3 class="settings-group-title">Replay Bundle
+            <span class="info-tip">?<span class="tip-text">Downloads a zip that lets the maintainer re-run this experiment's data pipeline exactly as it ran here: the sensor and covariate history it fetched, the cached history it read, your experiment settings, and what the pipeline produced from them. Nothing is trained and your data cache is not changed. Attach it to a bug report about wrong, flat or zero forecasts. <b>It contains this experiment's sensor history and your Home Assistant latitude/longitude</b> — check you are happy to share those before posting it publicly.</span></span>
+        </h3>
+        <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
+            <button type="button" class="btn btn-secondary" id="btn-replay-bundle"
+                    onclick="downloadReplayBundle('{{ experiment.name }}', this)">
+                Download replay bundle
+            </button>
+            <span id="replay-bundle-status" style="color:var(--text-secondary);font-size:0.85rem;"></span>
+        </div>
+    </div>
+
     <!-- Target -->
     <div class="settings-group">
         <h3 class="settings-group-title">Target
@@ -5909,6 +5924,39 @@ window.showTab = function(el) {
             setTimeout(function() { location.reload(); }, 1000);
         })
         .catch(function(err) { mlfl.toast('Failed to promote: ' + err, 'error'); });
+    };
+
+    // ======== Replay bundle export ========
+    window.downloadReplayBundle = function(expName, btn) {
+        var status = document.getElementById('replay-bundle-status');
+        btn.disabled = true;
+        if (status) status.textContent = 'Recording pipeline inputs…';
+        fetch(BASE + '/experiment/' + expName + '/replay-bundle', {method: 'POST'})
+        .then(function(r) {
+            if (!r.ok) {
+                return r.json().catch(function() { return {}; }).then(function(j) {
+                    throw new Error(j.error || j.detail || ('HTTP ' + r.status));
+                });
+            }
+            var cd = r.headers.get('Content-Disposition') || '';
+            var m = cd.match(/filename="([^"]+)"/);
+            var fname = m ? m[1] : ('mlfl-replay-' + expName + '.zip');
+            return r.blob().then(function(b) { return {blob: b, name: fname}; });
+        })
+        .then(function(res) {
+            var url = URL.createObjectURL(res.blob);
+            var a = document.createElement('a');
+            a.href = url; a.download = res.name;
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+            btn.disabled = false;
+            if (status) status.textContent = 'Saved ' + res.name + ' (' + Math.round(res.blob.size / 1024) + ' KB)';
+        })
+        .catch(function(err) {
+            btn.disabled = false;
+            if (status) status.textContent = '';
+            mlfl.toast('Replay bundle failed: ' + err.message, 'error');
+        });
     };
 
     // ======== Pre-flight data sanity report ========

@@ -53,7 +53,28 @@ When an experiment sets `debug_save_training_dumps: true`, each retrain writes a
 `training.parquet` (the exact combined frame that fed `fit()`), `sliding_window.npz` (neural
 tensors), and `forecast.parquet` (the immediate post-retrain forecast). This is the production
 training surface captured offline — built for the "synthetic tests pass but production fails"
-regression signature. There is no replay tool; examine the bundles directly.
+regression signature. It is captured *after* preprocessing, features and missingness resolution,
+so it cannot be replayed; use a replay bundle for that.
+
+### Replay bundles
+
+The Settings-tab **Download replay bundle** button (`POST /experiment/{name}/replay-bundle`)
+records every HA and history-cache response the training-frame pipeline receives, plus the full
+config and the capture instant, and stores the pipeline's output alongside. Replay it against the
+current tree:
+
+```bash
+cd ml-forecast-lab
+python -m ml_forecast_lab.replay path/to/mlfl-replay-<exp>-<ts>.zip          # grid → frame → windows
+python -m ml_forecast_lab.replay bundle.zip --until grid -v                  # stop early, show pipeline logs
+```
+
+It drives the production methods (`_fetch_and_preprocess(now=…)`, `_prepare_training_frame`,
+`_build_training_windows`) and reports per stage which columns/channels moved and from which
+timestamp. Exit 0 = identical, 1 = differs, 2 = could not run. Replay is strict: a request the
+bundle never recorded raises `UnrecordedCall` rather than returning empty data. Adding I/O to the
+fetch path therefore needs the recorder in `replay.py` extended in the same change. Forecast-time
+replay (future covariates, cached model) is not covered yet.
 
 ### Debugging journal
 
@@ -140,6 +161,7 @@ The CHANGELOG is **user-facing release notes for HA users, not a design record**
 | `solar_physics.py` | Deterministic sun-elevation / clear-sky-GHI features via pvlib |
 | `config.py` | `ExperimentCfg` / `CovariateCfg` dataclasses and YAML load/validation |
 | `debug_dump.py` | The per-retrain training/forecast bundle dumper described above |
+| `replay.py` | Replay bundles: record the pipeline's HA/cache inputs, re-run them offline and compare per stage |
 | `dev_branch.py` | Maintainer-only overlay for running a git branch inside the add-on — not a user feature |
 
 ### The data pipeline (order is load-bearing)

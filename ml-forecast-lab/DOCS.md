@@ -412,6 +412,18 @@ The app log is visible from the HA app page or via the Web UI's **Logs** tab. Ev
 * Suppress the daily archive by setting `MLFL_DAILY_LOG_KEEP=0` in the app environment (the size-rotated log keeps working).
 * Disk footprint is bounded — ~50 MB live + (typical INFO-level daily volume × 14 days).
 
+### Sending a replay bundle with a bug report
+
+When forecasts look wrong, flat or zero, the most useful thing to attach to a bug report is a **replay bundle**. On the experiment's **Settings** tab, under **Replay Bundle**, click **Download replay bundle**. The app runs the same data fetch a retrain would and saves a zip that lets the maintainer re-run your experiment's data pipeline on the current code and see exactly where its output differs from yours. It holds:
+
+* the sensor and covariate history the app fetched from Home Assistant, and the cached history it read from its database;
+* your experiment settings and the time the bundle was made;
+* the resampled data, the training table built from it, and (for neural models) a fingerprint of the training windows.
+
+Making a bundle trains nothing and does not change your data cache. It takes as long as a data sanity check.
+
+**Privacy:** the bundle contains this experiment's sensor history and your Home Assistant latitude and longitude, which the solar features need. Check you are happy to share both before attaching it to a public issue.
+
 ### Backing up trained models
 
 `/share/ml_forecast_lab/` contains the model cache, SQLite database, and forecast log. The HA **Backups** app already picks this up if you have backups configured for app data. To export by hand: download the directory through the Samba / SSH app.
