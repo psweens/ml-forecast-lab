@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.52.2
+
+### Fixed
+
+**Tree-model forecasts no longer fail when sun elevation is enabled without
+clear-sky irradiance.** An experiment with `include_sun_elevation: true` and
+`include_clear_sky_irradiance: false`, served by a non-neural backend such as
+LightGBM or XGBoost, raised `KeyError: 'clear_sky_ghi'` on every forecast
+tick, including the one straight after a retrain, so no forecast sensors
+were published. The recursive forecast's night gate — which feeds 0 forward
+as the next step's lag after a night step — looked up clear-sky irradiance
+unconditionally, even though only sun elevation had been computed. The gate
+now applies only when clear-sky irradiance is part of the experiment,
+matching how the model's lag features were built at training time.
+Elevation-only experiments forecast again; experiments with clear-sky
+irradiance enabled are unchanged.
+
 ## 2.52.1
 
 ### Fixed
