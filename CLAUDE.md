@@ -59,22 +59,32 @@ so it cannot be replayed; use a replay bundle for that.
 ### Replay bundles
 
 The Settings-tab **Download replay bundle** button (`POST /experiment/{name}/replay-bundle`)
-records every HA and history-cache response the training-frame pipeline receives, plus the full
-config and the capture instant, and stores the pipeline's output alongside. Replay it against the
-current tree:
+captures two stages on separate shadow apps, each recording every HA and history-database
+response it receives (writes are suppressed), plus the configs and the capture instant:
+the **training frame** (`_prepare_training_frame` → `_build_training_windows`) and the
+**forecast** (`_compute_cached_forecast` → `_conformal_bands`, using the production model
+saved from memory into the bundle). Replay it against the current tree:
 
 ```bash
 cd ml-forecast-lab
-python -m ml_forecast_lab.replay path/to/mlfl-replay-<exp>-<ts>.zip          # grid → frame → windows
-python -m ml_forecast_lab.replay bundle.zip --until grid -v                  # stop early, show pipeline logs
+python -m ml_forecast_lab.replay bundle.zip --trust-model      # grid → frame → windows → forecast
+python -m ml_forecast_lab.replay bundle.zip --until frame -v    # stop early, show pipeline logs
 ```
 
-It drives the production methods (`_fetch_and_preprocess(now=…)`, `_prepare_training_frame`,
-`_build_training_windows`) and reports per stage which columns/channels moved and from which
-timestamp. Exit 0 = identical, 1 = differs, 2 = could not run. Replay is strict: a request the
-bundle never recorded raises `UnrecordedCall` rather than returning empty data. Adding I/O to the
-fetch path therefore needs the recorder in `replay.py` extended in the same change. Forecast-time
-replay (future covariates, cached model) is not covered yet.
+It reports per stage which columns / window channels / forecast inputs moved and from where.
+Exit 0 = identical, 1 = differs, 2 = could not run. Things to know:
+- The forecast stage loads the bundled model with the backend's own loader (pickle for
+  several backends), so it only runs with `--trust-model`.
+- Same host fingerprint (machine, Python, library versions) → everything must be
+  bit-identical. Across hosts, tree/profile backends stay exact, torch backends get a
+  1e-4-relative tolerance and statsforecast differences are informational.
+- `forecast/report.json` → `model_roundtrip` and `manifest.json` → `forecast.disk` say
+  whether the saved model reproduces the live one and whether disk matched memory — check
+  them first for "changed after restart" reports.
+- Replay is strict: a request the bundle never recorded raises `UnrecordedCall`. Every miss
+  is logged even where the pipeline swallows the exception, and exits 2. Adding I/O to the
+  fetch or forecast path therefore needs the recorders in `replay.py` extended in the same
+  change (`api_call` is allow-listed to `weather.get_forecasts` only).
 
 ### Debugging journal
 

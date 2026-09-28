@@ -414,15 +414,18 @@ The app log is visible from the HA app page or via the Web UI's **Logs** tab. Ev
 
 ### Sending a replay bundle with a bug report
 
-When forecasts look wrong, flat or zero, the most useful thing to attach to a bug report is a **replay bundle**. On the experiment's **Settings** tab, under **Replay Bundle**, click **Download replay bundle**. The app runs the same data fetch a retrain would and saves a zip that lets the maintainer re-run your experiment's data pipeline on the current code and see exactly where its output differs from yours. It holds:
+When forecasts look wrong, flat or zero, the most useful thing to attach to a bug report is a **replay bundle**. On the experiment's **Settings** tab, under **Replay Bundle**, click **Download replay bundle**. The app runs the same data fetch a retrain would, then the forecast your production model would publish, and saves a zip that lets the maintainer re-run both on the current code and see exactly where the result differs from yours. It holds:
 
 * the sensor and covariate history the app fetched from Home Assistant, and the cached history it read from its database;
+* the future values the forecast read — Solcast or other forecast attributes, and weather forecasts from `weather.get_forecasts`;
+* the forecast-accuracy history the confidence band is calibrated from;
 * your experiment settings and the time the bundle was made;
-* the resampled data, the training table built from it, and (for neural models) a fingerprint of the training windows.
+* the trained production model;
+* what the app produced: the resampled data, the training table, a fingerprint of the training windows (neural models), and the forecast with its band.
 
-Making a bundle trains nothing and does not change your data cache. It takes as long as a data sanity check.
+Making a bundle trains nothing, publishes nothing and does not change your data or models. It takes a few seconds longer than a data sanity check. The bundle also records whether the saved model gives the same forecast as the running one, and whether it matches the copy the app would load after a restart — both are common causes of "the forecast changed after I restarted".
 
-**Privacy:** the bundle contains this experiment's sensor history and your Home Assistant latitude and longitude, which the solar features need. Check you are happy to share both before attaching it to a public issue.
+**Privacy:** the bundle contains this experiment's sensor history, the forecasts it read, the trained model (for some model types this includes recent sensor values) and your Home Assistant latitude and longitude, which the solar features need. Check you are happy to share these before attaching it to a public issue.
 
 ### Backing up trained models
 
