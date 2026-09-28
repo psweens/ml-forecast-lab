@@ -19,7 +19,8 @@ that the saved model reproduces the one in memory and matches the copy a
 restart would load. Nothing is trained, published or written. The bundle
 contains the experiment's sensor history, the model and the HA site
 coordinates — see DOCS.md, "Sending a replay bundle with a bug report". No
-model, benchmark or forecast behaviour changes.
+model, benchmark or forecast behaviour changes. Design and verification:
+[docs/investigations/2026-09-replay-bundles.md](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-09-replay-bundles.md).
 
 ## 2.52.1
 

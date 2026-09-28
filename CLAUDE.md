@@ -74,7 +74,8 @@ python -m ml_forecast_lab.replay bundle.zip --until frame -v    # stop early, sh
 It reports per stage which columns / window channels / forecast inputs moved and from where.
 Exit 0 = identical, 1 = differs, 2 = could not run. Things to know:
 - The forecast stage loads the bundled model with the backend's own loader (pickle for
-  several backends), so it only runs with `--trust-model`.
+  several backends), so it only runs with `--trust-model` — for a bundle from a public issue
+  that means running a stranger's code; do it in a throwaway container or VM.
 - Same host fingerprint (machine, Python, library versions) → everything must be
   bit-identical. Across hosts, tree/profile backends stay exact, torch backends get a
   1e-4-relative tolerance and statsforecast differences are informational.
@@ -84,7 +85,8 @@ Exit 0 = identical, 1 = differs, 2 = could not run. Things to know:
 - Replay is strict: a request the bundle never recorded raises `UnrecordedCall`. Every miss
   is logged even where the pipeline swallows the exception, and exits 2. Adding I/O to the
   fetch or forecast path therefore needs the recorders in `replay.py` extended in the same
-  change (`api_call` is allow-listed to `weather.get_forecasts` only).
+  change (`api_call` is allow-listed to `weather.get_forecasts` only). Design, comparison
+  policy and the traps (lossless codecs, swallowed misses): `docs/investigations/2026-09-replay-bundles.md`.
 
 ### Debugging journal
 

@@ -49,6 +49,10 @@ def _rows(days, cadence_min=15, value=lambda i: i % 37 + 1.0, attrs=None):
                        freq=f"{cadence_min}min", tz="UTC")
     out = []
     for i, t in enumerate(ts):
+        # Recorder timestamps carry microseconds; every 5th lands on a whole
+        # second, as ~1 row in a million does on a real sensor. A cache table
+        # mixing both shapes is what broke an ISO-string codec.
+        t = t + pd.Timedelta(microseconds=0 if i % 5 == 0 else (i * 7919) % 999_983)
         r = {"last_changed": t.isoformat(), "state": f"{value(i):.4f}"}
         if attrs is not None:
             r["state"] = "cloudy"
@@ -101,6 +105,8 @@ class _StubHA:
 
     async def set_state(self, entity_id, state, attrs=None):
         self.set_calls.append(entity_id)
+        self.published = getattr(self, "published", {})
+        self.published[entity_id] = (state, attrs or {})
         return True
 
 
@@ -137,10 +143,12 @@ def _seed_residuals(app, exp):
     db = app.history_db
     cache = app._cached_models[exp.name]
     table = db.safe_table_name(exp.target_entity)
-    act = db.get_history(table).set_index("ds")["y"]
+    raw = db.get_history(table).set_index("ds")["y"]
+    # Bucketed onto the interval grid, as the conformal query's actuals are.
+    act = raw.groupby(raw.index.floor("30min")).mean()
     rng = np.random.default_rng(3)
     issue_times = [t for t in act.index
-                   if t.minute in (0, 30) and t < pd.Timestamp(NOW).tz_localize(None)
+                   if t < pd.Timestamp(NOW).tz_localize(None)
                    - pd.Timedelta(hours=2)][-60:]
     for t in issue_times:
         targets = [t + pd.Timedelta(minutes=30), t + pd.Timedelta(minutes=60)]
@@ -238,6 +246,8 @@ class TestForecastRoundTrip:
             report["future_covariates"])
         calls = _zip_json(payload, "forecast/calls.json")
         assert any('"api_call"' in c["key"] for c in calls)
+        assert report["model_roundtrip"]["status"] == "equal", report["model_roundtrip"]
+        assert report["bands"] is not None
 
         res = _replay(_write(tmp_path, payload))
         assert res.matches, res.render()
@@ -412,14 +422,203 @@ class TestConformalCodec:
 
 class TestComputePublishSplit:
     def test_what_is_published_is_what_is_computed(self, setup):
-        app, exp, _ = setup("lightgbm", seed=False)
-        app.published.clear()
+        """Replay compares _compute_cached_forecast + _conformal_bands; this
+        pins that HA receives exactly those values. log_transform makes the
+        raw output differ from the published one, so publishing the wrong
+        array cannot pass."""
+        app, exp, ha = setup("lightgbm", log_transform=True)
+        del app._publish_forecast_sensors          # the real publisher
+        cache = app._cached_models[exp.name]
+        run = asyncio.run(replay._run_forecast(app, cache, NOW))
+        fc, bands = run["fc"], run["bands"]
+        assert fc.status == "ok" and bands is not None
+        assert not np.allclose(fc.y_pred, fc.y_pred_raw)
+
+        ha.published = {}
         asyncio.run(app._forecast_with_cached(exp.name, now=NOW))
-        (pub,) = app.published
-        fc = asyncio.run(app._compute_cached_forecast(
-            app._cached_models[exp.name], now=NOW))
-        assert fc.status == "ok"
-        assert np.array_equal(pub["y_pred"], fc.y_pred)
-        assert pub["ds_future"].equals(fc.ds_future)
-        assert pub["model_name"] == fc.model_name == "lightgbm"
-        assert pub["last_trained_iso"] == fc.last_trained.isoformat()
+        base = f"sensor.{exp.publish_prefix}{exp.publish_name or exp.name}"
+
+        def values(suffix):
+            return [p["value"] for p in ha.published[base + suffix][1]["forecast"]]
+
+        pct = int(round(bands.level * 100))
+        assert values("_forecast") == [round(float(v), 4) for v in fc.y_pred]
+        assert values(f"_upper_{pct}") == [round(float(v), 4) for v in bands.upper]
+        assert values(f"_lower_{pct}") == [round(float(v), 4) for v in bands.lower]
+
+
+# ---- review findings (v2.52.2) ----
+
+class TestHistoryCodec:
+    def test_mixed_timestamp_precision_round_trips(self, tmp_path):
+        db = HistoryDB(str(tmp_path / "c.db"))
+        table = db.safe_table_name("sensor.x")
+        ds = pd.to_datetime(["2026-09-21 11:00:03.123456", "2026-09-21 11:05:00",
+                             "2026-09-21 11:10:07.654321"], format="ISO8601")
+        db.store_history(table, pd.DataFrame({"ds": ds, "value": [1.0, None, 3.0]}))
+        live = db.get_history(table)
+        rec = replay.RecordingHistoryDB(db, replay._CallLog()).get_history(table)
+        pd.testing.assert_frame_equal(rec, live)
+
+    def test_format_1_iso_rows_still_decode(self):
+        payload = {"rows": [["2026-09-21T11:00:03.123456", 1.0],
+                            ["2026-09-21T11:05:00", 2.0]], "y_dtype": "float64"}
+        df = replay._rows_to_history_frame(payload)
+        assert list(df["ds"]) == [pd.Timestamp("2026-09-21 11:00:03.123456"),
+                                  pd.Timestamp("2026-09-21 11:05:00")]
+
+
+class TestRecordedErrors:
+    @pytest.mark.parametrize("exc", [OSError("disk I/O error"), KeyError("x"),
+                                     type("OperationalError", (Exception,), {})("locked")])
+    def test_replayed_error_renders_like_the_original(self, exc):
+        log = replay._CallLog()
+        log.add("db", "k", error=exc)
+        q = replay._CallQueue(json.loads(json.dumps(log.calls)))
+        with pytest.raises(Exception) as got:
+            q.pop("db", "k")
+        assert f"{type(got.value).__name__}: {got.value}" == f"{type(exc).__name__}: {exc}"
+        if type(exc).__module__ == "builtins":
+            assert isinstance(got.value, type(exc))
+
+    def test_a_failure_at_capture_replays_identically(self, setup, tmp_path):
+        import sqlite3
+        app, exp, _ = setup("lightgbm")
+
+        def locked(*a, **kw):
+            raise sqlite3.OperationalError("database is locked")
+        app.history_db.get_conformal_quantiles = locked
+        payload = _capture(app, exp)
+        report = _zip_json(payload, "forecast/report.json")
+        assert report["bands_error"] == "OperationalError: database is locked"
+        res = _replay(_write(tmp_path, payload))
+        assert res.matches, res.render()
+
+
+class TestHistoryTrim:
+    def test_rows_older_than_the_window_are_not_bundled(self, setup, tmp_path):
+        app, exp, _ = setup("lightgbm")
+        table = app.history_db.safe_table_name(exp.target_entity)
+        old = pd.date_range(pd.Timestamp(NOW).tz_localize(None) - pd.Timedelta(days=40),
+                            periods=48, freq="30min")
+        app.history_db.store_history(table, pd.DataFrame({"ds": old, "value": 9.0}))
+        payload = _capture(app, exp)
+        floor = (pd.Timestamp(NOW) - pd.Timedelta(days=exp.days_history + 1)).tz_localize(None)
+        bundle = replay._Bundle(_write(tmp_path, payload))
+        for name in ("calls.json", "forecast/calls.json"):
+            for c in bundle.calls(name):
+                if c["key"].startswith('["get_history"') and c["target"] == "db":
+                    df = replay._rows_to_history_frame(c["response"])
+                    assert df.empty or df["ds"].min() >= floor, name
+        assert _replay(bundle._files and _write(tmp_path, payload, "b2.zip")).matches
+
+
+class TestCrossHostPolicy:
+    def test_policy_by_backend_family(self):
+        assert replay._comparison_policy("nlinear", same_host=True) == "exact"
+        assert replay._comparison_policy("lightgbm", same_host=False) == "exact"
+        assert replay._comparison_policy("nlinear", same_host=False) == "relative"
+        assert replay._comparison_policy("arima", same_host=False) == "informational"
+
+    def test_tolerance_is_scaled_by_the_raw_output_when_clamped_to_zero(self):
+        exp = {"y_pred": np.zeros(4, np.float32),
+               "model_output": np.array([-3.0, -1.0, 5.0, 2.0], np.float32)}
+        tol = replay._array_tolerance("relative", exp, "y_pred")
+        assert tol == pytest.approx(replay._NEURAL_REL_TOL * 5.0)
+        assert replay._array_tolerance("exact", exp, "y_pred") == 0.0
+
+    def test_cpu_identity_is_part_of_the_host(self):
+        a = replay._host_fingerprint()
+        b = json.loads(json.dumps(a))
+        assert replay._same_host(a, b)
+        b["cpu"]["model"] = "some other CPU"
+        assert not replay._same_host(a, b)
+
+    def _perturbed(self, payload, tmp_path, scale, other_host, name):
+        d = _extract(payload, tmp_path, name)
+        if other_host:
+            m = json.loads((d / "manifest.json").read_text())
+            m["host"]["machine"] = "elsewhere"
+            (d / "manifest.json").write_text(json.dumps(m))
+        parts = replay._npz_to_parts((d / "forecast/expected.npz").read_bytes())
+        y = parts["y_pred"].astype(np.float64)
+        parts["y_pred"] = (y + scale * max(1.0, float(np.abs(y).max()))).astype(np.float32)
+        (d / "forecast/expected.npz").write_bytes(replay._arrays_to_npz(parts))
+        return _replay(d)
+
+    def test_neural_across_hosts_tolerates_drift_but_not_change(self, setup, tmp_path):
+        app, exp, _ = setup("nlinear")
+        payload = _capture(app, exp)
+        small = self._perturbed(payload, tmp_path, 1e-6, True, "small")
+        assert small.stages["forecast"] == [], small.render()
+        assert any("different host" in n for n in small.notes)
+        large = self._perturbed(payload, tmp_path, 1e-2, True, "large")
+        assert any(d.startswith("forecast.y_pred") for d in large.stages["forecast"])
+
+    def test_same_host_rejects_one_ulp(self, setup, tmp_path):
+        app, exp, _ = setup("lightgbm")
+        d = _extract(_capture(app, exp), tmp_path)
+        parts = replay._npz_to_parts((d / "forecast/expected.npz").read_bytes())
+        parts["y_pred"] = parts["y_pred"].copy()
+        parts["y_pred"][0] = np.nextafter(parts["y_pred"][0], np.float32(np.inf))
+        (d / "forecast/expected.npz").write_bytes(replay._arrays_to_npz(parts))
+        res = _replay(d)
+        assert any(x.startswith("forecast.y_pred") for x in res.stages["forecast"])
+
+
+class TestBundleSafety:
+    @pytest.mark.parametrize("name", ["../escape.bin", "/etc/escape.bin",
+                                      "a/../../escape.bin", "a\\..\\escape.bin"])
+    def test_escaping_entry_names_are_refused(self, tmp_path, name):
+        with pytest.raises(ValueError):
+            replay._safe_member_path(tmp_path.resolve(), name)
+
+    def test_zip_slip_bundle_is_refused(self, setup, tmp_path):
+        app, exp, _ = setup("lightgbm")
+        payload = _capture(app, exp)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(payload)) as src, \
+                zipfile.ZipFile(buf, "w") as dst:
+            for n in src.namelist():
+                dst.writestr(n, src.read(n))
+            dst.writestr("forecast/model/../../../escaped.txt", b"x")
+        with pytest.raises(ValueError):
+            _replay(_write(tmp_path, buf.getvalue(), "slip.zip"))
+        assert not list(tmp_path.parent.glob("escaped.txt"))
+
+    def test_capture_never_saves_the_live_model_object(self, setup, monkeypatch):
+        app, exp, _ = setup("lightgbm")
+        live = app._cached_models[exp.name]["model"]
+        saved_from = []
+        real = LightGBMModel.save
+
+        def spy(self, path):
+            saved_from.append(id(self))
+            return real(self, path)
+        monkeypatch.setattr(LightGBMModel, "save", spy)
+        _capture(app, exp)
+        assert saved_from and id(live) not in saved_from
+
+
+class TestDiskCheck:
+    def test_stale_model_on_disk_is_reported(self, setup, tmp_path):
+        app, exp, _ = setup("lightgbm")
+        meta_file = MLForecastLabApp._cached_model_dir(exp.name) / "cache_meta.json"
+        meta = json.loads(meta_file.read_text())
+        meta["model_version"] = "2020-01-01T00:00:00Z"
+        meta_file.write_text(json.dumps(meta))
+        payload = _capture(app, exp)
+        disk = _zip_json(payload, "manifest.json")["forecast"]["disk"]
+        assert disk["consistent"] is False and disk["mismatched_fields"] == ["model_version"]
+        res = _replay(_write(tmp_path, payload))
+        assert any("restart would have served a different model" in n for n in res.notes)
+
+    def test_disk_is_checked_even_when_the_save_fails(self, setup, monkeypatch):
+        app, exp, _ = setup("lightgbm")
+
+        def broken(self, path):
+            raise OSError("no space left on device")
+        monkeypatch.setattr(LightGBMModel, "save", broken)
+        fsum = _zip_json(_capture(app, exp), "manifest.json")["forecast"]
+        assert fsum["status"] == "model_save_failed"
+        assert fsum["disk"]["consistent"] is True

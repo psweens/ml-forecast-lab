@@ -76,7 +76,7 @@ import platform
 import sys
 import tempfile
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -177,12 +177,21 @@ def _jsonable(obj: Any) -> Any:
 
 
 def _history_frame_to_rows(df: pd.DataFrame) -> dict:
+    # Timestamps travel as integer epoch nanoseconds: an ISO string drops
+    # ".000000" on whole-second rows, and a table mixing both shapes cannot
+    # be parsed back with one inferred format.
     if df is None or df.empty:
         return {"rows": []}
+    ds = pd.to_datetime(df["ds"])
+    tz = str(ds.dt.tz) if ds.dt.tz is not None else None
+    if tz:
+        ds = ds.dt.tz_convert("UTC").dt.tz_localize(None)
     y = [None if (isinstance(v, float) and np.isnan(v)) else _jsonable(v)
          for v in df["y"]]
     return {
-        "rows": [[_iso(ds), v] for ds, v in zip(df["ds"], y)],
+        "ds_encoding": "ns",
+        "ds_tz": tz,
+        "rows": [[int(t), v] for t, v in zip(ds.astype("int64"), y)],
         "y_dtype": str(df["y"].dtype),
     }
 
@@ -194,7 +203,12 @@ def _rows_to_history_frame(payload: dict) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=["ds", "y"])
     df = pd.DataFrame(rows, columns=["ds", "value"])
-    df["ds"] = pd.to_datetime(df["ds"])
+    if payload.get("ds_encoding") == "ns":
+        df["ds"] = pd.to_datetime(df["ds"].astype("int64"), unit="ns")
+        if payload.get("ds_tz"):
+            df["ds"] = df["ds"].dt.tz_localize("UTC").dt.tz_convert(payload["ds_tz"])
+    else:  # format-1 bundles: ISO strings, with or without a fraction
+        df["ds"] = pd.to_datetime(df["ds"], format="ISO8601")
     df = df.rename(columns={"value": "y"})
     if payload.get("y_dtype"):
         df["y"] = df["y"].astype(payload["y_dtype"])
@@ -236,10 +250,11 @@ class _CallLog:
         self.misses: list[str] = []
 
     def add(self, target: str, key: str, response: Any = None,
-            error: Optional[str] = None) -> None:
+            error: Optional[BaseException] = None) -> None:
         entry = {"target": target, "key": key}
         if error is not None:
-            entry["error"] = error
+            entry["error_type"] = type(error).__name__
+            entry["error"] = str(error)
         else:
             entry["response"] = response
         self.calls.append(entry)
@@ -265,7 +280,7 @@ class RecordingHA:
         try:
             resp = await call()
         except Exception as e:
-            self._log.add("ha", key, error=f"{type(e).__name__}: {e}")
+            self._log.add("ha", key, error=e)
             raise
         resp = _jsonable(resp)
         self._log.add("ha", key, resp)
@@ -288,7 +303,7 @@ class RecordingHA:
         try:
             full = await self._inner.get_config()
         except Exception as e:
-            self._log.add("ha", key, error=f"{type(e).__name__}: {e}")
+            self._log.add("ha", key, error=e)
             raise
         # The captured run sees the same trimmed dict replay will serve.
         resp = {k: _jsonable(full.get(k)) for k in _HA_CONFIG_KEYS if k in full}
@@ -320,17 +335,33 @@ class RecordingHistoryDB:
     decoded from their recorded form, exactly as replay will serve them.
     """
 
-    def __init__(self, inner, log: _CallLog):
+    def __init__(self, inner, log: _CallLog, floor: Optional[datetime] = None):
         self._inner = inner
         self._log = log
+        # Rows older than this are dropped before recording: the tables are
+        # keyed by entity, so they can hold another experiment's longer
+        # history, and every consumer filters to ds >= start anyway.
+        self._floor = None
+        if floor is not None:
+            ts = pd.Timestamp(floor)
+            ts = ts.tz_convert("UTC") if ts.tzinfo is not None else ts
+            self._floor = ts.tz_localize(None)  # the cache stores naive UTC
 
     def safe_table_name(self, entity_id: str) -> str:
         # Pure function of the entity id: passed through, not recorded.
         return self._inner.safe_table_name(entity_id)
 
     def get_history(self, table_name: str) -> pd.DataFrame:
-        payload = _history_frame_to_rows(self._inner.get_history(table_name))
-        self._log.add("db", _key("get_history", table_name), payload)
+        key = _key("get_history", table_name)
+        try:
+            df = self._inner.get_history(table_name)
+        except Exception as e:
+            self._log.add("db", key, error=e)
+            raise
+        if self._floor is not None and not df.empty:
+            df = df[pd.to_datetime(df["ds"]) >= self._floor].reset_index(drop=True)
+        payload = _history_frame_to_rows(df)
+        self._log.add("db", key, payload)
         return _rows_to_history_frame(payload)
 
     def get_conformal_quantiles(self, *args, **kwargs) -> dict:
@@ -338,7 +369,7 @@ class RecordingHistoryDB:
         try:
             resp = self._inner.get_conformal_quantiles(*args, **kwargs)
         except Exception as e:
-            self._log.add("db", key, error=f"{type(e).__name__}: {e}")
+            self._log.add("db", key, error=e)
             raise
         payload = _encode_conformal(resp)
         self._log.add("db", key, payload)
@@ -361,6 +392,30 @@ class RecordingHistoryDB:
 # Replay side
 # ---------------------------------------------------------------------------
 
+def _rebuild_error(entry: dict) -> BaseException:
+    """The recorded exception, with the same class name and ``str()``.
+
+    The pipeline records failures as ``f"{type(e).__name__}: {e}"``
+    (``fetch_error``, ``bands_error``), so a replayed failure must render
+    identically. Builtin types keep their class, so ``except`` clauses still
+    match; others become a same-named RuntimeError subclass.
+    """
+    import builtins
+
+    name = entry.get("error_type")
+    msg = entry.get("error", "")
+    if name is None:  # format 1 stored "Type: message"
+        name, _, msg = str(msg).partition(": ")
+    name = name or "RecordedError"
+    base = getattr(builtins, name, None)
+    if not (isinstance(base, type) and issubclass(base, Exception)):
+        base = RuntimeError
+    try:
+        return type(name, (base,), {"__str__": lambda self: msg})(msg)
+    except Exception:
+        return type(name, (RuntimeError,), {"__str__": lambda self: msg})(msg)
+
+
 class _CallQueue:
     def __init__(self, calls: list[dict]):
         self._q: dict[tuple, list[dict]] = {}
@@ -375,7 +430,7 @@ class _CallQueue:
             raise UnrecordedCall(f"{target} request not in bundle: {key}")
         entry = q.pop(0)
         if "error" in entry:
-            raise RuntimeError(f"recorded failure: {entry['error']}")
+            raise _rebuild_error(entry)
         return entry["response"]
 
     def miss(self, what: str) -> None:
@@ -661,8 +716,44 @@ def _same_host(a: Optional[dict], b: Optional[dict]) -> bool:
         return False
     if any(a.get(k) != b.get(k) for k in ("machine", "python", "versions")):
         return False
-    ta, tb = a.get("torch_threads"), b.get("torch_threads")
-    return ta is None or tb is None or ta == tb
+    ca, cb = a.get("cpu") or {}, b.get("cpu") or {}
+    for k in ("model", "numpy_features"):
+        if ca.get(k) != cb.get(k):
+            return False
+    for x, y in ((a.get("torch_threads"), b.get("torch_threads")),
+                 (ca.get("torch_capability"), cb.get("torch_capability"))):
+        if x is not None and y is not None and x != y:
+            return False
+    return True
+
+
+def _cpu_identity() -> dict:
+    """What decides which SIMD kernels numpy and torch dispatch to: the same
+    image on a different CPU can differ in the last bits."""
+    info: dict = {"model": None, "numpy_features": None, "torch_capability": None}
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                k, _, v = line.partition(":")
+                if k.strip() in ("model name", "CPU part", "Model"):
+                    info["model"] = v.strip()
+                    break
+    except OSError:
+        info["model"] = platform.processor() or None
+    for mod in ("numpy.core._multiarray_umath", "numpy._core._multiarray_umath"):
+        try:
+            feats = __import__(mod, fromlist=["__cpu_features__"]).__cpu_features__
+            info["numpy_features"] = sorted(k for k, on in feats.items() if on)
+            break
+        except Exception:
+            continue
+    if "torch" in sys.modules:
+        try:
+            info["torch_capability"] = str(
+                sys.modules["torch"].backends.cpu.get_cpu_capability())
+        except Exception:
+            pass
+    return info
 
 
 def _host_fingerprint() -> dict:
@@ -682,6 +773,7 @@ def _host_fingerprint() -> dict:
             threads = None
     return {
         "machine": platform.machine(),
+        "cpu": _cpu_identity(),
         "python": platform.python_version(),
         "versions": versions,
         "torch_threads": threads,
@@ -785,18 +877,17 @@ def _shadow_app(config, ha, db):
 # Capture
 # ---------------------------------------------------------------------------
 
-def _roundtrip_check(live_model, loaded_output, diag) -> dict:
-    """Does a copy of the live model reproduce what the reloaded one output?
+def _roundtrip_check(twin, loaded_output, diag) -> dict:
+    """Does the live model (``twin``: a deep copy of it) reproduce what the
+    model reloaded from the bundled bytes output?
 
-    Runs on a deep copy so the live model's state is never touched from this
+    A copy is used so the live model's state is never touched from this
     thread (RevIN writes per-forward statistics onto the module).
     """
+    if twin is None:
+        return {"status": "not_checked", "reason": "the live model could not be copied"}
     if loaded_output is None:
         return {"status": "not_checked", "reason": "no model output"}
-    try:
-        twin = copy.deepcopy(live_model)
-    except Exception as e:
-        return {"status": "not_checked", "reason": f"deepcopy failed: {e}"}
     try:
         if diag.get("path") == "tree":
             rows = np.asarray(diag["X_rows"], dtype=np.float32)
@@ -817,7 +908,7 @@ def _roundtrip_check(live_model, loaded_output, diag) -> dict:
     return {"status": "differs" if diffs else "equal", "diffs": diffs}
 
 
-def _disk_check(live_app, name: str, meta: dict, bundled_sha: Optional[str]) -> dict:
+def _disk_check(live_app, name: str, meta: dict) -> dict:
     """Compare the copy a restart would load with the model in memory."""
     model_dir = live_app._cached_model_dir(name)
     meta_file, model_bin = model_dir / "cache_meta.json", model_dir / "model.bin"
@@ -831,12 +922,13 @@ def _disk_check(live_app, name: str, meta: dict, bundled_sha: Optional[str]) -> 
     fields = ("schema_version", "model_name", "model_version", "trained_at",
               "feature_cols", "missing_indicators", "window_size", "channel_names")
     mismatched = [f for f in fields if disk.get(f) != meta.get(f)]
-    return {
-        "consistent": not mismatched,
-        "mismatched_fields": mismatched,
-        # Informational: some backends' save() is not byte-deterministic.
-        "model_bin_sha_equal": disk_sha == bundled_sha,
-    }
+    return {"consistent": not mismatched, "mismatched_fields": mismatched,
+            "model_bin_sha256": disk_sha}
+
+
+def _history_floor(now: datetime, exp_cfg) -> datetime:
+    # One day of slack below the window start the stage will request.
+    return now - timedelta(days=int(exp_cfg.days_history) + 1)
 
 
 async def _capture_forecast(live_app, name: str, now: datetime, files: dict) -> dict:
@@ -850,21 +942,35 @@ async def _capture_forecast(live_app, name: str, now: datetime, files: dict) -> 
         return {"status": "absent", "reason": "no cached production model"}
     meta = _cache_meta(cache)
     summary: dict = {"status": "captured", "model_meta": meta,
-                     "experiment_config": _jsonable(cache["exp_cfg"])}
+                     "experiment_config": _jsonable(cache["exp_cfg"]),
+                     "has_db": live_app.history_db is not None}
     files["forecast/meta.json"] = json.dumps(meta, indent=2).encode()
+    # Independent of the bundled model, so it runs even when saving or
+    # reloading fails — the case where disk most likely holds another model.
+    summary["disk"] = await asyncio.to_thread(_disk_check, live_app, name, meta)
 
+    # Everything below works on a private copy: save() and predict() on the
+    # live object from this thread could race a live tick (XGBoost's
+    # save_model sets and clears Booster attributes).
+    try:
+        twin = await asyncio.to_thread(copy.deepcopy, cache["model"])
+    except Exception as e:
+        summary["copy_error"] = f"{type(e).__name__}: {e}"
+        twin = None
     registry = getattr(live_app, "model_registry", None) or build_model_registry()
     with tempfile.TemporaryDirectory() as tmp:
         model_bin = Path(tmp) / "model.bin"
         try:
-            await asyncio.to_thread(cache["model"].save, str(model_bin))
+            await asyncio.to_thread((twin or cache["model"]).save, str(model_bin))
         except Exception as e:
             summary.update(status="model_save_failed", error=f"{type(e).__name__}: {e}")
             return summary
         for p in sorted(Path(tmp).rglob("*")):
             if p.is_file():
                 files[f"forecast/model/{p.relative_to(tmp).as_posix()}"] = p.read_bytes()
-        bundled_sha = hashlib.sha256(model_bin.read_bytes()).hexdigest()
+        summary["disk"]["model_bin_sha_equal"] = (
+            summary["disk"].pop("model_bin_sha256", None)
+            == hashlib.sha256(model_bin.read_bytes()).hexdigest())
         try:
             model = registry.create(meta["model_name"])
             await asyncio.to_thread(model.load, str(model_bin))
@@ -872,13 +978,12 @@ async def _capture_forecast(live_app, name: str, now: datetime, files: dict) -> 
             summary.update(status="model_load_failed", error=f"{type(e).__name__}: {e}")
             return summary
 
-    summary["disk"] = await asyncio.to_thread(
-        _disk_check, live_app, name, meta, bundled_sha)
     entry = _cache_entry_from_meta(meta, model, cache["exp_cfg"])
-
     log = _CallLog()
     ha = RecordingHA(live_app.ha_interface, log)
-    db = RecordingHistoryDB(live_app.history_db, log) if live_app.history_db else None
+    db = (RecordingHistoryDB(live_app.history_db, log,
+                             floor=_history_floor(now, cache["exp_cfg"]))
+          if live_app.history_db else None)
     shadow = _shadow_app(live_app.config, ha, db)
     shadow.model_registry = registry
     shadow._cached_models[name] = entry
@@ -894,7 +999,7 @@ async def _capture_forecast(live_app, name: str, now: datetime, files: dict) -> 
     files["forecast/expected.npz"] = _arrays_to_npz(_forecast_arrays(run))
     report = _forecast_summary(run)
     report["model_roundtrip"] = await asyncio.to_thread(
-        _roundtrip_check, cache["model"], (run["fc"].diag or {}).get("model_output"),
+        _roundtrip_check, twin, (run["fc"].diag or {}).get("model_output"),
         run["fc"].diag or {})
     files["forecast/report.json"] = json.dumps(report, indent=2).encode()
     summary.update(forecast=report, misses=log.misses)
@@ -924,13 +1029,17 @@ async def capture_bundle(live_app, exp_cfg, now: Optional[datetime] = None) -> b
     Each stage runs on its own app instance with its own call log, so the
     capture neither races the live forecast/retrain ticks nor writes to the
     user's database, and one stage's cache state cannot leak into the other.
+    The frame stage is serialised before the forecast stage starts, so the
+    two stages' working sets never coexist.
     """
     from ml_forecast_lab import __version__
 
     now = now or datetime.now(timezone.utc)
     log = _CallLog()
     ha = RecordingHA(live_app.ha_interface, log)
-    db = RecordingHistoryDB(live_app.history_db, log) if live_app.history_db else None
+    db = (RecordingHistoryDB(live_app.history_db, log,
+                             floor=_history_floor(now, exp_cfg))
+          if live_app.history_db else None)
     shadow = _shadow_app(live_app.config, ha, db)
 
     prod_model = live_app._production_model_name(exp_cfg)
@@ -944,6 +1053,22 @@ async def capture_bundle(live_app, exp_cfg, now: Optional[datetime] = None) -> b
 
     result = await _run_pipeline(shadow, exp_cfg, now, build_windows)
 
+    expected = {}
+    if result.get("grid") is not None:
+        expected["expected/grid.npz"] = _frame_to_npz(result["grid"])
+    if "frame" in result:
+        expected["expected/frame.npz"] = _frame_to_npz(result["frame"])
+        expected["expected/window_frame.npz"] = _frame_to_npz(
+            result["report"]["window_frame"])
+    report = {
+        "missingness": _report_summary(result["report"]) if "report" in result else None,
+        "windows": _window_fingerprint(result.get("windows")),
+    }
+    blobs: dict = {}
+    frame_calls = _store_calls(log.calls, blobs)
+    frame_misses = list(log.misses)
+    del result, shadow, log, ha, db
+
     files: dict = {}
     try:
         forecast = await _capture_forecast(live_app, exp_cfg.name, now, files)
@@ -953,6 +1078,8 @@ async def capture_bundle(live_app, exp_cfg, now: Optional[datetime] = None) -> b
         logger.warning(f"replay capture: forecast stage failed: {e}", exc_info=True)
         files = {}
         forecast = {"status": "capture_error", "error": f"{type(e).__name__}: {e}"}
+    forecast_calls = (_store_calls(files.pop("forecast/calls.json"), blobs)
+                      if "forecast/calls.json" in files else None)
 
     app_cfg = {
         f.name: _jsonable(getattr(live_app.config, f.name))
@@ -967,32 +1094,16 @@ async def capture_bundle(live_app, exp_cfg, now: Optional[datetime] = None) -> b
         "app_config": app_cfg,
         "production_model": prod_model,
         "windows_built": build_windows,
+        "has_db": live_app.history_db is not None,
         "host": _host_fingerprint(),
-        "capture_misses": log.misses,
+        "capture_misses": frame_misses,
         "forecast": {k: v for k, v in forecast.items()
                      if k not in ("forecast", "model_meta")},
-        "privacy": "Contains this experiment's sensor and covariate history, "
-                   "weather/solar forecasts it read, the trained model (which "
-                   "for some backends holds recent sensor values), and the HA "
-                   "site latitude/longitude.",
+        "privacy": "Contains this experiment's sensor and covariate history "
+                   "for its history window, weather/solar forecasts it read, "
+                   "the trained model (which for some backends holds recent "
+                   "sensor values), and the HA site latitude/longitude.",
     }
-
-    expected = {}
-    if result.get("grid") is not None:
-        expected["expected/grid.npz"] = _frame_to_npz(result["grid"])
-    if "frame" in result:
-        expected["expected/frame.npz"] = _frame_to_npz(result["frame"])
-        expected["expected/window_frame.npz"] = _frame_to_npz(
-            result["report"]["window_frame"])
-    report = {
-        "missingness": _report_summary(result["report"]) if "report" in result else None,
-        "windows": _window_fingerprint(result.get("windows")),
-    }
-
-    blobs: dict = {}
-    frame_calls = _store_calls(log.calls, blobs)
-    forecast_calls = (_store_calls(files.pop("forecast/calls.json"), blobs)
-                      if "forecast/calls.json" in files else None)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -1057,8 +1168,8 @@ def _load_config(app_config: dict, experiment_config: dict):
     return cfg, cfg.experiments[0]
 
 
-def _tolerance(model_name: str, same_host: bool, reference) -> Optional[float]:
-    """Absolute tolerance for forecast values; None = informational only.
+def _comparison_policy(model_name: str, same_host: bool) -> str:
+    """``exact``, ``relative`` or ``informational`` for forecast values.
 
     Same host fingerprint: everything must be bit-identical. Across hosts,
     tree and profile backends are order-fixed sums and comparisons and stay
@@ -1067,11 +1178,28 @@ def _tolerance(model_name: str, same_host: bool, reference) -> Optional[float]:
     time, so a cross-host difference there is not evidence of a bug.
     """
     if same_host or model_name in _EXACT_FAMILY:
-        return 0.0
+        return "exact"
     if model_name in _INFORMATIONAL_FAMILY:
-        return None
-    ref = np.asarray(reference, dtype=np.float64) if reference is not None else None
-    scale = float(np.nanmax(np.abs(ref))) if ref is not None and ref.size else 1.0
+        return "informational"
+    return "relative"
+
+
+def _array_tolerance(policy: str, expected: dict, key: str) -> float:
+    """Absolute tolerance for one compared array under ``policy``.
+
+    Scaled by that array's own magnitude and by the raw model output's, so
+    a forecast clamped to zero (night-time PV) or in log space still gets a
+    tolerance on the scale the model actually computed at.
+    """
+    if policy != "relative":
+        return 0.0
+    scale = 0.0
+    for k in (key, "model_output"):
+        a = expected.get(k)
+        if a is not None and np.asarray(a).size:
+            m = np.nanmax(np.abs(np.asarray(a, dtype=np.float64)))
+            if np.isfinite(m):
+                scale = max(scale, float(m))
     return _NEURAL_REL_TOL * max(scale, 1e-12)
 
 
@@ -1141,16 +1269,21 @@ async def _replay_forecast(bundle: _Bundle, manifest: dict, trust_model: bool,
 
     registry = build_model_registry()
     with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
         for name in bundle.names("forecast/model/"):
-            dest = Path(tmp) / name[len("forecast/model/"):]
+            dest = _safe_member_path(root, name[len("forecast/model/"):])
+            if dest is None:
+                continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(bundle.get(name))
         model = registry.create(meta["model_name"])
-        model.load(str(Path(tmp) / "model.bin"))
+        model.load(str(root / "model.bin"))
     entry = _cache_entry_from_meta(meta, model, fc_exp)
 
     queue = _CallQueue(bundle.calls("forecast/calls.json"))
-    has_db = any(c["target"] == "db" for c in bundle.json("forecast/calls.json"))
+    has_db = fsum.get("has_db")
+    if has_db is None:
+        has_db = any(c["target"] == "db" for c in bundle.json("forecast/calls.json"))
     app = _shadow_app(config, ReplayHA(queue), ReplayHistoryDB(queue) if has_db else None)
     app.model_registry = registry
     app._cached_models[fc_exp.name] = entry
@@ -1164,13 +1297,15 @@ async def _replay_forecast(bundle: _Bundle, manifest: dict, trust_model: bool,
     actual = _forecast_summary(run)
     act_arrays = _forecast_arrays(run)
     same_host = _same_host(manifest.get("host"), _host_fingerprint())
-    tol = _tolerance(meta["model_name"], same_host, exp_arrays.get("y_pred"))
+    policy = _comparison_policy(meta["model_name"], same_host)
     if not same_host:
         result.notes.append(
-            "forecast captured on a different host or library versions: "
-            + ("values compared exactly (order-fixed backend)" if tol == 0.0 else
-               "values compared informationally (statsforecast refits at predict)"
-               if tol is None else f"values compared within ±{tol:.3g}"))
+            "forecast captured on a different host, CPU or library versions: "
+            + {"exact": "values compared exactly (order-fixed backend)",
+               "informational": "value differences are informational "
+                                "(statsforecast refits at predict time)",
+               "relative": f"values compared within {_NEURAL_REL_TOL:g} of "
+                           f"their scale"}[policy])
 
     diffs: list[str] = []
     for k in ("status", "used_fresh_frame", "fetch_error", "path",
@@ -1187,8 +1322,9 @@ async def _replay_forecast(bundle: _Bundle, manifest: dict, trust_model: bool,
     value_diffs: list[str] = []
     for k in ("model_output", "y_pred_raw", "y_pred", "upper", "lower"):
         value_diffs += _compare_array(f"forecast.{k}", exp_arrays.get(k),
-                                      act_arrays.get(k), tol or 0.0)
-    if tol is None:
+                                      act_arrays.get(k),
+                                      _array_tolerance(policy, exp_arrays, k))
+    if policy == "informational":
         result.notes.extend(value_diffs)
     else:
         diffs += value_diffs
@@ -1206,6 +1342,25 @@ async def _replay_forecast(bundle: _Bundle, manifest: dict, trust_model: bool,
             "at capture, the model on disk did not match the one in memory "
             f"({disk.get('reason') or ', '.join(disk.get('mismatched_fields') or [])}) "
             "— a restart would have served a different model")
+
+
+def _safe_member_path(root: Path, rel: str) -> Optional[Path]:
+    """``root / rel`` if it stays inside ``root``; None for directory entries.
+
+    Bundle entry names come from whoever made the bundle: an absolute name
+    or one with ``..`` would otherwise write outside the temp directory.
+    """
+    from pathlib import PurePosixPath
+
+    if not rel or rel.endswith("/"):
+        return None
+    parts = PurePosixPath(rel)
+    if parts.is_absolute() or ".." in parts.parts or "\\" in rel:
+        raise ValueError(f"unsafe bundle entry {rel!r}")
+    dest = (root / parts).resolve()
+    if not dest.is_relative_to(root):
+        raise ValueError(f"unsafe bundle entry {rel!r}")
+    return dest
 
 
 def _input_diffs(exp_arrays: dict, act_arrays: dict, meta: dict,
@@ -1249,7 +1404,9 @@ async def replay_bundle(path, until: str = "forecast",
         raise ValueError(f"unsupported bundle format {manifest.get('format_version')}")
     config, exp_cfg = _load_config(manifest["app_config"], manifest["experiment_config"])
     queue = _CallQueue(bundle.calls("calls.json"))
-    has_db = any(c["target"] == "db" for c in bundle.json("calls.json"))
+    has_db = manifest.get("has_db")
+    if has_db is None:  # format 1
+        has_db = any(c["target"] == "db" for c in bundle.json("calls.json"))
     app = _shadow_app(config, ReplayHA(queue),
                       ReplayHistoryDB(queue) if has_db else None)
     now = pd.Timestamp(manifest["captured_at"]).to_pydatetime()
@@ -1323,9 +1480,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--until", choices=STAGES, default="forecast",
                     help="last stage to run (default: forecast)")
     ap.add_argument("--trust-model", action="store_true",
-                    help="load the bundled model and replay the forecast stage "
-                         "(the backend loader may unpickle it: only for bundles "
-                         "you trust)")
+                    help="load the bundled model and replay the forecast stage. "
+                         "The backend loader may unpickle it, which runs code "
+                         "from whoever made the bundle: for a bundle from a "
+                         "public issue, do this in a throwaway container or VM")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="show the pipeline's own log output")
     args = ap.parse_args(argv)
