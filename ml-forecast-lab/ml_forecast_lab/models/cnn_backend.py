@@ -17,7 +17,9 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
-from .base import ForecastModel, _build_activation, _resolve_sigmoid_scale, _RevIN
+from .base import (
+    ForecastModel, _build_activation, _resolve_sigmoid_scale, _RevIN, load_torch_checkpoint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -539,7 +541,7 @@ class CNNModel(ForecastModel):
 
     def load(self, path: str) -> None:
         """Load model state dict."""
-        data = torch.load(path, map_location="cpu")
+        data = load_torch_checkpoint(path)
         self.set_params(**data["params"])
         self._input_size = data.get("input_size")
         self._sequence_length = data.get("sequence_length")

@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.52.2
+
+### Fixed
+
+**A neural champion survives a restart instead of being retrained.** On
+PyTorch 2.6 and later, every restart logged "Failed to restore cached model
+… Weights only load failed" and retrained from scratch — always for
+`nbeats` and `nhits`, and for any other neural backend with `use_revin:
+false`. Those checkpoints carry numpy normalisation statistics, which
+PyTorch's new default loader refuses. Checkpoints now load
+with exactly those statistics allowed and nothing else. After updating, the
+cached champion is restored on start and forecasts resume from it at once;
+caches saved by earlier versions load unchanged, so nothing retrains.
+
+**An XGBoost champion forecasts after a restart.** The log reported the
+XGBoost model as restored, then every forecast tick failed with
+"object of type 'NoneType' has no len()" until the next scheduled retrain —
+up to a day without forecasts. Rolling back to an XGBoost generation failed
+the same way. XGBoost kept part of its model in a second file that the cache
+save never moved into place. The model is now saved as a single file, and
+caches written by earlier versions are recovered on load: the XGBoost
+champion restored when this update starts forecasts immediately.
+
+**XGBoost models whose trees found no split are saved again.** Saving such a
+model failed with "Object of type float32 is not JSON serializable", and
+disk kept the model from the retrain before — possibly a different backend,
+which the next restart then served without comment. The save is fixed, and
+restore now logs a warning whenever the model it loads is not the
+experiment's `production_model`. That is expected after rolling back to a
+different backend; otherwise it points at an earlier failed save. Details:
+[docs/investigations/2026-09-model-cache-roundtrip.md](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-09-model-cache-roundtrip.md).
+
 ## 2.52.1
 
 ### Fixed

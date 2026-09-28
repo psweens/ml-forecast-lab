@@ -28,6 +28,10 @@ except ImportError:
         ImportWarning
     )
 
+# Booster attribute that carries XGBoostModel's own metadata inside the
+# saved model file (see XGBoostModel.save).
+_METADATA_ATTR = "mlfl_metadata"
+
 
 class XGBoostModel(ForecastModel):
     """
@@ -280,11 +284,19 @@ class XGBoostModel(ForecastModel):
             )
         )
 
-        # Normalise feature importances to sum to 1
-        total_importance = sum(feature_importances.values())
+        # Normalise feature importances to sum to 1. Cast to plain float
+        # either way: xgboost reports np.float32, which json.dump rejects —
+        # v2.52.2: an all-zero set (every tree a single leaf) skipped the
+        # division and made save() raise, aborting the cache persist.
+        total_importance = float(sum(feature_importances.values()))
         if total_importance > 0:
             feature_importances = {
-                k: v / total_importance for k, v in feature_importances.items()
+                k: float(v) / total_importance
+                for k, v in feature_importances.items()
+            }
+        else:
+            feature_importances = {
+                k: float(v) for k, v in feature_importances.items()
             }
 
         self.training_metadata = {
@@ -400,6 +412,14 @@ class XGBoostModel(ForecastModel):
         """
         Save the trained model to disk using XGBoost native format.
 
+        Everything ``load`` needs is written into the single file at
+        *path*: the metadata (feature names, training metadata,
+        hyperparameters) rides inside the model as a booster attribute.
+        v2.52.2: it used to go to a ``path + ".metadata.json"`` sidecar,
+        which the cache persist's write-then-rename never carried along —
+        the restored champion then had no feature names and every
+        forecast tick raised until the next retrain.
+
         Parameters
         ----------
         path : str
@@ -416,10 +436,6 @@ class XGBoostModel(ForecastModel):
             raise RuntimeError("Cannot save unfitted model")
 
         try:
-            self.model.save_model(path)
-
-            # Also save metadata separately
-            metadata_path = path + ".metadata.json"
             metadata = {
                 "feature_names": self.feature_names_,
                 "training_metadata": {
@@ -431,9 +447,17 @@ class XGBoostModel(ForecastModel):
                 },
                 "hyperparameters": self.get_params(),
             }
-
-            with open(metadata_path, "w") as f:
-                json.dump(metadata, f, indent=2)
+            booster = self.model.get_booster()
+            booster.set_attr(**{_METADATA_ATTR: json.dumps(metadata)})
+            try:
+                # Explicit UBJSON rather than save_model(path): the format
+                # save_model picks follows the file extension, and the
+                # cache persist writes to "model.bin.tmp".
+                raw = booster.save_raw(raw_format="ubj")
+            finally:
+                booster.set_attr(**{_METADATA_ATTR: None})
+            with open(path, "wb") as f:
+                f.write(raw)
 
             logger.info(f"Model saved successfully to {path}")
 
@@ -444,6 +468,9 @@ class XGBoostModel(ForecastModel):
     def load(self, path: str) -> None:
         """
         Load a trained model from disk using XGBoost native format.
+
+        Reads the metadata embedded by ``save``; files written before
+        v2.52.2 fall back to the old ``path + ".metadata.json"`` sidecar.
 
         Parameters
         ----------
@@ -456,24 +483,44 @@ class XGBoostModel(ForecastModel):
             If read fails or file format is invalid.
         """
         try:
+            with open(path, "rb") as f:
+                raw = bytearray(f.read())
             self.model = xgb.XGBRegressor()
-            self.model.load_model(path)
+            self.model.load_model(raw)
+            booster = self.model.get_booster()
 
-            # Load metadata if available
-            metadata_path = path + ".metadata.json"
-            try:
-                with open(metadata_path, "r") as f:
-                    metadata = json.load(f)
+            metadata = None
+            embedded = booster.attr(_METADATA_ATTR)
+            if embedded is not None:
+                metadata = json.loads(embedded)
+                booster.set_attr(**{_METADATA_ATTR: None})
+            else:
+                metadata_path = path + ".metadata.json"
+                try:
+                    with open(metadata_path, "r") as f:
+                        metadata = json.load(f)
+                except FileNotFoundError:
+                    pass
 
+            if metadata is not None:
                 self.feature_names_ = metadata.get("feature_names")
                 self.training_metadata = metadata.get("training_metadata", {})
 
                 # Restore hyperparameters
                 hyperparams = metadata.get("hyperparameters", {})
                 self.set_params(**hyperparams)
-
-            except FileNotFoundError:
-                logger.warning(f"Metadata file not found at {metadata_path}")
+            else:
+                # A cache persisted before v2.52.2 lost its sidecar in the
+                # write-then-rename; the booster itself is intact. predict
+                # needs only the column count, which the booster records —
+                # the names are fit()'s own defaults for unnamed input.
+                n_features = booster.num_features()
+                self.feature_names_ = [f"feature_{i}" for i in range(n_features)]
+                self.training_metadata = {"num_features": n_features}
+                logger.warning(
+                    f"No metadata in {path} or beside it — recovered "
+                    f"{n_features} feature(s) from the booster"
+                )
 
             self._is_fitted = True
             logger.info(f"Model loaded successfully from {path}")

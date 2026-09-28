@@ -5900,10 +5900,6 @@ class MLForecastLabApp:
         if not self.config or not self.config.experiments:
             return
 
-        base_dir = Path("/data/ml_forecast_lab/models")
-        if not base_dir.exists():
-            return
-
         restored = 0
         for exp_cfg in self.config.experiments:
             if exp_cfg.mode != "production":
@@ -5933,6 +5929,23 @@ class MLForecastLabApp:
                 model_name = meta["model_name"]
                 model = self.model_registry.create(model_name)
                 model.load(str(model_bin))
+
+                # v2.52.2: disk holds whatever generation last persisted
+                # successfully, which is not necessarily the configured
+                # champion — a rollback to a different backend is one
+                # legitimate cause, a retrain whose save failed is another.
+                # Still served (rejecting would undo a rollback on every
+                # restart), but never silently.
+                configured = getattr(exp_cfg, "production_model", None)
+                if configured and configured != model_name:
+                    logger.warning(
+                        f"  Restored cached model for {exp_cfg.name} is "
+                        f"{model_name}, but production_model is {configured} "
+                        f"— serving {model_name} until the next scheduled "
+                        f"retrain trains {configured} (expected after a "
+                        f"rollback; otherwise the last retrain's save failed "
+                        f"— check earlier 'Failed to persist' warnings)"
+                    )
 
                 trained_at = datetime.fromisoformat(meta["trained_at"])
                 is_neural = meta.get("is_neural", False)

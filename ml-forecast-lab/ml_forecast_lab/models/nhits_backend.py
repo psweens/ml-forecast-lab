@@ -16,7 +16,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .base import ForecastModel, _build_activation, _resolve_sigmoid_scale
+from .base import (
+    ForecastModel, _build_activation, _resolve_sigmoid_scale, load_torch_checkpoint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -560,7 +562,7 @@ class NHiTSModel(ForecastModel):
 
     def load(self, path: str) -> None:
         """Load model state dict."""
-        data = torch.load(path, map_location="cpu")
+        data = load_torch_checkpoint(path)
         self.set_params(**data["params"])
         self._channel_mean = data.get("channel_mean")
         self._channel_std = data.get("channel_std")
