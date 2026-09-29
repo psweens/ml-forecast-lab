@@ -1,4 +1,4 @@
-"""Production model cache round trip (v2.52.2).
+"""Production model cache round trip (v2.52.3).
 
 ``_persist_cached_model`` writes the retrained champion to disk and
 ``_restore_cached_models`` / ``_rollback_cached_model`` read it back after a
@@ -304,7 +304,7 @@ class TestXGBoost:
         _assert_identical(published[0], published[1])
 
     def test_cache_written_before_the_fix_still_restores(self, tmp_db, cache_root):
-        """A cache persisted by v2.52.1 or earlier holds a bare booster:
+        """A cache persisted by v2.52.2 or earlier holds a bare booster:
         the sidecar was stranded at ``model.bin.tmp.metadata.json``. The
         booster is intact, so restore must serve it, not a model whose
         predict raises."""

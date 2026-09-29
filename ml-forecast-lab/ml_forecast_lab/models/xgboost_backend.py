@@ -286,7 +286,7 @@ class XGBoostModel(ForecastModel):
 
         # Normalise feature importances to sum to 1. Cast to plain float
         # either way: xgboost reports np.float32, which json.dump rejects —
-        # v2.52.2: an all-zero set (every tree a single leaf) skipped the
+        # v2.52.3: an all-zero set (every tree a single leaf) skipped the
         # division and made save() raise, aborting the cache persist.
         total_importance = float(sum(feature_importances.values()))
         if total_importance > 0:
@@ -415,7 +415,7 @@ class XGBoostModel(ForecastModel):
         Everything ``load`` needs is written into the single file at
         *path*: the metadata (feature names, training metadata,
         hyperparameters) rides inside the model as a booster attribute.
-        v2.52.2: it used to go to a ``path + ".metadata.json"`` sidecar,
+        v2.52.3: it used to go to a ``path + ".metadata.json"`` sidecar,
         which the cache persist's write-then-rename never carried along —
         the restored champion then had no feature names and every
         forecast tick raised until the next retrain.
@@ -470,7 +470,7 @@ class XGBoostModel(ForecastModel):
         Load a trained model from disk using XGBoost native format.
 
         Reads the metadata embedded by ``save``; files written before
-        v2.52.2 fall back to the old ``path + ".metadata.json"`` sidecar.
+        v2.52.3 fall back to the old ``path + ".metadata.json"`` sidecar.
 
         Parameters
         ----------
@@ -510,7 +510,7 @@ class XGBoostModel(ForecastModel):
                 hyperparams = metadata.get("hyperparameters", {})
                 self.set_params(**hyperparams)
             else:
-                # A cache persisted before v2.52.2 lost its sidecar in the
+                # A cache persisted before v2.52.3 lost its sidecar in the
                 # write-then-rename; the booster itself is intact. predict
                 # needs only the column count, which the booster records —
                 # the names are fit()'s own defaults for unnamed input.

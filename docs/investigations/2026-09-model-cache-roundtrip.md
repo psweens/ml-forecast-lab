@@ -1,6 +1,6 @@
-# Production model cache round trip (v2.52.2)
+# Production model cache round trip (v2.52.3)
 
-**Status:** Shipped in v2.52.2. Defect analysis, fix rationale and
+**Status:** Shipped in v2.52.3. Defect analysis, fix rationale and
 verification record behind that release's CHANGELOG entry.
 
 The pinning tests are in
@@ -19,7 +19,7 @@ python -m pytest tests/unit/test_cache_roundtrip.py -v   # ~12 s
 
 ## TL;DR
 
-| Defect (live before v2.52.2) | Observed | Fix |
+| Defect (live before v2.52.3) | Observed | Fix |
 | --- | --- | --- |
 | **A.** `XGBoostModel.save` wrote metadata to `path + ".metadata.json"`; the persist saves to `model.bin.tmp` and renames only that file | The sidecar was stranded at `model.bin.tmp.metadata.json`. `load` warned, left `feature_names_=None` and reported success, so the retrain was deferred and every tick raised `TypeError: object of type 'NoneType' has no len()`. `previous/` never held the sidecar | Metadata rides inside the model file as a booster attribute (`mlfl_metadata`), written as explicit UBJSON |
 | **A0.** All-zero XGBoost importances skipped normalisation and stayed `np.float32` | `json.dump` raised inside `save`; the persist aborted before its rename and disk kept the previous generation, possibly a different backend, which restore served silently | Importances are cast to `float`; restore warns when the loaded `model_name` differs from `production_model` |
@@ -41,7 +41,7 @@ and `model.bin`.
 extension, and the persist writes to `.tmp`. On xgboost 2.0.x that meant the
 deprecated binary format; on 2.1 it means UBJSON with a warning.
 
-**Legacy caches.** A cache persisted by v2.52.1 or earlier holds an intact
+**Legacy caches.** A cache persisted by v2.52.2 or earlier holds an intact
 booster without metadata. `load` falls back, in order, to:
 
 1. the embedded attribute;
@@ -103,7 +103,7 @@ saw B.
 
 ## Verification record
 
-The new suite was run against the v2.52.1 sources, with only the hard-coded
+The new suite was run against the pre-fix sources, with only the hard-coded
 `/data/ml_forecast_lab/models` gate removed from `_restore_cached_models`
 (it made every restore a no-op outside the container, masking the causes).
 Each failure matched its defect:
@@ -117,8 +117,9 @@ Each failure matched its defect:
   `cache_meta.json` (A0).
 - `lightgbm` and default `nlinear` (RevIN on) passed, as controls.
 
-That gate is now gone: each experiment already checks for its own files, so
-the gate was redundant.
+Since v2.52.2 that gate is derived from `_cached_model_dir(...).parent`, so
+monkeypatching `_cached_model_dir` alone redirects the whole cache and the
+suite needs no other patching.
 
 ## Open finding (not fixed here): XGBoost's default loss grows no splits
 

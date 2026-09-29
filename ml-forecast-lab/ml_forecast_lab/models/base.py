@@ -340,7 +340,7 @@ def _checkpoint_numpy_globals() -> list:
 def load_torch_checkpoint(path: str) -> Any:
     """``torch.load`` for a checkpoint written by a neural backend's ``save``.
 
-    v2.52.2: torch 2.6 flipped ``torch.load``'s default to
+    v2.52.3: torch 2.6 flipped ``torch.load``'s default to
     ``weights_only=True``, which refuses those numpy stats — so restoring
     such a cached neural champion failed and forced a retrain on every
     restart. Loads stay ``weights_only`` with
