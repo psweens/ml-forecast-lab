@@ -5249,9 +5249,14 @@ class MLForecastLabApp:
                     # steps push 0 into the buffer so downstream lag
                     # features stay in-distribution even when the
                     # model's raw prediction at a previous night step
-                    # was slightly positive.
+                    # was slightly positive. v2.52.2: keyed on the column,
+                    # like build_features, not on prod_future_solar alone.
                     ghi_now = None
-                    if prod_future_solar is not None and ts in prod_future_solar.index:
+                    if (
+                        prod_future_solar is not None
+                        and 'clear_sky_ghi' in prod_future_solar.columns
+                        and ts in prod_future_solar.index
+                    ):
                         ghi_now = float(prod_future_solar.loc[ts, 'clear_sky_ghi'])
                     if ghi_now is not None and ghi_now <= 0:
                         lag_buffer.append(0.0)
@@ -7730,8 +7735,17 @@ class MLForecastLabApp:
                     # untouched so the model's own learned response —
                     # on in-distribution inputs — drives what gets
                     # published.
+                    #
+                    # v2.52.2: gated only when clear_sky_ghi was computed.
+                    # An elevation-only experiment has future_solar with
+                    # sun_elevation alone; build_features trained its lags
+                    # ungated, so the buffer must stay ungated too.
                     ghi_now = None
-                    if future_solar is not None and ts in future_solar.index:
+                    if (
+                        future_solar is not None
+                        and 'clear_sky_ghi' in future_solar.columns
+                        and ts in future_solar.index
+                    ):
                         ghi_now = float(future_solar.loc[ts, 'clear_sky_ghi'])
                     if ghi_now is not None and ghi_now <= 0:
                         lag_buffer.append(0.0)
