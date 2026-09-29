@@ -902,6 +902,247 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
     _apply_patience(model, exp_cfg, overrides)
 
 
+# ---------------------------------------------------------------------------
+# Production model cache: backend registry, persisted meta, restored entries
+# ---------------------------------------------------------------------------
+
+# schema_version bumped to 2 in v2.37 to force a re-train after the neural-PV
+# root-cause fixes (PF1-PF9), and to 3 in v2.51.0: sequence models now train
+# on complete-grid windows (causally-imputed y inputs, y_missing channel,
+# measured-labels-only) and the inference window is built the same way, so a
+# model trained on the old punctured windows would be served inputs from a
+# different distribution than it was fitted on. Old caches are silently
+# ignored on load and a fresh training cycle is scheduled — see
+# docs/investigations/2026-05-neural-pv.md for the v2.37 precedent.
+CACHE_SCHEMA_VERSION = 3
+
+# (config name, module under ml_forecast_lab.models, class) for every backend
+# beyond the four core ones. Registration skips any whose optional
+# dependencies are missing.
+_OPTIONAL_BACKENDS = [
+    ("catboost", "catboost_backend", "CatBoostModel"),
+    ("gru", "gru_backend", "GRUModel"),
+    ("segrnn", "segrnn_backend", "SegRNNModel"),
+    ("dlinear", "dlinear_backend", "DLinearModel"),
+    ("nlinear", "nlinear_backend", "NLinearModel"),
+    ("fits", "fits_backend", "FITSModel"),
+    ("nbeats", "nbeats_backend", "NBeatsModel"),
+    ("nhits", "nhits_backend", "NHiTSModel"),
+    ("tide", "tide_backend", "TiDEModel"),
+    ("tsmixer", "tsmixer_backend", "TSMixerModel"),
+    ("timemixer", "timemixer_backend", "TimeMixerModel"),
+    ("sparsetsf", "sparsetsf_backend", "SparseTSFModel"),
+    ("xpatch", "xpatch_backend", "XPatchModel"),
+    ("cyclenet", "cyclenet_backend", "CycleNetModel"),
+    ("patchtst", "patchtst_backend", "PatchTSTModel"),
+    ("itransformer", "itransformer_backend", "iTransformerModel"),
+    ("crossformer", "crossformer_backend", "CrossformerModel"),
+    ("timesnet", "timesnet_backend", "TimesNetModel"),
+    ("tft", "tft_backend", "TFTModel"),
+    ("timexer", "timexer_backend", "TimeXerModel"),
+    ("moderntcn", "moderntcn_backend", "ModernTCNModel"),
+    ("seasonal_naive", "seasonal_naive_backend", "SeasonalNaiveModel"),
+    ("daily_profile", "daily_profile_backend", "DailyProfileModel"),
+    ("arima", "statsforecast_backend", "ARIMAModel"),
+    ("ets", "statsforecast_backend", "ETSModel"),
+    ("theta", "statsforecast_backend", "ThetaModel"),
+    # Zero-shot foundation models. Optional heavy deps
+    # (chronos-forecasting / granite-tsfm) — skipped cleanly
+    # here when the packages aren't installed, e.g. on armv7
+    # where the transformers stack has no wheels.
+    ("chronos_bolt", "chronos_bolt_backend", "ChronosBoltModel"),
+    ("ttm", "ttm_backend", "TTMModel"),
+]
+
+
+def build_model_registry():
+    """A ``ModelRegistry`` with every backend this install can load.
+
+    v2.52.2: module-level so the replay tool can load a bundled model
+    without the add-on's HA / database start-up.
+    """
+    from ml_forecast_lab.models.registry import ModelRegistry
+    from ml_forecast_lab.models.lightgbm_backend import LightGBMModel
+    from ml_forecast_lab.models.xgboost_backend import XGBoostModel
+    from ml_forecast_lab.models.lstm_backend import LSTMModel
+    from ml_forecast_lab.models.cnn_backend import CNNModel
+
+    registry = ModelRegistry()
+    registry.register("lightgbm", LightGBMModel)
+    registry.register("xgboost", XGBoostModel)
+    registry.register("lstm", LSTMModel)
+    registry.register("cnn", CNNModel)
+
+    for _name, _module, _cls_name in _OPTIONAL_BACKENDS:
+        try:
+            _mod = __import__(f"ml_forecast_lab.models.{_module}", fromlist=[_cls_name])
+            registry.register(_name, getattr(_mod, _cls_name))
+        except Exception as e:
+            logger.debug(f"{_name} not available: {e}")
+    return registry
+
+
+def _cache_meta(cache: dict) -> dict:
+    """The ``cache_meta.json`` record for an in-memory cache entry.
+
+    v2.52.2: shared by ``_persist_cached_model`` and replay-bundle capture,
+    so a bundle carries exactly the meta a restart would read.
+    """
+    from ml_forecast_lab import __version__
+
+    # window_size is only meaningful for neural backends that
+    # trained through the sliding-window path — derive it from
+    # the live seq_kwargs.sequence_data shape so we don't store
+    # redundant state. channel_names is persisted so the
+    # forecast-cycle parity guard survives a restart (without
+    # it, the first post-restart forecast would skip the guard).
+    # extended_window + past_window_size + future_feature_cols
+    # let the post-restart inference path reproduce the same
+    # past/future split and recompute future-known features
+    # without consulting the live training tensor.
+    is_neural = cache.get("is_neural", False)
+    seq_kwargs = cache.get("seq_kwargs", {})
+    window_size = None
+    channel_names = None
+    extended_window = bool(seq_kwargs.get("extended_window", False))
+    past_window_size = seq_kwargs.get("past_window_size")
+    future_feature_cols = seq_kwargs.get("future_feature_cols")
+    if is_neural and "sequence_data" in seq_kwargs:
+        window_size = int(seq_kwargs["sequence_data"].shape[1])
+    if is_neural and seq_kwargs.get("channel_names") is not None:
+        channel_names = list(seq_kwargs["channel_names"])
+
+    return {
+        "schema_version": CACHE_SCHEMA_VERSION,
+        "addon_version": __version__,
+        "model_name": cache["model_name"],
+        "feature_cols": list(cache["feature_cols"]),
+        "missing_indicators": list(
+            cache.get("missing_indicators") or []
+        ),
+        "trained_at": cache["trained_at"].isoformat(),
+        "model_version": cache["model_version"],
+        "is_neural": is_neural,
+        "window_size": window_size,
+        "channel_names": channel_names,
+        "extended_window": extended_window,
+        "past_window_size": (
+            int(past_window_size) if past_window_size is not None else None
+        ),
+        "future_feature_cols": (
+            list(future_feature_cols) if future_feature_cols is not None else None
+        ),
+        # Subset of future_feature_cols that came from user
+        # covariates and require a HA history / forecast fetch
+        # at inference. Deterministic columns (temporal /
+        # solar physics) are recomputed from the future_index.
+        "future_covariate_names": (
+            list(seq_kwargs.get("future_covariate_names") or [])
+        ),
+    }
+
+
+def _cache_entry_from_meta(meta: dict, model, exp_cfg) -> dict:
+    """Rebuild a ``_cached_models`` entry from persisted meta and a model
+    already loaded from its ``model.bin``.
+
+    v2.52.2: one copy shared by start-up restore, rollback and replay.
+    """
+    trained_at = datetime.fromisoformat(meta["trained_at"])
+    is_neural = meta.get("is_neural", False)
+    window_size = meta.get("window_size")
+
+    # Rebuild a minimal seq_kwargs so _forecast_with_cached
+    # can still read window_size from sequence_data.shape[1]
+    # without us having to persist the full training array.
+    # channel_names from the persisted meta drives the
+    # post-restart parity guard against silent column-order
+    # drift between train and inference.
+    # extended_window / past_window_size / future_feature_cols
+    # carry the new (post-v2.35.x) split-window information
+    # forward so a freshly-restarted addon publishes the same
+    # forecasts as the live process did before the restart.
+    # Old metas missing these keys fall back to the legacy
+    # past-only path — those caches will be retrained on the
+    # next schedule tick anyway.
+    seq_kwargs: Dict = {}
+    if is_neural and window_size:
+        seq_kwargs["sequence_data"] = np.zeros(
+            (1, window_size, 1), dtype=np.float32
+        )
+        cached_ch = meta.get("channel_names")
+        if cached_ch:
+            seq_kwargs["channel_names"] = list(cached_ch)
+        if meta.get("extended_window"):
+            seq_kwargs["extended_window"] = True
+            past_ws = meta.get("past_window_size")
+            if past_ws is not None:
+                seq_kwargs["past_window_size"] = int(past_ws)
+            ffc = meta.get("future_feature_cols")
+            if ffc is not None:
+                seq_kwargs["future_feature_cols"] = list(ffc)
+            fcn = meta.get("future_covariate_names")
+            if fcn:
+                seq_kwargs["future_covariate_names"] = list(fcn)
+
+    return {
+        "model": model,
+        "model_name": meta["model_name"],
+        "feature_cols": meta["feature_cols"],
+        # Absent on caches written before v2.51.0; those
+        # models have no indicator columns at all, so an
+        # empty list is the correct pin for them.
+        "missing_indicators": list(
+            meta.get("missing_indicators") or []
+        ),
+        "combined": None,  # re-fetched on first forecast
+        "exp_cfg": exp_cfg,
+        "trained_at": trained_at,
+        "model_version": meta["model_version"],
+        "is_neural": is_neural,
+        "seq_kwargs": seq_kwargs,
+    }
+
+
+@dataclasses.dataclass
+class CachedForecast:
+    """One cached-model forecast, before publishing (v2.52.2).
+
+    ``status`` is ``"ok"`` or why nothing would be published:
+    ``insufficient_data``, ``no_frame`` (fresh fetch failed and the entry
+    holds no training frame, as after a restore) or ``channel_mismatch``.
+    ``diag`` carries the model's inputs and raw output for the replay tool:
+    ``path`` (``neural``/``tree``), ``model_output``, ``future_covariates``,
+    and ``window``/``steps_tick``/``channel_names`` (neural) or ``X_rows``
+    (tree, one feature row per recursive step).
+    """
+
+    status: str
+    exp_cfg: object
+    model_name: str
+    model_version: Optional[str] = None
+    last_trained: Optional[datetime] = None
+    used_fresh_frame: bool = False
+    fetch_error: Optional[str] = None
+    last_ts: Optional[pd.Timestamp] = None
+    ds_future: Optional[pd.DatetimeIndex] = None
+    y_pred: Optional[np.ndarray] = None
+    y_pred_raw: Optional[np.ndarray] = None
+    diag: dict = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass
+class ConformalBands:
+    """Split-conformal band around a point forecast (v2.52.2)."""
+
+    level: float
+    q_vec: np.ndarray
+    upper: np.ndarray
+    lower: np.ndarray
+    total_samples: int
+    pooled_versions: bool
+
+
 class MLForecastLabApp:
     """
     Main application controller for ML Forecast Lab.
@@ -1153,59 +1394,7 @@ class MLForecastLabApp:
             logger.info("CovariateResolver initialised (covariate history cached)")
 
             # Initialise ModelRegistry with all available backends
-            from ml_forecast_lab.models.registry import ModelRegistry
-            from ml_forecast_lab.models.lightgbm_backend import LightGBMModel
-            from ml_forecast_lab.models.xgboost_backend import XGBoostModel
-            from ml_forecast_lab.models.lstm_backend import LSTMModel
-            from ml_forecast_lab.models.cnn_backend import CNNModel
-
-            self.model_registry = ModelRegistry()
-            self.model_registry.register("lightgbm", LightGBMModel)
-            self.model_registry.register("xgboost", XGBoostModel)
-            self.model_registry.register("lstm", LSTMModel)
-            self.model_registry.register("cnn", CNNModel)
-
-            # Register optional backends
-            _optional_backends = [
-                ("catboost", "catboost_backend", "CatBoostModel"),
-                ("gru", "gru_backend", "GRUModel"),
-                ("segrnn", "segrnn_backend", "SegRNNModel"),
-                ("dlinear", "dlinear_backend", "DLinearModel"),
-                ("nlinear", "nlinear_backend", "NLinearModel"),
-                ("fits", "fits_backend", "FITSModel"),
-                ("nbeats", "nbeats_backend", "NBeatsModel"),
-                ("nhits", "nhits_backend", "NHiTSModel"),
-                ("tide", "tide_backend", "TiDEModel"),
-                ("tsmixer", "tsmixer_backend", "TSMixerModel"),
-                ("timemixer", "timemixer_backend", "TimeMixerModel"),
-                ("sparsetsf", "sparsetsf_backend", "SparseTSFModel"),
-                ("xpatch", "xpatch_backend", "XPatchModel"),
-                ("cyclenet", "cyclenet_backend", "CycleNetModel"),
-                ("patchtst", "patchtst_backend", "PatchTSTModel"),
-                ("itransformer", "itransformer_backend", "iTransformerModel"),
-                ("crossformer", "crossformer_backend", "CrossformerModel"),
-                ("timesnet", "timesnet_backend", "TimesNetModel"),
-                ("tft", "tft_backend", "TFTModel"),
-                ("timexer", "timexer_backend", "TimeXerModel"),
-                ("moderntcn", "moderntcn_backend", "ModernTCNModel"),
-                ("seasonal_naive", "seasonal_naive_backend", "SeasonalNaiveModel"),
-                ("daily_profile", "daily_profile_backend", "DailyProfileModel"),
-                ("arima", "statsforecast_backend", "ARIMAModel"),
-                ("ets", "statsforecast_backend", "ETSModel"),
-                ("theta", "statsforecast_backend", "ThetaModel"),
-                # Zero-shot foundation models. Optional heavy deps
-                # (chronos-forecasting / granite-tsfm) — skipped cleanly
-                # here when the packages aren't installed, e.g. on armv7
-                # where the transformers stack has no wheels.
-                ("chronos_bolt", "chronos_bolt_backend", "ChronosBoltModel"),
-                ("ttm", "ttm_backend", "TTMModel"),
-            ]
-            for _name, _module, _cls_name in _optional_backends:
-                try:
-                    _mod = __import__(f"ml_forecast_lab.models.{_module}", fromlist=[_cls_name])
-                    self.model_registry.register(_name, getattr(_mod, _cls_name))
-                except Exception as e:
-                    logger.debug(f"{_name} not available: {e}")
+            self.model_registry = build_model_registry()
 
             logger.info(f"ModelRegistry initialised with {len(self.model_registry.list_available())} backends")
 
@@ -1545,6 +1734,19 @@ class MLForecastLabApp:
                     return {"verdict": "alert", "warnings": ["Experiment not found"], "ok": False}
                 return await self.compute_data_report(exp_cfg)
             self.web_app.state.appstate.data_report_callback = _data_report_trigger
+
+            # Replay bundle export (v2.52.2) — records the training-frame
+            # pipeline's inputs for offline reproduction; see replay.py.
+            async def _replay_bundle_trigger(experiment_name: str) -> Optional[bytes]:
+                exp_cfg = next(
+                    (e for e in self.config.experiments if e.name == experiment_name),
+                    None,
+                )
+                if exp_cfg is None:
+                    return None
+                from ml_forecast_lab.replay import capture_bundle
+                return await capture_bundle(self, exp_cfg)
+            self.web_app.state.appstate.replay_bundle_callback = _replay_bundle_trigger
 
             # Cached-model directory accessor — lets the web layer check
             # whether a "previous" version exists for the rollback button
@@ -2353,12 +2555,18 @@ class MLForecastLabApp:
 
         return best if best is not None else _DEFAULT_CACHE_MAX_AGE_DAYS
 
-    async def _fetch_and_preprocess(self, exp_cfg) -> Optional[pd.DataFrame]:
+    async def _fetch_and_preprocess(
+        self, exp_cfg, now: Optional[datetime] = None,
+    ) -> Optional[pd.DataFrame]:
         """
         Fetch history and preprocess for an experiment.
 
         Returns DataFrame with DatetimeIndex and 'y' column containing the
         preprocessed target values, ready for feature engineering.
+
+        ``now`` pins the wall clock the history window is anchored to.
+        v2.52.2: replay bundles pass the captured instant so a replay asks
+        for exactly the window the capture did; production leaves it unset.
         """
         from ml_forecast_lab.ha_interface import normalise_history
         from ml_forecast_lab.preprocessing import (
@@ -2371,7 +2579,8 @@ class MLForecastLabApp:
             _describe_gap_spans,
         )
 
-        now = datetime.now(timezone.utc)
+        if now is None:
+            now = datetime.now(timezone.utc)
         start = now - timedelta(days=exp_cfg.days_history)
         freq = f"{exp_cfg.interval_minutes}min"
         table_name = self.history_db.safe_table_name(exp_cfg.target_entity) if self.history_db else None
@@ -5368,9 +5577,175 @@ class MLForecastLabApp:
         finally:
             self._update_running = False
 
+    def _production_model_name(self, exp_cfg) -> str:
+        """The backend a retrain trains: the pinned production model, else
+        the benchmark winner, else the first enabled backend."""
+        prod_model_name = exp_cfg.production_model
+        if not prod_model_name and self.web_app:
+            bench = self.web_app.state.appstate.benchmark_results.get(exp_cfg.name)
+            if bench and bench.best_model_name:
+                prod_model_name = bench.best_model_name
+        if not prod_model_name:
+            prod_model_name = exp_cfg.models_enabled[0] if exp_cfg.models_enabled else "lightgbm"
+        return prod_model_name
+
+    async def _prepare_training_frame(self, exp_cfg, now: Optional[datetime] = None):
+        """Fetch, build features and resolve missingness for a retrain.
+
+        Returns ``(grid_df, combined, missing_report)`` or ``None`` when the
+        fetch produced nothing. v2.52.2: shared by ``_retrain_and_cache`` and
+        the replay tool (``ml_forecast_lab.replay``), so a replay exercises
+        the production frame construction rather than a copy of it.
+        """
+        from ml_forecast_lab.features import build_features
+
+        df = await self._fetch_and_preprocess(exp_cfg, now=now)
+        if df is None:
+            return None
+        features_df = build_features(
+            df, target_col="y",
+            interval_minutes=exp_cfg.interval_minutes,
+            country=exp_cfg.country,
+        )
+        combined, missing_report = _supervised_frame(
+            df, features_df, exp_cfg, label="retrain",
+        )
+        return df, combined, missing_report
+
+    async def _build_training_windows(self, exp_cfg, combined, missing_report):
+        """Build the extended (past + future-known) neural training windows.
+
+        Returns ``(seq_X, seq_y, channel_names, seq_kwargs)``, or ``None``
+        when the frame is too short for a 12-step past window (the caller
+        then trains on the tabular matrix). v2.52.2: extracted from
+        ``_retrain_and_cache`` unchanged so the replay tool builds windows
+        through the same code.
+        """
+        from ml_forecast_lab.features import (
+            create_sliding_windows, compute_known_future_features,
+        )
+
+        raw_cov_cols = neural_covariate_columns(combined.columns)
+        window_size = min(48, len(combined) // 3)
+        # Train with dense horizons (1, 2, ..., future_periods) so the
+        # multi-head output covers every forecast step directly — no
+        # interpolation or autoregression needed at inference time.
+        future_periods = getattr(exp_cfg, 'future_periods', 48)
+        horizon_steps = list(range(1, future_periods + 1))
+        if window_size < 12:
+            return None
+        seq_kwargs: dict = {}
+        # Extend each training window with future-known features at
+        # horizon positions. Without this, a multi-horizon neural
+        # head has only the past window to project from, and a
+        # single linear layer (NLinear / SparseTSF) cannot
+        # disambiguate "horizon h" from "absolute hour at h" because
+        # h corresponds to different absolute hours across windows
+        # ending at different times — the weights are forced into a
+        # phase-smeared compromise. LSTM/CNN hit the same wall via
+        # their pooled-context → linear head and tend to collapse
+        # to the unconditional mean. Tree models avoid the issue
+        # because their recursive inference path already passes
+        # future temporal/solar features per horizon row; this
+        # change brings the neural path to parity.
+        loc = await self._get_site_location()
+        solar_lat_lon = loc if loc is not None else None
+        include_sun_elevation = 'sun_elevation' in raw_cov_cols
+        include_clear_sky_ghi = 'clear_sky_ghi' in raw_cov_cols
+
+        # User-configured future-role covariates (e.g. Solcast PV
+        # forecast, met.no weather). The tree (recursive) inference
+        # path always saw these at horizon positions via
+        # ``future_cov_values``; the neural extended-window path
+        # historically did not, so neural backends were
+        # information-starved relative to tree backends in
+        # benchmarks. At training time the "future" positions are
+        # actually past timestamps we have ground-truth observations
+        # for — use the in-sample historical values from ``combined``.
+        # The matching inference-side call in _forecast_with_cached
+        # fetches the HA forecast attribute for real-future
+        # timestamps.
+        _win_rt = missing_report["window_frame"]
+        _lm_rt = missing_report["window_label_mask"].to_numpy()
+        future_cov_for_neural = _collect_train_future_covariates(
+            _win_rt, exp_cfg
+        )
+        neural_future_cov_names = list(future_cov_for_neural)
+        if neural_future_cov_names:
+            logger.info(
+                f"  Neural future covariates (horizon-aware): "
+                f"{neural_future_cov_names}"
+            )
+
+        future_features_df = compute_known_future_features(
+            _win_rt.index,
+            add_temporal=True,
+            country=getattr(exp_cfg, 'country', None),
+            solar_lat_lon=solar_lat_lon,
+            include_sun_elevation=include_sun_elevation,
+            include_clear_sky_ghi=include_clear_sky_ghi,
+            future_covariate_values=future_cov_for_neural or None,
+        )
+        # Windows over the complete-grid frame with a label mask:
+        # inputs are unbroken time spans (invented y cells flagged
+        # via the y_missing channel), and a window is a training
+        # sample only when every horizon label was measured.
+        seq_X, seq_y, channel_names, _kept_rt = create_sliding_windows(
+            _win_rt, 'target', window_size=window_size,
+            covariate_cols=raw_cov_cols if raw_cov_cols else None,
+            add_temporal=True, horizon_steps=horizon_steps,
+            future_features_df=future_features_df,
+            label_mask=_lm_rt,
+        )
+        seq_kwargs['sequence_data'] = seq_X
+        # Cache the per-channel meaning so the forecast cycle can
+        # verify it's feeding the model channels in the SAME order
+        # they were trained on. Without this, a covariate fetch
+        # that silently re-orders (e.g. a transient empty cov_series
+        # at one tick, or a future build_features rearrangement)
+        # would make NLinear/DLinear/etc. predict from mis-labelled
+        # channels and produce nonsense (e.g. spurious early-morning
+        # peaks) with no error raised. Backend fit() methods accept
+        # **kwargs and silently ignore unknown keys, so passing
+        # channel_names through is harmless during training; it's
+        # only consumed by _forecast_with_cached. Matches what the
+        # benchmark-holdout path has done for two minor releases.
+        seq_kwargs['channel_names'] = channel_names
+        # Mark this cache as carrying an extended (past + future)
+        # window so _forecast_with_cached knows to rebuild the
+        # inference tensor the same way. Old caches that pre-date
+        # this flag take the legacy path (past window only). The
+        # split index lets inference know where the past window
+        # ends — it's the size we asked create_sliding_windows to
+        # use, before the future-position extension.
+        seq_kwargs['extended_window'] = True
+        seq_kwargs['past_window_size'] = window_size
+        # Absolute grid position of each window's first row, for
+        # phase-aware backends (cyclenet).
+        from ml_forecast_lab.features import grid_step_index
+        _steps_rt = grid_step_index(_win_rt.index, _kept_rt)
+        if _steps_rt is not None:
+            seq_kwargs['window_step_index'] = _steps_rt
+        seq_kwargs['future_feature_cols'] = list(future_features_df.columns)
+        # Sub-list — just the columns that came from user
+        # covariates with role in (future, both). The
+        # deterministic columns (temporal, solar physics) can
+        # be recomputed at inference from the future_index
+        # alone; these need a HA history / forecast fetch.
+        if neural_future_cov_names:
+            seq_kwargs['future_covariate_names'] = list(
+                neural_future_cov_names
+            )
+        logger.info(
+            f"  Extended training windows: "
+            f"{window_size} past + {len(horizon_steps)} future "
+            f"= {seq_X.shape[1]} steps × {seq_X.shape[2]} channels, "
+            f"future cols={list(future_features_df.columns)}"
+        )
+        return seq_X, seq_y, channel_names, seq_kwargs
+
     async def _retrain_and_cache(self, exp_cfg):
         """Train a production model and cache it for fast forecast cycles."""
-        from ml_forecast_lab.features import build_features
         from ml_forecast_lab.models.base import TrainingCancelled
 
         logger.info(f"  Retraining {exp_cfg.name}...")
@@ -5394,17 +5769,10 @@ class MLForecastLabApp:
                 )
 
         # Fetch and prepare data
-        df = await self._fetch_and_preprocess(exp_cfg)
-        if df is None:
+        prepared = await self._prepare_training_frame(exp_cfg)
+        if prepared is None:
             return
-        features_df = build_features(
-            df, target_col="y",
-            interval_minutes=exp_cfg.interval_minutes,
-            country=exp_cfg.country,
-        )
-        combined, missing_report = _supervised_frame(
-            df, features_df, exp_cfg, label="retrain",
-        )
+        df, combined, missing_report = prepared
 
         feature_cols = [c for c in combined.columns if c != "target"]
         X = combined[feature_cols].values.astype(np.float32)
@@ -5412,13 +5780,7 @@ class MLForecastLabApp:
         y = combined["target"].values.astype(np.float32)
 
         # Determine production model
-        prod_model_name = exp_cfg.production_model
-        if not prod_model_name and self.web_app:
-            bench = self.web_app.state.appstate.benchmark_results.get(exp_cfg.name)
-            if bench and bench.best_model_name:
-                prod_model_name = bench.best_model_name
-        if not prod_model_name:
-            prod_model_name = exp_cfg.models_enabled[0] if exp_cfg.models_enabled else "lightgbm"
+        prod_model_name = self._production_model_name(exp_cfg)
 
         # Create and configure model
         model = self.model_registry.create(prod_model_name)
@@ -5441,124 +5803,11 @@ class MLForecastLabApp:
         is_neural = model.is_neural
         seq_kwargs = {}
         if is_neural:
-            from ml_forecast_lab.features import (
-                create_sliding_windows, compute_known_future_features,
+            windows = await self._build_training_windows(
+                exp_cfg, combined, missing_report,
             )
-            raw_cov_cols = neural_covariate_columns(combined.columns)
-            window_size = min(48, len(combined) // 3)
-            # Train with dense horizons (1, 2, ..., future_periods) so the
-            # multi-head output covers every forecast step directly — no
-            # interpolation or autoregression needed at inference time.
-            future_periods = getattr(exp_cfg, 'future_periods', 48)
-            horizon_steps = list(range(1, future_periods + 1))
-            if window_size >= 12:
-                # Extend each training window with future-known features at
-                # horizon positions. Without this, a multi-horizon neural
-                # head has only the past window to project from, and a
-                # single linear layer (NLinear / SparseTSF) cannot
-                # disambiguate "horizon h" from "absolute hour at h" because
-                # h corresponds to different absolute hours across windows
-                # ending at different times — the weights are forced into a
-                # phase-smeared compromise. LSTM/CNN hit the same wall via
-                # their pooled-context → linear head and tend to collapse
-                # to the unconditional mean. Tree models avoid the issue
-                # because their recursive inference path already passes
-                # future temporal/solar features per horizon row; this
-                # change brings the neural path to parity.
-                loc = await self._get_site_location()
-                solar_lat_lon = loc if loc is not None else None
-                include_sun_elevation = 'sun_elevation' in raw_cov_cols
-                include_clear_sky_ghi = 'clear_sky_ghi' in raw_cov_cols
-
-                # User-configured future-role covariates (e.g. Solcast PV
-                # forecast, met.no weather). The tree (recursive) inference
-                # path always saw these at horizon positions via
-                # ``future_cov_values``; the neural extended-window path
-                # historically did not, so neural backends were
-                # information-starved relative to tree backends in
-                # benchmarks. At training time the "future" positions are
-                # actually past timestamps we have ground-truth observations
-                # for — use the in-sample historical values from ``combined``.
-                # The matching inference-side call in _forecast_with_cached
-                # fetches the HA forecast attribute for real-future
-                # timestamps.
-                _win_rt = missing_report["window_frame"]
-                _lm_rt = missing_report["window_label_mask"].to_numpy()
-                future_cov_for_neural = _collect_train_future_covariates(
-                    _win_rt, exp_cfg
-                )
-                neural_future_cov_names = list(future_cov_for_neural)
-                if neural_future_cov_names:
-                    logger.info(
-                        f"  Neural future covariates (horizon-aware): "
-                        f"{neural_future_cov_names}"
-                    )
-
-                future_features_df = compute_known_future_features(
-                    _win_rt.index,
-                    add_temporal=True,
-                    country=getattr(exp_cfg, 'country', None),
-                    solar_lat_lon=solar_lat_lon,
-                    include_sun_elevation=include_sun_elevation,
-                    include_clear_sky_ghi=include_clear_sky_ghi,
-                    future_covariate_values=future_cov_for_neural or None,
-                )
-                # Windows over the complete-grid frame with a label mask:
-                # inputs are unbroken time spans (invented y cells flagged
-                # via the y_missing channel), and a window is a training
-                # sample only when every horizon label was measured.
-                seq_X, seq_y, channel_names, _kept_rt = create_sliding_windows(
-                    _win_rt, 'target', window_size=window_size,
-                    covariate_cols=raw_cov_cols if raw_cov_cols else None,
-                    add_temporal=True, horizon_steps=horizon_steps,
-                    future_features_df=future_features_df,
-                    label_mask=_lm_rt,
-                )
-                seq_kwargs['sequence_data'] = seq_X
-                # Cache the per-channel meaning so the forecast cycle can
-                # verify it's feeding the model channels in the SAME order
-                # they were trained on. Without this, a covariate fetch
-                # that silently re-orders (e.g. a transient empty cov_series
-                # at one tick, or a future build_features rearrangement)
-                # would make NLinear/DLinear/etc. predict from mis-labelled
-                # channels and produce nonsense (e.g. spurious early-morning
-                # peaks) with no error raised. Backend fit() methods accept
-                # **kwargs and silently ignore unknown keys, so passing
-                # channel_names through is harmless during training; it's
-                # only consumed by _forecast_with_cached. Matches what the
-                # benchmark-holdout path has done for two minor releases.
-                seq_kwargs['channel_names'] = channel_names
-                # Mark this cache as carrying an extended (past + future)
-                # window so _forecast_with_cached knows to rebuild the
-                # inference tensor the same way. Old caches that pre-date
-                # this flag take the legacy path (past window only). The
-                # split index lets inference know where the past window
-                # ends — it's the size we asked create_sliding_windows to
-                # use, before the future-position extension.
-                seq_kwargs['extended_window'] = True
-                seq_kwargs['past_window_size'] = window_size
-                # Absolute grid position of each window's first row, for
-                # phase-aware backends (cyclenet).
-                from ml_forecast_lab.features import grid_step_index
-                _steps_rt = grid_step_index(_win_rt.index, _kept_rt)
-                if _steps_rt is not None:
-                    seq_kwargs['window_step_index'] = _steps_rt
-                seq_kwargs['future_feature_cols'] = list(future_features_df.columns)
-                # Sub-list — just the columns that came from user
-                # covariates with role in (future, both). The
-                # deterministic columns (temporal, solar physics) can
-                # be recomputed at inference from the future_index
-                # alone; these need a HA history / forecast fetch.
-                if neural_future_cov_names:
-                    seq_kwargs['future_covariate_names'] = list(
-                        neural_future_cov_names
-                    )
-                logger.info(
-                    f"  Extended training windows: "
-                    f"{window_size} past + {len(horizon_steps)} future "
-                    f"= {seq_X.shape[1]} steps × {seq_X.shape[2]} channels, "
-                    f"future cols={list(future_features_df.columns)}"
-                )
+            if windows is not None:
+                seq_X, seq_y, _channel_names, seq_kwargs = windows
                 # v2.37 PF1-PF9 diagnostic — surfaces the exact knobs the
                 # neural backend will receive in fit(). When a user reports
                 # "the LSTM forecast is still flat after the v2.37 upgrade"
@@ -5776,7 +6025,6 @@ class MLForecastLabApp:
         if not cache:
             return
         try:
-            from ml_forecast_lab import __version__
             model_dir = self._cached_model_dir(exp_name)
             model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -5813,67 +6061,7 @@ class MLForecastLabApp:
             cache["model"].save(str(model_bin_tmp))
             model_bin_tmp.replace(model_bin)
 
-            # window_size is only meaningful for neural backends that
-            # trained through the sliding-window path — derive it from
-            # the live seq_kwargs.sequence_data shape so we don't store
-            # redundant state. channel_names is persisted so the
-            # forecast-cycle parity guard survives a restart (without
-            # it, the first post-restart forecast would skip the guard).
-            # extended_window + past_window_size + future_feature_cols
-            # let the post-restart inference path reproduce the same
-            # past/future split and recompute future-known features
-            # without consulting the live training tensor.
-            is_neural = cache.get("is_neural", False)
-            seq_kwargs = cache.get("seq_kwargs", {})
-            window_size = None
-            channel_names = None
-            extended_window = bool(seq_kwargs.get("extended_window", False))
-            past_window_size = seq_kwargs.get("past_window_size")
-            future_feature_cols = seq_kwargs.get("future_feature_cols")
-            if is_neural and "sequence_data" in seq_kwargs:
-                window_size = int(seq_kwargs["sequence_data"].shape[1])
-            if is_neural and seq_kwargs.get("channel_names") is not None:
-                channel_names = list(seq_kwargs["channel_names"])
-
-            meta = {
-                # schema_version bumped to 2 in v2.37 to force a re-train
-                # after the neural-PV root-cause fixes (PF1-PF9), and to 3
-                # in v2.51.0: sequence models now train on complete-grid
-                # windows (causally-imputed y inputs, y_missing channel,
-                # measured-labels-only) and the inference window is built
-                # the same way, so a model trained on the old punctured
-                # windows would be served inputs from a different
-                # distribution than it was fitted on. Old caches are
-                # silently ignored on load and a fresh training cycle is
-                # scheduled — see docs/investigations/2026-05-neural-pv.md
-                # for the v2.37 precedent.
-                "schema_version": 3,
-                "addon_version": __version__,
-                "model_name": cache["model_name"],
-                "feature_cols": list(cache["feature_cols"]),
-                "missing_indicators": list(
-                    cache.get("missing_indicators") or []
-                ),
-                "trained_at": cache["trained_at"].isoformat(),
-                "model_version": cache["model_version"],
-                "is_neural": is_neural,
-                "window_size": window_size,
-                "channel_names": channel_names,
-                "extended_window": extended_window,
-                "past_window_size": (
-                    int(past_window_size) if past_window_size is not None else None
-                ),
-                "future_feature_cols": (
-                    list(future_feature_cols) if future_feature_cols is not None else None
-                ),
-                # Subset of future_feature_cols that came from user
-                # covariates and require a HA history / forecast fetch
-                # at inference. Deterministic columns (temporal /
-                # solar physics) are recomputed from the future_index.
-                "future_covariate_names": (
-                    list(seq_kwargs.get("future_covariate_names") or [])
-                ),
-            }
+            meta = _cache_meta(cache)
             tmp = meta_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(meta, indent=2))
             tmp.replace(meta_file)
@@ -5900,7 +6088,9 @@ class MLForecastLabApp:
         if not self.config or not self.config.experiments:
             return
 
-        base_dir = Path("/data/ml_forecast_lab/models")
+        # Derived from _cached_model_dir so the two can't disagree on where
+        # the cache lives.
+        base_dir = self._cached_model_dir("_").parent
         if not base_dir.exists():
             return
 
@@ -5921,11 +6111,12 @@ class MLForecastLabApp:
                 # degenerate anchors / collapsed backcasts, so loading them
                 # would just re-publish the broken forecasts that PF1-PF9
                 # were designed to fix. Force re-train by ignoring them.
-                if meta.get("schema_version") != 3:
+                if meta.get("schema_version") != CACHE_SCHEMA_VERSION:
                     logger.info(
                         f"  Cached model for {exp_cfg.name} has schema "
                         f"v{meta.get('schema_version')}, ignoring (v2.51.0 "
-                        f"complete-grid windows require schema_version=3 — a fresh "
+                        f"complete-grid windows require schema_version="
+                        f"{CACHE_SCHEMA_VERSION} — a fresh "
                         f"benchmark + retrain will be scheduled)"
                     )
                     continue
@@ -5934,60 +6125,9 @@ class MLForecastLabApp:
                 model = self.model_registry.create(model_name)
                 model.load(str(model_bin))
 
-                trained_at = datetime.fromisoformat(meta["trained_at"])
-                is_neural = meta.get("is_neural", False)
-                window_size = meta.get("window_size")
-
-                # Rebuild a minimal seq_kwargs so _forecast_with_cached
-                # can still read window_size from sequence_data.shape[1]
-                # without us having to persist the full training array.
-                # channel_names from the persisted meta drives the
-                # post-restart parity guard against silent column-order
-                # drift between train and inference.
-                # extended_window / past_window_size / future_feature_cols
-                # carry the new (post-v2.35.x) split-window information
-                # forward so a freshly-restarted addon publishes the same
-                # forecasts as the live process did before the restart.
-                # Old metas missing these keys fall back to the legacy
-                # past-only path — those caches will be retrained on the
-                # next schedule tick anyway.
-                seq_kwargs: Dict = {}
-                if is_neural and window_size:
-                    seq_kwargs["sequence_data"] = np.zeros(
-                        (1, window_size, 1), dtype=np.float32
-                    )
-                    cached_ch = meta.get("channel_names")
-                    if cached_ch:
-                        seq_kwargs["channel_names"] = list(cached_ch)
-                    if meta.get("extended_window"):
-                        seq_kwargs["extended_window"] = True
-                        past_ws = meta.get("past_window_size")
-                        if past_ws is not None:
-                            seq_kwargs["past_window_size"] = int(past_ws)
-                        ffc = meta.get("future_feature_cols")
-                        if ffc is not None:
-                            seq_kwargs["future_feature_cols"] = list(ffc)
-                        fcn = meta.get("future_covariate_names")
-                        if fcn:
-                            seq_kwargs["future_covariate_names"] = list(fcn)
-
-                self._cached_models[exp_cfg.name] = {
-                    "model": model,
-                    "model_name": model_name,
-                    "feature_cols": meta["feature_cols"],
-                    # Absent on caches written before v2.51.0; those
-                    # models have no indicator columns at all, so an
-                    # empty list is the correct pin for them.
-                    "missing_indicators": list(
-                        meta.get("missing_indicators") or []
-                    ),
-                    "combined": None,  # re-fetched on first forecast
-                    "exp_cfg": exp_cfg,
-                    "trained_at": trained_at,
-                    "model_version": meta["model_version"],
-                    "is_neural": is_neural,
-                    "seq_kwargs": seq_kwargs,
-                }
+                entry = _cache_entry_from_meta(meta, model, exp_cfg)
+                trained_at = entry["trained_at"]
+                self._cached_models[exp_cfg.name] = entry
                 # Also mirror into web status so the UI reflects the
                 # restored champion immediately, not "unknown" until the
                 # next retrain writes one.
@@ -6074,42 +6214,9 @@ class MLForecastLabApp:
             model_name = meta["model_name"]
             model = self.model_registry.create(model_name)
             model.load(str(model_dir / "model.bin"))
-            trained_at = datetime.fromisoformat(meta["trained_at"])
-            is_neural = meta.get("is_neural", False)
-            window_size = meta.get("window_size")
-            seq_kwargs: Dict = {}
-            if is_neural and window_size:
-                seq_kwargs["sequence_data"] = np.zeros(
-                    (1, window_size, 1), dtype=np.float32
-                )
-                cached_ch = meta.get("channel_names")
-                if cached_ch:
-                    seq_kwargs["channel_names"] = list(cached_ch)
-                if meta.get("extended_window"):
-                    seq_kwargs["extended_window"] = True
-                    past_ws = meta.get("past_window_size")
-                    if past_ws is not None:
-                        seq_kwargs["past_window_size"] = int(past_ws)
-                    ffc = meta.get("future_feature_cols")
-                    if ffc is not None:
-                        seq_kwargs["future_feature_cols"] = list(ffc)
-                    fcn = meta.get("future_covariate_names")
-                    if fcn:
-                        seq_kwargs["future_covariate_names"] = list(fcn)
-            self._cached_models[exp_name] = {
-                "model": model,
-                "model_name": model_name,
-                "feature_cols": meta["feature_cols"],
-                "missing_indicators": list(
-                    meta.get("missing_indicators") or []
-                ),
-                "combined": None,
-                "exp_cfg": exp_cfg,
-                "trained_at": trained_at,
-                "model_version": meta["model_version"],
-                "is_neural": is_neural,
-                "seq_kwargs": seq_kwargs,
-            }
+            self._cached_models[exp_name] = _cache_entry_from_meta(
+                meta, model, exp_cfg,
+            )
             if self.web_app:
                 status = self.web_app.state.appstate.experiment_statuses.get(exp_name)
                 if status:
@@ -6317,6 +6424,119 @@ class MLForecastLabApp:
                     f"{exp_cfg.name} / {entity}: {e}"
                 )
 
+    async def _conformal_bands(
+        self,
+        exp_cfg,
+        y_pred: np.ndarray,
+        ds_future: pd.DatetimeIndex,
+        model_name: str,
+        model_version: Optional[str],
+        level: Optional[float] = None,
+    ) -> Optional[ConformalBands]:
+        """The split-conformal band for a forecast, or None during cold start.
+
+        v2.52.2: extracted unchanged from ``_publish_forecast_sensors`` so
+        the replay tool computes bands through the same code. The caller
+        owns the production-mode / history-DB gate and the error handling.
+        """
+        actuals_table = self.history_db.safe_table_name(
+            exp_cfg.target_entity
+        )
+        target_level = (
+            level
+            if level is not None
+            else float(getattr(exp_cfg, 'conformal_coverage', 0.8))
+        )
+        # Pin residual quantiles to the current model_version
+        # when we have enough calibrated residuals for it;
+        # otherwise pool across all weight regimes of this
+        # model so bands still get published during the
+        # cold-start period right after a retrain.
+        #
+        # Without this fallback, v2.24.0 introduced a
+        # regression where the conformal query filtered so
+        # strictly to the fresh (hours-old) model_version that
+        # it returned zero usable quantiles. `have_intervals`
+        # then stayed False, so the _upper_{pct} / _lower_{pct}
+        # sensors stopped being written at all — HA kept
+        # showing their stale pre-retrain values and the user
+        # saw "some forecast sensors aren't updating".
+        current_version = model_version
+        # Offloaded: this query joins forecast_log against the
+        # actuals grid and scales with both; running it inline
+        # froze the event loop (web UI + scheduler) for the
+        # duration of every publish cycle (audit F3).
+        cq = await asyncio.to_thread(
+            self.history_db.get_conformal_quantiles,
+            exp_cfg.name,
+            actuals_table,
+            level=target_level,
+            model_name=model_name,
+            model_version=current_version,
+            interval_minutes=exp_cfg.interval_minutes,
+        )
+        pooled = False
+        if (
+            current_version
+            and (cq.get("fallback_quantile") is None
+                 or cq.get("total_samples", 0) < 10)
+        ):
+            cq_all = await asyncio.to_thread(
+                self.history_db.get_conformal_quantiles,
+                exp_cfg.name,
+                actuals_table,
+                level=target_level,
+                model_name=model_name,
+                model_version=None,
+                interval_minutes=exp_cfg.interval_minutes,
+            )
+            if cq_all.get("fallback_quantile") is not None:
+                logger.info(
+                    f"  Conformal bands: falling back to all-versions "
+                    f"pool for {exp_cfg.name} (current version has "
+                    f"{cq.get('total_samples', 0)} residuals, need >=10)"
+                )
+                cq = cq_all
+                pooled = True
+        quantiles = cq.get("quantiles") or {}
+        fallback = cq.get("fallback_quantile")
+        if fallback is None:
+            return None
+        bucket_min = max(1, int(exp_cfg.interval_minutes))
+        # Lead-minutes w.r.t. the effective issuance time
+        # (one interval before ds_future[0]); matches the
+        # convention used by log_forecast's lead computation
+        # to within a retrieval-cycle of clock skew.
+        issued_ref = ds_future[0] - pd.Timedelta(
+            minutes=exp_cfg.interval_minutes
+        )
+        lead_min_arr = np.array([
+            int((ts - issued_ref).total_seconds() / 60)
+            for ts in ds_future
+        ], dtype=int)
+        lead_buckets = (lead_min_arr // bucket_min) * bucket_min
+        q_vec = np.array([
+            quantiles.get(int(b), fallback)
+            for b in lead_buckets
+        ], dtype=float)
+        y_pred_upper = (y_pred + q_vec).astype(np.float32)
+        y_pred_lower = (y_pred - q_vec).astype(np.float32)
+        if getattr(exp_cfg, "source_is_cumulative", False):
+            y_pred_lower = np.maximum(y_pred_lower, 0.0)
+        logger.info(
+            f"  Conformal {int(target_level*100)}% band: "
+            f"n={cq.get('total_samples', 0)} residuals, "
+            f"median width={float(np.median(q_vec*2)):.3f}"
+        )
+        return ConformalBands(
+            level=target_level,
+            q_vec=q_vec,
+            upper=y_pred_upper,
+            lower=y_pred_lower,
+            total_samples=int(cq.get("total_samples", 0)),
+            pooled_versions=pooled,
+        )
+
     async def _publish_forecast_sensors(
         self,
         exp_cfg,
@@ -6439,94 +6659,14 @@ class MLForecastLabApp:
             and exp_cfg.mode == "production"
         ):
             try:
-                actuals_table = self.history_db.safe_table_name(
-                    exp_cfg.target_entity
-                )
-                target_level = (
-                    interval_level
-                    if interval_level is not None
-                    else float(getattr(exp_cfg, 'conformal_coverage', 0.8))
-                )
-                # Pin residual quantiles to the current model_version
-                # when we have enough calibrated residuals for it;
-                # otherwise pool across all weight regimes of this
-                # model so bands still get published during the
-                # cold-start period right after a retrain.
-                #
-                # Without this fallback, v2.24.0 introduced a
-                # regression where the conformal query filtered so
-                # strictly to the fresh (hours-old) model_version that
-                # it returned zero usable quantiles. `have_intervals`
-                # then stayed False, so the _upper_{pct} / _lower_{pct}
-                # sensors stopped being written at all — HA kept
-                # showing their stale pre-retrain values and the user
-                # saw "some forecast sensors aren't updating".
                 cached = self._cached_models.get(exp_cfg.name) or {}
-                current_version = cached.get("model_version")
-                # Offloaded: this query joins forecast_log against the
-                # actuals grid and scales with both; running it inline
-                # froze the event loop (web UI + scheduler) for the
-                # duration of every publish cycle (audit F3).
-                cq = await asyncio.to_thread(
-                    self.history_db.get_conformal_quantiles,
-                    exp_cfg.name,
-                    actuals_table,
-                    level=target_level,
-                    model_name=model_name,
-                    model_version=current_version,
-                    interval_minutes=exp_cfg.interval_minutes,
+                bands = await self._conformal_bands(
+                    exp_cfg, y_pred, ds_future, model_name,
+                    cached.get("model_version"), level=interval_level,
                 )
-                if (
-                    current_version
-                    and (cq.get("fallback_quantile") is None
-                         or cq.get("total_samples", 0) < 10)
-                ):
-                    cq_all = await asyncio.to_thread(
-                        self.history_db.get_conformal_quantiles,
-                        exp_cfg.name,
-                        actuals_table,
-                        level=target_level,
-                        model_name=model_name,
-                        model_version=None,
-                        interval_minutes=exp_cfg.interval_minutes,
-                    )
-                    if cq_all.get("fallback_quantile") is not None:
-                        logger.info(
-                            f"  Conformal bands: falling back to all-versions "
-                            f"pool for {exp_cfg.name} (current version has "
-                            f"{cq.get('total_samples', 0)} residuals, need >=10)"
-                        )
-                        cq = cq_all
-                quantiles = cq.get("quantiles") or {}
-                fallback = cq.get("fallback_quantile")
-                if fallback is not None:
-                    bucket_min = max(1, int(exp_cfg.interval_minutes))
-                    # Lead-minutes w.r.t. the effective issuance time
-                    # (one interval before ds_future[0]); matches the
-                    # convention used by log_forecast's lead computation
-                    # to within a retrieval-cycle of clock skew.
-                    issued_ref = ds_future[0] - pd.Timedelta(
-                        minutes=exp_cfg.interval_minutes
-                    )
-                    lead_min_arr = np.array([
-                        int((ts - issued_ref).total_seconds() / 60)
-                        for ts in ds_future
-                    ], dtype=int)
-                    lead_buckets = (lead_min_arr // bucket_min) * bucket_min
-                    q_vec = np.array([
-                        quantiles.get(int(b), fallback)
-                        for b in lead_buckets
-                    ], dtype=float)
-                    y_pred_upper = (y_pred + q_vec).astype(np.float32)
-                    y_pred_lower = (y_pred - q_vec).astype(np.float32)
-                    if getattr(exp_cfg, "source_is_cumulative", False):
-                        y_pred_lower = np.maximum(y_pred_lower, 0.0)
-                    interval_level = target_level
-                    logger.info(
-                        f"  Conformal {int(target_level*100)}% band: "
-                        f"n={cq.get('total_samples', 0)} residuals, "
-                        f"median width={float(np.median(q_vec*2)):.3f}"
-                    )
+                if bands is not None:
+                    y_pred_upper, y_pred_lower = bands.upper, bands.lower
+                    interval_level = bands.level
             except Exception as e:
                 logger.warning(f"  Conformal band computation failed: {e}", exc_info=True)
 
@@ -6993,18 +7133,21 @@ class MLForecastLabApp:
                     f"({', '.join(e.split('.')[-1] for e, _ in failed)})"
                 )
 
-    async def _forecast_with_cached(self, experiment_name: str):
-        """Run inference with a cached model and publish sensors.
+    async def _compute_cached_forecast(
+        self, cache: dict, now: Optional[datetime] = None,
+    ) -> "CachedForecast":
+        """Run inference with a cached model entry, without publishing.
 
-        Fetches fresh recent data on each call so that lag features and
-        timestamps are current, even though the model itself is cached
-        from the last retrain cycle.
+        Fetches fresh recent data so that lag features and timestamps are
+        current, even though the model itself is cached from the last
+        retrain cycle. Returns every value ``_forecast_with_cached``
+        publishes, plus the model's raw output and its inputs for the
+        replay tool. ``now`` pins the history window (replay only).
+
+        v2.52.2: split out of ``_forecast_with_cached`` unchanged, so the
+        replay tool reproduces a forecast through the production code.
         """
         from ml_forecast_lab.features import build_features
-
-        cache = self._cached_models.get(experiment_name)
-        if not cache:
-            return
 
         model = cache["model"]
         exp_cfg = cache["exp_cfg"]
@@ -7022,11 +7165,17 @@ class MLForecastLabApp:
         # cached-frame fallback, where no grid is available.
         _grid_y = None
         _fresh_window_frame = None
+        used_fresh_frame = False
+        fetch_error = None
+        diag: dict = {}
         try:
-            df_fresh = await self._fetch_and_preprocess(exp_cfg)
+            df_fresh = await self._fetch_and_preprocess(exp_cfg, now=now)
             if df_fresh is None:
                 logger.warning(f"  Skipping forecast cycle for {exp_cfg.name} — insufficient data")
-                return
+                return CachedForecast(
+                    status="insufficient_data", exp_cfg=exp_cfg,
+                    model_name=prod_model_name,
+                )
             features_fresh = build_features(
                 df_fresh, target_col="y",
                 interval_minutes=exp_cfg.interval_minutes,
@@ -7054,9 +7203,11 @@ class MLForecastLabApp:
             )
             _grid_y = df_fresh["y"]
             _fresh_window_frame = _fresh_missing_report["window_frame"]
+            used_fresh_frame = True
             logger.debug(f"  Fresh data: {len(combined)} samples, last={combined.index[-1]}")
         except Exception as e:
             logger.warning(f"  Fresh data fetch failed, using cached data: {e}")
+            fetch_error = f"{type(e).__name__}: {e}"
             combined = cache.get("combined")
             if combined is None:
                 # _restore_cached_models deliberately doesn't persist the
@@ -7067,7 +7218,10 @@ class MLForecastLabApp:
                     f"  No cached data frame for {exp_cfg.name} after a "
                     f"restore — skipping this forecast cycle"
                 )
-                return
+                return CachedForecast(
+                    status="no_frame", exp_cfg=exp_cfg,
+                    model_name=prod_model_name, fetch_error=fetch_error,
+                )
 
         n_lags = 12
         last_ts = combined.index[-1]
@@ -7200,6 +7354,7 @@ class MLForecastLabApp:
                         f"  Future covariates wired to neural horizon "
                         f"positions: {list(future_cov_for_inference)}"
                     )
+                diag["future_covariates"] = list(future_cov_for_inference)
 
                 future_features_df = compute_known_future_features(
                     future_index,
@@ -7255,7 +7410,13 @@ class MLForecastLabApp:
                     f"Skipping forecast publish — wait for next retrain "
                     f"cycle to rebuild the cached channel order."
                 )
-                return
+                return CachedForecast(
+                    status="channel_mismatch", exp_cfg=exp_cfg,
+                    model_name=prod_model_name,
+                    used_fresh_frame=used_fresh_frame, fetch_error=fetch_error,
+                    diag={"channel_names": list(ch_names_now),
+                          "cached_channel_names": list(cached_ch_names)},
+                )
             # build_inference_window already returns shape (1, window, ch).
             last_window = seq_X_prod
             # The single inference window's first row sits window_size
@@ -7273,6 +7434,13 @@ class MLForecastLabApp:
                 ),
             )
             multi_pred = multi_pred.ravel()
+            diag.update(
+                path="neural",
+                window=np.asarray(last_window),
+                steps_tick=_steps_tick,
+                channel_names=list(ch_names_now),
+                model_output=np.asarray(multi_pred).copy(),
+            )
 
             # Neural models trained with dense horizons output all
             # future_periods predictions directly.
@@ -7401,6 +7569,7 @@ class MLForecastLabApp:
                             logger.debug(
                                 f"  Future fetch failed for {cov_name}: {e}"
                             )
+            diag["future_covariates"] = list(future_cov_values)
             if future_cov_values:
                 logger.info(
                     f"  Fetched future covariate series for "
@@ -7531,6 +7700,8 @@ class MLForecastLabApp:
                     )
                 return row
 
+            x_rows: list = []
+
             def _run_recursive_forecast():
                 preds = []
                 for step in range(future_periods):
@@ -7542,6 +7713,7 @@ class MLForecastLabApp:
                     X_row = _nan_to_num_guarded(
                         X_row, "cached recursive forecast row", feature_cols,
                     )
+                    x_rows.append(X_row[0].copy())
                     y = model.predict(X_row)
                     val = float(y.ravel()[0] if hasattr(y, 'ravel') else y[0])
                     preds.append(val)
@@ -7569,6 +7741,11 @@ class MLForecastLabApp:
 
             loop = asyncio.get_running_loop()
             y_pred = await loop.run_in_executor(None, _run_recursive_forecast)
+            diag.update(
+                path="tree",
+                X_rows=np.asarray(x_rows, dtype=np.float32),
+                model_output=np.asarray(y_pred).copy(),
+            )
 
         if y_pred.ndim > 1:
             y_pred = y_pred.ravel()
@@ -7578,11 +7755,7 @@ class MLForecastLabApp:
         # log space when log_transform is on, in physical space when
         # it's off). Cheap copy of ≤96 float32s; only the next branch
         # mutates y_pred in place.
-        y_pred_raw_snapshot = (
-            np.asarray(y_pred, dtype=np.float32).copy()
-            if getattr(exp_cfg, "debug_save_training_dumps", False)
-            else None
-        )
+        y_pred_raw_snapshot = np.asarray(y_pred, dtype=np.float32).copy()
 
         # Invert log-transform if active (see _run_production_inference).
         if exp_cfg.log_transform:
@@ -7629,6 +7802,38 @@ class MLForecastLabApp:
         if not isinstance(last_trained, datetime):
             last_trained = datetime.now(timezone.utc)
 
+        return CachedForecast(
+            status="ok",
+            exp_cfg=exp_cfg,
+            model_name=prod_model_name,
+            model_version=cache.get("model_version"),
+            last_trained=last_trained,
+            used_fresh_frame=used_fresh_frame,
+            fetch_error=fetch_error,
+            last_ts=last_ts,
+            ds_future=ds_future,
+            y_pred=y_pred,
+            y_pred_raw=y_pred_raw_snapshot,
+            diag=diag,
+        )
+
+    async def _forecast_with_cached(
+        self, experiment_name: str, now: Optional[datetime] = None,
+    ):
+        """Run inference with a cached model and publish sensors.
+
+        Fetches fresh recent data on each call so that lag features and
+        timestamps are current, even though the model itself is cached
+        from the last retrain cycle.
+        """
+        cache = self._cached_models.get(experiment_name)
+        if not cache:
+            return
+        fc = await self._compute_cached_forecast(cache, now=now)
+        if fc.status != "ok":
+            return
+        exp_cfg = fc.exp_cfg
+
         # Debug bundle: pair this forecast with the most recent training
         # dump for the same experiment. Only fires when dump_training
         # left a pending dir behind (i.e. this is the immediate
@@ -7641,9 +7846,9 @@ class MLForecastLabApp:
             try:
                 self._debug_dumper.dump_forecast(
                     exp_name=exp_cfg.name,
-                    y_pred_raw=y_pred_raw_snapshot,
-                    y_pred_physical=y_pred,
-                    ds_future=ds_future,
+                    y_pred_raw=fc.y_pred_raw,
+                    y_pred_physical=fc.y_pred,
+                    ds_future=fc.ds_future,
                     model_version=cache.get("model_version"),
                     log_transform_applied=bool(exp_cfg.log_transform),
                 )
@@ -7652,10 +7857,10 @@ class MLForecastLabApp:
 
         await self._publish_forecast_sensors(
             exp_cfg=exp_cfg,
-            y_pred=y_pred,
-            ds_future=ds_future,
-            model_name=prod_model_name,
-            last_trained_iso=last_trained.isoformat(),
+            y_pred=fc.y_pred,
+            ds_future=fc.ds_future,
+            model_name=fc.model_name,
+            last_trained_iso=fc.last_trained.isoformat(),
         )
 
     async def _run_tuning(self, experiment_name: str, model_name: str,
