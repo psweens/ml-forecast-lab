@@ -33,7 +33,9 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from .base import ForecastModel, _build_activation, _resolve_sigmoid_scale, _RevIN
+from .base import (
+    ForecastModel, _build_activation, _resolve_sigmoid_scale, _RevIN, load_torch_checkpoint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -524,7 +526,7 @@ class SegRNNModel(ForecastModel):
 
     def load(self, path: str) -> None:
         """Load model state dict."""
-        data = torch.load(path, map_location="cpu")
+        data = load_torch_checkpoint(path)
         self.set_params(**data["params"])
         self._seq_len = data.get("seq_len")
         self._n_channels = data.get("n_channels")

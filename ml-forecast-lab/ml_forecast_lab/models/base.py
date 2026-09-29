@@ -310,6 +310,53 @@ except ImportError:
     _past_only_score_mask = None  # type: ignore[assignment]
 
 
+# ---------------------------------------------------------------------------
+# Checkpoint loading (neural backends)
+# ---------------------------------------------------------------------------
+
+
+def _checkpoint_numpy_globals() -> list:
+    """Numpy objects a neural checkpoint legitimately pickles.
+
+    Sequence backends store their channel / target normalisation stats
+    (``channel_mean``, ``y_mean``, ...) beside the state dict as numpy
+    arrays — N-BEATS / NHiTS always, the rest whenever RevIN is off. An array unpickles through ``_reconstruct(ndarray, ...)``
+    and a scalar through ``scalar(dtype, ...)``, and a dtype reduces to its
+    own class (``numpy.dtype[float32]``), so each has to be allowlisted for
+    a ``weights_only`` load to rebuild them.
+    """
+    from numpy.core import multiarray as _multiarray
+
+    dtype_classes = [
+        type(np.dtype(t))
+        for t in (np.float16, np.float32, np.float64, np.int32, np.int64, np.bool_)
+    ]
+    return [
+        _multiarray._reconstruct, _multiarray.scalar, np.ndarray, np.dtype,
+        *dtype_classes,
+    ]
+
+
+def load_torch_checkpoint(path: str) -> Any:
+    """``torch.load`` for a checkpoint written by a neural backend's ``save``.
+
+    v2.52.3: torch 2.6 flipped ``torch.load``'s default to
+    ``weights_only=True``, which refuses those numpy stats — so restoring
+    such a cached neural champion failed and forced a retrain on every
+    restart. Loads stay ``weights_only`` with
+    exactly those numpy globals allowlisted. torch < 2.5 has no scoped
+    allowlist; there the load keeps that version's own default
+    (``weights_only=False``), i.e. the behaviour it always had.
+    """
+    import torch
+
+    safe_globals = getattr(torch.serialization, "safe_globals", None)
+    if safe_globals is None:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    with safe_globals(_checkpoint_numpy_globals()):
+        return torch.load(path, map_location="cpu", weights_only=True)
+
+
 def _resolve_sigmoid_scale(y: np.ndarray, buffer: float = 1.1) -> float:
     """
     Compute the sigmoid upper bound from training targets.

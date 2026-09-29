@@ -21,7 +21,9 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from .base import ForecastModel, _build_activation, _resolve_sigmoid_scale, _RevIN
+from .base import (
+    ForecastModel, _build_activation, _resolve_sigmoid_scale, _RevIN, load_torch_checkpoint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -415,7 +417,7 @@ class GRUModel(ForecastModel):
         logger.info(f"Saved GRU model to {path}")
 
     def load(self, path: str) -> None:
-        data = torch.load(path, map_location="cpu")
+        data = load_torch_checkpoint(path)
         self.set_params(**data["params"])
         self._channel_mean = data.get("channel_mean")
         self._channel_std = data.get("channel_std")

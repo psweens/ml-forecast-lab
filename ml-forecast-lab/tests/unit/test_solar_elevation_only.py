@@ -1,4 +1,4 @@
-"""v2.52.2: tree recursive forecast with ``sun_elevation`` but no ``clear_sky_ghi``.
+"""v2.52.3: tree recursive forecast with ``sun_elevation`` but no ``clear_sky_ghi``.
 
 ``compute_solar_features`` emits only the columns it is asked for. Both tree
 recursive-forecast loops — ``_forecast_with_cached`` and
