@@ -814,12 +814,24 @@ class TestAccuracySurvivesNullValues:
     while COUNT(*) still counted the rows, and the round() on the way out
     aborted the entire accuracy prep: "Forecast accuracy prep failed:
     type NoneType doesn't define __round__ method". The published
-    accuracy sensor then silently read 0."""
+    accuracy sensor then silently read 0.
+
+    The grid is anchored to ``now − 2 days``: a hard-coded 2026-08-20 aged
+    out of ``max_age_days=30`` in September 2026, after which the tests
+    below either failed or passed on an empty window."""
 
     @staticmethod
-    def _seed(db, nan_predictions=False, nan_actuals=False):
+    def _grid():
+        from datetime import datetime as _dt, timedelta as _td
+        anchor = (_dt.utcnow() - _td(days=2)).replace(
+            hour=10, minute=0, second=0, microsecond=0,
+        )
+        return pd.date_range(anchor, periods=5, freq="30min")
+
+    @classmethod
+    def _seed(cls, db, nan_predictions=False, nan_actuals=False):
         db.ensure_forecast_log_table()
-        grid = pd.date_range("2026-08-20 10:00", periods=5, freq="30min")
+        grid = cls._grid()
         actual_vals = [10.0, 12.0, 15.0, 16.0, 18.0]
         if nan_actuals:
             actual_vals = [float("nan")] * len(actual_vals)
@@ -879,7 +891,7 @@ class TestAccuracySurvivesNullValues:
         three real pairs must still score, and score exactly."""
         db = HistoryDB(tmp_db)
         db.ensure_forecast_log_table()
-        grid = pd.date_range("2026-08-20 10:00", periods=5, freq="30min")
+        grid = self._grid()
         db.store_history("sensor_load", pd.DataFrame({
             "ds": grid, "value": [10.0, 12.0, 15.0, 16.0, 18.0],
         }))

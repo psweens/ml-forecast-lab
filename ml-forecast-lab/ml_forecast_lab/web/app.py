@@ -447,6 +447,8 @@ class AppState:
         self.reset_model_callback = None
         # Pre-flight data sanity check — see /experiment/{name}/data-report.
         self.data_report_callback = None
+        # Replay bundle export — see /experiment/{name}/replay-bundle.
+        self.replay_bundle_callback = None
         # Strong references to fire-and-forget tasks. asyncio holds only a
         # weak reference to running tasks; without this set a coroutine
         # scheduled via create_task can be garbage-collected before its
@@ -2260,6 +2262,36 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception as e:
             logger.error("data-report failed for %s: %s", name, e, exc_info=True)
             return JSONResponse(content={"verdict": "alert", "warnings": [_safe_error(e)], "ok": False}, status_code=500)
+
+    @app.post("/experiment/{name}/replay-bundle")
+    async def replay_bundle(name: str):
+        """Capture a replay bundle for an experiment and return it as a zip.
+
+        Runs the training-frame fetch against HA and the history cache while
+        recording every response, so the pipeline can be re-run offline with
+        ``python -m ml_forecast_lab.replay``. Read-only: the user's cache is
+        not modified and no model is trained.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        cb = app.state.appstate.replay_bundle_callback
+        if not cb:
+            return JSONResponse(content={"success": False, "error": "Replay export unavailable"}, status_code=503)
+        try:
+            payload = await cb(name)
+        except Exception as e:
+            logger.error("replay-bundle failed for %s: %s", name, e, exc_info=True)
+            return JSONResponse(content={"success": False, "error": _safe_error(e)}, status_code=500)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Experiment not found in config")
+        from datetime import datetime as _dt, timezone as _tz
+        stamp = _dt.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
+        safe = re.sub(r"[^A-Za-z0-9_-]", "_", name)
+        return Response(
+            content=payload,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="mlfl-replay-{safe}-{stamp}.zip"'},
+        )
 
     @app.get("/experiment/{name}/rollback-available")
     async def rollback_available(name: str):

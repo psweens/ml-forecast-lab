@@ -862,9 +862,11 @@ class TestInferenceContract:
             "required_indicators = [\n                c for c in feature_cols "
             "if c.endswith(MISSING_SUFFIX)\n            ]"
         ) not in src
-        # Written on retrain, persisted, and restored.
+        # Written on retrain, persisted, and restored. Restore and rollback
+        # share _cache_entry_from_meta (v2.52.2), so one read covers both.
         assert '"missing_indicators": list(' in src
-        assert src.count('meta.get("missing_indicators")') == 2
+        assert src.count('meta.get("missing_indicators")') == 1
+        assert src.count("_cache_entry_from_meta(") == 3  # def + 2 callers
 
     def test_lag_buffer_is_seeded_on_true_time_offsets(self):
         """`buf[-k]` is only "k intervals ago" if the buffer holds
