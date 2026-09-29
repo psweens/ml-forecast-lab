@@ -5249,9 +5249,14 @@ class MLForecastLabApp:
                     # steps push 0 into the buffer so downstream lag
                     # features stay in-distribution even when the
                     # model's raw prediction at a previous night step
-                    # was slightly positive.
+                    # was slightly positive. v2.52.3: keyed on the column,
+                    # like build_features, not on prod_future_solar alone.
                     ghi_now = None
-                    if prod_future_solar is not None and ts in prod_future_solar.index:
+                    if (
+                        prod_future_solar is not None
+                        and 'clear_sky_ghi' in prod_future_solar.columns
+                        and ts in prod_future_solar.index
+                    ):
                         ghi_now = float(prod_future_solar.loc[ts, 'clear_sky_ghi'])
                     if ghi_now is not None and ghi_now <= 0:
                         lag_buffer.append(0.0)
@@ -6124,6 +6129,23 @@ class MLForecastLabApp:
                 model_name = meta["model_name"]
                 model = self.model_registry.create(model_name)
                 model.load(str(model_bin))
+
+                # v2.52.3: disk holds whatever generation last persisted
+                # successfully, which is not necessarily the configured
+                # champion — a rollback to a different backend is one
+                # legitimate cause, a retrain whose save failed is another.
+                # Still served (rejecting would undo a rollback on every
+                # restart), but never silently.
+                configured = getattr(exp_cfg, "production_model", None)
+                if configured and configured != model_name:
+                    logger.warning(
+                        f"  Restored cached model for {exp_cfg.name} is "
+                        f"{model_name}, but production_model is {configured} "
+                        f"— serving {model_name} until the next scheduled "
+                        f"retrain trains {configured} (expected after a "
+                        f"rollback; otherwise the last retrain's save failed "
+                        f"— check earlier 'Failed to persist' warnings)"
+                    )
 
                 entry = _cache_entry_from_meta(meta, model, exp_cfg)
                 trained_at = entry["trained_at"]
@@ -7730,8 +7752,17 @@ class MLForecastLabApp:
                     # untouched so the model's own learned response —
                     # on in-distribution inputs — drives what gets
                     # published.
+                    #
+                    # v2.52.3: gated only when clear_sky_ghi was computed.
+                    # An elevation-only experiment has future_solar with
+                    # sun_elevation alone; build_features trained its lags
+                    # ungated, so the buffer must stay ungated too.
                     ghi_now = None
-                    if future_solar is not None and ts in future_solar.index:
+                    if (
+                        future_solar is not None
+                        and 'clear_sky_ghi' in future_solar.columns
+                        and ts in future_solar.index
+                    ):
                         ghi_now = float(future_solar.loc[ts, 'clear_sky_ghi'])
                     if ghi_now is not None and ghi_now <= 0:
                         lag_buffer.append(0.0)
