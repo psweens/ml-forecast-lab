@@ -2,8 +2,11 @@
 """Report the on-disk and in-memory footprint of ML Forecast Lab.
 
 Read-only. Safe to run against a live add-on — the database is opened in
-read-only mode (immutable when no connection has it open, so a copied-out
-database gains no -wal/-shm files) and nothing outside stdout is written.
+read-only mode and nothing outside stdout is written, apart from SQLite's
+own -shm index: a database with a -wal beside it (the live add-on's, or a
+copy that kept its -wal) is read through that index, which SQLite creates
+or updates. A WAL database without a -wal is opened immutable and gains
+no -wal/-shm files.
 
 The defaults are the in-container layout: the database at
 ``/data/ml_forecast_lab/history.db``, models and logs under
@@ -74,12 +77,14 @@ def sized(paths):
 # ----------------------------------------------------------------------
 
 def open_ro(path):
-    """Read-only connection that never creates files beside the database.
+    """Read-only connection; creates no files beside a database without a -wal.
 
     The add-on keeps a connection open, so its WAL database always has a
     -wal file while it runs. A WAL database without one has no connection
     and no writer: it is opened immutable, which reads the main file alone
     and needs no -shm, so a copy in an unwritable directory still opens.
+    With a -wal present the WAL pages must be read, so SQLite opens (and if
+    need be creates) the -shm beside it.
     """
     uri = Path(path).resolve().as_uri() + "?mode=ro"
     if not os.path.exists(path + "-wal"):
@@ -151,10 +156,15 @@ def report_db_tables(conn, path):
     rows.sort(reverse=True)
     print(f"\n  {'total':>11} {'table':>11} {'indexes':>11} {'rows':>12}  name")
     for tot_b, tbl_b, idx_b, n, name in rows:
-        print(f"  {mb(tot_b):>11} {mb(tbl_b):>11} {mb(idx_b):>11} {n:>12,}  {name}")
+        if sizes:
+            print(f"  {mb(tot_b):>11} {mb(tbl_b):>11} {mb(idx_b):>11} {n:>12,}  {name}")
+        else:
+            print(f"  {'-':>11} {'-':>11} {'-':>11} {n:>12,}  {name}")
 
     cache = [r for r in rows if r[4] not in CORE_TABLES]
-    if cache:
+    if cache and not sizes:
+        print(f"\n  {len(cache)} per-entity cache table(s)")
+    elif cache:
         cache_bytes = sum(r[0] for r in cache)
         cache_idx = sum(r[2] for r in cache)
         print(f"\n  {len(cache)} per-entity cache table(s), {mb(cache_bytes)} total")
@@ -184,7 +194,9 @@ def report_models(models_dir):
         for label, d in (("current", exp), ("previous", exp / "previous")):
             if not d.is_dir():
                 continue
-            size = sum(s for _, s in sized(d.iterdir()))
+            # *.tmp files are not part of either generation; they are
+            # counted once, below.
+            size = sum(s for f, s in sized(d.iterdir()) if ".tmp" not in f.name)
             if size:
                 parts.append(f"{label} {mb(size)}")
                 exp_total += size
@@ -192,7 +204,12 @@ def report_models(models_dir):
         # interrupted (or in-flight) save or a model.bin.tmp.metadata.json
         # stranded by v2.52.2 and earlier (XGBoost metadata now rides in the
         # booster).
-        stale += sized(exp.rglob("*.tmp*"))
+        exp_stale = sized(exp.rglob("*.tmp*"))
+        tmp_size = sum(s for _, s in exp_stale)
+        if tmp_size:
+            parts.append(f"tmp {mb(tmp_size)}")
+            exp_total += tmp_size
+        stale += exp_stale
         grand += exp_total
         print(f"  {exp.name:<28} {mb(exp_total):>10}   {', '.join(parts)}")
 
