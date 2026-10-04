@@ -7,8 +7,9 @@ covariate config entry, so neither reached ``future_cov_values``, and every
 horizon step carried the value at ``last_ts``: a forecast made at night told
 the tree it stayed night for the whole day ahead, and the
 ``<col>_x_hour_sin/cos`` interactions inherited the same frozen value.
-``_forecast_with_cached`` already computed both from pvlib for the forecast
-grid; both loops now share ``_future_solar_frame``.
+``_compute_cached_forecast`` (behind ``_forecast_with_cached``) already
+computed both from pvlib for the forecast grid; both loops now share
+``_future_solar_frame``.
 
 The defect was latent: ``_run_production_inference`` is reached only through
 ``update_experiment(..., is_lab_mode=False)`` from ``_run_update_cycle``,
@@ -191,8 +192,10 @@ class TestProductionInferenceSolarHorizon:
         _assert_rows_follow_pvlib(rows, published[0]["ds_future"], cols)
 
     def test_matches_cached_forecast_rows(self, tmp_db, monkeypatch):
-        """The post-retrain forecast and the next cached tick see the same
-        solar inputs for the same horizon."""
+        """``_run_production_inference`` and the cached path
+        (``_retrain_and_cache`` → ``_forecast_with_cached`` →
+        ``_compute_cached_forecast``) see the same solar inputs for the same
+        horizon."""
         exp = _exp()
         app, published, rows = _make_app(tmp_db, exp, monkeypatch)
         _run(app._run_production_inference(exp))
