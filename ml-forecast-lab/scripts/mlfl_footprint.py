@@ -2,7 +2,8 @@
 """Report the on-disk and in-memory footprint of ML Forecast Lab.
 
 Read-only. Safe to run against a live add-on — the database is opened in
-read-only mode and nothing outside stdout is written.
+read-only mode (immutable when no connection has it open, so a copied-out
+database gains no -wal/-shm files) and nothing outside stdout is written.
 
 The defaults are the in-container layout: the database at
 ``/data/ml_forecast_lab/history.db``, models and logs under
@@ -48,16 +49,65 @@ def rule(title):
     print("-" * len(title))
 
 
+def sized(paths):
+    """(path, size) for each regular file in ``paths`` that still exists.
+
+    The live add-on renames model.bin.tmp, rotates logs and prunes debug
+    dumps while this runs, so a file (or directory) can vanish between
+    listing and stat; it is skipped rather than aborting the report.
+    """
+    out = []
+    try:
+        for f in paths:
+            try:
+                if f.is_file():
+                    out.append((f, f.stat().st_size))
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return out
+
+
 # ----------------------------------------------------------------------
 # SQLite
 # ----------------------------------------------------------------------
+
+def open_ro(path):
+    """Read-only connection that never creates files beside the database.
+
+    The add-on keeps a connection open, so its WAL database always has a
+    -wal file while it runs. A WAL database without one has no connection
+    and no writer: it is opened immutable, which reads the main file alone
+    and needs no -shm, so a copy in an unwritable directory still opens.
+    """
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    if not os.path.exists(path + "-wal"):
+        with open(path, "rb") as f:
+            header = f.read(20)
+        # Header bytes 18/19 are the file-format write/read versions; 2 = WAL.
+        if header.startswith(b"SQLite format 3\0") and header[18] == 2:
+            uri += "&immutable=1"
+    return sqlite3.connect(uri, uri=True)
+
 
 def report_db(path):
     rule(f"DATABASE  {path}")
     if not os.path.exists(path):
         print("  not found — pass --data (or --db) with the correct location")
         return
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn = None
+    try:
+        conn = open_ro(path)
+        report_db_tables(conn, path)
+    except (OSError, sqlite3.Error) as e:
+        print(f"  could not read the database: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def report_db_tables(conn, path):
     page = conn.execute("PRAGMA page_size").fetchone()[0]
     total = conn.execute("PRAGMA page_count").fetchone()[0] * page
     free = conn.execute("PRAGMA freelist_count").fetchone()[0] * page
@@ -71,7 +121,8 @@ def report_db(path):
         sizes = {}
 
     wal = os.path.getsize(path + "-wal") if os.path.exists(path + "-wal") else 0
-    print(f"  file            {mb(total)}")
+    # On-disk size; `total` (page_count) also counts pages still in the WAL.
+    print(f"  file            {mb(os.path.getsize(path))}")
     if wal:
         print(f"  -wal            {mb(wal)}")
     pct = (free / total * 100) if total else 0
@@ -110,8 +161,6 @@ def report_db(path):
         print(f"  of which {mb(cache_idx)} is index — roughly half of that is the "
               f"redundant idx_*_ds\n  duplicating the UNIQUE(ds) autoindex")
 
-    conn.close()
-
 
 # ----------------------------------------------------------------------
 # Saved models
@@ -123,6 +172,9 @@ def report_models(models_dir):
     if not root.is_dir():
         print("  not found — pass --data with the correct location")
         return
+    if not os.access(root, os.R_OK | os.X_OK):
+        print("  not readable — permission denied")
+        return
 
     grand = 0
     stale = []
@@ -132,14 +184,15 @@ def report_models(models_dir):
         for label, d in (("current", exp), ("previous", exp / "previous")):
             if not d.is_dir():
                 continue
-            size = sum(f.stat().st_size for f in d.iterdir() if f.is_file())
+            size = sum(s for _, s in sized(d.iterdir()))
             if size:
                 parts.append(f"{label} {mb(size)}")
                 exp_total += size
         # Persists write *.tmp then rename, so a leftover *.tmp is either an
-        # interrupted save or a model.bin.tmp.metadata.json stranded by
-        # v2.52.2 and earlier (XGBoost metadata now rides in the booster).
-        stale += [f for f in exp.rglob("*.tmp*") if f.is_file()]
+        # interrupted (or in-flight) save or a model.bin.tmp.metadata.json
+        # stranded by v2.52.2 and earlier (XGBoost metadata now rides in the
+        # booster).
+        stale += sized(exp.rglob("*.tmp*"))
         grand += exp_total
         print(f"  {exp.name:<28} {mb(exp_total):>10}   {', '.join(parts)}")
 
@@ -147,10 +200,10 @@ def report_models(models_dir):
     print(f"\n  total {mb(grand)} across {n_exp} experiment(s)")
     if stale:
         print(f"\n  {len(stale)} leftover .tmp file(s) — not read on restore; an "
-              f"interrupted save, or\n  model.bin.tmp.metadata.json stranded by "
-              f"v2.52.2 or earlier:")
-        for f in stale[:10]:
-            print(f"    {f}  ({f.stat().st_size:,} B)")
+              f"interrupted or in-flight save,\n  or model.bin.tmp.metadata.json "
+              f"stranded by v2.52.2 or earlier:")
+        for f, size in stale[:10]:
+            print(f"    {f}  ({size:,} B)")
 
 
 def report_dir(title, path, pattern="*"):
@@ -159,11 +212,15 @@ def report_dir(title, path, pattern="*"):
     if not root.is_dir():
         print("  not found")
         return
-    files = [f for f in root.rglob(pattern) if f.is_file()]
-    total = sum(f.stat().st_size for f in files)
+    # rglob skips unreadable directories silently; say so rather than "0 files".
+    if not os.access(root, os.R_OK | os.X_OK):
+        print("  not readable — permission denied")
+        return
+    files = sized(root.rglob(pattern))
+    total = sum(size for _, size in files)
     print(f"  {len(files)} file(s), {mb(total)}")
-    for f in sorted(files, key=lambda f: -f.stat().st_size)[:8]:
-        print(f"    {mb(f.stat().st_size):>10}  {f.relative_to(root)}")
+    for f, size in sorted(files, key=lambda fs: -fs[1])[:8]:
+        print(f"    {mb(size):>10}  {f.relative_to(root)}")
 
 
 # ----------------------------------------------------------------------
@@ -174,7 +231,11 @@ def report_rss():
     rule("PROCESS MEMORY")
     found = False
     self_pid = str(os.getpid())
-    for pid in sorted(p for p in os.listdir("/proc") if p.isdigit()):
+    try:
+        pids = sorted(p for p in os.listdir("/proc") if p.isdigit())
+    except OSError:  # no procfs (e.g. reading a copied-out tree on macOS)
+        pids = []
+    for pid in pids:
         if pid == self_pid:
             continue
         try:
@@ -199,7 +260,7 @@ def report_rss():
             print(f"  pid {pid}")
             print(f"    current RSS   {mb(vals.get('VmRSS:', 0))}")
             print(f"    peak RSS      {mb(vals.get('VmHWM:', 0))}  "
-                  f"(high-water mark — glibc does not return this to the OS)")
+                  f"(highest RSS since start; never decreases, even after frees)")
             print(f"    cmd           {cmd.strip()[:90]}")
         except (OSError, ValueError):
             continue
@@ -221,11 +282,20 @@ def main():
     args = ap.parse_args()
 
     print("ML Forecast Lab — footprint report")
-    report_db(args.db or os.path.join(args.data, "history.db"))
-    report_models(os.path.join(args.data, "models"))
-    report_dir("LOGS", os.path.join(args.data, "logs"))
-    report_dir("DEBUG DUMPS", os.path.join(args.config, "debug"))
-    report_rss()
+    sections = [
+        lambda: report_db(args.db or os.path.join(args.data, "history.db")),
+        lambda: report_models(os.path.join(args.data, "models")),
+        lambda: report_dir("LOGS", os.path.join(args.data, "logs")),
+        lambda: report_dir("DEBUG DUMPS", os.path.join(args.config, "debug")),
+        report_rss,
+    ]
+    # One unreadable path (e.g. permissions on a copied-out tree) must not
+    # cost the sections after it.
+    for section in sections:
+        try:
+            section()
+        except OSError as e:
+            print(f"  could not read: {e}")
     print()
 
 
