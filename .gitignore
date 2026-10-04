@@ -31,3 +31,8 @@ venv/
 # Data (runtime)
 *.db
 *.log
+
+# Archives: replay bundles (mlfl-replay-*.zip) and other scratch archives
+# never belong in the tree — ml-forecast-lab/ is cloned onto every user's
+# device by Supervisor. Commit a deliberate fixture with `git add -f`.
+*.zip
