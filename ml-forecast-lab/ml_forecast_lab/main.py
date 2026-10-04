@@ -1887,6 +1887,36 @@ class MLForecastLabApp:
             return None
         return self._site_location
 
+    async def _future_solar_frame(self, future_index, cov_cols):
+        """pvlib ``sun_elevation`` / ``clear_sky_ghi`` for the forecast grid.
+
+        Computed for whichever of the two is in ``cov_cols`` — the columns
+        the tree was trained on — so the recursive loops never carry the
+        ``last_ts`` value across the horizon. None when neither is present,
+        the site location is unknown, or pvlib fails.
+        """
+        solar_cols = [
+            c for c in ("sun_elevation", "clear_sky_ghi") if c in cov_cols
+        ]
+        if not solar_cols:
+            return None
+        loc = await self._get_site_location()
+        if loc is None:
+            return None
+        lat, lon = loc
+        try:
+            from ml_forecast_lab.solar_physics import compute_solar_features
+            return compute_solar_features(
+                future_index,
+                latitude=lat,
+                longitude=lon,
+                include_elevation="sun_elevation" in solar_cols,
+                include_clear_sky="clear_sky_ghi" in solar_cols,
+            )
+        except Exception as e:
+            logger.debug(f"Future solar pre-compute failed: {e}")
+            return None
+
     async def _resolve_units(self, exp_cfg) -> str:
         """Resolve the unit to publish on this experiment's HA sensors.
 
@@ -5117,29 +5147,15 @@ class MLForecastLabApp:
                 for c in raw_cov_cols
             }
 
-            # Deterministic future solar values for the physics-gated
-            # lag buffer (mirrors _forecast_with_cached). When the user
-            # has `include_clear_sky_irradiance: true` on the
-            # experiment, future clear_sky_ghi is known a priori from
-            # pvlib — we use it below to zero the lag buffer at night
-            # steps, keeping the recursive feature vectors in the same
-            # distribution the tree saw during training.
-            prod_future_solar = None
-            if getattr(exp_cfg, "include_clear_sky_irradiance", False):
-                try:
-                    loc = await self._get_site_location()
-                    if loc is not None:
-                        lat, lon = loc
-                        from ml_forecast_lab.solar_physics import compute_solar_features
-                        prod_future_solar = compute_solar_features(
-                            future_index, latitude=lat, longitude=lon,
-                            include_elevation=False,
-                            include_clear_sky=True,
-                        )
-                except Exception as e:
-                    logger.debug(
-                        f"  _run_production_inference future solar compute failed: {e}"
-                    )
+            # Deterministic future solar values (mirrors
+            # _forecast_with_cached): they feed each step's sun_elevation /
+            # clear_sky_ghi and their interactions, which must not be
+            # carried flat from last_ts; clear_sky_ghi also zeroes
+            # the lag buffer at night steps, keeping the recursive feature
+            # vectors in the distribution the tree saw during training.
+            prod_future_solar = await self._future_solar_frame(
+                future_index, raw_cov_cols,
+            )
 
             # Lag buffer: chronological, grows with each prediction.
             # Seeded from the complete grid so buf[-k] really is k intervals
@@ -5196,12 +5212,20 @@ class MLForecastLabApp:
                 row[TARGET_MISSING_COLUMN] = (
                     1.0 if any(lag_imputed[-_lag_reach:]) else 0.0
                 )
-                # Covariates (use future values if available, else last-known)
+                # Covariates: pvlib solar values first, then future
+                # values if available, else last-known.
                 fresh = {}
                 for c in raw_cov_cols:
                     row[c] = last_cov_vals.get(c, 0.0)
                     fresh[c] = False
-                    if c in future_cov_values:
+                    if (
+                        prod_future_solar is not None
+                        and c in prod_future_solar.columns
+                        and ts in prod_future_solar.index
+                    ):
+                        row[c] = float(prod_future_solar.loc[ts, c])
+                        fresh[c] = True
+                    elif c in future_cov_values:
                         try:
                             row[c] = float(future_cov_values[c].iloc[step_idx])
                             fresh[c] = True
@@ -7606,26 +7630,9 @@ class MLForecastLabApp:
             # are exactly known for any future time given (lat, lon), so we
             # should NOT carry forward the last value — that would leave the
             # recursive forecast stuck in a single point of the day.
-            future_solar = None
-            solar_cols = [
-                c for c in ("sun_elevation", "clear_sky_ghi")
-                if c in raw_cov_cols
-            ]
-            if solar_cols:
-                loc = await self._get_site_location()
-                if loc is not None:
-                    lat, lon = loc
-                    try:
-                        from ml_forecast_lab.solar_physics import compute_solar_features
-                        future_solar = compute_solar_features(
-                            future_index,
-                            latitude=lat,
-                            longitude=lon,
-                            include_elevation="sun_elevation" in solar_cols,
-                            include_clear_sky="clear_sky_ghi" in solar_cols,
-                        )
-                    except Exception as e:
-                        logger.debug(f"Future solar pre-compute failed: {e}")
+            future_solar = await self._future_solar_frame(
+                future_index, raw_cov_cols,
+            )
 
             def _build_feature_row(ts: pd.Timestamp, buf: list, step_idx: int) -> dict:
                 """Construct a single feature row matching the training schema."""
