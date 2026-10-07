@@ -7042,7 +7042,8 @@ class MLForecastLabApp:
         # glue. On cold start (no forecast_log rows yet, lab mode, DB
         # unavailable, or query failure) the state is 0 with empty
         # arrays and a `status` attribute naming the reason; state
-        # transitions to "ready" once `lead_time_curve` has samples.
+        # transitions to "ready" once `lead_time_curve` has a sample at
+        # a non-negative lead.
         acc_state: Union[int, float] = 0
         acc_attrs = {
             "friendly_name": f"{publish_name} Forecast Accuracy",
@@ -7094,8 +7095,19 @@ class MLForecastLabApp:
                     acc_attrs["mae"] = ltc["mae"]
                     acc_attrs["rmse"] = ltc["rmse"]
                     acc_attrs["sample_count"] = ltc["sample_count"]
-                    acc_attrs["status"] = "ready"
-                    acc_state = round(ltc["mae"][0], 4) if ltc["mae"] else 0
+                    # v2.52.4: the state is the first non-negative lead
+                    # bucket, not index 0. A tick that falls back to a
+                    # stale frame logs hindcast rows (leads of minus
+                    # several hours); index 0 then pinned the state to
+                    # that bucket's handful of samples for the 30-day
+                    # window. Bucket 0 holds leads in (-interval, interval).
+                    i0 = next(
+                        (i for i, m in enumerate(ltc["lead_minutes"]) if m >= 0),
+                        None,
+                    )
+                    if i0 is not None:
+                        acc_attrs["status"] = "ready"
+                        acc_state = round(ltc["mae"][i0], 4)
                 if rev:
                     acc_attrs["revision_first_mae"] = rev.get(
                         "first_forecast_mae"

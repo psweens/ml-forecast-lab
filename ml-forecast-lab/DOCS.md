@@ -366,7 +366,7 @@ When an experiment is in `mode: production`, the app publishes the following sen
 | `sensor.mlfl_<name>_cumulative` | The integrated forecast curve. Resets at local midnight when `source_is_cumulative` and `reset_daily` are both true; otherwise a `cumsum` anchored at zero. | Useful for daily-budget automations (EV planning, hot-water tank pre-heat). |
 | `sensor.mlfl_<name>_upper_<pct>` | Upper conformal band at the `<pct>` coverage level (default `80`). | Renamed to match `conformal_coverage` — e.g. `_upper_90` if you set `0.9`. Appears once enough residuals have been calibrated; cold-start may take ~10 forecast cycles. |
 | `sensor.mlfl_<name>_lower_<pct>` | Lower conformal band. | As above. |
-| `sensor.mlfl_<name>_forecast_accuracy` | Running accuracy summary (bias, MAE, coverage). | Updated whenever a logged prediction's actual arrives. |
+| `sensor.mlfl_<name>_forecast_accuracy` | Mean absolute error of the next-interval forecast over the last 30 days. Per interval when `source_is_cumulative` is true. | Recomputed on every forecast publish. Attributes carry the full lead-time curve (`lead_hours`, `mae`, `rmse`, `sample_count`) and the first-versus-latest revision MAE. `status` reads `accumulating` until a next-interval forecast has been scored. |
 | `sensor.mlfl_<name>_last_benchmark` | ISO timestamp of the most recent benchmark completion. | `device_class: timestamp`. Attributes include outcome, duration, winner, and a truncated error string when the cycle failed — convenient triggers for HA automations. |
 | `sensor.mlfl_<name>_last_retrain` | ISO timestamp of the most recent retrain. | Same shape as `_last_benchmark`. |
 
