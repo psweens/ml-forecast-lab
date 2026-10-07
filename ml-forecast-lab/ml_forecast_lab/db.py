@@ -532,7 +532,9 @@ class HistoryDB:
         Creates ``_mlfl_actuals_grid_tmp(grid_dt, value)`` — raw actuals
         snapped to the interval grid — and, when ``increment`` is set,
         additionally ``_mlfl_actuals_vals_tmp(grid_dt, value)`` holding
-        the adjacency-guarded per-interval deltas (NULL across gaps).
+        each bin's increment under the training label's rule: last
+        reading minus the last reading before the bin, zero for a bin
+        with no readings, NULL for the window's first bin.
 
         Every analytics query used to inline the grid aggregation as a
         WITH-clause CTE. SQLite executes those as a co-routine that is
@@ -581,20 +583,57 @@ class HistoryDB:
                 "ON _mlfl_actuals_grid_tmp(grid_dt)"
             )
             if increment:
+                # v2.52.4: the training label's rule (cumulative_to_interval
+                # then a sum resample), not an adjacency-guarded difference
+                # of bin means. Each bin's increment is its last reading
+                # minus the last reading before it, so the change after a
+                # quiet stretch lands in the bin where it was recorded and
+                # a bin with no readings is a zero increment. A drop
+                # (reset) counts the bin's last reading, as training counts
+                # the reading after a reset. Bins before the first and
+                # after the last reading in the window are absent.
+                where_sql = (
+                    "WHERE value IS NOT NULL AND SUBSTR(ds, 1, 19) >= ?"
+                    if since_str else "WHERE value IS NOT NULL"
+                )
                 cursor.execute(
-                    """
+                    f"""
                     CREATE TEMP TABLE _mlfl_actuals_vals_tmp AS
-                    SELECT grid_dt,
-                        CASE
-                          WHEN CAST(strftime('%s', grid_dt) AS INTEGER)
-                               - CAST(strftime('%s', LAG(grid_dt) OVER (ORDER BY grid_dt)) AS INTEGER)
-                               = ?
-                          THEN value - LAG(value) OVER (ORDER BY grid_dt)
-                          ELSE NULL
-                        END AS value
-                    FROM _mlfl_actuals_grid_tmp
+                    WITH RECURSIVE
+                    readings AS (
+                        SELECT (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ? AS g,
+                               ds, value
+                        FROM {actuals_table}
+                        {where_sql}
+                    ),
+                    last_per_bin AS (
+                        SELECT g, value FROM (
+                            SELECT g, value,
+                                   ROW_NUMBER() OVER (PARTITION BY g ORDER BY ds DESC) AS rn
+                            FROM readings
+                        ) WHERE rn = 1
+                    ),
+                    deltas AS (
+                        SELECT g,
+                               CASE
+                                 WHEN value < LAG(value) OVER (ORDER BY g) THEN value
+                                 ELSE value - LAG(value) OVER (ORDER BY g)
+                               END AS value
+                        FROM last_per_bin
+                    ),
+                    span(g, g_end) AS (
+                        SELECT MIN(g), MAX(g) FROM last_per_bin
+                        UNION ALL
+                        SELECT g + ?, g_end FROM span WHERE g + ? <= g_end
+                    )
+                    SELECT strftime('%Y-%m-%d %H:%M:%S', span.g, 'unixepoch') AS grid_dt,
+                           CASE WHEN d.g IS NULL THEN 0.0 ELSE d.value END AS value
+                    FROM span
+                    LEFT JOIN deltas d ON d.g = span.g
+                    WHERE span.g IS NOT NULL
                     """,
-                    (interval_sec,),
+                    (interval_sec, interval_sec, *since_params,
+                     interval_sec, interval_sec),
                 )
                 cursor.execute(
                     "CREATE INDEX _mlfl_actuals_vals_tmp_idx "
@@ -619,12 +658,12 @@ class HistoryDB:
     def _actuals_join(increment: bool) -> tuple[str, str]:
         """Actuals relation and WHERE guard for a forecast_log join.
 
-        Increment mode (cumulative source) reads the per-interval deltas
-        ``_materialise_actuals_grid(..., increment=True)`` built: a NULL
-        delta (recorder gap) and a negative delta (daily reset) measure no
-        interval and are excluded, as in ``get_forecast_accuracy``. Raw
-        mode reads the grid unchanged and adds no guard, so its results
-        are what they were before v2.52.4.
+        Increment mode (cumulative source) reads the per-bin increments
+        ``_materialise_actuals_grid(..., increment=True)`` built, under the
+        same guard as ``get_forecast_accuracy``: NULL (the window's first
+        bin) and negative values are excluded. Raw mode reads the grid
+        unchanged and adds no guard, so its results are what they were
+        before v2.52.4.
         """
         if increment:
             return (
@@ -759,19 +798,17 @@ class HistoryDB:
         # the subsequent `fv.value >= 0` filter silently dropped any row
         # where the 2nd difference went negative. v2.40.7 fix.
         #
-        # Midnight resets on daily-cumulative sensors produce a large
-        # negative actuals increment (e.g. 0 - 85 = -85). Increment mode
-        # filters `av.value >= 0` to drop those rows; safe because the
-        # mode is gated on source_is_cumulative upstream.
-        #
-        # We also null out the actuals delta when the previous grid row
-        # is not exactly one interval earlier — otherwise an HA outage
-        # causes e.g. a 2-hour span to be treated as a single-interval
-        # demand, inflating MAE with data-availability artefacts rather
-        # than model error. The adjacency check compares unix-epoch
-        # seconds of the stringified grid_dt.
+        # v2.52.4: the actuals increments follow the training label's
+        # rule (see _materialise_actuals_grid). A bin with no reading is
+        # a zero increment and the growth across a recorder gap lands in
+        # the bin of the first reading after it, as the model was trained
+        # to see it. The previous adjacency guard nulled that bin and
+        # never scored empty ones, which for a counter that only logs
+        # changes left a small, biased sample of draw-time bins. A reset
+        # counts the bin's own reading, so a negative increment no longer
+        # occurs; the `av.value >= 0` filter stays as a guard.
         # v2.41.0 (audit F4): the grid-aligned actuals — and, in
-        # increment mode, their adjacency-guarded deltas — are
+        # increment mode, their per-bin increments — are
         # materialised ONCE into indexed temp tables instead of being
         # inlined as WITH-clause CTEs in every query below. The CTE
         # form executed as a co-routine re-scanned per forecast_log
@@ -791,8 +828,8 @@ class HistoryDB:
                 "actuals_vals AS "
                 "(SELECT grid_dt, value FROM _mlfl_actuals_vals_tmp)"
             )
-            # Actuals can be NULL (adjacency guard) or negative
-            # (midnight reset). The ≥0 check stays actuals-only —
+            # Actuals can be NULL (the window's first bin). The ≥0
+            # check stays actuals-only —
             # applying it to the forecast was the silent half of the
             # v2.40.7 bug, hiding rows where the spurious 2nd
             # difference went negative — but the NULL check applies to
@@ -1034,9 +1071,9 @@ class HistoryDB:
         # --- Normalisation baseline ---
         # Mean |actual| across the same window in evaluation_mode. Used by
         # the UI to report MAE as a % of "typical interval demand" without
-        # needing the caller to know units. In increment mode we diff
-        # actuals with the same adjacency guard as the accuracy query so
-        # the baseline matches what errors are measured against.
+        # needing the caller to know units. In increment mode it reads
+        # the same per-bin increments as the accuracy query so the
+        # baseline matches what errors are measured against.
         typical = None
         try:
             if increment:
@@ -1535,8 +1572,9 @@ class HistoryDB:
             space from the predicted delta (≈0–1%/interval) and
             plotting them together is misleading. This flag tells the
             query to return the actual as a per-interval delta
-            (``value − value[t−interval]``, adjacency-guarded) so both
-            series live on the same axis.
+            (the bin's increment under the training label's rule; see
+            ``_materialise_actuals_grid``) so both series live on the
+            same axis.
         model_name : str, optional
             Restrict forecast candidates to one model. Matches the
             accuracy / stability endpoints.
@@ -1581,9 +1619,9 @@ class HistoryDB:
 
         # v2.41.0 (audit F4): indexed temp tables instead of per-query
         # co-routine CTEs (see _materialise_actuals_grid). For
-        # cumulative sources the deltas table puts actuals in the same
-        # space as the per-interval predictions, with the same
-        # adjacency guard as get_forecast_accuracy's increment mode.
+        # cumulative sources the increments table puts actuals in the
+        # same space as the per-interval predictions, as in
+        # get_forecast_accuracy's increment mode.
         if not self._materialise_actuals_grid(
             cursor, actuals_table, interval_sec, cutoff_str,
             increment=source_is_cumulative,
@@ -1780,12 +1818,10 @@ class HistoryDB:
             The experiment's target is a cumulative counter. Its
             forecast_log rows hold per-interval deltas while the actuals
             table holds the raw counter, so residuals are taken against
-            the adjacency-guarded actuals deltas instead (the
-            ``increment`` mode of ``get_forecast_accuracy``). Intervals
-            after a recorder gap (NULL delta) and the daily reset
-            (negative delta) carry no measured interval and are
-            excluded. v2.52.4: before this, cumulative bands were sized
-            from |delta − running counter|.
+            the actuals increments instead (the ``increment`` mode of
+            ``get_forecast_accuracy``), which follow the training
+            label's rule. v2.52.4: before this, cumulative bands were
+            sized from |delta − running counter|.
 
         Returns
         -------
@@ -1975,9 +2011,8 @@ class HistoryDB:
         point-only rows are excluded automatically.
 
         ``source_is_cumulative``: the band brackets a per-interval delta,
-        so it is tested against the adjacency-guarded actuals deltas
-        rather than the raw counter; recorder-gap and daily-reset
-        intervals are excluded (see ``_actuals_join``). v2.52.4.
+        so it is tested against the actuals increments rather than the
+        raw counter (see ``_actuals_join``). v2.52.4.
 
         Returns
         -------

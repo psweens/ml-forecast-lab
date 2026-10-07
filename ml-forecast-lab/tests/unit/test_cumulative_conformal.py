@@ -12,8 +12,8 @@ fraction-of-a-kWh forecast, coverage read whatever the counter level
 happened to produce, and the accuracy state measured the counter level, not
 the model. The web Accuracy tab already used increment mode.
 
-All three now compare against the adjacency-guarded actuals deltas, with
-recorder-gap (NULL) and daily-reset (negative) intervals excluded, and the
+All three now compare against the actuals increments, which follow the
+training label's rule (pinned in ``test_increment_actuals.py``), and the
 non-cumulative path is unchanged. The replay key for
 ``get_conformal_quantiles`` carries the new flag only when it is set, so
 bundles recorded before it existed keep their keys.
@@ -44,16 +44,17 @@ def _grid_end() -> datetime:
     return datetime.utcnow().replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
 
 
-def _daily_counter(days: int = 4, gap: tuple[int, int] = (100, 103)):
+def _daily_counter(days: int = 4, quiet: tuple[int, int] = (100, 103)):
     """A daily-reset counter on the 30-min grid, plus its true increments.
 
     Resets at UTC midnight (the reset row carries that interval's
-    increment), and ``gap`` (positional, half-open) is a recorder outage:
-    those rows are absent, so the first bin after it has no measured delta.
+    increment). ``quiet`` (positional, half-open) is a stretch with no use,
+    which a change-only recorder leaves without rows.
     """
     end = _grid_end()
     idx = pd.date_range(end - timedelta(days=days), end, freq=f"{INTERVAL}min")
     inc = np.array([0.2 + 0.1 * (i % 5) for i in range(len(idx))])
+    inc[quiet[0]:quiet[1]] = 0.0
     counter = np.empty(len(idx))
     total = 0.0
     for i, ts in enumerate(idx):
@@ -62,20 +63,14 @@ def _daily_counter(days: int = 4, gap: tuple[int, int] = (100, 103)):
         total += inc[i]
         counter[i] = total
     keep = np.ones(len(idx), dtype=bool)
-    keep[gap[0]:gap[1]] = False
+    keep[quiet[0]:quiet[1]] = False
     return idx, inc, counter, keep
 
 
-def _measured_delta_mask(idx, keep):
-    """Bins with a measured, non-reset delta: present, previous bin present,
-    and not the first bin of a UTC day."""
-    mask = np.zeros(len(idx), dtype=bool)
-    for i in range(1, len(idx)):
-        mask[i] = (
-            keep[i] and keep[i - 1]
-            and idx[i].normalize() == idx[i - 1].normalize()
-        )
-    return mask
+def _scored(idx):
+    """Bins with a scored increment: every bin but the window's first,
+    quiet and reset bins included."""
+    return np.arange(len(idx)) >= 1
 
 
 @pytest.fixture
@@ -111,9 +106,9 @@ class TestConformalQuantiles:
             model_version="v1", interval_minutes=INTERVAL,
             source_is_cumulative=True,
         )
-        kept = _measured_delta_mask(idx, keep)
+        kept = _scored(idx)
         expected = float(np.quantile(np.abs(resid[kept]), LEVEL))
-        # Gap, post-gap and reset bins carry no measured interval.
+        # Quiet bins score as zero use, reset bins as their own use.
         assert cq["total_samples"] == int(kept.sum())
         assert cq["fallback_quantile"] == pytest.approx(expected, rel=1e-6)
         assert cq["quantiles"][INTERVAL] == pytest.approx(expected, rel=1e-6)
@@ -145,9 +140,9 @@ class TestCoverage:
             model_name="lightgbm", model_version="v1",
             source_is_cumulative=True,
         )
-        kept = int(_measured_delta_mask(idx, keep).sum())
-        # The ±0.1 band brackets every true increment; reset and post-gap
-        # bins are excluded rather than counted as misses.
+        kept = int(_scored(idx).sum())
+        # The ±0.1 band brackets every true increment, quiet and reset
+        # bins included.
         assert cov["overall"] == {"coverage": 1.0, "n": kept}
         assert cov["by_lead"]["coverage"] == [1.0]
         assert cov["by_lead"]["n"] == [kept]
@@ -246,7 +241,7 @@ class TestPublishedSensors:
         exp = _exp(source_is_cumulative=True, reset_daily=True)
         captured = self._publish(db, exp)
 
-        kept = _measured_delta_mask(idx, keep)
+        kept = _scored(idx)
         acc_state, acc_attrs = captured[f"sensor.mlfl_{EXP}_forecast_accuracy"]
         assert acc_attrs["status"] == "ready"
         assert float(acc_state) == pytest.approx(
@@ -269,6 +264,37 @@ class TestPublishedSensors:
         monkeypatch.setattr(db, "get_forecast_accuracy", spy)
         self._publish(db, _exp(source_is_cumulative=False))
         assert modes == ["raw"]
+
+
+class TestWebWiring:
+    """The Accuracy tab passes the flag positionally; pin that it binds to
+    ``source_is_cumulative`` in the real signatures."""
+
+    @pytest.mark.parametrize(
+        "method", ["get_forecast_coverage", "get_conformal_quantiles"],
+    )
+    def test_positional_flag_binds_to_source_is_cumulative(self, method):
+        import ast
+        import inspect
+        from pathlib import Path
+
+        import ml_forecast_lab.web.app as web_app
+
+        tree = ast.parse(Path(web_app.__file__).read_text())
+        params = list(inspect.signature(getattr(HistoryDB, method)).parameters)[1:]
+        bound = []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and node.args
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "to_thread"):
+                continue
+            target = node.args[0]
+            if not (isinstance(target, ast.Attribute) and target.attr == method):
+                continue
+            args = [ast.unparse(a) for a in node.args[1:]]
+            if "bool(exp_cfg.source_is_cumulative)" in args:
+                bound.append(params[args.index("bool(exp_cfg.source_is_cumulative)")])
+        assert bound and set(bound) == {"source_is_cumulative"}
 
 
 class TestReplayKey:

@@ -23,6 +23,9 @@ Usage::
         --days 30 \\
         --tz Europe/London
 
+Add ``--cumulative`` for a ``source_is_cumulative`` experiment, so the bands
+are tested against per-interval increments rather than the raw counter.
+
 This is a read-only diagnostic — it does not modify the DB.
 """
 

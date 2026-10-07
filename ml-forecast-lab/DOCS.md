@@ -308,11 +308,15 @@ trades the formal coverage guarantee for zero retraining cost:
   recent 14 days.
 - **Cumulative sources.** When `source_is_cumulative` is true the
   forecast is a per-interval increment, so each residual compares it
-  with the measured increment for that interval. Intervals with no
-  measured increment are left out: the first one after a recorder gap
-  and the one containing the daily reset. The band, its coverage on the
-  Forecast Accuracy tab, and the `_forecast_accuracy` sensor all use
-  this per-interval scale.
+  with that interval's increment as training computes it: the
+  counter's rise since the last reading before the interval, or the
+  reading itself after a daily reset. An interval with no readings
+  counts as zero use, so a counter that only logs changes is scored on
+  its quiet intervals too, and the rise after a quiet spell or a
+  recorder outage counts in the interval where it was recorded. The
+  band, its coverage, and every per-interval figure on the Forecast
+  Accuracy tab, as well as the `_forecast_accuracy` sensor, use this
+  scale.
 - **Per-lead-bucket quantile.** For the requested `conformal_coverage`
   level (default 0.8), we take the `level`-th quantile (= 80th
   percentile for 80% bands) of `|residual|` per lead bucket — for an
@@ -349,7 +353,9 @@ coverage looks fine. The Forecast Accuracy tab surfaces the worst-
 mis-covered bucket alongside the headline coverage chip; the offline
 diagnostic at `scripts/conformal_coverage_check.py` prints the full
 hour-of-day / weekday-weekend / per-lead breakdown for ad-hoc
-analysis. If buckets ≥5pp off nominal persist across multiple days,
+analysis (add `--cumulative` for an experiment with
+`source_is_cumulative: true`, or it reports coverage against the raw
+counter). If buckets ≥5pp off nominal persist across multiple days,
 the bands need an adaptive method — see the script's output for
 options.
 
