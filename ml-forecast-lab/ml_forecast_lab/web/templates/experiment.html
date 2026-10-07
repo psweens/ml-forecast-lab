@@ -4040,20 +4040,24 @@ window.showTab = function(el) {
         var maes = ltc.mae || [];
         var ns = ltc.sample_count || [];
         // First bucket with sufficient samples = "typical next-step
-        // error" — what the user sees on their HA dashboard.
-        var idx = -1;
+        // error" — what the user sees on their HA dashboard. v2.52.4:
+        // non-negative leads only, as the sensor: a tick that reused
+        // cached data logs forecasts for times already past.
+        var idx = -1, first = -1;
         for (var i = 0; i < leads.length; i++) {
+            if (leads[i] < 0) continue;
+            if (first < 0) first = i;
             if (ns[i] >= LEADBUCKET_MIN_N) { idx = i; break; }
         }
-        // Fall back to first bucket if no bucket meets the threshold
-        // (cold-start window), but flag it as unknown.
+        // Fall back to the first non-negative bucket if none meets the
+        // threshold (cold-start window), but flag it as unknown.
         var headlineMae = null, nextStepN = 0, coldStart = false;
         if (idx >= 0) {
             headlineMae = maes[idx];
             nextStepN = ns[idx];
-        } else if (leads.length > 0) {
-            headlineMae = maes[0];
-            nextStepN = ns[0];
+        } else if (first >= 0) {
+            headlineMae = maes[first];
+            nextStepN = ns[first];
             coldStart = true;
         }
         var typical = a.typical_interval_demand;
@@ -4675,7 +4679,7 @@ window.showTab = function(el) {
             hint.textContent = 'Metrics accumulate each production cycle — check back after the next run.';
         } else if (reason === 'no_overlap') {
             title.textContent = 'Forecasts logged, but no matching actuals in this window.';
-            hint.textContent = 'The target sensor may have stopped reporting, or every interval delta was clipped by a daily reset. Open the Forecast-log inspector in the diagnostics accordion to see what was logged.';
+            hint.textContent = 'The target sensor may have stopped reporting. Open the Forecast-log inspector in the diagnostics accordion to see what was logged.';
         } else if (reason === '__error__') {
             title.textContent = 'Could not load forecast accuracy data.';
             hint.textContent = (data && data.error) ? String(data.error)

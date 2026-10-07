@@ -148,6 +148,26 @@ class TestCoverage:
         assert cov["by_lead"]["n"] == [kept]
         assert sum(cov["by_hour_of_day"]["n"]) == kept
 
+    def test_window_first_bin_is_not_scored(self, cumulative_db):
+        """The window's first bin has no increment (no earlier reading);
+        a banded forecast for it is left out, not counted as a miss."""
+        db, table, idx, _inc, _counter, _keep, _resid = cumulative_db
+        first = idx[0].to_pydatetime()
+        db.log_forecast(
+            EXP, first - timedelta(minutes=INTERVAL), [first], [0.5],
+            "lightgbm", upper_bounds=[0.6], lower_bounds=[0.4],
+            model_version="v1",
+        )
+        cov = db.get_forecast_coverage(
+            EXP, table, interval_minutes=INTERVAL,
+            model_name="lightgbm", model_version="v1",
+            source_is_cumulative=True,
+        )
+        kept = int(_scored(idx).sum())
+        assert cov["overall"] == {"coverage": 1.0, "n": kept}
+        assert cov["by_lead"]["n"] == [kept]
+        assert sum(cov["by_hour_of_day"]["n"]) == kept
+
     def test_raw_mode_is_unchanged(self, cumulative_db):
         db, table, idx, inc, counter, keep, _resid = cumulative_db
         cov = db.get_forecast_coverage(

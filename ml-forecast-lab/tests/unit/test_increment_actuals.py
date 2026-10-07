@@ -15,11 +15,16 @@ does, that:
 - compared multi-reading bins on a half-bin-shifted difference of means.
 
 Bands were then calibrated on a small, biased subset: about three times too
-wide for a change-only demand counter in simulation. The actuals are now
-each bin's last reading minus the last reading before it (a drop counts the
-bin's last reading, as training counts the reading after a reset) and zero
-for a bin with no readings, so they equal the training label wherever
-training does not cap a spike.
+wide for a change-only demand counter in simulation. The actuals now follow
+training per reading: each reading's rise over the previous one, or the
+reading itself after a restart (a drop below 90% of the previous reading),
+summed per bin, with zero for a bin with no readings. A reset inside a bin
+keeps the use recorded before it. They equal the training label except
+where training caps a spike (``max_increment``), relabels a small rise
+across UTC midnight as a reset (``reset_daily``), or treats a dip as a
+reset; the helper below disables the first two. A dip (a drop to no less
+than 90%) is negative use here, which the recovery cancels, so it cannot
+score a lifetime counter's whole reading as one interval's use.
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ def change_only_counter(days: int = 3, seed: int = 5):
     inc = np.where(rng.random(len(grid)) < 0.35, rng.uniform(0.1, 1.5, len(grid)), 0.0).round(3)
     inc[0] = inc[-1] = 0.5      # the window opens and closes on a reading
     inc[40:52] = 0.0            # a six-hour quiet stretch
+    inc[96] = 0.7               # use in a reset bin (09-19 00:00)
     rows, total, last = [], 0.0, None
     for i, ts in enumerate(grid):
         if i and ts.normalize() != grid[i - 1].normalize():
@@ -61,16 +67,16 @@ def change_only_counter(days: int = 3, seed: int = 5):
     return readings, grid, inc
 
 
-def training_label(readings: pd.DataFrame) -> pd.Series:
+def training_label(readings: pd.DataFrame, interval: int = INTERVAL) -> pd.Series:
     """The label the pipeline trains on, with the spike cap disabled."""
     series = readings.set_index("ds")["value"]
-    per_reading = cumulative_to_interval(series, INTERVAL, max_increment=1e9)
-    return resample_to_grid(per_reading, freq=f"{INTERVAL}min", method="sum")
+    per_reading = cumulative_to_interval(series, interval, max_increment=1e9)
+    return resample_to_grid(per_reading, freq=f"{interval}min", method="sum")
 
 
-def increment_actuals(db: HistoryDB, table: str) -> pd.Series:
+def increment_actuals(db: HistoryDB, table: str, interval: int = INTERVAL) -> pd.Series:
     cur = db.conn.cursor()
-    assert db._materialise_actuals_grid(cur, table, INTERVAL * 60, increment=True)
+    assert db._materialise_actuals_grid(cur, table, interval * 60, increment=True)
     rows = cur.execute(
         "SELECT grid_dt, value FROM _mlfl_actuals_vals_tmp ORDER BY grid_dt"
     ).fetchall()
@@ -119,7 +125,7 @@ class TestIncrementActuals:
     def test_raw_grid_is_unchanged(self, counter_db):
         db, table, readings, _grid, _inc = counter_db
         cur = db.conn.cursor()
-        assert db._materialise_actuals_grid(cur, table, INTERVAL * 60, increment=True)
+        assert db._materialise_actuals_grid(cur, table, INTERVAL * 60)
         rows = cur.execute(
             "SELECT grid_dt, value FROM _mlfl_actuals_grid_tmp ORDER BY grid_dt"
         ).fetchall()
@@ -161,3 +167,55 @@ class TestIncrementActuals:
         )
         assert sum(acc["lead_time_curve"]["sample_count"]) == len(grid) - 1
         assert max(acc["lead_time_curve"]["mae"]) == pytest.approx(0.0, abs=1e-9)
+
+
+class TestRestartsAndDips:
+    def test_reset_inside_a_bin_keeps_the_use_before_it(self, tmp_path):
+        """60-min bins with the daily reset at :30 (a UTC+5:30 local
+        midnight): the bin holds use before and after the reset."""
+        db = HistoryDB(tmp_path / "history.db")
+        table = db.safe_table_name("sensor.demand_today")
+        idx = pd.date_range("2026-09-17 00:00", "2026-09-20 00:00", freq="10min")
+        rng = np.random.default_rng(3)
+        step = rng.uniform(0.0, 0.2, len(idx)).round(3)
+        values, total = [], 0.0
+        for ts, d in zip(idx, step):
+            if ts.hour == 18 and ts.minute == 30:
+                total = 0.0
+            total += d
+            values.append(total)
+        readings = pd.DataFrame({"ds": idx, "value": values})
+        db.store_history(table, readings)
+
+        actuals = increment_actuals(db, table, interval=60)
+        label = training_label(readings, interval=60)
+        np.testing.assert_allclose(actuals.iloc[1:], label.iloc[1:].values, atol=1e-9)
+        reset_bins = [t for t in actuals.index if t.hour == 18]
+        assert reset_bins and all(actuals[t] > 0.1 for t in reset_bins)
+
+    def test_small_dip_is_not_a_restart(self, tmp_path):
+        """A lifetime counter that logs one reading 0.05 below the last,
+        under the previous bin's last reading, then recovers."""
+        db = HistoryDB(tmp_path / "history.db")
+        table = db.safe_table_name("sensor.energy_total")
+        idx = pd.date_range("2026-09-17 00:00", periods=48 * 3, freq="10min")
+        values = 12345.0 + 0.01 * np.arange(len(idx))
+        values[50] = values[49] - 0.05           # 08:20, last reading of the 08:00 bin
+        db.store_history(table, pd.DataFrame({"ds": idx, "value": values}))
+
+        actuals = increment_actuals(db, table)
+        assert actuals.iloc[1:].abs().max() < 0.1
+        # Use is conserved across the dip and its recovery.
+        assert actuals.iloc[1:].sum() == pytest.approx(
+            values[-1] - values[2], abs=1e-6,
+        )
+
+    def test_counter_restart_counts_the_new_reading(self, tmp_path):
+        db = HistoryDB(tmp_path / "history.db")
+        table = db.safe_table_name("sensor.energy_total")
+        idx = pd.date_range("2026-09-17 00:00", periods=12, freq="30min")
+        values = [100.0, 100.5, 101.0, 101.5, 102.0, 0.3, 0.8, 1.3, 1.8, 2.3, 2.8, 3.3]
+        db.store_history(table, pd.DataFrame({"ds": idx, "value": values}))
+
+        actuals = increment_actuals(db, table)
+        np.testing.assert_allclose(actuals.iloc[1:], [0.5] * 4 + [0.3] + [0.5] * 6)

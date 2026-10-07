@@ -565,9 +565,31 @@ class TestEvolutionActuals:
             source_is_cumulative=True,
         )
         vals = r["actuals"]["values"]
-        # First entry is NULL (no prior bin) and excluded. Then deltas:
-        # 1.0, 1.0, max(0, -7) = 0, 1.0, 1.0
+        # First entry is NULL (no prior reading) and excluded. Then
+        # 1.0, 1.0, the reset bin's own reading (0.0), 1.0, 1.0.
         assert vals == [1.0, 1.0, 0.0, 1.0, 1.0]
+
+    def test_cumulative_source_matches_trajectory_across_a_gap(
+        self, db, actuals_with_gap,
+    ):
+        """v2.52.4: the measured line uses the same increments as the
+        trajectory and accuracy queries — zeros through the 04:00-05:30
+        hole and the accumulated 5.0 at 06:00 — rather than leaving the
+        hole and the bin after it blank."""
+        issued = datetime(2024, 6, 16, 3, 0)
+        targets = _targets_30min(issued, 8)   # 03:30 … 07:00
+        _log_cycle(db, "exp", issued, targets, [1.0] * 8)
+        r = db.get_forecast_evolution(
+            "exp", actuals_with_gap,
+            n_cycles=12, interval_minutes=30,
+            source_is_cumulative=True,
+        )
+        assert r["actuals"]["targets"] == [
+            t.strftime("%Y-%m-%d %H:%M:%S") for t in targets
+        ]
+        assert r["actuals"]["values"] == pytest.approx(
+            [1.0, 0.0, 0.0, 0.0, 0.0, 5.0, 1.0, 1.0],
+        )
 
 
 # ---------------------------------------------------------------------

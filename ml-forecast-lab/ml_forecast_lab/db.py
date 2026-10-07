@@ -530,11 +530,11 @@ class HistoryDB:
         """(Re)build the indexed TEMP table the analytics joins read from.
 
         Creates ``_mlfl_actuals_grid_tmp(grid_dt, value)`` — raw actuals
-        snapped to the interval grid — and, when ``increment`` is set,
-        additionally ``_mlfl_actuals_vals_tmp(grid_dt, value)`` holding
-        each bin's increment under the training label's rule: last
-        reading minus the last reading before the bin, zero for a bin
-        with no readings, NULL for the window's first bin.
+        snapped to the interval grid — or, when ``increment`` is set,
+        ``_mlfl_actuals_vals_tmp(grid_dt, value)`` holding each bin's
+        increment under the training label's rule (see
+        ``_materialise_actuals_increments``). v2.52.4: increment mode no
+        longer builds the raw grid, which none of its readers use.
 
         Every analytics query used to inline the grid aggregation as a
         WITH-clause CTE. SQLite executes those as a co-routine that is
@@ -543,10 +543,10 @@ class HistoryDB:
         at 78 s (conformal) / 240 s (accuracy) on one experiment-month
         of forecast_log vs ~0.4 s with the materialised, indexed temp
         table (audit F3/F4; the v2.39.3 coverage fix pioneered the
-        pattern, this generalises it). ``since_str`` bounds the actuals
-        scan: join keys satisfy target_dt >= issued_at >= cutoff, so
-        earlier actuals can never match and scanning them only adds
-        cost that grows with ``max_age`` (up to 365 days) for no result.
+        pattern, this generalises it). ``since_str`` drops actuals that
+        cannot match: join keys satisfy target_dt >= issued_at >= cutoff.
+        In increment mode it also bounds the scan through the ds index;
+        the raw grid's ``SUBSTR`` filter still reads the whole table.
 
         Callers run under ``self._lock`` (single shared connection), so
         the fixed table names cannot race. Returns False on failure —
@@ -559,9 +559,15 @@ class HistoryDB:
         try:
             cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_grid_tmp")
             cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_vals_tmp")
+            cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_bins_tmp")
             # Built lazily by the daily-cumulative accuracy path for
             # non-cumulative sensors — drop any stale copy on every rebuild.
             cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_cum_tmp")
+            if increment:
+                self._materialise_actuals_increments(
+                    cursor, actuals_table, interval_sec, since_str,
+                )
+                return True
             since_sql = "WHERE SUBSTR(ds, 1, 19) >= ?" if since_str else ""
             since_params = (since_str,) if since_str else ()
             cursor.execute(
@@ -582,67 +588,97 @@ class HistoryDB:
                 "CREATE INDEX _mlfl_actuals_grid_tmp_idx "
                 "ON _mlfl_actuals_grid_tmp(grid_dt)"
             )
-            if increment:
-                # v2.52.4: the training label's rule (cumulative_to_interval
-                # then a sum resample), not an adjacency-guarded difference
-                # of bin means. Each bin's increment is its last reading
-                # minus the last reading before it, so the change after a
-                # quiet stretch lands in the bin where it was recorded and
-                # a bin with no readings is a zero increment. A drop
-                # (reset) counts the bin's last reading, as training counts
-                # the reading after a reset. Bins before the first and
-                # after the last reading in the window are absent.
-                where_sql = (
-                    "WHERE value IS NOT NULL AND SUBSTR(ds, 1, 19) >= ?"
-                    if since_str else "WHERE value IS NOT NULL"
-                )
-                cursor.execute(
-                    f"""
-                    CREATE TEMP TABLE _mlfl_actuals_vals_tmp AS
-                    WITH RECURSIVE
-                    readings AS (
-                        SELECT (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ? AS g,
-                               ds, value
-                        FROM {actuals_table}
-                        {where_sql}
-                    ),
-                    last_per_bin AS (
-                        SELECT g, value FROM (
-                            SELECT g, value,
-                                   ROW_NUMBER() OVER (PARTITION BY g ORDER BY ds DESC) AS rn
-                            FROM readings
-                        ) WHERE rn = 1
-                    ),
-                    deltas AS (
-                        SELECT g,
-                               CASE
-                                 WHEN value < LAG(value) OVER (ORDER BY g) THEN value
-                                 ELSE value - LAG(value) OVER (ORDER BY g)
-                               END AS value
-                        FROM last_per_bin
-                    ),
-                    span(g, g_end) AS (
-                        SELECT MIN(g), MAX(g) FROM last_per_bin
-                        UNION ALL
-                        SELECT g + ?, g_end FROM span WHERE g + ? <= g_end
-                    )
-                    SELECT strftime('%Y-%m-%d %H:%M:%S', span.g, 'unixepoch') AS grid_dt,
-                           CASE WHEN d.g IS NULL THEN 0.0 ELSE d.value END AS value
-                    FROM span
-                    LEFT JOIN deltas d ON d.g = span.g
-                    WHERE span.g IS NOT NULL
-                    """,
-                    (interval_sec, interval_sec, *since_params,
-                     interval_sec, interval_sec),
-                )
-                cursor.execute(
-                    "CREATE INDEX _mlfl_actuals_vals_tmp_idx "
-                    "ON _mlfl_actuals_vals_tmp(grid_dt)"
-                )
             return True
         except sqlite3.Error as e:
             logger.warning(f"Failed to build temp actuals grid: {e}")
             return False
+
+    # A drop to below this fraction of the previous reading is a counter
+    # restart (daily reset, meter swap, device reboot); a smaller drop is
+    # a measurement dip. Same threshold as HA's total_increasing reset
+    # detection.
+    _COUNTER_RESTART_RATIO = 0.9
+
+    def _materialise_actuals_increments(
+        self, cursor, actuals_table: str, interval_sec: int,
+        since_str: Optional[str],
+    ) -> None:
+        """Build ``_mlfl_actuals_vals_tmp(grid_dt, value)``: each bin's
+        increment under the training label's rule.
+
+        v2.52.4: per reading, as ``cumulative_to_interval``, then summed
+        per bin, as the sum resample: a reading's increment is its rise
+        over the previous reading, or the reading itself after a restart,
+        so a reset inside a bin keeps the use recorded before it. The
+        change after a quiet stretch lands in the bin where it was
+        recorded, and a bin with no readings between the window's first
+        and last reading is a zero increment. A dip below the previous
+        reading that is not a restart counts as negative use, which the
+        recovery cancels; a bin left negative is excluded downstream by
+        the ``>= 0`` guard. The bin holding the window's first reading is
+        NULL, since its use before that reading is unknown. Training
+        differs in three ways that are not copied here: it treats every
+        drop as a reset (a dip on a lifetime counter then scores the
+        whole reading, cut back by the spike cap), it caps spikes
+        (``max_increment``), and with ``reset_daily`` it treats a small
+        rise across UTC midnight as a reset. These increments are what
+        the counter measured.
+
+        ``ds >= since`` matches ``SUBSTR(ds, 1, 19) >= since`` for a
+        19-character cutoff and lets the ds index bound the scan; LAG
+        over ds reads that index in order. Callers hold ``self._lock``.
+        """
+        since_sql = "AND ds >= ?" if since_str else ""
+        since_params = (since_str,) if since_str else ()
+        cursor.execute(
+            f"""
+            CREATE TEMP TABLE _mlfl_actuals_bins_tmp AS
+            WITH steps AS (
+                SELECT (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ? AS g,
+                       value,
+                       LAG(value) OVER (ORDER BY ds) AS prev
+                FROM {actuals_table}
+                WHERE value IS NOT NULL {since_sql}
+            )
+            SELECT g,
+                   CASE
+                     WHEN COUNT(prev) < COUNT(*) THEN NULL
+                     ELSE SUM(CASE
+                                WHEN value < prev AND value < ? * prev THEN value
+                                ELSE value - prev
+                              END)
+                   END AS value
+            FROM steps
+            GROUP BY g
+            """,
+            (interval_sec, interval_sec, *since_params,
+             self._COUNTER_RESTART_RATIO),
+        )
+        cursor.execute(
+            "CREATE INDEX _mlfl_actuals_bins_tmp_idx "
+            "ON _mlfl_actuals_bins_tmp(g)"
+        )
+        cursor.execute(
+            """
+            CREATE TEMP TABLE _mlfl_actuals_vals_tmp AS
+            WITH RECURSIVE span(g, g_end) AS (
+                SELECT MIN(g), MAX(g) FROM _mlfl_actuals_bins_tmp
+                UNION ALL
+                SELECT g + ?, g_end FROM span WHERE g + ? <= g_end
+            )
+            SELECT strftime('%Y-%m-%d %H:%M:%S', span.g, 'unixepoch') AS grid_dt,
+                   CASE WHEN b.g IS NULL THEN 0.0 ELSE b.value END AS value
+            FROM span
+            LEFT JOIN _mlfl_actuals_bins_tmp b ON b.g = span.g
+            WHERE span.g IS NOT NULL
+            """,
+            (interval_sec, interval_sec),
+        )
+        cursor.execute(
+            "CREATE INDEX _mlfl_actuals_vals_tmp_idx "
+            "ON _mlfl_actuals_vals_tmp(grid_dt)"
+        )
+        cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_bins_tmp")
 
     @staticmethod
     def _drop_actuals_grid(cursor) -> None:
@@ -650,6 +686,7 @@ class HistoryDB:
         try:
             cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_grid_tmp")
             cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_vals_tmp")
+            cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_bins_tmp")
             cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_cum_tmp")
         except sqlite3.Error:
             pass
@@ -705,8 +742,10 @@ class HistoryDB:
             targets (which are already grid-aligned).
         evaluation_mode : str
             "raw" — evaluate against stored cumulative/point values.
-            "increment" — evaluate against per-interval deltas (LAG-based
-            diff of both forecasts and actuals). Only meaningful for
+            "increment" — evaluate against per-interval increments of
+            the actuals under the training label's rule (see
+            ``_materialise_actuals_increments``); the logged forecasts
+            are already per-interval. Only meaningful for
             cumulative sensors where raw-value errors mostly reflect the
             sensor's shape through the day rather than model skill.
         model_name : str, optional
@@ -799,14 +838,15 @@ class HistoryDB:
         # where the 2nd difference went negative. v2.40.7 fix.
         #
         # v2.52.4: the actuals increments follow the training label's
-        # rule (see _materialise_actuals_grid). A bin with no reading is
-        # a zero increment and the growth across a recorder gap lands in
-        # the bin of the first reading after it, as the model was trained
-        # to see it. The previous adjacency guard nulled that bin and
-        # never scored empty ones, which for a counter that only logs
-        # changes left a small, biased sample of draw-time bins. A reset
-        # counts the bin's own reading, so a negative increment no longer
-        # occurs; the `av.value >= 0` filter stays as a guard.
+        # rule, per reading (see _materialise_actuals_increments). A bin
+        # with no reading is a zero increment and the growth across a
+        # recorder gap lands in the bin of the first reading after it, as
+        # the model was trained to see it. The previous adjacency guard
+        # nulled that bin and never scored empty ones, which for a
+        # counter that only logs changes left a small, biased sample of
+        # draw-time bins. A restart counts the reading itself, so only a
+        # bin holding a dip that has not yet recovered is negative; the
+        # `av.value >= 0` filter excludes it.
         # v2.41.0 (audit F4): the grid-aligned actuals — and, in
         # increment mode, their per-bin increments — are
         # materialised ONCE into indexed temp tables instead of being
@@ -1103,7 +1143,8 @@ class HistoryDB:
         #                   cohort).
         #   "no_overlap"  — rows exist but no forecast target_dt matched
         #                   the actuals grid (sensor stopped reporting,
-        #                   increment mode + outages, etc.).
+        #                   or in increment mode only the window's
+        #                   first bin, which has no increment).
         total_logged = int(stats_row[0]) if stats_row else 0
         if lead_rows:
             empty_reason = "ok"
@@ -1573,7 +1614,7 @@ class HistoryDB:
             plotting them together is misleading. This flag tells the
             query to return the actual as a per-interval delta
             (the bin's increment under the training label's rule; see
-            ``_materialise_actuals_grid``) so both series live on the
+            ``_materialise_actuals_increments``) so both series live on the
             same axis.
         model_name : str, optional
             Restrict forecast candidates to one model. Matches the
@@ -2485,42 +2526,32 @@ class HistoryDB:
         # same space — otherwise the fan chart plots raw cumulative
         # values against delta predictions on one axis and the "Measured"
         # line spikes up to the daily total while predictions hug zero.
-        # Adjacency guard: only diff against the previous bin if it's
-        # exactly one interval back (mirrors get_forecast_trajectory).
-        # Reset guard: clamp negative deltas to 0 so daily-reset sensors
-        # don't produce a huge negative spike at midnight.
+        # v2.52.4: the deltas are the training-rule increments the
+        # trajectory and accuracy queries read (see
+        # _materialise_actuals_increments), built from one day before
+        # the window so its first bins have a preceding reading.
         actuals_targets: list = []
         actuals_values: list = []
         if min_target and max_target:
             if source_is_cumulative:
-                actuals_sql = f"""
-                    WITH actuals_grid AS (
-                        SELECT
-                            strftime('%Y-%m-%d %H:%M:%S',
-                                (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                                'unixepoch') AS grid_dt,
-                            AVG(value) AS value
-                        FROM {actuals_table}
-                        WHERE SUBSTR(ds, 1, 19) >= ?
-                          AND SUBSTR(ds, 1, 19) <= ?
-                        GROUP BY grid_dt
-                    )
-                    SELECT grid_dt,
-                        CASE
-                            WHEN CAST(strftime('%s', grid_dt) AS INTEGER)
-                                 - CAST(strftime('%s', LAG(grid_dt) OVER (ORDER BY grid_dt)) AS INTEGER)
-                                 = ?
-                            THEN MAX(0, value - LAG(value) OVER (ORDER BY grid_dt))
-                            ELSE NULL
-                        END AS value
-                    FROM actuals_grid
+                since = (
+                    pd.Timestamp(min_target) - pd.Timedelta(days=1)
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                # On failure the chart keeps its forecasts and shows no
+                # measured line, as when the actuals query below fails.
+                actuals_sql = (
+                    """
+                    SELECT grid_dt, value FROM _mlfl_actuals_vals_tmp
+                    WHERE grid_dt >= ? AND grid_dt <= ?
+                      AND value IS NOT NULL AND value >= 0
                     ORDER BY grid_dt ASC
-                """
-                actuals_params: tuple = (
-                    interval_sec, interval_sec,
-                    min_target, max_target,
-                    interval_sec,
+                    """
+                    if self._materialise_actuals_grid(
+                        cursor, actuals_table, interval_sec, since,
+                        increment=True,
+                    ) else None
                 )
+                actuals_params: tuple = (min_target, max_target)
             else:
                 actuals_sql = f"""
                     SELECT
@@ -2538,8 +2569,11 @@ class HistoryDB:
                     interval_sec, interval_sec, min_target, max_target,
                 )
             try:
-                cursor.execute(actuals_sql, actuals_params)
-                for grid_dt, value in cursor.fetchall():
+                rows = (
+                    cursor.execute(actuals_sql, actuals_params).fetchall()
+                    if actuals_sql else []
+                )
+                for grid_dt, value in rows:
                     if value is None:
                         continue
                     actuals_targets.append(grid_dt)
