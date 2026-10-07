@@ -3275,6 +3275,11 @@ class HistoryDB:
             )
             return {}
 
+    # v2.52.4: was the one public method on the shared connection without
+    # the lock; concurrent publish cycles interleaved its executemany with
+    # other writes ("cannot start a transaction within a transaction"), and
+    # its rollback() could discard another thread's uncommitted write.
+    @_locked
     def log_external_forecast(
         self,
         experiment: str,
