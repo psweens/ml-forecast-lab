@@ -1,13 +1,14 @@
 """v2.52.3: tree recursive forecast with ``sun_elevation`` but no ``clear_sky_ghi``.
 
 ``compute_solar_features`` emits only the columns it is asked for. Both tree
-recursive-forecast loops — ``_forecast_with_cached`` and
-``_run_production_inference`` — read ``clear_sky_ghi`` out of their future
-solar frame to decide whether to push 0 into the lag buffer at night. An
-experiment with ``include_sun_elevation: true`` and
-``include_clear_sky_irradiance: false`` handed the cached path a frame
-holding ``sun_elevation`` alone, the lookup raised ``KeyError``, and every
-forecast tick — including the immediate post-retrain one — failed.
+recursive-forecast loops — ``_compute_cached_forecast`` (behind
+``_forecast_with_cached``) and ``_run_production_inference`` — read
+``clear_sky_ghi`` out of their future solar frame to decide whether to push
+0 into the lag buffer at night. An experiment with
+``include_sun_elevation: true`` and ``include_clear_sky_irradiance: false``
+handed the cached path a frame holding ``sun_elevation`` alone, the lookup
+raised ``KeyError``, and every forecast tick — including the immediate
+post-retrain one — failed.
 
 The gate must follow training. ``build_features`` gates lags on clear-sky GHI
 only when that column is in the frame, so an elevation-only model was fitted
@@ -191,8 +192,8 @@ class TestCachedForecast:
         exp = _exp()
         app, published, _ = _make_app(tmp_db, exp, monkeypatch)
 
-        # _retrain_and_cache runs the post-retrain _forecast_with_cached,
-        # which is where the KeyError surfaced.
+        # _retrain_and_cache runs the post-retrain _forecast_with_cached →
+        # _compute_cached_forecast, which is where the KeyError surfaced.
         _run(app._retrain_and_cache(exp))
 
         cache = app._cached_models[exp.name]

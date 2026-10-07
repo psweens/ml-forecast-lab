@@ -41,7 +41,7 @@ and `model.bin`.
 extension, and the persist writes to `.tmp`. On xgboost 2.0.x that meant the
 deprecated binary format; on 2.1 it means UBJSON with a warning.
 
-**Legacy caches.** A cache persisted by v2.52.1 or earlier holds an intact
+**Legacy caches.** A cache persisted by v2.52.2 or earlier holds an intact
 booster without metadata. `load` falls back, in order, to:
 
 1. the embedded attribute;
@@ -117,8 +117,9 @@ Each failure matched its defect:
   `cache_meta.json` (A0).
 - `lightgbm` and default `nlinear` (RevIN on) passed, as controls.
 
-That gate is now gone: each experiment already checks for its own files, so
-the gate was redundant.
+Since v2.52.2 that gate is derived from `_cached_model_dir(...).parent`, so
+monkeypatching `_cached_model_dir` alone redirects the whole cache and the
+suite needs no other patching.
 
 ## Open finding (not fixed here): XGBoost's default loss grows no splits
 
