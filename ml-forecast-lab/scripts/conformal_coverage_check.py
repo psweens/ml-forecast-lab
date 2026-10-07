@@ -54,6 +54,9 @@ def main() -> int:
                              "Default: UTC.")
     parser.add_argument("--nominal", type=float, default=0.8,
                         help="Nominal coverage level the bands were calibrated at (default 0.8)")
+    parser.add_argument("--cumulative", action="store_true",
+                        help="The target is a cumulative counter (source_is_cumulative): "
+                             "test the bands against per-interval actuals deltas")
     args = parser.parse_args()
 
     if not args.db.exists():
@@ -75,6 +78,7 @@ def main() -> int:
         model_version=args.model_version,
         tz=args.tz,
         nominal=args.nominal,
+        source_is_cumulative=args.cumulative,
     )
 
     nominal = args.nominal

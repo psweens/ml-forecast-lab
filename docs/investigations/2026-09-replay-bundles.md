@@ -62,7 +62,7 @@ by `TestComputePublishSplit`.
 | Boundary | Methods | Notes |
 | --- | --- | --- |
 | HA | `get_history`, `get_state`, `get_config`, `api_call` | `get_config` is trimmed to latitude/longitude. `api_call` is allow-listed to `POST weather.get_forecasts?return_response` only, because it is also HA's write path. |
-| History DB | `get_history`, `get_conformal_quantiles` | `safe_table_name` is pure, so it passes through. `store_history` and `cleanup` are suppressed. |
+| History DB | `get_history`, `get_conformal_quantiles` | `safe_table_name` is pure, so it passes through. `store_history` and `cleanup` are suppressed. The conformal key is every bound argument with defaults applied; since v2.52.4 `source_is_cumulative` joins it only when true, so bundles recorded earlier keep their keys. A cumulative experiment's bundle from v2.52.3 or earlier recorded raw-counter quantiles, which the current tree no longer requests: its forecast stage stops at `UnrecordedCall` (exit 2). |
 | Model | `model.save` of a deep copy of the live model | The live object is never touched from the capture thread, because XGBoost's `save_model` sets and clears Booster attributes. |
 
 **Lossless recording.** The recorder hands the capture pipeline the

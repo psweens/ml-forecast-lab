@@ -3005,8 +3005,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         result["model_version"] = model_version
         if model_fallback:
             result["model_fallback"] = model_fallback
-        # Merge empirical interval coverage. Always on raw values (that's
-        # what the published entities are); independent of evaluation_mode.
+        # Merge empirical interval coverage. Independent of
+        # evaluation_mode: the published bands bracket the same values as
+        # the published forecast — per-interval deltas for a cumulative
+        # source (v2.52.4), raw values otherwise.
         # Pass HA's configured time zone so the hour-of-day breakdown
         # surfaces in the user's local "evening peak" / "Sunday morning"
         # terms rather than UTC.
@@ -3033,6 +3035,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 model_version,
                 ha_tz,
                 nominal,
+                bool(exp_cfg.source_is_cumulative),
             )
             buckets = []
             for kind, container, key, label_fmt in [
@@ -3099,6 +3102,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 14,
                 n_need,
                 model_version,
+                bool(exp_cfg.source_is_cumulative),
             )
             n_have = int(cq.get("total_samples") or 0)
             forecast_every = exp_cfg.forecast_every_minutes or 30

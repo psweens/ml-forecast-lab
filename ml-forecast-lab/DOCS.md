@@ -306,6 +306,13 @@ trades the formal coverage guarantee for zero retraining cost:
 - **Calibration set.** Per-lead absolute residuals from the deployed
   `(forecast, actual)` pairs in `forecast_log`, capped at the most
   recent 14 days.
+- **Cumulative sources.** When `source_is_cumulative` is true the
+  forecast is a per-interval increment, so each residual compares it
+  with the measured increment for that interval. Intervals with no
+  measured increment are left out: the first one after a recorder gap
+  and the one containing the daily reset. The band, its coverage on the
+  Forecast Accuracy tab, and the `_forecast_accuracy` sensor all use
+  this per-interval scale.
 - **Per-lead-bucket quantile.** For the requested `conformal_coverage`
   level (default 0.8), we take the `level`-th quantile (= 80th
   percentile for 80% bands) of `|residual|` per lead bucket — for an

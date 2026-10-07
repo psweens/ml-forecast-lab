@@ -615,6 +615,24 @@ class HistoryDB:
         except sqlite3.Error:
             pass
 
+    @staticmethod
+    def _actuals_join(increment: bool) -> tuple[str, str]:
+        """Actuals relation and WHERE guard for a forecast_log join.
+
+        Increment mode (cumulative source) reads the per-interval deltas
+        ``_materialise_actuals_grid(..., increment=True)`` built: a NULL
+        delta (recorder gap) and a negative delta (daily reset) measure no
+        interval and are excluded, as in ``get_forecast_accuracy``. Raw
+        mode reads the grid unchanged and adds no guard, so its results
+        are what they were before v2.52.4.
+        """
+        if increment:
+            return (
+                "_mlfl_actuals_vals_tmp",
+                "AND ag.value IS NOT NULL AND ag.value >= 0",
+            )
+        return "_mlfl_actuals_grid_tmp", ""
+
     def get_forecast_accuracy(
         self,
         experiment: str,
@@ -1709,6 +1727,7 @@ class HistoryDB:
         max_age_days: int = 14,
         min_samples: int = 10,
         model_version: Optional[str] = None,
+        source_is_cumulative: bool = False,
     ) -> dict:
         """
         Compute per-lead-time conformal nonconformity quantiles from
@@ -1757,6 +1776,16 @@ class HistoryDB:
             Minimum residuals per lead bucket before reporting a
             quantile; buckets below this are omitted and the caller
             falls back (see ``fallback_quantile`` in the return dict).
+        source_is_cumulative : bool
+            The experiment's target is a cumulative counter. Its
+            forecast_log rows hold per-interval deltas while the actuals
+            table holds the raw counter, so residuals are taken against
+            the adjacency-guarded actuals deltas instead (the
+            ``increment`` mode of ``get_forecast_accuracy``). Intervals
+            after a recorder gap (NULL delta) and the daily reset
+            (negative delta) carry no measured interval and are
+            excluded. v2.52.4: before this, cumulative bands were sized
+            from |delta − running counter|.
 
         Returns
         -------
@@ -1817,6 +1846,7 @@ class HistoryDB:
         # previously covered the full max_age retention window.
         if not self._materialise_actuals_grid(
             cursor, actuals_table, interval_sec, cutoff_str,
+            increment=source_is_cumulative,
         ):
             return {
                 "quantiles": {},
@@ -1825,6 +1855,7 @@ class HistoryDB:
                 "total_samples": 0,
                 "level": level,
             }
+        actuals_rel, actuals_filter = self._actuals_join(source_is_cumulative)
         try:
             cursor.execute(f"""
                 SELECT
@@ -1833,10 +1864,11 @@ class HistoryDB:
                     fl.model_name,
                     fl.model_version
                 FROM forecast_log fl
-                INNER JOIN _mlfl_actuals_grid_tmp ag ON ag.grid_dt = fl.target_dt
+                INNER JOIN {actuals_rel} ag ON ag.grid_dt = fl.target_dt
                 WHERE fl.experiment = ?
                   AND fl.target_dt <= ?
                   AND fl.issued_at >= ?
+                  {actuals_filter}
                   {model_filter}
             """, tuple(params))
             rows = cursor.fetchall()
@@ -1928,6 +1960,7 @@ class HistoryDB:
         model_version: Optional[str] = None,
         tz: Optional[str] = None,
         nominal: float = 0.8,
+        source_is_cumulative: bool = False,
     ) -> dict:
         """
         Compute empirical coverage of published interval forecasts.
@@ -1940,6 +1973,11 @@ class HistoryDB:
 
         Only rows with non-NULL upper AND lower are considered — legacy
         point-only rows are excluded automatically.
+
+        ``source_is_cumulative``: the band brackets a per-interval delta,
+        so it is tested against the adjacency-guarded actuals deltas
+        rather than the raw counter; recorder-gap and daily-reset
+        intervals are excluded (see ``_actuals_join``). v2.52.4.
 
         Returns
         -------
@@ -2012,6 +2050,7 @@ class HistoryDB:
         # never match).
         if not self._materialise_actuals_grid(
             cursor, actuals_table, interval_sec, cutoff_str,
+            increment=source_is_cumulative,
         ):
             return {
                 "by_lead": {"lead_minutes": [], "coverage": [], "n": []},
@@ -2021,6 +2060,8 @@ class HistoryDB:
                 "overall": {},
                 "tz": tz or "UTC",
             }
+
+        actuals_rel, actuals_filter = self._actuals_join(source_is_cumulative)
 
         # v2.34.0: per-lead coverage is computed per cohort and one
         # winner picked per bucket (most rows, ties broken by newest
@@ -2041,12 +2082,13 @@ class HistoryDB:
                                  THEN 1.0 ELSE 0.0 END) AS coverage,
                         COUNT(*) AS n
                     FROM forecast_log fl
-                    INNER JOIN _mlfl_actuals_grid_tmp ag ON ag.grid_dt = fl.target_dt
+                    INNER JOIN {actuals_rel} ag ON ag.grid_dt = fl.target_dt
                     WHERE fl.experiment = ?
                       AND fl.target_dt <= ?
                       AND fl.issued_at >= ?
                       AND fl.upper IS NOT NULL
                       AND fl.lower IS NOT NULL
+                      {actuals_filter}
                       {model_filter_sql}
                     GROUP BY lead_bucket, fl.model_name, fl.model_version
                 ),
@@ -2069,10 +2111,7 @@ class HistoryDB:
             by_lead_rows = cursor.fetchall()
         except sqlite3.Error as e:
             logger.error(f"Coverage query failed: {e}", exc_info=True)
-            try:
-                cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_grid_tmp")
-            except sqlite3.Error:
-                pass
+            self._drop_actuals_grid(cursor)
             return {
                 "by_lead": {"lead_minutes": [], "coverage": [], "n": []},
                 "by_hour_of_day": {"hour": [], "coverage": [], "n": []},
@@ -2105,12 +2144,13 @@ class HistoryDB:
                                  THEN 1.0 ELSE 0.0 END) AS coverage,
                         COUNT(*) AS n
                     FROM forecast_log fl
-                    INNER JOIN _mlfl_actuals_grid_tmp ag ON ag.grid_dt = fl.target_dt
+                    INNER JOIN {actuals_rel} ag ON ag.grid_dt = fl.target_dt
                     WHERE fl.experiment = ?
                       AND fl.target_dt <= ?
                       AND fl.issued_at >= ?
                       AND fl.upper IS NOT NULL
                       AND fl.lower IS NOT NULL
+                      {actuals_filter}
                       {model_filter_sql}
                     GROUP BY fl.model_name, fl.model_version
                 )
@@ -2159,12 +2199,13 @@ class HistoryDB:
                         CASE WHEN ag.value BETWEEN fl.lower AND fl.upper
                              THEN 1.0 ELSE 0.0 END AS in_band
                     FROM forecast_log fl
-                    INNER JOIN _mlfl_actuals_grid_tmp ag ON ag.grid_dt = fl.target_dt
+                    INNER JOIN {actuals_rel} ag ON ag.grid_dt = fl.target_dt
                     WHERE fl.experiment = ?
                       AND fl.target_dt <= ?
                       AND fl.issued_at >= ?
                       AND fl.upper IS NOT NULL
                       AND fl.lower IS NOT NULL
+                      {actuals_filter}
                       {model_filter_sql}
                 )
                 SELECT j.target_dt, j.in_band
@@ -2265,12 +2306,9 @@ class HistoryDB:
                     key=lambda c: abs(c["coverage"] - nominal),
                 )
 
-        try:
-            cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_grid_tmp")
-        except sqlite3.Error:
-            # TEMP tables are connection-scoped and dropped when the
-            # connection closes — failure to explicitly drop is harmless.
-            pass
+        # TEMP tables are connection-scoped and dropped when the
+        # connection closes — failure to explicitly drop is harmless.
+        self._drop_actuals_grid(cursor)
 
         return {
             "by_lead": by_lead,
