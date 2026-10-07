@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -141,3 +142,18 @@ class TestAccuracyState:
         assert attrs["lead_hours"] and attrs["lead_hours"][0] < 0
         assert attrs["status"] == "accumulating"
         assert state == "0"
+
+
+def test_accuracy_tab_headline_skips_hindcast_buckets():
+    """Source contract: the Accuracy tab's headline error picks the first
+    non-negative lead bucket, as the sensor state does."""
+    html = (
+        Path(__file__).resolve().parents[2]
+        / "ml_forecast_lab" / "web" / "templates" / "experiment.html"
+    ).read_text()
+    start = html.index("--- Accuracy chip + headline MAE ---")
+    block = html[start:html.index("--- Overall headline ---", start)]
+    assert "if (leads[i] < 0) continue;" in block
+    assert block.index("leads[i] < 0") < block.index("ns[i] >= LEADBUCKET_MIN_N")
+    assert "headlineMae = maes[first];" in block
+    assert "maes[0]" not in block

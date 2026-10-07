@@ -101,18 +101,26 @@ resample, in one window query (`_materialise_actuals_increments`). A bin
 with no readings, between the window's first and last reading, is 0. A
 reset inside a bin keeps the use recorded before it, which matters when
 the local midnight falls inside a UTC bin (60-minute bins at UTC+5:30, for
-example). The window's first bin has no earlier reading and is NULL; bins
-after the last reading are absent until a reading arrives.
+example). The scan starts at the last reading before the window's
+cutoff, so a window that opens while the counter is idle scores its quiet
+bins as zero and the first draw after them in full; the table starts at
+the bin holding the cutoff. Only when no earlier reading exists is the
+first bin NULL. Bins after the last reading are absent until a reading
+arrives. The seed matters for counters idle for days: for an EV-charger
+counter with a session every four days, a scan starting at the cutoff
+drops up to a third of the window's zero bins, and the first session's
+bin, from the band's residual buffer whenever the 14-day cutoff falls in
+an idle spell.
 
 **Restarts and dips.** A drop to below 90% of the previous reading
 (`_COUNTER_RESTART_RATIO`, the threshold Home Assistant uses for
 `total_increasing` resets) is a restart and scores the new reading. A
 smaller drop is a measurement dip and scores as negative use, which the
 recovering reading cancels, so use is conserved across it. A bin left
-negative is excluded by the `>= 0` guard. Training treats every drop as a
-reset: a 0.05 kWh dip on a lifetime counter labels that reading with the
-whole counter value, which the spike cap then cuts back to the 95th
-percentile. The analytics do not copy that, because it would score one
+negative is excluded by the `>= 0` guard in every reader. Training
+treats every drop as a reset: a 0.05 kWh dip on a lifetime counter
+labels that reading with the whole counter value, which the spike cap
+then cuts back to the 95th percentile. The analytics do not copy that, because it would score one
 interval of a lifetime counter at its whole reading.
 
 **Where the actuals and the label still differ.**
@@ -129,28 +137,32 @@ interval of a lifetime counter at its whole reading.
 
 `test_increment_actuals.py` compares the table with the output of
 `cumulative_to_interval` (spike cap disabled) and `resample_to_grid` on a
-change-only daily-reset counter, a mid-bin reset with 60-minute bins, a
-dip on a lifetime counter and a counter restart.
+change-only daily-reset counter (also with the window opening in a quiet
+stretch), a reset in the middle of a 60-minute bin, and the convergence
+chart after a counter idle for days. Further tests pin the analytics' own
+rule where training differs: the 90% restart threshold, a dip on a
+lifetime counter that conserves use, and a bin left negative by a dip,
+which no reader scores.
 
 **Readers.** The accuracy lead-time curve, its typical-demand baseline,
 bands, coverage, the trajectory and the Forecast convergence chart's
 measured line all read this table. The convergence chart previously
 computed its own adjacency-guarded difference of bin means, clamped at
 zero, so the reset bin showed 0 and the bin after a quiet stretch was
-blank. It now builds the table from one day before its earliest target,
-so its first bins have a preceding reading.
+blank. It now builds the table from its earliest target, seeded with the
+last reading before it.
 
 **Cost.** The table is built per call under the database lock. The query
 reads each reading once through the ds index in order (`LAG` over `ds`,
-with `ds >= since` instead of `SUBSTR(ds, 1, 19) >= since` so the index
-bounds the scan), groups by bin, then fills empty bins from a recursive
-span. Measured on x86 against the v2.52.3 raw-grid build, with 30-minute
-bins: a 10-second table of 120 days took 294 / 632 / 2078 ms for 14 /
-30 / 90-day windows (v2.52.3: 352 / 552 / 1505 ms), and a 1-minute table
-of 365 days 45 / 105 / 328 ms (102 / 143 / 294 ms). An earlier draft
-that took each bin's last reading with a per-bin sort, also built the
-raw grid and filtered with `SUBSTR` (a full scan) took three to four
-times as long as v2.52.3.
+with `ds >= x` instead of `SUBSTR(ds, 1, 19) >= x` so the index bounds
+the scan, and one index seek for the seed), groups by bin, then fills
+empty bins from a recursive span. Measured on x86 against the v2.52.3
+raw-grid build, with 30-minute bins: a 10-second table of 120 days took
+298 / 683 / 2109 ms for 14 / 30 / 90-day windows (v2.52.3: 334 / 550 /
+1549 ms), and a 1-minute table of 365 days 46 / 109 / 338 ms (107 / 145 /
+315 ms). Taking each bin's last reading with a per-bin sort, building the
+raw grid as well and filtering with `SUBSTR` (a full scan) takes three to
+four times as long as v2.52.3.
 
 **Trade-off.** A recorder outage on a meter that normally reports every
 interval is now scored the way training sees it: zeros through the

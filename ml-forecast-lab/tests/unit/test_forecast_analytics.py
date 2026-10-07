@@ -198,8 +198,9 @@ class TestAccuracyLeadTime:
     def test_typical_interval_demand_mode_aware(self, db, actuals_monotonic):
         # Raw typical = mean |value| across the actuals in the window.
         # The monotonic 0..191 series has mean 95.5.
-        # Increment typical = mean |delta| across actuals_grid, with
-        # adjacency guard (every delta is +1) → 1.0.
+        # Increment typical = mean |increment| across the per-bin
+        # increments: the first bin is NULL and every other one is +1
+        # → 1.0.
         issued = datetime(2024, 6, 15, 8, 0)
         targets = _targets_30min(issued, 2)
         _log_cycle(db, "exp", issued, targets, [17.0, 18.0])
@@ -545,10 +546,11 @@ class TestEvolutionActuals:
         # indices 17..20.
         assert vals[:4] == [17.0, 18.0, 19.0, 20.0]
 
-    def test_cumulative_source_clamps_negative_resets(self, db):
+    def test_cumulative_source_scores_reset_as_its_own_reading(self, db):
         # Daily-reset sensor: cumulative climbs through the day then
-        # snaps back to 0 at midnight. Naive diff would emit a large
-        # negative spike at the reset; the clamp should pin that to 0.
+        # snaps back to 0 at midnight. A naive diff would emit -7 at
+        # the reset; the restart rule (a drop below 90% of the previous
+        # reading) scores the reset bin as its own reading instead.
         table = db.safe_table_name("sensor.reset")
         idx = pd.date_range("2024-06-15 22:00", periods=6, freq="30min")
         # Values: 5, 6, 7, 0, 1, 2  (reset at index 3)

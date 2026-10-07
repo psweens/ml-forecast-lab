@@ -545,8 +545,9 @@ class HistoryDB:
         table (audit F3/F4; the v2.39.3 coverage fix pioneered the
         pattern, this generalises it). ``since_str`` drops actuals that
         cannot match: join keys satisfy target_dt >= issued_at >= cutoff.
-        In increment mode it also bounds the scan through the ds index;
-        the raw grid's ``SUBSTR`` filter still reads the whole table.
+        In increment mode it also bounds the scan through the ds index,
+        starting at the last reading before ``since_str``; the raw grid's
+        ``SUBSTR`` filter still reads the whole table.
 
         Callers run under ``self._lock`` (single shared connection), so
         the fixed table names cannot race. Returns False on failure —
@@ -615,21 +616,37 @@ class HistoryDB:
         and last reading is a zero increment. A dip below the previous
         reading that is not a restart counts as negative use, which the
         recovery cancels; a bin left negative is excluded downstream by
-        the ``>= 0`` guard. The bin holding the window's first reading is
-        NULL, since its use before that reading is unknown. Training
-        differs in three ways that are not copied here: it treats every
-        drop as a reset (a dip on a lifetime counter then scores the
-        whole reading, cut back by the spike cap), it caps spikes
-        (``max_increment``), and with ``reset_daily`` it treats a small
-        rise across UTC midnight as a reset. These increments are what
-        the counter measured.
+        the ``>= 0`` guard. Training differs in three ways that are not
+        copied here: it treats every drop as a reset (a dip on a lifetime
+        counter then scores the whole reading, cut back by the spike
+        cap), it caps spikes (``max_increment``), and with
+        ``reset_daily`` it treats a small rise across UTC midnight as a
+        reset. These increments are what the counter measured.
 
-        ``ds >= since`` matches ``SUBSTR(ds, 1, 19) >= since`` for a
-        19-character cutoff and lets the ds index bound the scan; LAG
-        over ds reads that index in order. Callers hold ``self._lock``.
+        With ``since``, the scan starts at the last reading before it, so
+        an idle counter's quiet bins at the start of the window are zero
+        and the first rise after them is scored; the table then starts
+        at the bin holding ``since``. Without it, or with no reading
+        before it, the bin holding the first reading is NULL, since its
+        use before that reading is unknown.
+
+        ``ds >= x`` matches ``SUBSTR(ds, 1, 19) >= x`` for a 19-character
+        ``x`` and lets the ds index bound the scan (and the seed lookup);
+        LAG over ds reads that index in order. Callers hold
+        ``self._lock``.
         """
-        since_sql = "AND ds >= ?" if since_str else ""
-        since_params = (since_str,) if since_str else ()
+        if since_str:
+            since_sql = (
+                f"AND ds >= COALESCE((SELECT ds FROM {actuals_table} "
+                "WHERE ds < ? AND value IS NOT NULL "
+                "ORDER BY ds DESC LIMIT 1), ?)"
+            )
+            since_params: tuple = (since_str, since_str)
+            span_start = "MAX(MIN(g), (CAST(strftime('%s', ?) AS INTEGER) / ?) * ?)"
+            span_params: tuple = (since_str, interval_sec, interval_sec)
+        else:
+            since_sql, since_params = "", ()
+            span_start, span_params = "MIN(g)", ()
         cursor.execute(
             f"""
             CREATE TEMP TABLE _mlfl_actuals_bins_tmp AS
@@ -659,10 +676,10 @@ class HistoryDB:
             "ON _mlfl_actuals_bins_tmp(g)"
         )
         cursor.execute(
-            """
+            f"""
             CREATE TEMP TABLE _mlfl_actuals_vals_tmp AS
             WITH RECURSIVE span(g, g_end) AS (
-                SELECT MIN(g), MAX(g) FROM _mlfl_actuals_bins_tmp
+                SELECT {span_start}, MAX(g) FROM _mlfl_actuals_bins_tmp
                 UNION ALL
                 SELECT g + ?, g_end FROM span WHERE g + ? <= g_end
             )
@@ -670,9 +687,9 @@ class HistoryDB:
                    CASE WHEN b.g IS NULL THEN 0.0 ELSE b.value END AS value
             FROM span
             LEFT JOIN _mlfl_actuals_bins_tmp b ON b.g = span.g
-            WHERE span.g IS NOT NULL
+            WHERE span.g IS NOT NULL AND span.g <= span.g_end
             """,
-            (interval_sec, interval_sec),
+            (*span_params, interval_sec, interval_sec),
         )
         cursor.execute(
             "CREATE INDEX _mlfl_actuals_vals_tmp_idx "
@@ -847,9 +864,9 @@ class HistoryDB:
         # draw-time bins. A restart counts the reading itself, so only a
         # bin holding a dip that has not yet recovered is negative; the
         # `av.value >= 0` filter excludes it.
-        # v2.41.0 (audit F4): the grid-aligned actuals — and, in
-        # increment mode, their per-bin increments — are
-        # materialised ONCE into indexed temp tables instead of being
+        # v2.41.0 (audit F4): the actuals — the raw grid, or in
+        # increment mode (v2.52.4) only the per-bin increments — are
+        # materialised ONCE into an indexed temp table instead of being
         # inlined as WITH-clause CTEs in every query below. The CTE
         # form executed as a co-routine re-scanned per forecast_log
         # row: O(N_forecasts × N_actuals) per query, three queries per
@@ -1669,9 +1686,12 @@ class HistoryDB:
         ):
             return {"error": "could not build actuals grid"}
         if source_is_cumulative:
+            # v2.52.4: a bin holding an unrecovered dip is negative; it
+            # is excluded here as in every other increment reader.
             actuals_vals_cte = (
                 "actuals_vals AS "
-                "(SELECT grid_dt, value FROM _mlfl_actuals_vals_tmp)"
+                "(SELECT grid_dt, value FROM _mlfl_actuals_vals_tmp "
+                "WHERE value >= 0)"
             )
             actual_space = "delta"
         else:
@@ -2528,15 +2548,13 @@ class HistoryDB:
         # line spikes up to the daily total while predictions hug zero.
         # v2.52.4: the deltas are the training-rule increments the
         # trajectory and accuracy queries read (see
-        # _materialise_actuals_increments), built from one day before
-        # the window so its first bins have a preceding reading.
+        # _materialise_actuals_increments), seeded with the last reading
+        # before the window so its first bins are scored.
         actuals_targets: list = []
         actuals_values: list = []
         if min_target and max_target:
             if source_is_cumulative:
-                since = (
-                    pd.Timestamp(min_target) - pd.Timedelta(days=1)
-                ).strftime("%Y-%m-%d %H:%M:%S")
+                since = pd.Timestamp(min_target).strftime("%Y-%m-%d %H:%M:%S")
                 # On failure the chart keeps its forecasts and shows no
                 # measured line, as when the actuals query below fails.
                 actuals_sql = (

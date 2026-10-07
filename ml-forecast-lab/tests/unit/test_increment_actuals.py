@@ -19,7 +19,9 @@ wide for a change-only demand counter in simulation. The actuals now follow
 training per reading: each reading's rise over the previous one, or the
 reading itself after a restart (a drop below 90% of the previous reading),
 summed per bin, with zero for a bin with no readings. A reset inside a bin
-keeps the use recorded before it. They equal the training label except
+keeps the use recorded before it, and with a window cutoff the scan
+starts at the last reading before it, so a window that opens in a quiet
+stretch scores those bins as zero. They equal the training label except
 where training caps a spike (``max_increment``), relabels a small rise
 across UTC midnight as a reset (``reset_daily``), or treats a dip as a
 reset; the helper below disables the first two. A dip (a drop to no less
@@ -74,9 +76,13 @@ def training_label(readings: pd.DataFrame, interval: int = INTERVAL) -> pd.Serie
     return resample_to_grid(per_reading, freq=f"{interval}min", method="sum")
 
 
-def increment_actuals(db: HistoryDB, table: str, interval: int = INTERVAL) -> pd.Series:
+def increment_actuals(
+    db: HistoryDB, table: str, interval: int = INTERVAL, since: str | None = None,
+) -> pd.Series:
     cur = db.conn.cursor()
-    assert db._materialise_actuals_grid(cur, table, interval * 60, increment=True)
+    assert db._materialise_actuals_grid(
+        cur, table, interval * 60, since, increment=True,
+    )
     rows = cur.execute(
         "SELECT grid_dt, value FROM _mlfl_actuals_vals_tmp ORDER BY grid_dt"
     ).fetchall()
@@ -121,6 +127,25 @@ class TestIncrementActuals:
         assert midnights
         for i in midnights:
             assert actuals.iloc[i] == pytest.approx(inc[i], abs=1e-9)
+
+    @pytest.mark.parametrize("offset_min", [0, 10])
+    def test_window_opening_in_a_quiet_stretch(self, counter_db, offset_min):
+        """A window that opens in a quiet stretch scores its quiet bins as
+        zero and the first draw after them in full: the scan starts at the
+        last reading before the window."""
+        db, table, _readings, grid, inc = counter_db
+        since = grid[44] + timedelta(minutes=offset_min)
+        actuals = increment_actuals(
+            db, table, since=since.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        assert actuals.index[0] == grid[44]
+        assert list(actuals.index) == list(grid[44:])
+        np.testing.assert_allclose(actuals.values, inc[44:], atol=1e-9)
+
+    def test_window_after_the_last_reading_is_empty(self, counter_db):
+        db, table, _readings, grid, _inc = counter_db
+        since = (grid[-1] + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        assert increment_actuals(db, table, since=since).empty
 
     def test_raw_grid_is_unchanged(self, counter_db):
         db, table, readings, _grid, _inc = counter_db
@@ -219,3 +244,105 @@ class TestRestartsAndDips:
 
         actuals = increment_actuals(db, table)
         np.testing.assert_allclose(actuals.iloc[1:], [0.5] * 4 + [0.3] + [0.5] * 6)
+
+    @pytest.mark.parametrize("drop_to, expected", [
+        (89.0, 89.0),    # below 90% of 100: a restart, the reading itself
+        (91.0, -9.0),    # 90% or more: a dip, negative use
+    ])
+    def test_restart_threshold_is_ninety_percent(self, tmp_path, drop_to, expected):
+        db = HistoryDB(tmp_path / "history.db")
+        table = db.safe_table_name("sensor.energy_total")
+        idx = pd.date_range("2026-09-17 00:00", periods=6, freq="30min")
+        values = [98.0, 99.0, 100.0, drop_to, drop_to + 1.0, drop_to + 2.0]
+        db.store_history(table, pd.DataFrame({"ds": idx, "value": values}))
+        actuals = increment_actuals(db, table)
+        assert actuals.iloc[3] == pytest.approx(expected)
+
+    def test_unrecovered_dip_bin_is_not_scored(self, tmp_path):
+        """A dip at a bin's last reading leaves that bin negative; every
+        increment-mode reader excludes it (the ``>= 0`` guard)."""
+        db = HistoryDB(tmp_path / "history.db")
+        table = db.safe_table_name("sensor.energy_total")
+        idx = pd.date_range("2026-09-17 00:00", periods=48 * 3, freq="10min")
+        values = 12345.0 + 0.01 * np.arange(len(idx))
+        values[50] = values[49] - 0.5            # 08:20: 08:00 bin -0.48, 08:30 bin +0.54
+        db.store_history(table, pd.DataFrame({"ds": idx, "value": values}))
+        db.ensure_forecast_log_table()
+        grid = pd.date_range(idx[0], idx[-1], freq=f"{INTERVAL}min")[1:]
+        for t in grid:
+            target = t.to_pydatetime()
+            for lead in (INTERVAL, 2 * INTERVAL):
+                db.log_forecast(
+                    "energy", target - timedelta(minutes=lead), [target], [0.03],
+                    "lightgbm", upper_bounds=[0.05], lower_bounds=[0.01],
+                    model_version="v1",
+                )
+        scored = len(grid) - 1                   # every bin but the dip
+        kw = dict(model_name="lightgbm", model_version="v1",
+                  interval_minutes=INTERVAL)
+        cq = db.get_conformal_quantiles(
+            "energy", table, max_age_days=3650, source_is_cumulative=True, **kw,
+        )
+        assert cq["total_samples"] == 2 * scored
+        cov = db.get_forecast_coverage(
+            "energy", table, max_age_days=3650, source_is_cumulative=True, **kw,
+        )
+        assert cov["overall"]["n"] == 2 * scored
+        acc = db.get_forecast_accuracy(
+            "energy", table, max_age_days=3650, interval_minutes=INTERVAL,
+            evaluation_mode="increment", model_name="lightgbm",
+        )
+        assert sum(acc["lead_time_curve"]["sample_count"]) == 2 * scored
+        assert acc["typical_interval_demand"] == pytest.approx(
+            (45 * 0.03 + 0.54) / 46, abs=1e-4,
+        )
+        ev = db.get_forecast_evolution(
+            "energy", table, n_cycles=500, interval_minutes=INTERVAL,
+            source_is_cumulative=True,
+        )
+        assert "2026-09-17 08:00:00" not in ev["actuals"]["targets"]
+        assert min(ev["actuals"]["values"]) >= 0
+        tr = db.get_forecast_trajectory(
+            "energy", table, interval_minutes=INTERVAL, max_age_days=3650,
+            source_is_cumulative=True, model_name="lightgbm",
+        )
+        assert "2026-09-17 08:30:00" in tr["available_targets"]
+        assert "2026-09-17 08:00:00" not in tr["available_targets"]
+        assert min(m["actual"] for m in tr["target_meta"]) >= 0
+
+
+def test_convergence_chart_scores_the_first_draw_after_an_idle_spell(tmp_path):
+    """The Forecast convergence chart's measured line after a counter
+    idle for days: quiet bins are zero and the first draw counts in full,
+    as in training and the 30-day readers."""
+    db = HistoryDB(tmp_path / "history.db")
+    table = db.safe_table_name("sensor.ev_energy_total")
+    readings = pd.DataFrame({
+        "ds": pd.to_datetime([
+            "2026-09-10 12:00", "2026-09-14 19:05", "2026-09-14 19:20",
+            "2026-09-14 19:35", "2026-09-14 20:10",
+        ]),
+        "value": [100.0, 102.0, 104.0, 104.5, 106.0],
+    })
+    db.store_history(table, readings)
+    db.ensure_forecast_log_table()
+    for issued in (datetime(2026, 9, 14, 16, 0), datetime(2026, 9, 14, 16, 30)):
+        targets = list(pd.date_range("2026-09-14 16:30", "2026-09-14 21:00",
+                                     freq=f"{INTERVAL}min").to_pydatetime())
+        db.log_forecast("ev", issued, targets, [0.5] * len(targets), "lightgbm",
+                        model_version="v1")
+    ev = db.get_forecast_evolution(
+        "ev", table, n_cycles=12, interval_minutes=INTERVAL,
+        source_is_cumulative=True,
+    )
+    measured = dict(zip(ev["actuals"]["targets"], ev["actuals"]["values"]))
+    label = training_label(readings)
+    expected = {
+        t.strftime("%Y-%m-%d %H:%M:%S"): v
+        for t, v in label.items() if t >= pd.Timestamp("2026-09-14 16:30")
+    }
+    assert measured["2026-09-14 19:00:00"] == pytest.approx(4.0)
+    assert measured.keys() == expected.keys()
+    np.testing.assert_allclose(
+        [measured[k] for k in expected], list(expected.values()), atol=1e-9,
+    )
