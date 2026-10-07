@@ -308,15 +308,16 @@ trades the formal coverage guarantee for zero retraining cost:
   recent 14 days.
 - **Cumulative sources.** When `source_is_cumulative` is true the
   forecast is a per-interval increment, so each residual compares it
-  with that interval's increment as training computes it: the
-  counter's rise since the last reading before the interval, or the
-  reading itself after a daily reset. An interval with no readings
-  counts as zero use, so a counter that only logs changes is scored on
-  its quiet intervals too, and the rise after a quiet spell or a
-  recorder outage counts in the interval where it was recorded. The
-  band, its coverage, and every per-interval figure on the Forecast
-  Accuracy tab, as well as the `_forecast_accuracy` sensor, use this
-  scale.
+  with that interval's increment, built the way training builds its
+  labels: the sum of the counter's rises from each reading to the next,
+  counting the reading itself after a reset (a drop to below 90% of the
+  previous reading). A smaller drop is a measurement dip, which the
+  recovery cancels. An interval with no readings counts as zero use, so
+  a counter that only logs changes is scored on its quiet intervals
+  too, and the rise after a quiet spell or a recorder outage counts in
+  the interval where it was recorded. The band, its coverage, and every
+  per-interval figure on the Forecast Accuracy tab, as well as the
+  `_forecast_accuracy` sensor, use this scale.
 - **Per-lead-bucket quantile.** For the requested `conformal_coverage`
   level (default 0.8), we take the `level`-th quantile (= 80th
   percentile for 80% bands) of `|residual|` per lead bucket — for an

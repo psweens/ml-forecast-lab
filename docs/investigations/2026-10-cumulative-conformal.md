@@ -7,7 +7,7 @@ The pinning tests:
 - `ml-forecast-lab/tests/unit/test_cumulative_conformal.py`: bands,
   coverage, accuracy sensor scale and the replay key;
 - `tests/unit/test_increment_actuals.py`: the increment actuals equal
-  the training label;
+  the training label, and restarts and dips;
 - `tests/unit/test_accuracy_sensor_state.py`: the frozen accuracy state;
 - `tests/unit/test_external_forecast_lock.py`: the database lock.
 
@@ -26,8 +26,8 @@ python -m pytest tests/unit/test_cumulative_conformal.py tests/unit/test_increme
 | **A.** `get_conformal_quantiles` joined a cumulative experiment's logged per-interval deltas to the raw counter grid | 80% bands tens of kWh wide around a forecast of a fraction of a kWh. On a daily-reset counter the quantile tracks the day's total | Join the actuals increments (`increment=True`) |
 | **B.** `get_forecast_coverage` made the same join, in all three of its queries | Accuracy-tab coverage tested A's bands against the counter too, so it was measured on A's scale and could not expose A | Same join |
 | **C.** The `_forecast_accuracy` sensor called `get_forecast_accuracy` in its default `raw` mode | The sensor measured the counter level, not the model. The web Accuracy tab already forced `increment` for cumulative sources, so the chart and the sensor disagreed | The sensor passes `evaluation_mode="increment"` for a cumulative source |
-| **D.** The increment actuals differenced bin means and nulled any bin whose previous bin had no reading | A counter that only logs changes was scored on a small, biased subset: no quiet bin, no first draw after a quiet spell, no reset bin. Simulated bands about three times too wide | The increment actuals follow the training label's rule |
-| **E.** The sensor state was `lead_time_curve["mae"][0]`, the most negative lead bucket | After one stale-frame tick, every experiment's accuracy state stayed identical on every publish, cumulative or not | The state is the first bucket with a non-negative lead |
+| **D.** The increment actuals differenced bin means and nulled any bin whose previous bin had no reading | A counter that only logs changes was scored on a small, biased subset: no quiet bin, no first draw after a quiet spell, no reset bin. Simulated bands about three times too wide | The increment actuals follow the training label's rule, per reading; the Forecast convergence chart reads them too |
+| **E.** The sensor state was `lead_time_curve["mae"][0]`, the most negative lead bucket | After one stale-frame tick, every experiment's accuracy state stayed identical on every publish, cumulative or not | The state, and the Accuracy tab's headline error, use the first bucket with a non-negative lead |
 | **F.** `log_external_forecast` was the one public `HistoryDB` method on the shared connection without `@_locked` | "cannot start a transaction within a transaction" and "no more rows available" from concurrent publish cycles | `@_locked` |
 
 ## A–C: which actuals a cumulative residual is taken against
@@ -44,9 +44,12 @@ per-interval residuals.
 
 `_materialise_actuals_grid(..., increment=True)` builds the per-interval
 actuals the Accuracy tab's increment mode reads, `_mlfl_actuals_vals_tmp`.
-Bands, coverage and the sensor now read the same relation, through one
-helper (`HistoryDB._actuals_join`) so the call sites cannot disagree.
-What that relation holds was itself wrong (D, below).
+Bands and coverage now read it through one helper
+(`HistoryDB._actuals_join`), so their joins cannot disagree. The sensor
+(`get_forecast_accuracy` in increment mode) and the Forecast convergence
+chart read the same table under the equivalent guard
+(`value IS NOT NULL AND value >= 0`). What that table held was itself
+wrong (D, below).
 
 The raw path is byte-for-byte the pre-v2.52.4 SQL: `_actuals_join(False)`
 returns the old relation and an empty guard. Non-cumulative bands,
@@ -91,16 +94,63 @@ forecast the training label exactly got an 80% quantile of 0.36 kWh
 instead of 0. A realistic model's band realised 94% coverage against a
 nominal 80%.
 
-The increment for bin t is now `last(t) − last reading before t`. When
-that is negative, the counter has restarted and the increment is
-`last(t)`. A bin with no readings, between the window's first and last
-reading, is 0. That equals the training label exactly, except where
-training caps a spike (`max_increment`, by default the 95th percentile
-of per-reading increments): the analytics score against what the counter
-measured. The window's first bin has no earlier reading and is NULL;
-bins after the last reading are absent until a reading arrives.
-`test_increment_actuals.py` compares the relation with the output of
-`cumulative_to_interval` and `resample_to_grid` on a change-only counter.
+Each reading's increment is now its rise over the previous reading, or
+the reading itself after a restart, and a bin's increment is the sum over
+the readings recorded in it: `cumulative_to_interval` followed by the sum
+resample, in one window query (`_materialise_actuals_increments`). A bin
+with no readings, between the window's first and last reading, is 0. A
+reset inside a bin keeps the use recorded before it, which matters when
+the local midnight falls inside a UTC bin (60-minute bins at UTC+5:30, for
+example). The window's first bin has no earlier reading and is NULL; bins
+after the last reading are absent until a reading arrives.
+
+**Restarts and dips.** A drop to below 90% of the previous reading
+(`_COUNTER_RESTART_RATIO`, the threshold Home Assistant uses for
+`total_increasing` resets) is a restart and scores the new reading. A
+smaller drop is a measurement dip and scores as negative use, which the
+recovering reading cancels, so use is conserved across it. A bin left
+negative is excluded by the `>= 0` guard. Training treats every drop as a
+reset: a 0.05 kWh dip on a lifetime counter labels that reading with the
+whole counter value, which the spike cap then cuts back to the 95th
+percentile. The analytics do not copy that, because it would score one
+interval of a lifetime counter at its whole reading.
+
+**Where the actuals and the label still differ.**
+- The spike cap. With `max_increment` unset, `cumulative_to_interval` caps
+  each rise, except across a multi-interval gap, at the 95th percentile of
+  all rises, so the top readings train on a clipped label. The analytics
+  score against what the counter measured. Not measured on real data.
+- `reset_daily`. Training also treats a rise across UTC midnight smaller
+  than 10% of the series mean as a reset. Outside UTC that midnight is
+  not the counter's, so an ordinary reading there is labelled with the
+  day's running total, then cut back by the spike cap. The analytics
+  ignore the clock and use the 90% rule.
+- Dips, as above.
+
+`test_increment_actuals.py` compares the table with the output of
+`cumulative_to_interval` (spike cap disabled) and `resample_to_grid` on a
+change-only daily-reset counter, a mid-bin reset with 60-minute bins, a
+dip on a lifetime counter and a counter restart.
+
+**Readers.** The accuracy lead-time curve, its typical-demand baseline,
+bands, coverage, the trajectory and the Forecast convergence chart's
+measured line all read this table. The convergence chart previously
+computed its own adjacency-guarded difference of bin means, clamped at
+zero, so the reset bin showed 0 and the bin after a quiet stretch was
+blank. It now builds the table from one day before its earliest target,
+so its first bins have a preceding reading.
+
+**Cost.** The table is built per call under the database lock. The query
+reads each reading once through the ds index in order (`LAG` over `ds`,
+with `ds >= since` instead of `SUBSTR(ds, 1, 19) >= since` so the index
+bounds the scan), groups by bin, then fills empty bins from a recursive
+span. Measured on x86 against the v2.52.3 raw-grid build, with 30-minute
+bins: a 10-second table of 120 days took 294 / 632 / 2078 ms for 14 /
+30 / 90-day windows (v2.52.3: 352 / 552 / 1505 ms), and a 1-minute table
+of 365 days 45 / 105 / 328 ms (102 / 143 / 294 ms). An earlier draft
+that took each bin's last reading with a per-bin sort, also built the
+raw grid and filtered with `SUBSTR` (a full scan) took three to four
+times as long as v2.52.3.
 
 **Trade-off.** A recorder outage on a meter that normally reports every
 interval is now scored the way training sees it: zeros through the
@@ -132,7 +182,9 @@ froze together.
 The state now reads the first bucket with `lead_minutes >= 0`. The
 hindcast buckets stay in the `lead_hours` / `mae` attributes, and the
 sensor reports `status: accumulating` until a next-interval sample
-exists.
+exists. The Accuracy tab's summary card made the same choice for its
+headline error (the first bucket with enough samples, else bucket 0); it
+now skips negative leads too.
 
 ## F: the external-forecast lock
 
@@ -167,13 +219,16 @@ writers concurrently.
   `source_is_cumulative`. A non-negative target such as PV power can
   publish a negative lower band. Keying the clamp on
   `target_is_nonnegative` changes published bands and replay output.
-- **A counter glitch.** A single bad reading of 0 on a lifetime counter
-  counts as a restart (increment 0), and the next bin's rebound counts
-  as one interval's use. Training caps that rebound with
-  `max_increment`. The analytics have no equivalent cap, so one glitch
-  inflates the accuracy figures until it leaves the window.
-- **The training spike cap itself.** With `max_increment` unset,
-  `cumulative_to_interval` caps each reading's rise at the 95th
-  percentile of all rises, so the top 5% of readings train on a clipped
-  label. The analytics score against the uncapped counter. This has not
-  been measured on real data.
+- **A counter glitch to zero.** A single bad reading of 0 on a lifetime
+  counter is a drop below 90%, so it counts as a restart (increment 0),
+  and the recovering reading's rise counts the whole counter as one
+  interval's use. Training caps that rebound with `max_increment`. The
+  analytics have no equivalent cap, so one glitch inflates the accuracy
+  figures and widens the band until it leaves the window. Small dips no
+  longer do this (D, above).
+- **Coverage after the update.** Forecasts logged before v2.52.4 carry
+  the old, counter-scale bands. Coverage filtered to the current model
+  version reads close to 100% until the next retrain changes the
+  version; views across all versions keep those rows until they leave
+  the window. The quantiles themselves come from residuals, not logged
+  bands, so the published band is right from the next publish.
