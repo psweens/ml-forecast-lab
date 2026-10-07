@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.52.4
+
+### Fixed
+
+**Conformal bands and the accuracy sensor for cumulative experiments are on
+the per-interval scale.** With `source_is_cumulative: true`, the published
+`_upper_80` / `_lower_80` bands were tens of kWh wide around a forecast of a
+fraction of a kWh, and `_forecast_accuracy` reported an error the size of
+the day's running total. The forecast is a per-interval increment, but its
+residuals were taken against the sensor's raw counter. Bands, Accuracy-tab
+coverage and the accuracy sensor now compare it with each interval's
+increment as training computes it. The Accuracy tab's per-interval figures
+used a different rule that skipped quiet intervals and the interval after
+each one, so a counter that only logs changes (hot-water demand, for
+example) was scored on a small, unrepresentative sample; they now use the
+training rule too, and their values for cumulative experiments change. The
+bands narrow to the forecast's real error once the next forecast is
+published. Experiments without `source_is_cumulative` are unchanged.
+Details:
+[docs/investigations/2026-10-cumulative-conformal.md](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-cumulative-conformal.md).
+
+**The `_forecast_accuracy` sensor no longer freezes after a Home Assistant
+outage.** The sensor could stay at exactly the same value for days, on every
+experiment at once. A forecast tick that cannot fetch fresh history reuses
+the cached data and logs forecasts for times that are already past; the
+sensor reported the error of that small, hours-old group instead of the
+next-interval error, until those rows aged out after 30 days. The state is
+now always the next-interval error. The past-time group is still listed in
+the `lead_hours` and `mae` attributes.
+
+**External forecasts are logged reliably alongside the add-on's own.** The
+log showed "Error logging external forecast … cannot start a transaction
+within a transaction" or "no more rows available" when two experiments
+published at the same moment, and the failed write could also undo another
+experiment's pending database write. External-forecast logging now waits
+for the database like every other write.
+
 ## 2.52.3
 
 ### Fixed
