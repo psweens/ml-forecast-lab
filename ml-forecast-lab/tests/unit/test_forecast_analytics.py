@@ -80,10 +80,9 @@ def actuals_monotonic(db):
 @pytest.fixture
 def actuals_with_gap(db):
     """
-    Cumulative-style actuals with a 2-hour hole in the middle of Day 2.
-    Forcing the increment-mode LAG to span a gap without the adjacency
-    guard would produce a spurious 4-bin-worth delta at the first row
-    after the hole.
+    Cumulative-style actuals with a 2-hour hole in the middle of Day 2:
+    the rows for 04:00-05:30 are missing, so the 06:00 reading carries
+    five intervals' growth.
     """
     table = db.safe_table_name("sensor.mono_gap")
     idx = pd.date_range("2024-06-15 00:00", periods=48 * 2, freq="30min")
@@ -151,30 +150,29 @@ class TestAccuracyLeadTime:
         # Perfect delta predictions → zero MAE at every lead.
         assert all(m < 1e-6 for m in ltc["mae"])
 
-    def test_increment_mode_nulls_delta_on_actuals_gap(self, db, actuals_with_gap):
-        """
-        With a 2-hour hole in actuals, the LAG at the first post-gap bin
-        spans 4 intervals. Without the adjacency guard, that bin's
-        "delta" = value[06:00] − value[03:30] = 5, compared against a
-        forecast's per-bin delta of 1 → MAE of 4 at that lead bucket.
-        The guard nulls the actuals row out so it never joins, and MAE
-        on the surviving buckets stays ~0.
+    def test_increment_mode_scores_an_actuals_gap_like_training(
+        self, db, actuals_with_gap,
+    ):
+        """v2.52.4: increment actuals follow the training label's rule
+        (``cumulative_to_interval`` then a sum resample). Bins with no
+        reading are zero increments and the first reading after the hole
+        carries the growth since the last one (60 − 55 = 5), as the model
+        was trained to see them. Before, the hole's bins had no actual and
+        the 06:00 bin was nulled by an adjacency guard, so a counter that
+        only logs changes was never scored on its quiet or post-quiet
+        intervals.
         """
         issued = datetime(2024, 6, 16, 3, 0)
-        # Predict the per-interval delta directly = 1.0 (matches the
-        # seeded monotonic increments). Horizon spans the gap.
-        targets = _targets_30min(issued, 8)
-        preds = [1.0] * 8
-        _log_cycle(db, "exp", issued, targets, preds)
+        targets = _targets_30min(issued, 8)   # 03:30 … 07:00
+        _log_cycle(db, "exp", issued, targets, [1.0] * 8)
         r = db.get_forecast_accuracy(
             "exp", actuals_with_gap, max_age_days=GENEROUS_WINDOW,
             evaluation_mode="increment", model_name="lgb",
         )
         ltc = r["lead_time_curve"]
-        # Any non-zero MAE would mean a gap-spanning delta leaked through
-        # the actuals adjacency guard.
-        for m in ltc["mae"]:
-            assert m < 1e-6, f"Gap-spanning delta leaked into MAE: {ltc['mae']}"
+        assert ltc["lead_minutes"] == [30, 60, 90, 120, 150, 180, 210, 240]
+        assert ltc["sample_count"] == [1] * 8
+        assert ltc["mae"] == pytest.approx([0, 1, 1, 1, 1, 4, 0, 0], abs=1e-6)
 
     def test_model_filter_excludes_other_models(self, db, actuals_monotonic):
         issued = datetime(2024, 6, 15, 8, 0)
@@ -200,8 +198,9 @@ class TestAccuracyLeadTime:
     def test_typical_interval_demand_mode_aware(self, db, actuals_monotonic):
         # Raw typical = mean |value| across the actuals in the window.
         # The monotonic 0..191 series has mean 95.5.
-        # Increment typical = mean |delta| across actuals_grid, with
-        # adjacency guard (every delta is +1) → 1.0.
+        # Increment typical = mean |increment| across the per-bin
+        # increments: the first bin is NULL and every other one is +1
+        # → 1.0.
         issued = datetime(2024, 6, 15, 8, 0)
         targets = _targets_30min(issued, 2)
         _log_cycle(db, "exp", issued, targets, [17.0, 18.0])
@@ -458,10 +457,10 @@ class TestTrajectory:
         m = next(m for m in r["target_meta"] if m["target_dt"].startswith("2024-06-15 09"))
         assert m["max_abs_error"] == pytest.approx(0.1, abs=1e-6)
 
-    def test_delta_space_gap_nulls_actual(self, db, actuals_with_gap):
-        # A target right after the 04:00-05:30 hole has no adjacent
-        # predecessor → actual is null (matches the gap guard on the
-        # accuracy increment query).
+    def test_delta_space_after_gap_matches_training(self, db, actuals_with_gap):
+        # v2.52.4: the first target after the 04:00-05:30 hole scores
+        # against the growth since the last reading (60 − 55 = 5), the
+        # training label for that bin, as the accuracy query does.
         t = datetime(2024, 6, 16, 6, 0)
         _log_cycle(db, "exp", datetime(2024, 6, 16, 3, 0), [t], [1.0])
         _log_cycle(db, "exp", datetime(2024, 6, 16, 3, 30), [t], [1.0])
@@ -470,10 +469,8 @@ class TestTrajectory:
             interval_minutes=30, max_age_days=GENEROUS_WINDOW,
             source_is_cumulative=True, model_name="lgb",
         )
-        # The target shouldn't appear among available_targets because
-        # av.value IS NULL fails the candidate-query join filter.
-        assert not any(t.strftime("%Y-%m-%d %H:%M:%S") in x
-                       for x in r.get("available_targets", []))
+        assert r["actual_space"] == "delta"
+        assert r["actual"] == pytest.approx(5.0, abs=1e-6)
 
     def test_model_filter_excludes_other_models(self, db, actuals_monotonic):
         t = datetime(2024, 6, 15, 9, 0)
@@ -549,10 +546,11 @@ class TestEvolutionActuals:
         # indices 17..20.
         assert vals[:4] == [17.0, 18.0, 19.0, 20.0]
 
-    def test_cumulative_source_clamps_negative_resets(self, db):
+    def test_cumulative_source_scores_reset_as_its_own_reading(self, db):
         # Daily-reset sensor: cumulative climbs through the day then
-        # snaps back to 0 at midnight. Naive diff would emit a large
-        # negative spike at the reset; the clamp should pin that to 0.
+        # snaps back to 0 at midnight. A naive diff would emit -7 at
+        # the reset; the restart rule (a drop below 90% of the previous
+        # reading) scores the reset bin as its own reading instead.
         table = db.safe_table_name("sensor.reset")
         idx = pd.date_range("2024-06-15 22:00", periods=6, freq="30min")
         # Values: 5, 6, 7, 0, 1, 2  (reset at index 3)
@@ -569,9 +567,31 @@ class TestEvolutionActuals:
             source_is_cumulative=True,
         )
         vals = r["actuals"]["values"]
-        # First entry is NULL (no prior bin) and excluded. Then deltas:
-        # 1.0, 1.0, max(0, -7) = 0, 1.0, 1.0
+        # First entry is NULL (no prior reading) and excluded. Then
+        # 1.0, 1.0, the reset bin's own reading (0.0), 1.0, 1.0.
         assert vals == [1.0, 1.0, 0.0, 1.0, 1.0]
+
+    def test_cumulative_source_matches_trajectory_across_a_gap(
+        self, db, actuals_with_gap,
+    ):
+        """v2.52.4: the measured line uses the same increments as the
+        trajectory and accuracy queries — zeros through the 04:00-05:30
+        hole and the accumulated 5.0 at 06:00 — rather than leaving the
+        hole and the bin after it blank."""
+        issued = datetime(2024, 6, 16, 3, 0)
+        targets = _targets_30min(issued, 8)   # 03:30 … 07:00
+        _log_cycle(db, "exp", issued, targets, [1.0] * 8)
+        r = db.get_forecast_evolution(
+            "exp", actuals_with_gap,
+            n_cycles=12, interval_minutes=30,
+            source_is_cumulative=True,
+        )
+        assert r["actuals"]["targets"] == [
+            t.strftime("%Y-%m-%d %H:%M:%S") for t in targets
+        ]
+        assert r["actuals"]["values"] == pytest.approx(
+            [1.0, 0.0, 0.0, 0.0, 0.0, 5.0, 1.0, 1.0],
+        )
 
 
 # ---------------------------------------------------------------------

@@ -6508,6 +6508,12 @@ class MLForecastLabApp:
         # showing their stale pre-retrain values and the user
         # saw "some forecast sensors aren't updating".
         current_version = model_version
+        # v2.52.4: a cumulative target logs per-interval deltas, so its
+        # residuals are taken against the actuals deltas, not the raw
+        # counter — the bands were sized from the running daily total.
+        source_is_cumulative = bool(
+            getattr(exp_cfg, "source_is_cumulative", False)
+        )
         # Offloaded: this query joins forecast_log against the
         # actuals grid and scales with both; running it inline
         # froze the event loop (web UI + scheduler) for the
@@ -6520,6 +6526,7 @@ class MLForecastLabApp:
             model_name=model_name,
             model_version=current_version,
             interval_minutes=exp_cfg.interval_minutes,
+            source_is_cumulative=source_is_cumulative,
         )
         pooled = False
         if (
@@ -6535,6 +6542,7 @@ class MLForecastLabApp:
                 model_name=model_name,
                 model_version=None,
                 interval_minutes=exp_cfg.interval_minutes,
+                source_is_cumulative=source_is_cumulative,
             )
             if cq_all.get("fallback_quantile") is not None:
                 logger.info(
@@ -7034,7 +7042,8 @@ class MLForecastLabApp:
         # glue. On cold start (no forecast_log rows yet, lab mode, DB
         # unavailable, or query failure) the state is 0 with empty
         # arrays and a `status` attribute naming the reason; state
-        # transitions to "ready" once `lead_time_curve` has samples.
+        # transitions to "ready" once `lead_time_curve` has a sample at
+        # a non-negative lead.
         acc_state: Union[int, float] = 0
         acc_attrs = {
             "friendly_name": f"{publish_name} Forecast Accuracy",
@@ -7063,10 +7072,18 @@ class MLForecastLabApp:
                 # per publish cycle. Running inline would freeze the
                 # event loop for the full cycle duration, starving the
                 # web UI and the HA set_state HTTPX pool.
+                # v2.52.4: increment mode for a cumulative target, as the
+                # web Accuracy tab already does — raw mode scored the
+                # per-interval forecast against the running counter.
                 accuracy = await asyncio.to_thread(
                     self.history_db.get_forecast_accuracy,
                     exp_cfg.name, actuals_table, 30,
                     exp_cfg.interval_minutes,
+                    evaluation_mode=(
+                        "increment"
+                        if getattr(exp_cfg, "source_is_cumulative", False)
+                        else "raw"
+                    ),
                 )
                 ltc = accuracy.get("lead_time_curve", {})
                 rev = accuracy.get("revision_improvement", {})
@@ -7078,8 +7095,19 @@ class MLForecastLabApp:
                     acc_attrs["mae"] = ltc["mae"]
                     acc_attrs["rmse"] = ltc["rmse"]
                     acc_attrs["sample_count"] = ltc["sample_count"]
-                    acc_attrs["status"] = "ready"
-                    acc_state = round(ltc["mae"][0], 4) if ltc["mae"] else 0
+                    # v2.52.4: the state is the first non-negative lead
+                    # bucket, not index 0. A tick that falls back to a
+                    # stale frame logs hindcast rows (leads of minus
+                    # several hours); index 0 then pinned the state to
+                    # that bucket's handful of samples for the 30-day
+                    # window. Bucket 0 holds leads in (-interval, interval).
+                    i0 = next(
+                        (i for i, m in enumerate(ltc["lead_minutes"]) if m >= 0),
+                        None,
+                    )
+                    if i0 is not None:
+                        acc_attrs["status"] = "ready"
+                        acc_state = round(ltc["mae"][i0], 4)
                 if rev:
                     acc_attrs["revision_first_mae"] = rev.get(
                         "first_forecast_mae"

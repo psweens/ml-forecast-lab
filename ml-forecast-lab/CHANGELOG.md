@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.52.4
+
+### Fixed
+
+**Conformal bands and the accuracy sensor for cumulative experiments are on
+the per-interval scale.** With `source_is_cumulative: true`, the published
+`_upper_80` / `_lower_80` bands were tens of kWh wide around a forecast of a
+fraction of a kWh, and `_forecast_accuracy` reported an error the size of
+the day's running total. The forecast is a per-interval increment, but its
+residuals were taken against the sensor's raw counter. Bands, Accuracy-tab
+coverage and the accuracy sensor now compare it with each interval's
+increment. The bands narrow to the forecast's real error at the next
+forecast publish. Accuracy-tab coverage reads close to 100% until the next
+retrain, because forecasts logged before the update carry the old bands;
+views across all model versions keep them until they leave the 30-day
+window. Experiments without `source_is_cumulative` are unchanged. Details:
+[docs/investigations/2026-10-cumulative-conformal.md](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-cumulative-conformal.md).
+
+**Per-interval accuracy for cumulative experiments includes quiet
+intervals.** The Accuracy tab's per-interval figures skipped every interval
+with no reading and the interval after each one, so a counter that only
+logs changes (hot-water demand, for example) was scored on a small sample of
+its busiest intervals. Each interval's increment is now built the way
+training builds its labels: the rise between readings, zero for an
+interval with no reading, and the reading itself after a counter reset (a
+drop to below 90% of the previous reading). The error figures, the
+Forecast convergence chart's measured line, the bands and the accuracy
+sensor all use it, so their values for cumulative experiments change after
+updating.
+
+**The `_forecast_accuracy` sensor no longer freezes after a Home Assistant
+outage.** The sensor could stay at exactly the same value for days, on every
+experiment at once. A forecast tick that cannot fetch fresh history reuses
+the cached data and logs forecasts for times that are already past; the
+sensor reported the error of that small, hours-old group instead of the
+next-interval error, until those rows aged out after 30 days. The state is
+now always the next-interval error, as is the Accuracy tab's headline
+error. The past-time group is still listed in the `lead_hours` and `mae`
+attributes.
+
+**External forecasts are logged reliably alongside the add-on's own.** The
+log showed "Error logging external forecast … cannot start a transaction
+within a transaction" or "no more rows available" when two experiments
+published at the same moment, and the failed write could also undo another
+experiment's pending database write. External-forecast logging now waits
+for the database like every other write.
+
 ## 2.52.3
 
 ### Fixed

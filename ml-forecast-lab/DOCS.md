@@ -306,6 +306,18 @@ trades the formal coverage guarantee for zero retraining cost:
 - **Calibration set.** Per-lead absolute residuals from the deployed
   `(forecast, actual)` pairs in `forecast_log`, capped at the most
   recent 14 days.
+- **Cumulative sources.** When `source_is_cumulative` is true the
+  forecast is a per-interval increment, so each residual compares it
+  with that interval's increment, built the way training builds its
+  labels: the sum of the counter's rises from each reading to the next,
+  counting the reading itself after a reset (a drop to below 90% of the
+  previous reading). A smaller drop is a measurement dip, which the
+  recovery cancels. An interval with no readings counts as zero use, so
+  a counter that only logs changes is scored on its quiet intervals
+  too, and the rise after a quiet spell or a recorder outage counts in
+  the interval where it was recorded. The band, its coverage, and every
+  per-interval figure on the Forecast Accuracy tab, as well as the
+  `_forecast_accuracy` sensor, use this scale.
 - **Per-lead-bucket quantile.** For the requested `conformal_coverage`
   level (default 0.8), we take the `level`-th quantile (= 80th
   percentile for 80% bands) of `|residual|` per lead bucket — for an
@@ -342,7 +354,9 @@ coverage looks fine. The Forecast Accuracy tab surfaces the worst-
 mis-covered bucket alongside the headline coverage chip; the offline
 diagnostic at `scripts/conformal_coverage_check.py` prints the full
 hour-of-day / weekday-weekend / per-lead breakdown for ad-hoc
-analysis. If buckets ≥5pp off nominal persist across multiple days,
+analysis (add `--cumulative` for an experiment with
+`source_is_cumulative: true`, or it reports coverage against the raw
+counter). If buckets ≥5pp off nominal persist across multiple days,
 the bands need an adaptive method — see the script's output for
 options.
 
@@ -359,7 +373,7 @@ When an experiment is in `mode: production`, the app publishes the following sen
 | `sensor.mlfl_<name>_cumulative` | The integrated forecast curve. Resets at local midnight when `source_is_cumulative` and `reset_daily` are both true; otherwise a `cumsum` anchored at zero. | Useful for daily-budget automations (EV planning, hot-water tank pre-heat). |
 | `sensor.mlfl_<name>_upper_<pct>` | Upper conformal band at the `<pct>` coverage level (default `80`). | Renamed to match `conformal_coverage` — e.g. `_upper_90` if you set `0.9`. Appears once enough residuals have been calibrated; cold-start may take ~10 forecast cycles. |
 | `sensor.mlfl_<name>_lower_<pct>` | Lower conformal band. | As above. |
-| `sensor.mlfl_<name>_forecast_accuracy` | Running accuracy summary (bias, MAE, coverage). | Updated whenever a logged prediction's actual arrives. |
+| `sensor.mlfl_<name>_forecast_accuracy` | Mean absolute error of the next-interval forecast over the last 30 days. Per interval when `source_is_cumulative` is true. | Recomputed on every forecast publish. Attributes carry the full lead-time curve (`lead_hours`, `mae`, `rmse`, `sample_count`) and the first-versus-latest revision MAE. `status` reads `accumulating` until a next-interval forecast has been scored. |
 | `sensor.mlfl_<name>_last_benchmark` | ISO timestamp of the most recent benchmark completion. | `device_class: timestamp`. Attributes include outcome, duration, winner, and a truncated error string when the cycle failed — convenient triggers for HA automations. |
 | `sensor.mlfl_<name>_last_retrain` | ISO timestamp of the most recent retrain. | Same shape as `_last_benchmark`. |
 

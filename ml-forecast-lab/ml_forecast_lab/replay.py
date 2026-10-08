@@ -156,6 +156,12 @@ def _conformal_key(*args, **kwargs) -> str:
         None, *args, **kwargs)
     bound.apply_defaults()
     params = {k: v for k, v in bound.arguments.items() if k != "self"}
+    # v2.52.4: the flag joins the key only when set, so non-cumulative
+    # bundles recorded before it existed keep their keys. A cumulative
+    # bundle from v2.52.3 or earlier recorded raw-counter quantiles,
+    # which this tree no longer asks for: it replays as UnrecordedCall.
+    if not params.get("source_is_cumulative"):
+        params.pop("source_is_cumulative", None)
     return _key("get_conformal_quantiles",
                 json.dumps(params, sort_keys=True, default=str))
 
