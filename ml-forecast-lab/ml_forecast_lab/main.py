@@ -1908,6 +1908,13 @@ class MLForecastLabApp:
                         finally:
                             self.web_app.state.appstate.end_benchmark(experiment_name)
                             self._running_tasks.pop(experiment_name, None)
+                    else:
+                        # v2.55.1: a card can outlive its mlfl.yaml entry (statuses
+                        # are built at startup), so a queued run would otherwise
+                        # vanish without a trace.
+                        logger.warning(
+                            f"Benchmark trigger: experiment '{experiment_name}' not found in config"
+                        )
 
             self.web_app.state.appstate.benchmark_callback = _benchmark_trigger
 

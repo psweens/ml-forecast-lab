@@ -17,6 +17,23 @@
   forecast keeps its history.
 - [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-external-forecast-units.md)
 
+## 2.55.1
+
+### Fixed
+
+**Run All Benchmarks runs the benchmarks again.**
+
+- Clicking **Run All Benchmarks** on the dashboard said the benchmarks were
+  queued, but none ran.
+- Afterwards each experiment looked as if it was still training until the
+  app restarted: **Run Pipeline**, **Retrain** and **Roll back** were
+  refused, and **Stop Training** could not clear it.
+- The benchmarks now run one at a time; the waiting ones show
+  **Queued (#n)** on their cards, and clicking that takes one out of the
+  queue.
+- Installing this update also frees any experiment that is stuck now.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-run-all-benchmarks-never-ran.md)
+
 ## 2.55.0
 
 ### Fixed
