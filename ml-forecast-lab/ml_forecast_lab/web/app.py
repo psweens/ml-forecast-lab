@@ -1589,33 +1589,31 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         if name not in app.state.appstate.experiment_statuses:
             raise HTTPException(status_code=404, detail="Experiment not found")
 
-        if app.state.appstate.is_benchmark_running(name):
+        appstate = app.state.appstate
+        if appstate.is_benchmark_running(name):
             return JSONResponse(
                 status_code=409,
                 content={"error": "Benchmark already running for this experiment"},
             )
+        if appstate.get_queue_position(name) > 0:
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Experiment is already queued"},
+            )
+        if not appstate.benchmark_callback:
+            raise HTTPException(status_code=501, detail="Benchmark callback not registered")
 
-        app.state.appstate.start_benchmark(name)
-
-        # Without this dispatch the experiment is marked "running" but no
-        # work is queued — start_benchmark() only flips a flag. The matching
-        # end_benchmark() lives inside benchmark_callback's finally block,
-        # so if we don't call the callback the flag is never cleared and
-        # every subsequent run-benchmark / run-pipeline / retrain rejects
-        # with 409 until the add-on restarts.
-        if app.state.appstate.benchmark_callback:
-            try:
-                app.state.appstate.benchmark_callback(name)
-            except Exception:
-                # Clear the flag if dispatch itself raises so the experiment
-                # isn't permanently jammed; the callback's own error path
-                # handles clear-on-completion failures.
-                app.state.appstate.end_benchmark(name)
-                raise
-        else:
-            # No callback wired (test / stub harness) — clear the flag so
-            # the response below isn't a lie.
-            app.state.appstate.end_benchmark(name)
+        # v2.55.1: benchmark_callback is async, so the bare call this route
+        # made before only built a coroutine — nothing ran and the running
+        # flag set ahead of it was never cleared. Route through the same
+        # serial queue as run-pipeline: _process_training_queue sets the
+        # flag, awaits the callback, clears the flag in its own finally
+        # (even if the callback raises before reaching its own), and
+        # registers the task in _pipeline_tasks so stop-training can
+        # cancel it.
+        appstate.training_queue.append({"name": name, "steps": ["benchmark"]})
+        position = appstate.get_queue_position(name)
+        appstate.spawn(_process_training_queue(app))
 
         return JSONResponse(
             status_code=202,
@@ -1623,25 +1621,30 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 "message": "Benchmark run accepted",
                 "experiment": name,
                 "status": "queued",
+                "queue_position": position,
             },
         )
 
     @app.post("/api/benchmarks/run-all")
     async def run_all_benchmarks():
-        """Trigger benchmark runs for all experiments."""
+        """Queue a benchmark run for every experiment not already running or queued."""
+        appstate = app.state.appstate
+        if not appstate.benchmark_callback:
+            raise HTTPException(status_code=501, detail="Benchmark callback not registered")
         queued = []
         skipped = []
-        for name, status in app.state.appstate.experiment_statuses.items():
-            if app.state.appstate.is_benchmark_running(name):
+        # v2.55.1: enqueue rather than dispatch (see run_benchmark). One
+        # benchmark runs at a time, so a Pi never holds several training
+        # workloads, scheduled retrains can take the training lock between
+        # them, and the rest show as Queued (#n) and can be removed by Stop.
+        for name in list(appstate.experiment_statuses):
+            if appstate.is_benchmark_running(name) or appstate.get_queue_position(name) > 0:
                 skipped.append(name)
-            else:
-                app.state.appstate.start_benchmark(name)
-                if app.state.appstate.benchmark_callback:
-                    try:
-                        app.state.appstate.benchmark_callback(name)
-                    except Exception:
-                        pass
-                queued.append(name)
+                continue
+            appstate.training_queue.append({"name": name, "steps": ["benchmark"]})
+            queued.append(name)
+        if queued:
+            appstate.spawn(_process_training_queue(app))
         return JSONResponse(
             status_code=202,
             content={
@@ -5398,9 +5401,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         position = appstate.get_queue_position(name)
         logger.info(f"Queued pipeline for {name} (position {position})")
 
-        # Kick the queue processor
-        import asyncio as _aio
-        _aio.ensure_future(_process_training_queue(app))
+        # Kick the queue processor (spawn keeps a strong reference and
+        # logs a processor failure instead of letting it vanish).
+        appstate.spawn(_process_training_queue(app))
 
         return JSONResponse(
             status_code=202,
