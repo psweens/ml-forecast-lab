@@ -269,8 +269,8 @@ class ExternalForecastCfg:
     """Unit of the forecast's values, one of ``EXTERNAL_FORECAST_UNITS``.
     ``None`` uses the entity's HA ``unit_of_measurement``. In ``attribute``
     mode that unit describes the entity's state, which need not be the unit
-    of its trajectory entries: a Solcast-format sensor's state is the day's
-    total in kWh while each ``pv_estimate`` is average power in kW. v2.56.0."""
+    of its trajectory entries: a forecast sensor's state can be the day's
+    total in kWh while each entry is average power in kW. v2.56.0."""
 
     def __post_init__(self) -> None:
         if not self.entity_id:

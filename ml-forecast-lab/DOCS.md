@@ -235,7 +235,7 @@ Compare this app's forecast against up to **five third-party forecasts of the sa
 | `attribute` | string | `forecast` | `attribute` mode only — which attribute (or weather `hourly`/`daily`/`twice_daily` service type) holds the trajectory. |
 | `value_key` | string | `null` | `attribute` mode only — the value key inside each trajectory entry (e.g. `pv_estimate`). `null` auto-detects. |
 | `scale` | float | `null` | Optional multiplier override. Usually unnecessary — base units (W/kW/MW, Wh/kWh/MWh) are reconciled automatically from each forecast's unit. |
-| `unit` | `W` \| `kW` \| `MW` \| `Wh` \| `kWh` \| `MWh` | `null` | The unit of the forecast's values. `null` uses the sensor's HA unit. Set it in `attribute` mode when the forecast entries are in a different unit from the sensor's state — a Solcast-style sensor's state is today's total in kWh, but each `pv_estimate` is average power in kW, so it needs `unit: kW`. |
+| `unit` | `W` \| `kW` \| `MW` \| `Wh` \| `kWh` \| `MWh` | `null` | The unit of the forecast's values. `null` uses the sensor's HA unit. Set it in `attribute` mode when the forecast entries are in a different unit from the sensor's state — a sensor whose state is today's total in kWh while each entry is average power in kW needs `unit: kW`. |
 | `is_cumulative` | bool | `null` | Override for whether the sensor is a running total. `null` auto-detects the cumulative shape (and differences it before comparison). |
 | `label` | string | `null` | Friendly name in the tab's chart/legend. |
 

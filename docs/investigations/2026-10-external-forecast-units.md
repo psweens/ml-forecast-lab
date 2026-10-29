@@ -13,55 +13,38 @@ converts every series to energy per interval: power × interval hours, energy
 as it is. In `attribute` mode that unit belongs to the sensor's **state**,
 not to the trajectory entries the comparison scores.
 
-The Solcast attribute format is the common case, and the one in the DOCS
-example:
+A common layout for solar and other energy forecasts, and the one in the
+DOCS example, has:
 
-- the state is the day's total, in kWh;
-- each `detailedForecast` entry (`pv_estimate`, `pv_estimate10`,
-  `pv_estimate90`, or Predbat's `pv_estimateCL`) is average power over the
-  period, in kW.
+- a state that is the day's total, in kWh;
+- trajectory entries that are average power over each period, in kW.
 
 The entries were therefore taken as kWh per interval. Against a kW target on
-a 30-minute grid, each external came out at 1/0.5 = 2× its real size. The
+a 30-minute grid, such an external came out at 1/0.5 = 2× its real size. The
 same holds against a cumulative kWh target, which is also compared in energy
 per interval. The scale-mismatch guard only trips beyond 4× or below 0.25×,
 so nothing flagged it.
 
-## Measured on a production solar experiment
+## Effect
 
-30-minute interval, kW target, two trajectory externals in the Solcast
-format (raw Solcast `pv_estimate`, and a calibrated `pv_estimateCL`), 30-day
-window:
+For every external in that layout, on an experiment with an interval under
+an hour:
 
-| | App | Calibrated | Raw |
-|---|---|---|---|
-| Scale ratio (external mean ÷ actual mean) | — | 1.79 | 1.81 |
-| "Best available" MAE (kW) | 0.285 | 0.593 | 0.589 |
-| Daily bias (kWh/day) | — | +4.4 | +4.4 |
+- the scale ratio (external mean ÷ actual mean) sat near 1/interval_hours
+  times the forecast's own bias, about 1.8–2.2 on a 30-minute grid;
+- per-interval error and RMSE were roughly doubled;
+- the daily bias was close to the mean daily total, since doubling adds one
+  day's total;
+- the verdict and ranking favoured the app over forecasts that, scored in
+  the right unit at matched lead, could be better than it.
 
-A daily bias of about the mean daily generation is what doubling gives. The
-tab declared the app about 50% better than both.
-
-Re-scored by hand with the entries in kW, on the half-hours the app scores
-(those where the target reported, daylight in practice), 16 days, the
-forecast in force at each lead, about 250 half-hours per lead:
-
-| Lead | App | Calibrated | Raw |
-|---|---|---|---|
-| 0 | **0.17** | 0.21 | 0.20 |
-| 1 h | 0.23 | 0.22 | **0.19** |
-| 4 h | 0.23 | 0.21 | **0.20** |
-| 8 h | 0.27 | **0.20** | 0.21 |
-| 24 h | 0.30 | **0.19** | 0.19 |
-
-So the headline was inverted beyond the current half-hour. A check on the 48
-targets the trajectory route exposes, scored against the app's own actuals,
-gave the same ordering, so the hand resampling of the actuals is not the
-cause.
+Because values are logged raw and converted at read time, the logged
+history itself was never wrong; only its scoring was.
 
 The "Best available" view also compares the app's latest issuance (median
-lead 0) with the externals' latest (median lead 90–140 min). That is by
-design and labelled on the tab; "Same lead time" is the like-for-like view.
+lead near 0) with each external's latest, which for a source that updates a
+few times a day is typically hours old. That is by design and labelled on the
+tab; "Same lead time" is the like-for-like view.
 
 ## Fix
 

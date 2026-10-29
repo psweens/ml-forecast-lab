@@ -2,12 +2,11 @@
 v2.56.0: the unit of an external forecast's values.
 
 Pins the defect where the Forecast Comparison tab read an attribute-mode
-forecast in its sensor's HA unit. A Solcast-format sensor's state is the
-day's total in kWh while each ``detailedForecast`` entry is average power in
-kW, so the entries were scored as kWh per interval: ×2 on a 30-minute grid,
-inside the 4× scale-mismatch guard. Every external forecast of a power target
-then showed about double the error and a large positive bias, and the app
-appeared to beat it.
+forecast in its sensor's HA unit. A forecast sensor's state can be the day's
+total in kWh while each trajectory entry is average power in kW; such entries
+were scored as kWh per interval: ×2 on a 30-minute grid, inside the 4×
+scale-mismatch guard. These external forecasts then showed about double their
+error and a large positive bias, and the app appeared to beat them.
 
   - ``ExternalForecastCfg.unit`` (canonical spelling, validation, tolerant
     YAML load) and ``set_experiment_external_forecast_unit``.
@@ -81,12 +80,12 @@ class TestUnitConfig:
         # Two forecasts read from one entity: only the addressed one changes,
         # and clearing removes the key.
         p = tmp_path / "mlfl.yaml"
-        base = {"entity_id": "sensor.solcast", "mode": "attribute",
-                "attribute": "detailedForecast"}
+        base = {"entity_id": "sensor.pv_forecast", "mode": "attribute",
+                "attribute": "forecast"}
         p.write_text(yaml.dump({"experiments": [{
             "name": "e", "target_entity": "sensor.t", "external_forecasts": [
-                dict(base, value_key="pv_estimate"),
-                dict(base, value_key="pv_estimate10", label="P10"),
+                dict(base, value_key="power"),
+                dict(base, value_key="power_p10", label="P10"),
             ],
         }]}))
         exts = load_config(p).experiments[0].external_forecasts
@@ -117,9 +116,9 @@ class TestSuspectExternalUnit:
                                      self.IH if ih is None else ih, ratio)
 
     def test_power_entries_on_an_energy_sensor(self):
-        # The measured case: 1.79 and 1.81 on a 30-minute grid.
-        assert self._s(1.79) == "kW"
-        assert self._s(1.81) == "kW"
+        # Doubled on a 30-minute grid, give or take a forecast's own bias.
+        assert self._s(1.8) == "kW"
+        assert self._s(2.3) == "kW"
         assert self._s(2.0, base=0.001) == "W"
         assert self._s(2.0, base=1000.0) == "MW"
 
@@ -169,7 +168,7 @@ def db(tmp_db):
 
 def _seed_pv(db, n=96, ext_factor=1.0):
     """kW target with a daylight curve, a perfect-ish app forecast, and a
-    trajectory external whose entries are kW (Solcast format), issued every
+    trajectory external whose entries are average power in kW, issued every
     2 h for the next 8 h. ``ext_factor`` scales the external's error-free
     values to model a biased forecast."""
     grid = list(pd.date_range("2024-06-15 00:00", periods=n, freq=f"{INTERVAL}min"))
@@ -180,7 +179,7 @@ def _seed_pv(db, n=96, ext_factor=1.0):
         db.log_forecast(experiment="e", issued_at=t - timedelta(minutes=INTERVAL),
                         targets=[t], predictions=[power[i] + 0.1],
                         model_name="lgb", model_version="v1")
-    src = "sensor.solcast|detailedForecast|pv_estimate"
+    src = "sensor.pv_forecast|forecast|power"
     for k in range(0, n, 4):
         issued = grid[k] - timedelta(minutes=INTERVAL)
         targets = grid[k:k + 16]
@@ -190,9 +189,9 @@ def _seed_pv(db, n=96, ext_factor=1.0):
 
 
 def _spec(src, unit, explicit):
-    return {"entity": "sensor.solcast", "source": src, "mode": "attribute",
+    return {"entity": "sensor.pv_forecast", "source": src, "mode": "attribute",
             "table": None, "scale": None, "is_cumulative": False,
-            "label": "Solcast", "unit": unit, "unit_explicit": explicit}
+            "label": "PV forecast", "unit": unit, "unit_explicit": explicit}
 
 
 class TestComparisonUnits:
@@ -215,7 +214,7 @@ class TestComparisonUnits:
         # Kept out of the matched-lead ranking, with the reason.
         sk = res["skill"]
         assert sk["available"] is False
-        assert {"label": "Solcast", "reason": "unit looks wrong"} in sk["excluded"]
+        assert {"label": "PV forecast", "reason": "unit looks wrong"} in sk["excluded"]
 
     def test_explicit_kw_scores_like_for_like(self, db):
         ttbl, src, _ = _seed_pv(db)
@@ -229,7 +228,7 @@ class TestComparisonUnits:
         assert abs(c["head_to_head"]["external"]["mae"] - 0.05) < 0.01
         sk = res["skill"]
         assert sk["available"] is True
-        assert [r["label"] for r in sk["rows"]] == ["ML Forecast Lab", "Solcast"]
+        assert [r["label"] for r in sk["rows"]] == ["ML Forecast Lab", "PV forecast"]
 
     def test_explicit_unit_is_trusted_even_when_the_ratio_looks_wrong(self, db):
         # A forecast that really is twice the actuals, with its unit set, is a

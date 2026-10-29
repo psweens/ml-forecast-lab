@@ -62,8 +62,8 @@ def suspect_external_unit(
     unit looks wrong, else ``None``.
 
     v2.56.0: an attribute-mode sensor's HA unit is the unit of its state, which
-    need not be that of its trajectory entries. A Solcast-format sensor's state
-    is the day's total in kWh while each entry is average power in kW, so the
+    need not be that of its trajectory entries. A forecast sensor's state can
+    be the day's total in kWh while each entry is average power in kW; such
     entries were read as energy per interval and came out scaled by
     1/interval_hours (×2 on a 30-minute grid) — under the 4× scale-mismatch
     guard. Reading power as energy, or energy as power, scales the forecast
@@ -3779,8 +3779,8 @@ class HistoryDB:
         scale-mismatch guard flags it.
 
         v2.56.0: an attribute-mode sensor's HA unit describes its state, not
-        necessarily its trajectory entries (Solcast-format: state kWh, entries
-        kW), and reading a power forecast as energy per interval scales it by
+        necessarily its trajectory entries (state kWh, entries kW), and
+        reading a power forecast as energy per interval scales it by
         1/interval_hours. Such a forecast is flagged ``unit_suspect`` with a
         ``suggested_unit`` when its scale ratio sits nearer that factor than 1
         (see the per-external block) and is left out of the skill ranking.

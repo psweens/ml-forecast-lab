@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 
-TWO_SOLCAST_YAML = textwrap.dedent(
+TWO_FORECASTS_YAML = textwrap.dedent(
     """\
     timezone: "Europe/London"
     update_every_minutes: 360
@@ -28,27 +28,27 @@ TWO_SOLCAST_YAML = textwrap.dedent(
         models_enabled:
           - "lightgbm"
         external_forecasts:
-          - entity_id: "sensor.solcast"
+          - entity_id: "sensor.pv_forecast"
             mode: "attribute"
-            attribute: "detailedForecast"
-            value_key: "pv_estimate"
-            label: "Solcast"
-          - entity_id: "sensor.solcast"
+            attribute: "forecast"
+            value_key: "power"
+            label: "PV forecast"
+          - entity_id: "sensor.pv_forecast"
             mode: "attribute"
-            attribute: "detailedForecast"
-            value_key: "pv_estimate90"
-            label: "Solcast P90"
+            attribute: "forecast"
+            value_key: "power_p90"
+            label: "PV forecast P90"
     """
 )
 
-P50 = "sensor.solcast|detailedForecast|pv_estimate"
-P90 = "sensor.solcast|detailedForecast|pv_estimate90"
+P50 = "sensor.pv_forecast|forecast|power"
+P90 = "sensor.pv_forecast|forecast|power_p90"
 
 
 @pytest.fixture
 def cfg(tmp_path):
     p = tmp_path / "mlfl.yaml"
-    p.write_text(TWO_SOLCAST_YAML)
+    p.write_text(TWO_FORECASTS_YAML)
     return p
 
 
@@ -109,8 +109,8 @@ def test_set_unit_rejects_bad_input(client, seeded, cfg):
 
 def test_add_with_unit(client, seeded, cfg):
     r = client.post(f"/experiment/{seeded}/add-external-forecast", json={
-        "entity_id": "sensor.predbat_pv_today", "mode": "attribute",
-        "attribute": "detailedForecast", "value_key": "pv_estimateCL",
+        "entity_id": "sensor.other_pv_forecast", "mode": "attribute",
+        "attribute": "forecast", "value_key": "power",
         "unit": "kW",
     })
     assert r.json()["success"] is True, r.json()
