@@ -322,6 +322,26 @@ class TestGlitchesAndRebaselines:
         assert (daily > 5.0).all()
         assert inc.sum() == pytest.approx(s.iloc[-1] - s.iloc[0], abs=2.0)
 
+    def test_a_stale_reading_then_a_gap_scores_only_the_use(self):
+        """A 5% stale reading, then nothing for 2 h: the return is a gap row,
+        exempt from the cap, so a re-baseline at the stale value scored the
+        dip's depth (617 kWh) as one bin's use."""
+        s = _lifetime_meter()
+        i = 7 * 48
+        g = s.copy()
+        g.iloc[i] = 0.95 * s.iloc[i]
+        g = g.drop(g.index[i + 1:i + 5])
+        inc = cumulative_to_interval(g, INTERVAL)
+        assert inc.max() < 5.0
+        assert inc.sum() == pytest.approx(s.iloc[-1] - s.iloc[0], abs=2.0)
+
+    def test_a_stale_reading_then_a_gap_with_an_explicit_cap(self):
+        times = ["2026-10-20 00:00", "2026-10-20 00:30", "2026-10-20 01:00",
+                 "2026-10-20 03:00"]
+        s = _counter([10000.0, 10000.5, 9500.0, 10001.0], times=times)
+        inc = cumulative_to_interval(s, INTERVAL, max_increment=2.0)
+        assert inc.sum() == pytest.approx(1.0)
+
     def test_without_caps_or_deep_dips_the_scan_is_the_running_high_rule(self):
         """The scan only runs when it can differ from the vectorised rule;
         where it can't, it must agree exactly."""

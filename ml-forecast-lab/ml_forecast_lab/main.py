@@ -1515,9 +1515,11 @@ class MLForecastLabApp:
         # from the latest fetch. Seeds the cumulative sensor, which the raw
         # target's reading would seed with the subtracted loads included.
         self._net_today: Dict[str, dict] = {}
-        # v2.55.0: experiments whose net-actuals table has had the whole
-        # fetched window written this run; later fetches rewrite the tail.
-        self._net_actuals_backfilled: set = set()
+        # v2.55.0: per experiment, the newest bin written to its net-actuals
+        # table this run. The first write of a run covers the whole fetched
+        # window; later ones rewrite from two days before this bin, so a
+        # stretch without writes is filled in once they resume.
+        self._net_actuals_written: Dict[str, pd.Timestamp] = {}
         self._published_entities_path: Optional[Path] = None
         self._orphan_candidates: set = set()
         self._orphan_cleanup_disabled = False
@@ -2604,8 +2606,9 @@ class MLForecastLabApp:
 
     # v2.55.0: after a run has written an experiment's whole fetched window
     # to its net-actuals table, each later fetch rewrites only this much of
-    # the tail — the current bin and any bin a late reading or a carried
-    # deficit changed. A restart rewrites the window once more.
+    # the tail before the newest bin it wrote — the current bin and any bin
+    # a late reading or a carried deficit changed. A restart rewrites the
+    # window once more.
     _NET_ACTUALS_REWRITE_DAYS = 2
 
     def _local_tz(self):
@@ -2667,6 +2670,15 @@ class MLForecastLabApp:
         )
         cumulative = bool(getattr(exp_cfg, "source_is_cumulative", False))
 
+        # A sensor that failed to fetch was not subtracted: keep the seed and
+        # the table as the last complete fetch left them.
+        per_sensor = audit.get("per_sensor", [])
+        if len(per_sensor) < len(exp_cfg.load_subtract or []):
+            logger.info(
+                f"  {exp_cfg.name}: a load_subtract sensor was not fetched; "
+                f"actuals after subtraction are left as they were"
+            )
+            return
         if cumulative:
             now_utc = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
             today = now_utc.astimezone(tz).date()
@@ -2676,13 +2688,6 @@ class MLForecastLabApp:
             }
 
         if not self.history_db:
-            return
-        per_sensor = audit.get("per_sensor", [])
-        if len(per_sensor) < len(exp_cfg.load_subtract or []):
-            logger.info(
-                f"  {exp_cfg.name}: a load_subtract sensor was not fetched; "
-                f"its stored actuals after subtraction are left as they were"
-            )
             return
         step = pd.Timedelta(minutes=int(exp_cfg.interval_minutes))
         first_full = bins.min()
@@ -2702,8 +2707,9 @@ class MLForecastLabApp:
         frame = pd.DataFrame({"ds": bins, "value": net.to_numpy()})[keep]
         if not cumulative:
             frame = frame.dropna(subset=["value"])
-        if exp_cfg.name in self._net_actuals_backfilled:
-            tail_start = bins.max() - pd.Timedelta(
+        newest = self._net_actuals_written.get(exp_cfg.name)
+        if newest is not None:
+            tail_start = min(bins.max(), newest) - pd.Timedelta(
                 days=self._NET_ACTUALS_REWRITE_DAYS,
             )
             frame = frame[frame["ds"] >= tail_start]
@@ -2711,7 +2717,7 @@ class MLForecastLabApp:
             await asyncio.to_thread(
                 self.history_db.upsert_history, table, frame,
             )
-        self._net_actuals_backfilled.add(exp_cfg.name)
+            self._net_actuals_written[exp_cfg.name] = frame["ds"].max()
         oldest = now - timedelta(days=self._retention_days_for_table(table))
         await asyncio.to_thread(self.history_db.cleanup, table, oldest)
 

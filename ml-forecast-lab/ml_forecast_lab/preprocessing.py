@@ -127,26 +127,36 @@ def _score_from_accepted_level(
     a lifetime counter. Here the high a dip is measured against is the
     level scored so far (the raw high less the capped-off excess), and a
     dip deeper than ``dip_limit`` re-baselines the counter instead of
-    absorbing its later use. Without capped readings or deep dips this is
-    exactly the running-high rule.
+    absorbing its later use. A re-baseline is provisional: a later rise
+    that jumps back by about the dip's depth (a stale reading, then the
+    real one) scores only what it rose beyond that depth, so a gap row's
+    exemption from the cap can't let the dip's depth through as use.
+    Without capped readings or deep dips this is exactly the running-high
+    rule.
     """
     out = [0.0] * len(values)
     high = values[0]
     excess = 0.0
+    rebased = 0.0   # depth of the deep dips not yet known to be permanent
     for i in range(1, len(values)):
         v = values[i]
         if restarts[i]:
             out[i] = v if exempt[i] else min(v, cap[i])
-            high, excess = v, 0.0
+            high, excess, rebased = v, 0.0, 0.0
         elif v > high:
             rise = v - high
+            if rebased and rise >= rebased - dip_limit:
+                rise, rebased = max(rise - rebased, 0.0), 0.0
             scored = rise if exempt[i] or rise <= cap[i] else cap[i]
             out[i] = scored
             excess += rise - scored
             high = v
         elif v < high:
             accepted = high - excess
-            if v >= accepted or accepted - v > dip_limit:
+            if v >= accepted:
+                high = v
+            elif accepted - v > dip_limit:
+                rebased += accepted - v
                 high = v
             else:
                 high = accepted

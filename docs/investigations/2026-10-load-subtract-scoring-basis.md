@@ -57,12 +57,14 @@ the sensor measured once the loads are taken out):
   bin a late reading or a carried deficit reaches, change between fetches.
   The first fetch of a run writes the whole fetched window (so history
   logged before the upgrade is scored correctly at once); later fetches
-  rewrite the last two days.
+  rewrite from two days before the newest bin written, so days a failed
+  fetch skipped are filled in once fetches recover (unless the outage
+  outlasts the window, whose partial first day is never written).
 - Only bins the fetch measured in full are written, because the first
   fetch after every restart rewrites the window over rows an earlier run
   wrote:
   - nothing, when a configured subtract sensor's fetch failed (net would be
-    partly subtracted);
+    partly subtracted), and the seed keeps its last complete value;
   - nothing before every subtract sensor's history starts (the leading
     gap in the `apply_load_subtract` audit). The target comes from the
     app's cache, but the subtract sensors are fetched from HA, whose
@@ -182,9 +184,13 @@ detection therefore changed too:
   later reading scored 0 until the counter passed the old high: 20 of 28
   days of zero labels, including the most recent bins feeding inference
   lags. Both cases now total the recorded use (811.5 against 811.5 kWh;
-  810.6 for the step). The scan only runs when a counter dips and also has a
-  capped reading or a deep dip; otherwise the vectorised running-high
-  result stands unchanged.
+  810.6 for the step). A re-baseline is provisional: a later rise that
+  jumps back by about the dip's depth scores only what it rose beyond it.
+  Without that, a single stale reading 5% low followed by a gap row (exempt
+  from the cap) scored the dip's depth, 617 kWh, as one bin's use; now the
+  day totals what was recorded. The scan only runs when a counter dips and
+  also has a capped reading or a deep dip; otherwise the vectorised
+  running-high result stands unchanged.
 
 - With `reset_daily`, a reading crossing UTC midnight was also a restart
   if it rose by less than 10% of the counter's mean. A counter that resets

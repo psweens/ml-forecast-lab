@@ -317,9 +317,48 @@ class TestNetTableRewrites:
             return await inner(entity_id, *args, **kwargs)
 
         ha.get_history = ev_unavailable
-        app._net_actuals_backfilled.clear()   # as after a restart
+        seed = dict(app._net_today[exp.name])
+        app._net_actuals_written.clear()   # as after a restart
         _run(app._fetch_and_preprocess(exp, now=now))
         pd.testing.assert_frame_equal(app.history_db.get_history(table), before)
+        assert app._net_today[exp.name] == seed, (
+            "the seed would include the use of the sensor that failed"
+        )
+
+    def test_days_without_writes_are_filled_in_when_fetches_recover(self, tmp_db):
+        """The subtracted sensor fails for three days; the first good fetch
+        after it rewrites from before the outage, not just the last two
+        days, so those days aren't left without rows."""
+        start = _now()
+        end = start + timedelta(days=3, hours=6)
+        exp = _exp(days_history=6)
+        ha = _StubHA({
+            LOAD: _daily_counter_rows(end, days=9, per_bin=GROSS_PER_BIN),
+            EV: _daily_counter_rows(end, days=9, per_bin=EV_PER_BIN),
+        })
+        app = _make_app(tmp_db, exp, ha)
+        _run(app._fetch_and_preprocess(exp, now=start))
+
+        inner = ha.get_history
+
+        async def ev_unavailable(entity_id, *args, **kwargs):
+            if entity_id == EV:
+                raise RuntimeError("HA unavailable")
+            return await inner(entity_id, *args, **kwargs)
+
+        ha.get_history = ev_unavailable
+        for hours in range(6, 72 + 1, 6):
+            _run(app._fetch_and_preprocess(exp, now=start + timedelta(hours=hours)))
+        ha.get_history = inner
+        _run(app._fetch_and_preprocess(exp, now=end))
+
+        s = app.history_db.get_history(
+            app.history_db.net_actuals_table(exp.name),
+        ).set_index("ds")["y"]
+        naive = pd.Timestamp(start.replace(tzinfo=None))
+        outage = pd.date_range(naive, naive + timedelta(days=3), freq=f"{INTERVAL}min")
+        assert outage.isin(s.index).all()
+        assert s.reindex(outage).dropna().max() == pytest.approx(NET_PER_BIN, rel=0.05)
 
 
 # ---------------------------------------------------------------------
