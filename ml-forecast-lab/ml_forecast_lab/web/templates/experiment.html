@@ -2153,6 +2153,7 @@
                 {% if ext.mode == 'attribute' and ext.attribute %}<span class="cov-meta" style="font-style:italic;">attr: {{ ext.attribute }}</span>{% endif %}
                 {% if ext.mode == 'attribute' and ext.value_key %}<span class="cov-meta" style="font-style:italic;">key: {{ ext.value_key }}</span>{% endif %}
                 {% if ext.scale is not none %}<span class="cov-meta">scale: {{ ext.scale }}</span>{% endif %}
+                {% if ext.unit %}<span class="cov-meta">unit: {{ ext.unit }}</span>{% endif %}
                 {% if ext.is_cumulative is not none %}<span class="cov-meta">{{ 'cumulative' if ext.is_cumulative else 'per-interval' }}</span>{% endif %}
                 <button class="cov-remove-btn" onclick="removeExternalForecast(this)" title="Remove">&times;</button>
             </div>
@@ -2187,6 +2188,18 @@
             <div class="exp-field">
                 <label class="field-label">Scale <span class="info-tip">?<span class="tip-text">Optional multiplier to fix a unit mismatch (e.g. Wh→kWh = 0.001). Blank = none.</span></span></label>
                 <input type="number" class="setting-input" id="ext-scale-input" step="any" placeholder="None">
+            </div>
+            <div class="exp-field">
+                <label class="field-label">Unit <span class="info-tip">?<span class="tip-text">The unit of the forecast's values. <b>From the sensor</b> uses the entity's own unit. A forecast attribute can be in a different unit from its sensor: a sensor may show today's total in kWh while each forecast entry is average power in kW, and then the forecast needs <b>kW</b>.</span></span></label>
+                <select class="setting-input" id="ext-unit-input">
+                    <option value="">From the sensor</option>
+                    <option value="W">W</option>
+                    <option value="kW">kW</option>
+                    <option value="MW">MW</option>
+                    <option value="Wh">Wh</option>
+                    <option value="kWh">kWh</option>
+                    <option value="MWh">MWh</option>
+                </select>
             </div>
             <div class="exp-field" id="ext-attr-field" style="display:none;">
                 <label class="field-label">Forecast data <span class="info-tip">?<span class="tip-text">Which attribute on the entity holds the forecast to compare from — auto-detected from the entity's live attributes once you pick it (e.g. <code>results</code> for Predbat, <code>detailedForecast</code> for Solcast, <code>forecast</code> for weather, or a <code>hourly</code>/<code>daily</code> weather-service forecast). "Auto" uses the resolver's default (<code>forecast</code>).</span></span></label>
@@ -7224,6 +7237,7 @@ window.showTab = function(el) {
             mode: get('ext-mode-input') || 'state',
             label: get('ext-label-input'),
             scale: get('ext-scale-input'),
+            unit: get('ext-unit-input'),
             is_cumulative: get('ext-iscum-input'),
             attribute: get('ext-attr-input'),
             value_key: get('ext-key-input'),
@@ -7246,6 +7260,27 @@ window.showTab = function(el) {
                 mlfl.toast('Add failed: ' + (res.error || 'unknown'), 'error');
             }
         }).catch(function(err){ if(btn)btn.disabled=false; mlfl.toast('Add failed: '+err,'error'); });
+    };
+
+    // v2.56.0: set one forecast's unit from the comparison tab's warning.
+    // Keeps its captured history (removing and re-adding would drop it).
+    window.setExternalUnit = function(btn) {
+        var source = btn.getAttribute('data-source');
+        var unit = btn.getAttribute('data-unit');
+        if (!source || !unit) return;
+        btn.disabled = true;
+        fetch(BASE + '/experiment/' + EXP + '/external-forecast-unit', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({source: source, unit: unit}),
+        }).then(function(r){return r.json();}).then(function(res){
+            if (res.success) {
+                mlfl.toast('Unit set to ' + unit, 'success');
+                _reloadToThisTab();
+            } else {
+                btn.disabled = false;
+                mlfl.toast('Could not set the unit: ' + (res.error || 'unknown'), 'error');
+            }
+        }).catch(function(err){ btn.disabled = false; mlfl.toast('Could not set the unit: ' + err, 'error'); });
     };
 
     // Reload but return to this tab (the server re-renders the list + nav).
@@ -7279,6 +7314,10 @@ window.showTab = function(el) {
     };
 
     // ---- Tab rendering ----
+    function _escHtml(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
     function _fmt(v, units) {
         if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return '—';
         var n = Number(v); var s = (Math.abs(n) >= 100) ? n.toFixed(1) : n.toFixed(3);
@@ -7328,7 +7367,7 @@ window.showTab = function(el) {
             R.push({ kind:'ext', label:(c.label||c.entity), color:EXT_COLORS[i%EXT_COLORS.length],
                      mode:c.mode, block:h.external, daily:(h.daily?h.daily.external:null),
                      days:(c.days_logged||0), warming:!!c.warming,
-                     mismatch:!!c.scale_mismatch, ratio:c.scale_ratio, h:h, n:h.n,
+                     mismatch:!!(c.scale_mismatch || c.unit_suspect), ratio:c.scale_ratio, h:h, n:h.n,
                      lead: t.external_contemporaneous ? 0 : (t.external_median_lead_minutes != null ? t.external_median_lead_minutes : null),
                      contemporaneous: !!t.external_contemporaneous });
         });
@@ -7514,9 +7553,12 @@ window.showTab = function(el) {
         var all = (data.comparisons || []).filter(function(c){ return c.head_to_head; });
         if (!all.length) { card.style.display='none'; return; }
         // Can't-compare: every external is on a different scale to the target.
-        var comparable = all.filter(function(c){ return !c.scale_mismatch; });
+        var comparable = all.filter(function(c){ return !c.scale_mismatch && !c.unit_suspect; });
         if (!comparable.length) {
-            head.innerHTML = '⚠ Can’t compare yet — the external forecast' + (all.length !== 1 ? 's are' : ' is') + ' on a different scale to the target (likely a unit or cumulative mismatch). Set <b>Is cumulative?</b> / <b>Scale</b> above, or pick a sensor in the target’s units.';
+            var anyUnit = all.some(function(c){ return c.unit_suspect; });
+            head.innerHTML = anyUnit
+                ? '⚠ Can’t compare yet — the external forecast' + (all.length !== 1 ? 's look' : ' looks') + ' to be in a different unit from ' + (all.length !== 1 ? 'their sensors' : 'its sensor') + '. See the note under the comparison basis to set the unit.'
+                : '⚠ Can’t compare yet — the external forecast' + (all.length !== 1 ? 's are' : ' is') + ' on a different scale to the target (likely a unit or cumulative mismatch). Set <b>Is cumulative?</b> / <b>Scale</b> above, or pick a sensor in the target’s units.';
             head.style.color = 'var(--warning)';
             card.style.display = '';
             return;
@@ -7528,7 +7570,7 @@ window.showTab = function(el) {
         if (!app) { card.style.display='none'; return; }
         var n = ranked.length, nExt = n - 1;
         var mismatched = all.length - comparable.length;
-        var mmNote = mismatched ? ' <span style="color:var(--warning);font-weight:400;">(' + mismatched + ' excluded — scale mismatch)</span>' : '';
+        var mmNote = mismatched ? ' <span style="color:var(--warning);font-weight:400;">(' + mismatched + ' excluded — unit or scale mismatch)</span>' : '';
         var prov = data.warming_up ? '<span style="color:var(--warning);">Provisional · </span>' : '';
         var on = (_externalMetric === 'overall') ? 'overall' : ('on ' + (_METRIC_LABEL[_externalMetric] || 'MAE'));
         if (app.rank === 1) {
@@ -7569,12 +7611,23 @@ window.showTab = function(el) {
         if (anyAttr) parts.push('Trajectory externals are lead-matched — see the horizon chart.');
         basis.innerHTML = parts.join(' ');
         var msgs = [];
-        var mism = comps.filter(function(c){ return c.scale_mismatch; })
+        // v2.56.0: a forecast whose values look to be in another unit than its
+        // sensor's (e.g. kW entries on a kWh sensor) gets a one-click fix that
+        // keeps its captured history.
+        comps.filter(function(c){ return c.unit_suspect && c.suggested_unit; }).forEach(function(c){
+            msgs.push('⚠ ' + _escHtml(c.label || c.entity) + ' comes out about ' + (c.scale_ratio || '?')
+                + '× the actuals, which is what a forecast in ' + _escHtml(c.suggested_unit)
+                + ' read as ' + _escHtml(c.unit || 'its sensor’s unit') + ' looks like. It is left out of the ranking until its unit is set. '
+                + '<button type="button" class="btn btn-secondary" style="padding:0.1rem 0.5rem;font-size:0.8rem;" '
+                + 'data-source="' + _escHtml(c.source || '') + '" data-unit="' + _escHtml(c.suggested_unit) + '" '
+                + 'onclick="setExternalUnit(this)">Use ' + _escHtml(c.suggested_unit) + '</button>');
+        });
+        var mism = comps.filter(function(c){ return c.scale_mismatch && !c.unit_suspect; })
                         .map(function(c){ return (c.label || c.entity) + ' (≈' + (c.scale_ratio || '?') + '×)'; });
         if (mism.length) {
             msgs.push('⚠ On a different scale to the target — likely a unit mismatch or a cumulative sensor read raw: ' + mism.join(', ') + '. Fix with Is cumulative? / Scale above, or pick a sensor in the target’s units.');
         }
-        var stale = comps.filter(function(c){ return c.timing && c.timing.external_stale && !c.scale_mismatch; })
+        var stale = comps.filter(function(c){ return c.timing && c.timing.external_stale && !c.scale_mismatch && !c.unit_suspect; })
                          .map(function(c){ return c.label || c.entity; });
         if (stale.length) {
             msgs.push('⚠ Sparse/stale (far fewer samples than ML Forecast Lab): ' + stale.join(', ') + ' — treat those head-to-heads as indicative.');

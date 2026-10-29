@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.56.0
+
+### Fixed
+
+**The Forecast Comparison tab shows solar forecasts at their real size.**
+
+- A forecast read from a sensor's forecast data was taken in the sensor's
+  unit, but a solar forecast showing today's total in kWh lists each period
+  in kW.
+- With an interval under an hour these forecasts counted too high (double at
+  30 minutes), so the app looked better than them.
+- Each third-party forecast now has a **Unit** setting. One that looks to be
+  in a different unit from its sensor is left out of the ranking until set.
+- If the tab shows this note, choose **Use kW** (or the unit it names); the
+  forecast keeps its history.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-external-forecast-units.md)
+
 ## 2.55.1
 
 ### Fixed
