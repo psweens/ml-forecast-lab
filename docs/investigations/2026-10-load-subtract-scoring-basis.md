@@ -286,7 +286,7 @@ The analytics' increment actuals (`_materialise_actuals_increments`) keep the
 plain restart rule: the hold needs readings after the drop, which the
 bin-by-bin SQL does not have.
 
-### Days the main meter stopped reporting
+### Days the target stopped reporting
 
 On six of the 28 days (2, 5, 6, 8, 11 and 12 Oct) the house counter barely
 reported, with gaps of 14–24 hours between readings, while the subtracted sensors

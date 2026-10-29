@@ -8,7 +8,7 @@ Two conversions threw real use away before the model saw it.
    sensor updates slowly or irregularly, a genuine large rise builds up
    between readings and was cut back to a typical one. Replaying one
    install's history, daily label totals were 1.2 kWh/day low on a
-   house-load counter and 10.6 points/day low on a hot-water demand
+   whole-house energy counter and 10.6 points/day low on a demand
    counter. The default cap is now a rate — twice the counter's 99th
    percentile rate of rise, times the time since the previous reading — so
    a rise that took longer may be larger, and a glitch is still caught. The
@@ -160,7 +160,7 @@ class TestRestartsAndDips:
 # The default cap
 # ---------------------------------------------------------------------
 
-def _irregular_house_meter(seed=7, hours=48):
+def _irregular_meter(seed=7, hours=48):
     """A 0.1 kWh-resolution counter polled every 1–3 minutes, with an
     occasional 8–20 minute silence (never long enough to be a multi-interval
     gap), recording 1 kW all day and 12 kW from 18:00 to midnight."""
@@ -181,21 +181,21 @@ def _irregular_house_meter(seed=7, hours=48):
 
 class TestRateBasedCap:
     def test_slow_updates_keep_their_whole_rise(self):
-        s = _irregular_house_meter()
+        s = _irregular_meter()
         inc = cumulative_to_interval(s, INTERVAL)
         assert inc.sum() == pytest.approx(s.iloc[-1] - s.iloc[0])
 
     def test_the_old_size_cap_loses_use_on_the_same_counter(self):
         """Why the default changed: the 95th-percentile size cap, applied to
         the same counter, loses a material share of its use."""
-        s = _irregular_house_meter()
+        s = _irregular_meter()
         rises = s.diff()
         p95 = float(rises[rises > 0].quantile(0.95))
         old = cumulative_to_interval(s, INTERVAL, max_increment=p95)
         assert old.sum() < 0.9 * (s.iloc[-1] - s.iloc[0])
 
     def test_a_glitch_recovery_scores_only_the_use_since(self):
-        s = _irregular_house_meter()
+        s = _irregular_meter()
         i = len(s) // 2
         t = s.index[i]
         recovery_at = t + pd.Timedelta(seconds=40)
@@ -215,7 +215,7 @@ class TestRateBasedCap:
         """Daily counters keep every drop below 90% as a restart, so the
         recovery is a rise from 0 — kept out of the rate estimate, so the
         cap still holds it."""
-        s = _irregular_house_meter()
+        s = _irregular_meter()
         i = len(s) // 2
         t = s.index[i]
         recovery_at = t + pd.Timedelta(seconds=40)
@@ -379,7 +379,7 @@ def _days(idx):
     return np.asarray(idx.date)
 
 
-_SUB = {"entity_id": "sensor.immersion", "on_missing": "zero",
+_SUB = {"entity_id": "sensor.subtracted_load", "on_missing": "zero",
         "max_fraction_of_load": 10.0}
 
 
@@ -499,7 +499,7 @@ def _at(start, minutes, values):
 
 class TestGlitches:
     def test_a_stale_reading_that_comes_straight_back_is_not_use(self):
-        """The 23 Oct house-counter pattern: three dropouts in 20 minutes,
+        """A recorded daily-counter pattern: three dropouts in 20 minutes,
         each coming back at a stale 10.3 before jumping to the real value.
         Pre-hold, each counted as a restart and the climb back twice."""
         s = _at("2026-10-23 02:51", [0, 2, 4, 6, 9, 10, 13, 19.2, 19.7, 20.4, 22, 28.5, 29.2, 31],
@@ -510,8 +510,8 @@ class TestGlitches:
         assert inc.sum() == pytest.approx(15.6 - 11.1)
 
     def test_a_restart_that_climbs_from_zero_is_still_a_restart(self):
-        """The boiler's daily meter after the same power cut: it restarted at
-        zero and counted up again, so every segment is real use."""
+        """A daily meter during the same outage: it restarted at zero and
+        counted up again, so every segment is real use."""
         s = _at("2026-10-23 03:01", [0, 1, 3, 4.8, 5.6, 6.6, 7.6, 8.6, 9.6, 10.6, 12, 14.7, 15.7],
                 [0.0729, 0.251, 0, 0.0116, 0.1872, 0.3627, 0.5383, 0.7135, 0.8886, 1.0643, 0, 0.0848, 0.2608])
         inc = cumulative_to_interval(s, INTERVAL, max_increment=1e9)
@@ -589,7 +589,7 @@ class TestUnmeasuredDays:
         assert not out.isna().any()
 
     def test_the_fetch_path_leaves_the_missed_day_unmeasured(self, tmp_db):
-        """End to end: the house counter stops reporting for a day while the
+        """End to end: the target counter stops reporting for a day while the
         subtracted sensor carries on. That day's labels are NaN and its
         rows in the net actuals table are NULL, so neither training nor
         scoring treats it as a day of near-zero use."""

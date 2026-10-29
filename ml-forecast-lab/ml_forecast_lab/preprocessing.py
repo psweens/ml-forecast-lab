@@ -56,9 +56,9 @@ GLITCH_RECOVERY_MINUTES = 60
 def _hold_glitches(series: pd.Series) -> Tuple[pd.Series, int]:
     """Replace the readings of each glitch with the reading before it.
 
-    v2.55.0: an inverter counter that dropped out came back three times in
-    20 minutes at a stale value 12-30 % below its last reading, then jumped
-    straight back. Each drop passed for a restart, so the stale value was
+    v2.55.0: a daily energy counter whose integration dropped out came back
+    three times in 20 minutes at a stale value 12-30 % below its last
+    reading, then jumped straight back. Each drop passed for a restart, so the stale value was
     scored as use and the climb back to the real reading was counted a second
     time — 12 kWh too much that day. Holding the previous reading through the
     glitch scores it as no use, and the reading that comes back is measured

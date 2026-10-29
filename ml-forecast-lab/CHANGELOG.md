@@ -30,16 +30,16 @@
   their scores at the next benchmark, may change.
 - [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-load-subtract-scoring-basis.md#training-labels)
 
-**With `load_subtract`, late-reported energy is still taken off, and days the main meter missed are skipped.**
+**With `load_subtract`, energy reported late is still taken off, and days the sensor being forecast missed are left out.**
 
-- When a subtracted sensor recorded energy a little after the main meter,
-  or the main meter paused and caught up, that energy was often not taken
-  off, so those days were learned as busier than they were.
-- When the main meter counts up over the day, each day now comes to its
-  use minus the subtracted sensors'.
-- A day when the main meter stopped reporting but the subtracted sensors
-  carried on is now left out of training and accuracy, instead of being
-  learned as a day of almost no use.
+- When a subtracted sensor recorded energy a little after the sensor being
+  forecast, or that sensor paused and caught up, the energy was often not
+  taken off, so those days were learned as busier than they were.
+- For a sensor that counts up over the day, each day now comes to its use
+  minus the subtracted sensors'.
+- A day when the sensor being forecast stopped reporting but the subtracted
+  sensors carried on is now left out of training and accuracy, instead of
+  being learned as a day of almost no use.
 - These experiments retrain once after updating.
 - [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-load-subtract-scoring-basis.md#training-labels)
 
