@@ -390,6 +390,19 @@ class RecordingHistoryDB:
         self._log.add("db", key, payload)
         return _decode_conformal(payload)
 
+    def get_stored_forecast_history(self, source, start, end, freq) -> pd.DataFrame:
+        # v2.57.0: a covariate's history from stored forecasts, recorded on
+        # the grid it was read on (not the raw trajectories behind it).
+        key = _key("get_stored_forecast_history", source, _iso(start), _iso(end), freq)
+        try:
+            df = self._inner.get_stored_forecast_history(source, start, end, freq)
+        except Exception as e:
+            self._log.add("db", key, error=e)
+            raise
+        payload = _history_frame_to_rows(df)
+        self._log.add("db", key, payload)
+        return _rows_to_history_frame(payload)
+
     def store_history(self, table_name, df) -> int:
         return 0
 
@@ -397,6 +410,9 @@ class RecordingHistoryDB:
         return 0
 
     def cleanup(self, table_name, oldest_datetime) -> int:
+        return 0
+
+    def store_covariate_forecast(self, source, issued_at, targets, values) -> int:
         return 0
 
     def __getattr__(self, name):
@@ -508,6 +524,10 @@ class ReplayHistoryDB:
         return _decode_conformal(
             self._queue.pop("db", _conformal_key(*args, **kwargs)))
 
+    def get_stored_forecast_history(self, source, start, end, freq) -> pd.DataFrame:
+        return _rows_to_history_frame(self._queue.pop(
+            "db", _key("get_stored_forecast_history", source, _iso(start), _iso(end), freq)))
+
     def store_history(self, table_name, df) -> int:
         return 0
 
@@ -515,6 +535,9 @@ class ReplayHistoryDB:
         return 0
 
     def cleanup(self, table_name, oldest_datetime) -> int:
+        return 0
+
+    def store_covariate_forecast(self, source, issued_at, targets, values) -> int:
         return 0
 
     def __getattr__(self, name):

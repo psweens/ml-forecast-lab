@@ -2005,10 +2005,17 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         cov_dict = {"entity": entity}
         for opt_field in (
             "role", "aggregation", "scale", "is_binary",
-            "future_attribute", "future_value_key",
+            "future_attribute", "future_value_key", "history_source",
         ):
             if opt_field in body and body[opt_field] is not None:
                 cov_dict[opt_field] = body[opt_field]
+        # v2.57.0: further sensors continuing the same forecast, as a list
+        # or a comma/space-separated string.
+        extra = body.get("future_extra_entities")
+        if isinstance(extra, str):
+            extra = [e for e in re.split(r"[\s,]+", extra) if e]
+        if extra:
+            cov_dict["future_extra_entities"] = [str(e).strip() for e in extra if str(e).strip()]
 
         from ml_forecast_lab.config import add_experiment_covariate
         config_path = _find_config_path()

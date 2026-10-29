@@ -142,6 +142,25 @@ class SubtractCfg:
             raise ValueError("entity_id must be non-empty")
 
 
+COVARIATE_HISTORY_SOURCES = {'sensor', 'stored_forecast'}
+"""Valid ``CovariateCfg.history_source`` values (v2.57.0)."""
+
+STORED_FORECAST_PREFIX = 'covariate:'
+"""``external_forecast_log.source`` prefix for trajectories stored as
+covariate history (v2.57.0). Kept apart from the Forecast Comparison's own
+sources, which are scored and pruned on that tab's terms, and stored with an
+empty ``experiment`` so every experiment using the same forecast shares
+them."""
+
+
+def stored_forecast_source(entity: str, attribute: Optional[str],
+                           value_key: Optional[str]) -> str:
+    """The comparison-style source key of a covariate's forecast: the same
+    key an attribute-mode external forecast of that entity, attribute and
+    value key is logged under (``external_source_key``)."""
+    return external_source_key(entity, 'attribute', attribute or 'forecast', value_key)
+
+
 @dataclass
 class CovariateCfg:
     """Configuration for a single covariate (external feature)."""
@@ -177,6 +196,28 @@ class CovariateCfg:
     wind_speed) in order. Ignored when the attribute is a flat
     ``{iso_dt: value}`` mapping."""
 
+    future_extra_entities: List[str] = field(default_factory=list)
+    """For role='future' / 'both': further entities whose ``future_attribute``
+    continues the same forecast, for integrations that publish one sensor per
+    day. Their entries are merged with the main entity's; the main entity's
+    entry wins where both cover a time. Not used with the weather
+    ``hourly`` / ``daily`` / ``twice_daily`` service types, which already
+    return the whole horizon. v2.57.0."""
+
+    history_source: str = 'sensor'
+    """Where the training history comes from, for role='future' / 'both':
+
+    - ``sensor``: the entity's recorded state (or, with
+      ``future_value_key``, that attribute) — what the sensor measured.
+    - ``stored_forecast``: the forecast as it was issued. Each forecast
+      cycle stores the trajectory the covariate reads, and each grid bin's
+      history is the value from the latest stored trajectory issued at or
+      before the bin's start. Trajectories the Forecast Comparison tab
+      stored for the same entity, attribute and value key count too.
+
+    ``stored_forecast`` makes training see what forecasting sees: a forecast,
+    not the measured value it later turned into. v2.57.0."""
+
     def __post_init__(self) -> None:
         """Validate configuration."""
         valid_roles = {'future', 'lagged', 'both', 'concurrent'}
@@ -184,6 +225,24 @@ class CovariateCfg:
             raise ValueError(
                 f'role must be one of {valid_roles}, got {self.role!r}'
             )
+        if self.history_source not in COVARIATE_HISTORY_SOURCES:
+            raise ValueError(
+                f'history_source must be one of '
+                f'{sorted(COVARIATE_HISTORY_SOURCES)}, got {self.history_source!r}'
+            )
+        if self.history_source == 'stored_forecast' and self.role not in ('future', 'both'):
+            raise ValueError(
+                "history_source 'stored_forecast' needs role 'future' or "
+                f"'both' (a covariate with a forecast), got role {self.role!r}"
+            )
+        if self.future_extra_entities is None:
+            self.future_extra_entities = []
+        elif isinstance(self.future_extra_entities, str):
+            self.future_extra_entities = [self.future_extra_entities]
+        self.future_extra_entities = [
+            str(e).strip() for e in self.future_extra_entities
+            if str(e).strip() and str(e).strip() != self.entity
+        ]
         valid_transforms = {None, 'log', 'sqrt', 'box_cox'}
         if self.transform not in valid_transforms:
             raise ValueError(

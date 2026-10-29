@@ -97,6 +97,69 @@ def suspect_external_unit(
     return None
 
 
+def stored_forecast_on_grid(rows: pd.DataFrame, grid: pd.DatetimeIndex) -> pd.Series:
+    """A covariate's history from stored forecast trajectories.
+
+    v2.57.0: ``rows`` holds ``issued_at``, ``target_dt`` and ``value`` (naive
+    UTC). Each bin of ``grid`` takes its value from the latest trajectory
+    issued at or before the bin's start — the forecast that was available
+    before the period began — interpolated in time between that trajectory's
+    points, as ``CovariateResolver.fetch_future`` interpolates a live
+    forecast onto the horizon. A bin outside that trajectory's own span is
+    NaN (unmeasured), never filled from an older or a later trajectory.
+    Duplicate (issued_at, target_dt) rows, e.g. the same forecast stored by
+    two experiments, keep the first.
+    """
+    import numpy as np
+
+    out = pd.Series(np.nan, index=grid, dtype="float64")
+    if rows is None or rows.empty or len(grid) == 0:
+        return out
+    df = rows[["issued_at", "target_dt", "value"]].copy()
+    df["issued_at"] = pd.to_datetime(df["issued_at"], errors="coerce")
+    df["target_dt"] = pd.to_datetime(df["target_dt"], errors="coerce")
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    df = df.dropna()
+    if df.empty:
+        return out
+    df = (df.drop_duplicates(subset=["issued_at", "target_dt"], keep="first")
+            .sort_values(["issued_at", "target_dt"]))
+
+    issued = np.array(sorted(df["issued_at"].unique()), dtype="datetime64[ns]")
+    g = grid.values.astype("datetime64[ns]")
+    # Index of the latest issuance at or before each bin start; -1 = none.
+    which = np.searchsorted(issued, g, side="right") - 1
+
+    # One sorted key per row and per bin, (issuance, seconds), so a single
+    # searchsorted finds each bin's bracketing points inside its own
+    # trajectory. Seconds from the earliest time stay far inside float64's
+    # exact range at 1e9 per issuance.
+    t0 = min(df["target_dt"].min(), pd.Timestamp(g.min()))
+    r_iss = np.searchsorted(issued, df["issued_at"].values.astype("datetime64[ns]"))
+    r_sec = (df["target_dt"].values.astype("datetime64[ns]")
+             - np.datetime64(t0, "ns")) / np.timedelta64(1, "s")
+    r_val = df["value"].values.astype(float)
+    r_key = r_iss * 1e9 + r_sec
+    b_sec = (g - np.datetime64(t0, "ns")) / np.timedelta64(1, "s")
+    b_key = which * 1e9 + b_sec
+
+    n = len(r_key)
+    j = np.searchsorted(r_key, b_key, side="left")
+    jc = np.minimum(j, n - 1)
+    lc = np.maximum(j - 1, 0)
+    has = which >= 0
+    exact = has & (j < n) & (r_key[jc] == b_key)
+    inner = (has & ~exact & (j < n) & (j >= 1)
+             & (r_iss[jc] == which) & (r_iss[lc] == which))
+    vals = np.full(len(g), np.nan)
+    vals[exact] = r_val[jc[exact]]
+    x0, x1 = r_sec[lc[inner]], r_sec[jc[inner]]
+    y0, y1 = r_val[lc[inner]], r_val[jc[inner]]
+    vals[inner] = y0 + (y1 - y0) * (b_sec[inner] - x0) / (x1 - x0)
+    out[:] = vals
+    return out
+
+
 def _locked(fn):
     """Serialise SQLite access via ``self._lock``.
 
@@ -3448,6 +3511,12 @@ class HistoryDB:
             "CREATE INDEX IF NOT EXISTS idx_extflog_exp_issued "
             "ON external_forecast_log(experiment, issued_at)"
         )
+        # v2.57.0: a covariate's history reads one source across experiments,
+        # trajectory by trajectory.
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_extflog_src_issued_target "
+            "ON external_forecast_log(source, issued_at, target_dt)"
+        )
         # One-time cleanup of trajectories logged before content-change
         # detection: each forecast cycle used to re-log an unchanged external
         # trajectory as a fresh issuance, so every target had a ~one-cycle-old
@@ -3691,6 +3760,237 @@ class HistoryDB:
             )
             self.conn.rollback()
             return 0
+
+    # ------------------------------------------------------------------
+    # v2.57.0: stored forecasts as covariate history
+    # ------------------------------------------------------------------
+
+    @_locked
+    def store_covariate_forecast(
+        self, source: str, issued_at: datetime, targets: list, values: list,
+    ) -> int:
+        """Store a covariate's live forecast trajectory for use as its history.
+
+        ``source`` is the comparison-style key of the covariate's forecast
+        (``config.stored_forecast_source``). Rows go to
+        ``external_forecast_log`` under ``STORED_FORECAST_PREFIX + source``
+        with an empty ``experiment``, so experiments sharing the forecast
+        share them and the Forecast Comparison tab never reads them. A
+        trajectory whose values match the last stored one on every shared
+        target is the same issuance and is not stored again (the comparison
+        capture's content rule), so ``issued_at`` is accurate to the capture
+        cadence. Returns the number of rows inserted.
+        """
+        from ml_forecast_lab.config import STORED_FORECAST_PREFIX
+        stored = STORED_FORECAST_PREFIX + source
+        new = {}
+        for ts, val in zip(targets, values):
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(fval):
+                new[ts.strftime("%Y-%m-%d %H:%M:%S")] = round(fval, 4)
+        if not new:
+            return 0
+        last = self.get_last_external_trajectory("", stored)
+        if last:
+            overlap = [k for k in new if k in last]
+            if overlap and all(
+                abs(new[k] - round(float(last[k]), 4)) <= max(1e-4, 0.005 * abs(new[k]))
+                for k in overlap
+            ):
+                return 0
+        return self.log_external_forecast(
+            experiment="", source=stored, issued_at=issued_at,
+            targets=targets, values=values,
+        )
+
+    def get_stored_forecast_history(
+        self, source: str, start: datetime, end: datetime, freq: str,
+    ) -> pd.DataFrame:
+        """A covariate's history on the ``freq`` grid over ``[start, end]``,
+        from stored forecasts (``stored_forecast_on_grid``): those stored for
+        the covariate and those the Forecast Comparison tab stored for the
+        same source on any experiment. Returns ``ds`` / ``y`` rows (the
+        ``get_history`` shape) for the bins that have a value.
+
+        Only the rows the grid rule can use are read (``_stored_forecast_rows``),
+        under the lock; the grid is computed outside it.
+        """
+        empty = pd.DataFrame(columns=["ds", "y"])
+        start = pd.Timestamp(start)
+        end = pd.Timestamp(end)
+        if start.tzinfo is not None:
+            start = start.tz_convert("UTC").tz_localize(None)
+        if end.tzinfo is not None:
+            end = end.tz_convert("UTC").tz_localize(None)
+        grid = pd.date_range(start.floor(freq), end.floor(freq), freq=freq)
+        if len(grid) == 0:
+            return empty
+        rows = self._stored_forecast_rows(source, grid[0], grid[-1])
+        if rows is None or rows.empty:
+            return empty
+        on_grid = stored_forecast_on_grid(rows, grid).dropna()
+        return pd.DataFrame({"ds": on_grid.index, "y": on_grid.values.astype("float64")})
+
+    @_locked
+    def _stored_forecast_rows(self, source: str, first_bin, last_bin) -> Optional[pd.DataFrame]:
+        """The stored-forecast rows that can set a bin in
+        ``[first_bin, last_bin]``.
+
+        A bin takes the latest trajectory issued at or before it, so
+        trajectory ``i`` serves only until the next issuance. Of its targets,
+        those up to that issuance plus two of the source's own steps are read
+        (enough for the first point at or after it, to interpolate the last
+        bins it serves); the rest are never used. A year of half-hourly
+        trajectories refreshed every hour or so is then a few rows per
+        issuance, not the ~96 stored, read through a temporary issuance table
+        joined on the ``(source, issued_at, target_dt)`` index, so each
+        trajectory's scan stops at its cut-off. The step is the median
+        spacing of the latest trajectory. Points a day before the first bin
+        let it interpolate. Covariate rows sort first, so they win an exact
+        duplicate.
+        """
+        import numpy as np
+        from ml_forecast_lab.config import STORED_FORECAST_PREFIX
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='external_forecast_log'"
+        )
+        if not cursor.fetchone():
+            return None
+        fmt = "%Y-%m-%d %H:%M:%S"
+        sources = (STORED_FORECAST_PREFIX + source, source)
+        lo = (first_bin - pd.Timedelta(days=1)).strftime(fmt)
+        hi = (last_bin + pd.Timedelta(days=1)).strftime(fmt)
+        # Plain tuples: sqlite3.Row costs a third of the read at this volume.
+        cursor = self.conn.cursor()
+        cursor.row_factory = None
+        try:
+            issued = set()
+            for src in sources:  # one index range each beats an IN scan
+                cursor.execute(
+                    "SELECT DISTINCT issued_at FROM external_forecast_log "
+                    "WHERE source = ? AND issued_at <= ?",
+                    (src, last_bin.strftime(fmt)),
+                )
+                issued.update(r[0] for r in cursor.fetchall())
+            issued = sorted(issued)
+            if not issued:
+                return None
+            cursor.execute(
+                "SELECT target_dt FROM external_forecast_log "
+                "WHERE source IN (?, ?) AND issued_at = ? ORDER BY target_dt",
+                (*sources, issued[-1]),
+            )
+            tl = pd.to_datetime(pd.Series([r[0] for r in cursor.fetchall()]), format=fmt)
+            gaps = tl.drop_duplicates().diff().dropna()
+            step = gaps.median() if len(gaps) else pd.Timedelta(minutes=30)
+            margin = max(2 * step, pd.Timedelta(minutes=30))
+            iss = pd.to_datetime(pd.Series(issued), format=fmt)
+            until = (iss.shift(-1) + margin).dt.strftime(fmt).where(iss.shift(-1).notna(), None)
+
+            cursor.execute("DROP TABLE IF EXISTS _mlfl_stored_iss_tmp")
+            cursor.execute(
+                "CREATE TEMP TABLE _mlfl_stored_iss_tmp "
+                "(issued_at TEXT PRIMARY KEY, until TEXT)"
+            )
+            cursor.executemany(
+                "INSERT INTO _mlfl_stored_iss_tmp VALUES (?, ?)",
+                list(zip(issued, until.tolist())),
+            )
+            cursor.execute(
+                "SELECT e.experiment, e.issued_at, e.target_dt, e.value "
+                # CROSS JOIN fixes the loop order in SQLite: per issuance,
+                # a range scan of the index up to its cut-off.
+                "FROM _mlfl_stored_iss_tmp i "
+                "CROSS JOIN external_forecast_log e "
+                "  ON e.source IN (?, ?) AND e.issued_at = i.issued_at "
+                "WHERE e.target_dt >= ? "
+                "  AND e.target_dt <= MIN(?, COALESCE(i.until, ?))",
+                (*sources, lo, hi, hi),
+            )
+            data = cursor.fetchall()
+            cursor.execute("DROP TABLE IF EXISTS _mlfl_stored_iss_tmp")
+        except sqlite3.Error as e:
+            logger.error("Error reading stored forecasts for %s: %s", source, e)
+            return None
+        if not data:
+            return None
+        df = pd.DataFrame(data, columns=["experiment", "issued_at", "target_dt", "value"])
+        df["issued_at"] = pd.to_datetime(df["issued_at"], format=fmt)
+        df["target_dt"] = pd.to_datetime(df["target_dt"], format=fmt)
+        # Covariate rows first (stable), so they win an exact duplicate.
+        df = df.iloc[np.argsort((df["experiment"] != "").values, kind="stable")]
+        return df[["issued_at", "target_dt", "value"]].reset_index(drop=True)
+
+    @_locked
+    def maintain_stored_forecasts(
+        self, source: str, keep_days: int, now: Optional[datetime] = None,
+    ) -> dict:
+        """Backfill and prune one covariate's stored forecasts.
+
+        Backfill: trajectories the Forecast Comparison tab stored for
+        ``source`` (any experiment) and issued before the covariate's own
+        earliest stored trajectory are copied under the covariate's key, one
+        row per (issued_at, target_dt). That tab prunes on its own retention
+        and deletes a source's rows when it is removed; the copy keeps them as
+        training history. Rows issued after the covariate started storing its
+        own are not copied again.
+
+        Prune: the covariate's rows issued more than ``keep_days`` ago — the
+        longest ``days_history`` among the experiments using it — are
+        deleted. Returns ``{"copied": n, "pruned": n}``.
+        """
+        from ml_forecast_lab.config import STORED_FORECAST_PREFIX
+        stored = STORED_FORECAST_PREFIX + source
+        out = {"copied": 0, "pruned": 0}
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='external_forecast_log'"
+        )
+        if not cursor.fetchone():
+            return out
+        now = now or datetime.utcnow()
+        cutoff = (now - pd.Timedelta(days=max(1, int(keep_days)))).strftime(
+            "%Y-%m-%d %H:%M:%S")
+        try:
+            cursor.execute(
+                "SELECT MIN(issued_at) FROM external_forecast_log "
+                "WHERE experiment = '' AND source = ?", (stored,),
+            )
+            row = cursor.fetchone()
+            earliest = row[0] if row and row[0] else None
+            params = [stored, source, cutoff]
+            before = ""
+            if earliest:
+                before = "AND issued_at < ? "
+                params.append(earliest)
+            cursor.execute(
+                "INSERT INTO external_forecast_log "
+                "(experiment, source, issued_at, target_dt, lead_minutes, value) "
+                "SELECT '', ?, issued_at, target_dt, MIN(lead_minutes), MIN(value) "
+                "FROM external_forecast_log "
+                "WHERE source = ? AND experiment != '' AND issued_at >= ? "
+                + before +
+                "GROUP BY issued_at, target_dt",
+                params,
+            )
+            out["copied"] = max(0, cursor.rowcount)
+            cursor.execute(
+                "DELETE FROM external_forecast_log "
+                "WHERE experiment = '' AND source = ? AND issued_at < ?",
+                (stored, cutoff),
+            )
+            out["pruned"] = max(0, cursor.rowcount)
+            self.conn.commit()
+        except sqlite3.Error as e:
+            logger.error("Error maintaining stored forecasts for %s: %s", source, e)
+            self.conn.rollback()
+        return out
 
     @_locked
     def delete_external_forecast_log(self, experiment: str) -> int:
