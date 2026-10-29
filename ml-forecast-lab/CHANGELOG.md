@@ -21,21 +21,25 @@
 - When such a meter updated slowly or in bursts, large rises were cut short,
   so the busiest periods were learned as quieter than they were.
 - Some use could also be counted twice: when a meter stepped back slightly
-  and recovered, and, for meters that reset at midnight, the first hour of
-  each day during summer time.
+  and recovered, when it briefly dropped out and came back at an old
+  reading, and, for meters that reset at midnight, the first hour of each
+  day during summer time.
 - This affects experiments forecasting such a meter, or with one in
   `load_subtract`; a `max_increment` you set still applies.
 - These experiments retrain once after updating, so their forecasts, and
   their scores at the next benchmark, may change.
 - [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-load-subtract-scoring-basis.md#training-labels)
 
-**With `load_subtract`, energy a subtracted sensor reports late is still taken off.**
+**With `load_subtract`, late-reported energy is still taken off, and days the main meter missed are skipped.**
 
-- When a subtracted sensor recorded its energy a little after the main
-  meter, or the main meter paused and then caught up, that energy was often
-  not taken off, so those days were learned as busier than they were.
-- Each day now comes to the main meter's use minus the subtracted sensors'.
-- This applies when the main meter counts up over the day.
+- When a subtracted sensor recorded energy a little after the main meter,
+  or the main meter paused and caught up, that energy was often not taken
+  off, so those days were learned as busier than they were.
+- When the main meter counts up over the day, each day now comes to its
+  use minus the subtracted sensors'.
+- A day when the main meter stopped reporting but the subtracted sensors
+  carried on is now left out of training and accuracy, instead of being
+  learned as a day of almost no use.
 - These experiments retrain once after updating.
 - [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-load-subtract-scoring-basis.md#training-labels)
 

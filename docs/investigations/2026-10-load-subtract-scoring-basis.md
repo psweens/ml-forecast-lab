@@ -218,13 +218,13 @@ but before the midnight rule changed:
 | Electric boiler | 0.15 kWh | 0.12 kWh |
 | Car charger | ≈0.02 kWh | ≈0.03 kWh |
 
-The remaining +0.34 kWh/day on the house counter matches the BST midnight
-double count in sign and size (the 28 days were almost all BST, and that
-hour's night-time use is 0.3–0.5 kWh), but the replay has not been re-run
-with the midnight fix to confirm it. The install's own hot-water demand experiment
-sets `max_increment: 100`, so its labels were already right; the 10.6-point
-error is what the default would have produced, and what a subtract sensor
-on that counter would have seen.
+The remaining +0.34 kWh/day on the house counter was the BST midnight
+double count: the replay below, through the pipeline with the midnight fix,
+puts it at 0.00. The install's own hot-water demand experiment sets
+`max_increment: 100`, which avoided the 10.6-point undercount (the error the
+default would have produced, and what a subtract sensor on that counter
+would have seen) but still scored dips as restarts: +2.0 points/day before
+this release, 0.00 after.
 
 ### Clipping after subtraction lost the subtracted energy
 
@@ -250,6 +250,94 @@ Trade-off: daily totals become exact, but within the day the deficit comes
 off the next bins with use rather than the bins where the parent should
 have recorded it. Non-cumulative (power) targets still clip each bin: a
 sampled power reading has no later catch-up step to absorb the deficit.
+
+### Glitches after a dropout
+
+On three days the house counter's integration went unavailable and came back
+at a stale value 12–36 % below its last reading, then jumped straight back
+(23 Oct: 11.7 → 10.3 → 13.0, 13.4 → 10.3 → 14.5, 14.7 → 10.3 → 15.6 within
+20 minutes). Each drop is below `COUNTER_RESTART_RATIO`, so it scored as a
+restart: the stale value counted as use, and the climb back from it to the
+real reading counted a second time. The size cap had held each restart to
+0.2 kWh; the rate cap admits several minutes' worth at the counter's peak
+rate, so the rate cap alone overcounted 23 Oct by 12.3 kWh. `_undone_drops`
+leaves daily counters out, and keeping the first rise after a restart out of
+the rate estimate does not stop the stale value scoring or the climb back
+counting twice: with both in place the day still came to 79.0 kWh against a
+final reading of 66.8.
+
+`_hold_glitches` runs before restart detection. A drop is a glitch when it
+lands between `GLITCH_MIN_RATIO` (0.5) and `COUNTER_RESTART_RATIO` (0.9) of the
+previous reading, the readings after it stay within `GLITCH_HOLD_FRACTION`
+(25 %) of the drop above where it landed, and one comes back at or above the
+previous reading within `GLITCH_RECOVERY_MINUTES` (60). Its readings are
+replaced by the previous one, so the glitch scores nothing and the reading
+that comes back is measured from where the counter was.
+
+The lower bound matters. A plain "came back within the hour" rule also fired
+on the boiler's daily meter during the same power cut, where the meter
+genuinely restarted at zero and, at 12 kW, climbed past its previous reading
+within minutes; it would have removed 4.4 kWh of real use. Restarts go to or
+near zero (daily resets, reboots, meter swaps), stale values do not. The
+"stays near where it landed" condition separates a counter climbing from a
+restart from one stuck at a stale value.
+
+The analytics' increment actuals (`_materialise_actuals_increments`) keep the
+plain restart rule: the hold needs readings after the drop, which the
+bin-by-bin SQL does not have.
+
+### Days the main meter stopped reporting
+
+On six of the 28 days (2, 5, 6, 8, 11 and 12 Oct) the house counter barely
+reported, with gaps of 14–24 hours between readings, while the subtracted sensors
+kept counting. Subtraction left each of those days at 0–1 kWh of net use
+(before this release, anywhere from 0.4 to 52 kWh), and the model trained on
+them as real days.
+
+The deficit carry measures this directly: what is still outstanding after a
+day's last row is subtracted energy the parent never recorded. It was exactly
+zero on every day the parent reported throughout, and 25–100 % of the day's
+subtracted total on the six days it did not. `apply_load_subtract` therefore
+returns a completed day as NaN when its left-over exceeds
+`UNMEASURED_DEFICIT_FRACTION` (10 %) of both the day's subtracted total and its
+parent total. Both bounds are relative, so the rule does not depend on the
+target's units. The second keeps a day whose parent did report but whose last
+subtracted load landed after the parent's final reading. The last day in the
+series is still in progress and is never masked; its outstanding deficit is
+reported as `deficit_pending_kwh`.
+
+A masked day's labels are unmeasured, so they are excluded from supervision
+and never imputed, and its bins are NULL in the net actuals table, so scoring
+skips them too.
+
+### 28-day replay through the pipeline
+
+The recorded history of the house counter, the three subtracted sensors and
+the hot-water demand counter for 1–28 Oct was replayed through
+`_fetch_and_preprocess` and the subtract-sensor conversion of `main` and of
+this release. Each local day is scored against the counter's own last reading
+before midnight. A day counts for a counter only if it restarted at midnight,
+did not restart during the day, had no non-numeric state lasting 30 minutes,
+and (house counter) had no 60-minute gap between readings.
+
+| Counter | Clean days | `main` (MAE / bias) | v2.55.0 |
+|---|---|---|---|
+| House load | 13 | 1.28 / −1.25 kWh | 0.00 / 0.00 |
+| Hot-water demand, default cap | 26 | 11.9 / −11.9 points | 0.05 / −0.05 |
+| Hot-water demand, `max_increment: 100` | 26 | 1.98 / +1.98 points | 0.00 / 0.00 |
+| Hot-water heat, boiler, car charger | 20–25 | ≤ 0.05 kWh | ≤ 0.01 kWh |
+| House load after `load_subtract` | 10 | 0.54 / −0.40 kWh | 0.02 / +0.02 |
+
+Glitch days, house counter, against its final reading of the day:
+
+| Day | Final reading | `main` | Rate cap, no hold | v2.55.0 |
+|---|---|---|---|---|
+| 18 Oct | 45.5 | 43.8 | 48.5 | 45.5 |
+| 23 Oct | 66.8 | 61.4 | 79.1 | 66.7 |
+| 25 Oct | 59.6 | 57.8 | 61.9 | 59.6 |
+
+The six outage days are masked and no other day is. The hold changes no clean
+day and none of the other four counters.
 
 ### Cached models
 

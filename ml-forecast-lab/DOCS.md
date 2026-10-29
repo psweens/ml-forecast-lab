@@ -73,6 +73,8 @@ Many HA sensors report running totals (`*_today` energy, daily heat). Configure 
 | `reset_daily` | bool | `false` | `true` if the cumulative sensor resets at local midnight. |
 | `max_increment` | float | unset (= auto) | Caps the rise between two consecutive readings of a cumulative sensor. Useful to bound abnormal jumps (e.g. EV plug-ins). If unset, the cap grows with the time since the previous reading — twice the sensor's typical peak rate of rise times that time — so a sensor that updates slowly or irregularly isn't cut short, while a counter glitch still is. |
 
+A running total that falls back and climbs again counts as restarting only when it drops to below 90% of its last reading. A smaller dip isn't use, and counting resumes once the sensor passes its previous high. A drop that lands between half and 90% of the last reading, stays there, and is back at or above that reading within the hour is a sensor briefly reporting an old value after a dropout, so it isn't counted as a restart either.
+
 ### Covariates
 
 External signals that improve the forecast. Add as many as you want.
@@ -207,7 +209,7 @@ load_subtract:
 
 With `load_subtract` the experiment forecasts the target with these sensors taken out, and everything that checks the forecast uses the same figure: the Forecast Accuracy and Forecast Comparison tabs, `sensor.mlfl_<name>_forecast_accuracy`, the upper and lower bands, and the starting point of `sensor.mlfl_<name>_cumulative` (today's use so far with the subtracted sensors taken out, not the target sensor's own reading).
 
-When the target is a running total (`source_is_cumulative: true`), an interval where the subtracted sensors recorded more than the target — one sensor reporting a little after the other, or the target pausing and then catching up — is set to zero and the excess is taken off the following intervals of the same day. Each day's total is then the target's use minus the subtracted sensors' use. Any excess still left at midnight is dropped, and the log reports how much was carried and how much was left. Other targets set such an interval to zero.
+When the target is a running total (`source_is_cumulative: true`), an interval where the subtracted sensors recorded more than the target — one sensor reporting a little after the other, or the target pausing and then catching up — is set to zero and the excess is taken off the following intervals of the same day. Each day's total is then the target's use minus the subtracted sensors' use. Any excess still left at midnight is dropped, and the log reports how much was carried and how much was left. If what is left at midnight is more than 10% of both the subtracted sensors' use and the target's own use that day, the target was almost certainly not reporting while the subtracted sensors carried on, so the whole day is treated as unmeasured: it is left out of training and of the accuracy figures, and the log names it. The current day is never treated this way, since the target may still catch up. Other targets set such an interval to zero.
 
 **Note:** the older `subtract: [entity_id]` field is a deprecated stub — it loads without error but does not affect training. Migrate any existing config to `load_subtract`.
 

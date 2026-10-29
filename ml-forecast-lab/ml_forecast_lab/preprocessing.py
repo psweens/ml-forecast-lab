@@ -42,6 +42,60 @@ RATE_CAP_MULTIPLE = 2.0
 # the cap falls back to the 95th percentile of rises (the pre-v2.55.0 rule).
 RATE_CAP_MIN_SAMPLES = 20
 
+# v2.55.0: a drop below COUNTER_RESTART_RATIO that lands no lower than
+# GLITCH_MIN_RATIO of the previous reading, stays within GLITCH_HOLD_FRACTION
+# of the drop above where it landed, and is followed by a reading back at or
+# above the previous one within GLITCH_RECOVERY_MINUTES is a glitch (a sensor
+# reporting a stale value after a dropout), not a restart. Genuine restarts —
+# daily resets, device reboots, meter swaps — go to or near zero.
+GLITCH_MIN_RATIO = 0.5
+GLITCH_HOLD_FRACTION = 0.25
+GLITCH_RECOVERY_MINUTES = 60
+
+
+def _hold_glitches(series: pd.Series) -> Tuple[pd.Series, int]:
+    """Replace the readings of each glitch with the reading before it.
+
+    v2.55.0: an inverter counter that dropped out came back three times in
+    20 minutes at a stale value 12-30 % below its last reading, then jumped
+    straight back. Each drop passed for a restart, so the stale value was
+    scored as use and the climb back to the real reading was counted a second
+    time — 12 kWh too much that day. Holding the previous reading through the
+    glitch scores it as no use, and the reading that comes back is measured
+    from where the counter was. Returns (series, number of glitches held).
+    """
+    values = series.to_numpy(dtype="float64", copy=True)
+    times = series.index.asi8
+    window = int(pd.Timedelta(minutes=GLITCH_RECOVERY_MINUTES).value)
+    n = len(values)
+    held = 0
+    # Only drops into the glitch band are candidates, so the per-reading
+    # work is vectorised and the scan below visits a handful of rows. A held
+    # span ends at a reading back at or above the one before the drop, which
+    # is never itself a candidate, so later candidates see unchanged values.
+    with np.errstate(invalid="ignore"):
+        candidates = np.flatnonzero(
+            (values[1:] >= GLITCH_MIN_RATIO * values[:-1])
+            & (values[1:] < COUNTER_RESTART_RATIO * values[:-1])
+        ) + 1
+    resume = 0
+    for i in candidates:
+        if i < resume:
+            continue
+        prev, low = values[i - 1], values[i]
+        ceiling = low + GLITCH_HOLD_FRACTION * (prev - low)
+        j = i + 1
+        while (j < n and times[j] - times[i] <= window
+               and values[j] < prev and values[j] <= ceiling):
+            j += 1
+        if j < n and times[j] - times[i] <= window and values[j] >= prev:
+            values[i:j] = prev
+            held += 1
+            resume = j
+    if not held:
+        return series, 0
+    return pd.Series(values, index=series.index, name=series.name), held
+
 
 def _rate_based_cap(
     rises: pd.Series, elapsed_hours: pd.Series, eligible: pd.Series,
@@ -202,16 +256,18 @@ def cumulative_to_interval(
     Notes
     -----
     The function:
-    1. Ignores a lifetime counter's drop that the next rise undoes (a
+    1. Holds glitches — a stale reading after a dropout that comes straight
+       back — at the reading before them (``_hold_glitches``)
+    2. Ignores a lifetime counter's drop that the next rise undoes (a
        glitch), then detects restarts (a drop below
        ``COUNTER_RESTART_RATIO`` of the previous reading, or with
        ``reset_daily`` any drop across UTC midnight); a smaller dip is not
        use, and use resumes once the counter passes the level already
        scored, unless the dip is deeper than an interval's plausible use
        (a re-baseline)
-    2. Keeps the full rise across a multi-interval gap
-    3. Caps spikes exceeding the increment cap (gap rows exempt)
-    4. Preserves timezone information if present
+    3. Keeps the full rise across a multi-interval gap
+    4. Caps spikes exceeding the increment cap (gap rows exempt)
+    5. Preserves timezone information if present
 
     Examples
     --------
@@ -235,6 +291,16 @@ def cumulative_to_interval(
         logger.warning('Series has fewer than 2 values; returning zeros')
         return pd.Series(
             np.zeros(len(series)), index=series.index, dtype='float64'
+        )
+
+    # v2.55.0: a stale reading part-way below the last one that comes
+    # straight back is held at the reading before it, on any counter. Drops
+    # to near zero are never held, so daily resets are untouched.
+    series, n_glitches = _hold_glitches(series)
+    if n_glitches:
+        logger.info(
+            'cumulative_to_interval: %d brief drop(s) that came straight back '
+            'treated as glitches, not restarts', n_glitches,
         )
 
     # v2.55.0: a lifetime counter's momentary drop that it then undoes is a
@@ -627,9 +693,18 @@ def subtract_series(
     return result.ffill()
 
 
+# v2.55.0: a completed day whose deficit left after its last row exceeds this
+# fraction of both the subtracted sensors' total and the parent's total for
+# the day is unmeasured: the parent stopped reporting while the subtracted
+# sensors kept counting. Replaying 28 days of one install, the left-over was
+# exactly zero on every day the parent reported throughout, and 25-100 % of
+# the subtracted total on the six days it did not.
+UNMEASURED_DEFICIT_FRACTION = 0.1
+
+
 def _carry_deficit(
     values: pd.Series, day_keys: Sequence,
-) -> Tuple[pd.Series, float, float]:
+) -> Tuple[pd.Series, float, dict]:
     """Carry each below-zero row's deficit into the following rows of its day.
 
     v2.55.0: when the subtracted sensors and the parent meter record the same
@@ -641,10 +716,12 @@ def _carry_deficit(
     rows with use until it is absorbed, so each day's net total equals the
     day's parent total minus the subtracted totals whenever that is
     non-negative. A deficit still left at the end of the day (the subtracted
-    sensors recorded more than the parent did) is dropped, as before.
+    sensors recorded more than the parent did) is not carried further.
 
     NaN rows (unmeasured labels) pass through unchanged and keep the deficit
-    for the next measured row. Returns (adjusted, carried, dropped).
+    for the next measured row. Returns (adjusted, carried, left), where
+    ``left`` maps each day label with a deficit still outstanding after its
+    last row to that amount.
     """
     keys = np.asarray(day_keys)
     if len(keys) != len(values):
@@ -654,11 +731,12 @@ def _carry_deficit(
     vals = values.to_numpy(dtype="float64", copy=True)
     carry = 0.0
     created = 0.0
-    dropped = 0.0
+    left: dict = {}
     current = None
     for i in range(len(vals)):
         if current is None or keys[i] != current:
-            dropped += -carry
+            if carry < 0:
+                left[current] = left.get(current, 0.0) - carry
             carry = 0.0
             current = keys[i]
         v = vals[i]
@@ -673,9 +751,10 @@ def _carry_deficit(
         else:
             carry = 0.0
             vals[i] = v
-    dropped += -carry
-    carried = created - dropped
-    return pd.Series(vals, index=values.index), float(carried), float(dropped)
+    if carry < 0:
+        left[current] = left.get(current, 0.0) - carry
+    carried = created - sum(left.values())
+    return pd.Series(vals, index=values.index), float(carried), left
 
 
 def apply_load_subtract(
@@ -715,7 +794,11 @@ def apply_load_subtract(
       ``carry_deficit_days`` (v2.55.0) a row's deficit is instead carried
       into the following rows of the same day (``_carry_deficit``), so the
       day's net total is preserved; the audit records how much was carried
-      and how much was left over at day end.
+      and how much was left over at day end. A completed day whose left-over
+      exceeds ``UNMEASURED_DEFICIT_FRACTION`` of both its subtracted and its
+      parent total is returned as NaN (unmeasured): the parent stopped
+      reporting while the subtracted sensors kept counting. The last day
+      label is taken to be still in progress and is never masked.
     - **fraction guard**: per-row ``(sum_subtract / load)`` is checked against
       ``max_fraction_of_load``. If the violation rate exceeds
       ``max_fraction_violation_pct`` for ANY sensor, raises
@@ -735,15 +818,17 @@ def apply_load_subtract(
     carry_deficit_days : sequence, optional
         One day label per ``load`` row (e.g. the row's local date). When
         given, a below-zero row's deficit is carried into later rows with
-        the same label rather than clipped away. Meaningful for per-interval
-        energy, so callers pass it for cumulative sources. None (default)
-        clips each row at zero.
+        the same label rather than clipped away, and days the parent missed
+        are returned as NaN (see the negative-clip item above). Meaningful
+        for per-interval energy, so callers pass it for cumulative sources.
+        None (default) clips each row at zero.
 
     Returns
     -------
     (adjusted_load, audit) : (pd.Series, dict)
         ``adjusted_load`` is ``load - Σ subtracts`` clipped to [0, ∞), reindexed
-        by ``load.index`` (minus any rows dropped via ``on_missing='drop'``).
+        by ``load.index`` (minus any rows dropped via ``on_missing='drop'``),
+        NaN on any day judged unmeasured.
 
         ``audit`` has shape::
 
@@ -796,6 +881,9 @@ def apply_load_subtract(
             "clipped_pct": 0.0,
             "deficit_carried_kwh": 0.0,
             "deficit_dropped_kwh": 0.0,
+            "deficit_pending_kwh": 0.0,
+            "unmeasured_days": [],
+            "unmeasured_rows": 0,
             "load_total_kwh": float(load.sum()) if len(load) else 0.0,
             "subtract_total_kwh": 0.0,
             "per_sensor": [],
@@ -985,12 +1073,36 @@ def apply_load_subtract(
     n_clipped = int(clipped_mask.sum())
     deficit_carried = 0.0
     deficit_dropped = 0.0
+    deficit_pending = 0.0
+    unmeasured_days: list = []
     if carry_deficit_days is not None:
         # v2.55.0: rows about to be dropped neither create nor absorb a
         # deficit — their subtract value is a placeholder.
-        adjusted, deficit_carried, deficit_dropped = _carry_deficit(
+        adjusted, deficit_carried, left = _carry_deficit(
             raw_adjusted.where(~drop_mask), carry_deficit_days,
         )
+        day_keys = np.asarray(carry_deficit_days)
+        open_day = day_keys[-1] if len(day_keys) else None
+        kept = ~drop_mask.to_numpy()
+        for day, amount in left.items():
+            if day == open_day:
+                # Still in progress: the parent may yet catch up today.
+                deficit_pending += amount
+                continue
+            deficit_dropped += amount
+            in_day = (day_keys == day) & kept
+            day_subtract = float(np.nansum(total_subtract.to_numpy()[in_day]))
+            day_load = float(np.nansum(load.to_numpy()[in_day]))
+            if (amount > UNMEASURED_DEFICIT_FRACTION * day_subtract
+                    and amount > UNMEASURED_DEFICIT_FRACTION * day_load):
+                unmeasured_days.append(day)
+        if unmeasured_days:
+            # v2.55.0: the parent stopped reporting while the subtracted
+            # sensors kept counting, so the day's net use is unknown — not
+            # the near-zero that subtraction leaves. Unmeasured labels are
+            # excluded from supervision and scoring, never imputed.
+            masked = set(unmeasured_days)
+            adjusted[np.array([k in masked for k in day_keys])] = np.nan
     else:
         adjusted = raw_adjusted.clip(lower=0.0)
 
@@ -1016,6 +1128,8 @@ def apply_load_subtract(
                 f"went below zero after subtraction; "
                 f"{deficit_carried:.2f} carried into later rows of the same "
                 f"day, {deficit_dropped:.2f} left over at day end"
+                + (f", {deficit_pending:.2f} still to absorb today"
+                   if deficit_pending else "")
             )
         else:
             log(
@@ -1023,12 +1137,26 @@ def apply_load_subtract(
                 f"to zero after subtraction"
             )
 
+    unmeasured_rows = int(
+        adjusted.isna().sum() - kept_load.isna().sum()
+    ) if unmeasured_days else 0
+    if unmeasured_days:
+        logger.warning(
+            "load_subtract: %d day(s) treated as unmeasured because the "
+            "subtracted sensors recorded clearly more than the parent "
+            "(the parent was probably not reporting): %s",
+            len(unmeasured_days), ", ".join(str(d) for d in unmeasured_days),
+        )
+
     audit = {
         "n_rows": n_rows,
         "n_clipped_rows": n_clipped,
         "clipped_pct": clipped_pct,
         "deficit_carried_kwh": deficit_carried,
         "deficit_dropped_kwh": deficit_dropped,
+        "deficit_pending_kwh": deficit_pending,
+        "unmeasured_days": [str(d) for d in unmeasured_days],
+        "unmeasured_rows": unmeasured_rows,
         "load_total_kwh": float(kept_load.sum()) if len(kept_load) else 0.0,
         "subtract_total_kwh": (
             float(kept_subtract.sum()) if len(kept_subtract) else 0.0

@@ -2582,6 +2582,10 @@ class MLForecastLabApp:
                 if audit.get("deficit_carried_kwh") or audit.get("deficit_dropped_kwh")
                 else ""
             )
+            + (
+                f", unmeasured days={len(audit['unmeasured_days'])}"
+                if audit.get("unmeasured_days") else ""
+            )
         )
         for sensor in audit.get("per_sensor", []):
             gap = ""

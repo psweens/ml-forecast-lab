@@ -37,6 +37,18 @@ Two conversions threw real use away before the model saw it.
    never subtracted. For cumulative sources the deficit is now carried into
    the following rows of the same local day.
 
+3. **A stale reading after a dropout passed for a restart.** A counter that
+   came back at an old value 12-36 % below its last reading, then jumped
+   straight back, scored the old value as use and its climb back twice —
+   12 kWh too much on one day. Such glitches are now held at the reading
+   before them; genuine restarts, which go to or near zero, are unchanged.
+
+4. **Days the parent missed were learned as days of no use.** When the
+   parent stopped reporting while the subtracted sensors kept counting, the
+   day's net use came out near zero. A completed day whose deficit left at
+   midnight exceeds 10 % of both its subtracted and its parent total is now
+   unmeasured.
+
 Models trained on the old labels are retrained (``LABEL_RULE_VERSION``) for
 the experiments these touch; other experiments keep their cached models.
 """
@@ -44,6 +56,7 @@ the experiments these touch; other experiments keep their cached models.
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 import json
 import re
 from pathlib import Path
@@ -373,32 +386,32 @@ _SUB = {"entity_id": "sensor.immersion", "on_missing": "zero",
 class TestDeficitCarry:
     def test_a_deficit_comes_off_the_next_rows_of_the_day(self):
         idx = pd.date_range("2026-10-20 10:00", periods=5, freq="30min")
-        out, carried, dropped = _carry_deficit(
+        out, carried, left = _carry_deficit(
             pd.Series([1.0, -0.6, 0.4, 0.5, 0.3], index=idx), _days(idx),
         )
         np.testing.assert_allclose(out.to_numpy(), [1.0, 0.0, 0.0, 0.3, 0.3])
         assert carried == pytest.approx(0.6)
-        assert dropped == pytest.approx(0.0)
+        assert left == {}
 
     def test_totals_are_preserved_up_to_what_is_left_at_day_end(self):
         rng = np.random.default_rng(1)
         idx = pd.date_range("2026-10-20 00:00", periods=144, freq="30min")
         vals = pd.Series(rng.normal(0.1, 0.5, len(idx)), index=idx)
-        out, carried, dropped = _carry_deficit(vals, _days(idx))
+        out, carried, left = _carry_deficit(vals, _days(idx))
         assert (out >= 0).all()
-        assert out.sum() == pytest.approx(vals.sum() + dropped)
-        assert carried + dropped == pytest.approx(float(-vals[vals < 0].sum()))
+        assert out.sum() == pytest.approx(vals.sum() + sum(left.values()))
+        assert carried + sum(left.values()) == pytest.approx(float(-vals[vals < 0].sum()))
         for day in np.unique(_days(idx)):
             mask = _days(idx) == day
             assert out[mask].sum() >= vals[mask].sum() - 1e-9
 
     def test_a_deficit_does_not_cross_midnight(self):
         idx = pd.date_range("2026-10-20 23:00", periods=3, freq="30min")
-        out, carried, dropped = _carry_deficit(
+        out, carried, left = _carry_deficit(
             pd.Series([0.2, -0.5, 0.4], index=idx), _days(idx),
         )
         np.testing.assert_allclose(out.to_numpy(), [0.2, 0.0, 0.4])
-        assert dropped == pytest.approx(0.5)
+        assert left == {idx[0].date(): pytest.approx(0.5)}
         assert carried == pytest.approx(0.0)
 
     def test_unmeasured_rows_pass_through(self):
@@ -473,6 +486,131 @@ class TestDeficitCarry:
         idx = pd.DatetimeIndex(["2026-10-20 23:30", "2026-11-01 23:30"])
         days = app._local_dates(idx)
         assert [str(d) for d in days] == ["2026-10-21", "2026-11-01"]
+
+
+# ---------------------------------------------------------------------
+# Glitches: a stale reading after a dropout
+# ---------------------------------------------------------------------
+
+def _at(start, minutes, values):
+    t0 = pd.Timestamp(start)
+    return _counter(values, times=[t0 + pd.Timedelta(minutes=m) for m in minutes])
+
+
+class TestGlitches:
+    def test_a_stale_reading_that_comes_straight_back_is_not_use(self):
+        """The 23 Oct house-counter pattern: three dropouts in 20 minutes,
+        each coming back at a stale 10.3 before jumping to the real value.
+        Pre-hold, each counted as a restart and the climb back twice."""
+        s = _at("2026-10-23 02:51", [0, 2, 4, 6, 9, 10, 13, 19.2, 19.7, 20.4, 22, 28.5, 29.2, 31],
+                [11.1, 11.2, 11.3, 11.4, 11.5, 11.7, 10.3, 13.0, 13.1, 13.4, 10.3, 14.5, 14.7, 10.3])
+        s = pd.concat([s, _at("2026-10-23 03:22", [9], [15.6])])
+        # A daily counter, as recorded; lifetime counters have _undone_drops too.
+        inc = cumulative_to_interval(s, INTERVAL, reset_daily=True, max_increment=1e9)
+        assert inc.sum() == pytest.approx(15.6 - 11.1)
+
+    def test_a_restart_that_climbs_from_zero_is_still_a_restart(self):
+        """The boiler's daily meter after the same power cut: it restarted at
+        zero and counted up again, so every segment is real use."""
+        s = _at("2026-10-23 03:01", [0, 1, 3, 4.8, 5.6, 6.6, 7.6, 8.6, 9.6, 10.6, 12, 14.7, 15.7],
+                [0.0729, 0.251, 0, 0.0116, 0.1872, 0.3627, 0.5383, 0.7135, 0.8886, 1.0643, 0, 0.0848, 0.2608])
+        inc = cumulative_to_interval(s, INTERVAL, max_increment=1e9)
+        assert inc.sum() == pytest.approx((0.251 - 0.0729) + 1.0643 + 0.2608)
+
+    # The next two use a daily counter: a lifetime counter's drop that its
+    # next rise undoes is a glitch by the separate _undone_drops rule.
+    def test_a_drop_to_near_zero_is_a_restart_even_if_the_next_reading_is_higher(self):
+        s = _at("2026-10-20 06:00", [0, 2, 4, 6], [1.0, 1.1, 0.0, 1.2])
+        inc = cumulative_to_interval(s, INTERVAL, reset_daily=True, max_increment=1e9)
+        assert inc.sum() == pytest.approx(0.1 + 1.2)
+
+    def test_a_drop_that_climbs_away_is_a_restart(self):
+        s = _at("2026-10-20 06:00", [0, 2, 4, 6, 8], [10.0, 11.0, 7.0, 8.5, 11.2])
+        inc = cumulative_to_interval(s, INTERVAL, max_increment=1e9)
+        assert inc.sum() == pytest.approx(1.0 + 7.0 + 1.5 + 2.7)
+
+    def test_a_drop_that_comes_back_after_the_hour_is_a_restart(self):
+        s = _at("2026-10-20 06:00", [0, 2, 4, 66], [10.0, 11.0, 7.0, 11.5])
+        inc = cumulative_to_interval(s, INTERVAL, reset_daily=True, max_increment=1e9)
+        assert inc.sum() == pytest.approx(1.0 + 7.0 + 4.5)
+
+    def test_the_midnight_reset_is_never_a_glitch(self):
+        s = _at("2026-10-20 23:50", [0, 9, 11, 15], [25.0, 25.2, 0.1, 0.3])
+        inc = cumulative_to_interval(s, INTERVAL, reset_daily=True, max_increment=1e9)
+        assert inc.sum() == pytest.approx(0.2 + 0.1 + 0.2)
+
+
+# ---------------------------------------------------------------------
+# Days the parent stopped reporting
+# ---------------------------------------------------------------------
+
+def _three_days(load_day2=1.0, sub_per_bin=0.3, late=0.0):
+    idx = pd.date_range("2026-10-20 00:00", periods=48 * 3, freq="30min")
+    load = pd.Series(1.0, index=idx)
+    load.iloc[48:96] = load_day2
+    sub = pd.Series(sub_per_bin, index=idx)
+    if late:
+        sub.iloc[47] += late  # lands in the day's last bin, absorbed by nothing
+    return idx, load, sub
+
+
+class TestUnmeasuredDays:
+    def test_a_day_the_parent_missed_is_unmeasured(self):
+        idx, load, sub = _three_days(load_day2=0.0)
+        out, audit = apply_load_subtract(load, [(_SUB, sub)], carry_deficit_days=_days(idx))
+        assert out.iloc[48:96].isna().all()
+        np.testing.assert_allclose(out.iloc[:48].to_numpy(), 0.7)
+        np.testing.assert_allclose(out.iloc[96:].to_numpy(), 0.7)
+        assert audit["unmeasured_days"] == ["2026-10-21"]
+        assert audit["unmeasured_rows"] == 48
+
+    def test_a_small_left_over_at_midnight_is_kept(self):
+        """A subtracted load reported in the day's last bin leaves 1.0 of
+        14.4 subtracted (7 %) unabsorbed: kept, and counted as left over."""
+        idx, load, sub = _three_days(late=1.0)
+        out, audit = apply_load_subtract(load, [(_SUB, sub)], carry_deficit_days=_days(idx))
+        assert not out.isna().any()
+        assert audit["unmeasured_days"] == []
+        assert audit["deficit_dropped_kwh"] == pytest.approx(1.0 - 0.7)
+
+    def test_the_day_in_progress_is_never_unmeasured(self):
+        idx = pd.date_range("2026-10-20 00:00", periods=60, freq="30min")
+        load = pd.Series(1.0, index=idx)
+        load.iloc[48:] = 0.0  # the parent has stalled since midnight
+        sub = pd.Series(0.3, index=idx)
+        out, audit = apply_load_subtract(load, [(_SUB, sub)], carry_deficit_days=_days(idx))
+        assert not out.isna().any()
+        assert audit["unmeasured_days"] == []
+        assert audit["deficit_pending_kwh"] == pytest.approx(0.3 * 12)
+
+    def test_without_day_labels_nothing_is_unmeasured(self):
+        idx, load, sub = _three_days(load_day2=0.0)
+        out, audit = apply_load_subtract(load, [(_SUB, sub)])
+        assert not out.isna().any()
+
+    def test_the_fetch_path_leaves_the_missed_day_unmeasured(self, tmp_db):
+        """End to end: the house counter stops reporting for a day while the
+        subtracted sensor carries on. That day's labels are NaN and its
+        rows in the net actuals table are NULL, so neither training nor
+        scoring treats it as a day of near-zero use."""
+        from tests.unit import test_load_subtract_actuals as la
+        now = la._now()
+        missed = (now - timedelta(days=2)).date()
+        load_rows = [r for r in la._daily_counter_rows(now, days=5, per_bin=la.GROSS_PER_BIN)
+                     if pd.Timestamp(r["last_changed"]).date() != missed
+                     or pd.Timestamp(r["last_changed"]).hour == 0 and pd.Timestamp(r["last_changed"]).minute == 0]
+        ha = la._StubHA({la.LOAD: load_rows,
+                         la.EV: la._daily_counter_rows(now, days=5, per_bin=la.EV_PER_BIN)})
+        exp = la._exp()
+        app = la._make_app(tmp_db, exp, ha)
+        frame = asyncio.run(app._fetch_and_preprocess(exp, now=now))
+        y = frame["y"]
+        day = pd.DatetimeIndex(y.index).date
+        assert y[day == missed].isna().all()
+        assert y[day == missed - timedelta(days=1)].notna().all()
+        net = app.history_db.get_history(app.history_db.net_actuals_table("house_load"))
+        net_day = net[pd.DatetimeIndex(net["ds"]).date == missed]
+        assert len(net_day) and net_day["y"].isna().all()
 
 
 # ---------------------------------------------------------------------
