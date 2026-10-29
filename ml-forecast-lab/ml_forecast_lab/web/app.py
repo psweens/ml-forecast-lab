@@ -2860,7 +2860,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             exp_cfg = next((e for e in cfg.experiments if e.name == name), None)
             if not exp_cfg:
                 return JSONResponse(content={"error": "Experiment not in config"}, status_code=404)
-            actuals_table = db.safe_table_name(exp_cfg.target_entity)
+            actuals_table = db.actuals_table_for(exp_cfg)
         except Exception as e:
             return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
 
@@ -3200,7 +3200,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return base
 
         try:
-            actuals_table = db.safe_table_name(exp_cfg.target_entity)
+            actuals_table = db.actuals_table_for(exp_cfg)
             specs = []
             for e in externals_cfg:
                 specs.append({
@@ -3719,7 +3719,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             exp_cfg = next((e for e in cfg.experiments if e.name == name), None)
             if not exp_cfg:
                 return JSONResponse(content={"error": "Experiment not in config"}, status_code=404)
-            actuals_table = db.safe_table_name(exp_cfg.target_entity)
+            actuals_table = db.actuals_table_for(exp_cfg)
         except Exception as e:
             return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
 
@@ -3798,7 +3798,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             exp_cfg = next((e for e in cfg.experiments if e.name == name), None)
             if not exp_cfg:
                 return JSONResponse(content={"error": "Experiment not in config"}, status_code=404)
-            actuals_table = db.safe_table_name(exp_cfg.target_entity)
+            actuals_table = db.actuals_table_for(exp_cfg)
         except Exception as e:
             return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
 

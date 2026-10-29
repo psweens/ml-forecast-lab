@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.55.0
+
+### Fixed
+
+**Experiments with `load_subtract` are now checked against what they forecast.**
+
+- The accuracy sensor, the Forecast Accuracy and Forecast Comparison tabs and
+  the upper and lower bands compared each forecast with the target sensor's
+  full reading.
+- The `_cumulative` sensor also started from that full reading, so it sat
+  above the forecast by everything subtracted so far that day.
+- Both now use the target with the subtracted sensors taken out, including
+  for past forecasts.
+- Expect lower error figures and narrower bands on these experiments.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-load-subtract-scoring-basis.md)
+
 ## 2.54.0
 
 ### Fixed

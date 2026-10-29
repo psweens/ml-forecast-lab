@@ -25,6 +25,9 @@ Usage::
 
 Add ``--cumulative`` for a ``source_is_cumulative`` experiment, so the bands
 are tested against per-interval increments rather than the raw counter.
+For an experiment with ``load_subtract``, pass ``--target-table
+net_actuals_<experiment>`` (v2.55.0): the bands are calibrated against the
+target after subtraction, which that table holds.
 
 This is a read-only diagnostic — it does not modify the DB.
 """
@@ -100,7 +103,8 @@ def main() -> int:
         print("Common causes:")
         print(" - The experiment hasn't published _upper_/_lower_ sensors yet")
         print("   (cold-start: needs ~10 residuals before bands appear)")
-        print(" - Wrong --target-table — must match HistoryDB.safe_table_name(<target_entity>)")
+        print(" - Wrong --target-table — must match HistoryDB.actuals_table_for(<experiment>):")
+        print("   safe_table_name(<target_entity>), or net_actuals_<experiment> with load_subtract")
         print(" - --days too small — try increasing.")
         return 1
 

@@ -205,6 +205,8 @@ load_subtract:
 | `max_fraction_of_load` | float | `1.0` | Per-row ceiling on `subtract / load`. Rows exceeding it count as violations. |
 | `max_fraction_violation_pct` | float | `5.0` | Maximum percentage of rows allowed to violate `max_fraction_of_load` before the load-subtract step raises. Acts as a fail-fast guard for unit bugs. |
 
+With `load_subtract` the experiment forecasts the target with these sensors taken out, and everything that checks the forecast uses the same figure: the Forecast Accuracy and Forecast Comparison tabs, `sensor.mlfl_<name>_forecast_accuracy`, the upper and lower bands, and the starting point of `sensor.mlfl_<name>_cumulative` (today's use so far with the subtracted sensors taken out, not the target sensor's own reading).
+
 **Note:** the older `subtract: [entity_id]` field is a deprecated stub — it loads without error but does not affect training. Migrate any existing config to `load_subtract`.
 
 ### Solar-physics features
@@ -371,7 +373,7 @@ When an experiment is in `mode: production`, the app publishes the following sen
 |---|---|---|
 | `sensor.mlfl_<name>_forecast` | The next interval's forecast value. | Attributes include the full future curve as a list of `{datetime, value}` pairs. |
 | `sensor.mlfl_<name>_interval` | The next interval's value, expressed as a per-interval increment. | Published only when `source_is_cumulative` is true (otherwise identical to `_forecast`). |
-| `sensor.mlfl_<name>_cumulative` | The integrated forecast curve. Resets at local midnight when `source_is_cumulative` and `reset_daily` are both true; otherwise a `cumsum` anchored at zero. | Useful for daily-budget automations (EV planning, hot-water tank pre-heat). Shows `unknown` with `status: signed_predictions` when the forecast dips below zero, because a running total of signed values drifts; for targets that can't be negative (solar power, demand) set `target_is_nonnegative: true`. |
+| `sensor.mlfl_<name>_cumulative` | The integrated forecast curve. Resets at local midnight when `source_is_cumulative` and `reset_daily` are both true, starting from today's use so far (after `load_subtract`, when set); otherwise a `cumsum` anchored at zero. | Useful for daily-budget automations (EV planning, hot-water tank pre-heat). Shows `unknown` with `status: signed_predictions` when the forecast dips below zero, because a running total of signed values drifts; for targets that can't be negative (solar power, demand) set `target_is_nonnegative: true`. |
 | `sensor.mlfl_<name>_upper_<pct>` | Upper conformal band at the `<pct>` coverage level (default `80`). | Renamed to match `conformal_coverage` — e.g. `_upper_90` if you set `0.9`. Shows `unknown` with `status: no_conformal_bands` until enough residuals have been calibrated; cold-start may take ~10 forecast cycles. |
 | `sensor.mlfl_<name>_lower_<pct>` | Lower conformal band. | As above. |
 | `sensor.mlfl_<name>_forecast_accuracy` | Mean absolute error of the next-interval forecast over the last 30 days. Per interval when `source_is_cumulative` is true. | Recomputed on every forecast publish. Attributes carry the full lead-time curve (`lead_hours`, `mae`, `rmse`, `sample_count`) and the first-versus-latest revision MAE. `status` reads `accumulating` until a next-interval forecast has been scored. |

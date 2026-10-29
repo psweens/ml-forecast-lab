@@ -34,6 +34,17 @@ EXTERNAL_COMPARISON_WARMUP_DAYS = 7
 # read-side corruption filter as the no-actuals fallback cap.
 FORECAST_ABS_SANITY = 1e12
 
+# v2.55.0: prefix of the per-experiment tables holding the target AFTER
+# ``load_subtract`` — the series the model is trained on and forecasts. An
+# experiment with ``load_subtract`` is scored, calibrated and seeded against
+# this table instead of the raw target's, which holds the gross reading. Each
+# row is one grid bin: ``ds`` is the bin start; ``value`` is the running total
+# since local midnight through the end of the bin for a cumulative target, or
+# the bin's value otherwise. A NULL value marks a bin whose label is unmeasured
+# (``resolve_missingness``), which the increment reader scores as unknown rather
+# than as zero use.
+NET_ACTUALS_PREFIX = "net_actuals_"
+
 
 def _locked(fn):
     """Serialise SQLite access via ``self._lock``.
@@ -132,6 +143,27 @@ class HistoryDB:
             raise ValueError(f"Invalid table name after sanitisation: {safe!r}")
         return safe
 
+    def net_actuals_table(self, experiment: str) -> str:
+        """Table holding ``experiment``'s target after ``load_subtract``.
+
+        Keyed by experiment, not entity: two experiments on one sensor can
+        subtract different loads, so they have different actuals.
+        """
+        return self.safe_table_name(NET_ACTUALS_PREFIX + experiment)
+
+    def actuals_table_for(self, exp_cfg) -> str:
+        """The table an experiment's forecasts are scored against.
+
+        v2.55.0: with ``load_subtract`` the model forecasts the target minus
+        the subtracted loads, so accuracy, conformal bands, the comparison
+        and the cumulative seed read the net table; scoring against the raw
+        target measured the subtracted loads, not the forecast. Without it,
+        the raw target's table, as before.
+        """
+        if getattr(exp_cfg, "load_subtract", None):
+            return self.net_actuals_table(exp_cfg.name)
+        return self.safe_table_name(exp_cfg.target_entity)
+
     @_locked
     def ensure_table(self, table_name: str) -> None:
         """
@@ -200,6 +232,50 @@ class HistoryDB:
             return inserted
         except sqlite3.Error as e:
             logger.error(f"Error inserting into {table_name}: {e}", exc_info=True)
+            self.conn.rollback()
+            return 0
+
+    @_locked
+    def upsert_history(self, table_name: str, df: pd.DataFrame) -> int:
+        """Insert or overwrite records by ``ds``.
+
+        ``store_history`` ignores duplicates, which suits raw readings that
+        never change once recorded. The net-actuals tables are derived: the
+        current bin, and the day's running total, are rewritten as readings
+        arrive, so an existing row takes the new value.
+
+        Args:
+            table_name: SQL table name
+            df: DataFrame with columns ['ds', 'value']; NaN is stored as NULL
+
+        Returns:
+            Number of rows written
+        """
+        if df.empty:
+            return 0
+
+        self.ensure_table(table_name)
+
+        df_copy = df.copy()
+        df_copy["ds"] = pd.to_datetime(df_copy["ds"]).dt.strftime(
+            "%Y-%m-%d %H:%M:%S.%f"
+        )
+        df_copy["value"] = df_copy["value"].astype(object).where(
+            pd.notna(df_copy["value"]), None
+        )
+        records = df_copy[["ds", "value"]].values.tolist()
+
+        cursor = self.conn.cursor()
+        try:
+            cursor.executemany(
+                f"INSERT INTO {table_name} (ds, value) VALUES (?, ?) "
+                f"ON CONFLICT(ds) DO UPDATE SET value = excluded.value",
+                records,
+            )
+            self.conn.commit()
+            return len(records)
+        except sqlite3.Error as e:
+            logger.error(f"Error upserting into {table_name}: {e}", exc_info=True)
             self.conn.rollback()
             return 0
 
@@ -695,6 +771,25 @@ class HistoryDB:
             "CREATE INDEX _mlfl_actuals_vals_tmp_idx "
             "ON _mlfl_actuals_vals_tmp(grid_dt)"
         )
+        if actuals_table.startswith(NET_ACTUALS_PREFIX):
+            # v2.55.0: a net-actuals table writes a row for every bin, NULL
+            # where the label was unmeasured. Above, a bin with no reading
+            # is zero use — right for a counter the recorder only logs on
+            # change, wrong here — so those bins become unknown and are
+            # excluded like the window's first bin. Labels are never imputed.
+            cursor.execute(
+                f"""
+                UPDATE _mlfl_actuals_vals_tmp SET value = NULL
+                WHERE grid_dt IN (
+                    SELECT strftime('%Y-%m-%d %H:%M:%S',
+                        (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                        'unixepoch')
+                    FROM {actuals_table}
+                    WHERE value IS NULL
+                )
+                """,
+                (interval_sec, interval_sec),
+            )
         cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_bins_tmp")
 
     @staticmethod

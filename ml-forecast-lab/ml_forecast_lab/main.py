@@ -1492,6 +1492,14 @@ class MLForecastLabApp:
         # mirrored to _published_entities_path (set by run(); None in tests)
         # so sensors of renamed, removed or lab experiments can be removed.
         self._published_entities: Dict[str, str] = {}
+        # v2.55.0: per experiment with load_subtract, the target's use so far
+        # today after subtraction, as {"date": local date, "value": float},
+        # from the latest fetch. Seeds the cumulative sensor, which the raw
+        # target's reading would seed with the subtracted loads included.
+        self._net_today: Dict[str, dict] = {}
+        # v2.55.0: experiments whose net-actuals table has had the whole
+        # fetched window written this run; later fetches rewrite the tail.
+        self._net_actuals_backfilled: set = set()
         self._published_entities_path: Optional[Path] = None
         self._orphan_candidates: set = set()
         self._orphan_cleanup_disabled = False
@@ -2570,6 +2578,81 @@ class MLForecastLabApp:
                 f"{gap}"
             )
 
+    # v2.55.0: after a run has written an experiment's whole fetched window
+    # to its net-actuals table, each later fetch rewrites only this much of
+    # the tail — the current day's running total and any bin a late reading
+    # changed. A restart rewrites the window once more.
+    _NET_ACTUALS_REWRITE_DAYS = 2
+
+    def _local_tz(self):
+        """The configured timezone, for local-day boundaries; UTC if unset."""
+        try:
+            from zoneinfo import ZoneInfo
+            return ZoneInfo(
+                (self.config.timezone if self.config else None) or "UTC"
+            )
+        except Exception:
+            return timezone.utc
+
+    async def _record_net_actuals(
+        self, exp_cfg, net: pd.Series, now: datetime,
+    ) -> None:
+        """Keep an experiment's target after ``load_subtract``.
+
+        ``net`` is the target on the grid after subtraction, before outlier
+        clipping and any log transform: what the model is trained to
+        forecast, as measured. v2.55.0: it was used only for training, while
+        the cumulative seed, accuracy, conformal bands and the comparison
+        read the raw target, so they measured the subtracted loads as well
+        as the forecast's error.
+
+        For a cumulative target this records the use so far today (the
+        seed) and writes each bin's running total since local midnight to
+        ``HistoryDB.net_actuals_table``; an unmeasured bin is written as
+        NULL so it is scored as unknown, not as zero use. Otherwise each
+        measured bin's value is written. Writes go through ``upsert_history``
+        because the current bin and the day's total change between fetches.
+        """
+        net = pd.to_numeric(net, errors="coerce").astype(float)
+        if net.empty or not isinstance(net.index, pd.DatetimeIndex):
+            return
+        tz = self._local_tz()
+        idx_utc = (
+            net.index.tz_localize("UTC") if net.index.tz is None
+            else net.index.tz_convert("UTC")
+        )
+        local_dates = np.asarray(idx_utc.tz_convert(tz).date)
+        bins = idx_utc.tz_localize(None)
+        cumulative = bool(getattr(exp_cfg, "source_is_cumulative", False))
+
+        if cumulative:
+            values = net.fillna(0.0).groupby(local_dates).cumsum()
+            values = values.where(net.notna())
+            now_utc = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+            today = now_utc.astimezone(tz).date()
+            self._net_today[exp_cfg.name] = {
+                "date": today,
+                "value": float(net[local_dates == today].sum()),
+            }
+        else:
+            values = net
+
+        if not self.history_db:
+            return
+        table = self.history_db.net_actuals_table(exp_cfg.name)
+        frame = pd.DataFrame({"ds": bins, "value": values.to_numpy()})
+        if not cumulative:
+            frame = frame.dropna(subset=["value"])
+        if exp_cfg.name in self._net_actuals_backfilled:
+            tail_start = bins.max() - pd.Timedelta(
+                days=self._NET_ACTUALS_REWRITE_DAYS,
+            )
+            frame = frame[frame["ds"] >= tail_start]
+        await asyncio.to_thread(self.history_db.upsert_history, table, frame)
+        self._net_actuals_backfilled.add(exp_cfg.name)
+        oldest = now - timedelta(days=self._retention_days_for_table(table))
+        await asyncio.to_thread(self.history_db.cleanup, table, oldest)
+
     async def _analyse_entity_history(
         self,
         entity_id: str,
@@ -2961,6 +3044,13 @@ class MLForecastLabApp:
                     ent, getattr(cov, "future_value_key", None),
                 ))
 
+        # v2.55.0: the experiment's own net-actuals table.
+        if getattr(exp, "load_subtract", None) and getattr(exp, "name", None):
+            try:
+                out.append(self.history_db.net_actuals_table(exp.name))
+            except (ValueError, TypeError):
+                pass
+
         return out
 
     def _retention_days_for_table(self, table: Optional[str]) -> int:
@@ -3269,6 +3359,16 @@ class MLForecastLabApp:
                             f"contiguous for feature construction."
                         )
                     self._log_load_subtract_audit(exp_cfg, sub_audit)
+                    # v2.55.0: scoring, bands and the cumulative seed use
+                    # this series too. Non-fatal: a failed write leaves the
+                    # previous actuals in place and the forecast unaffected.
+                    try:
+                        await self._record_net_actuals(exp_cfg, series, now)
+                    except Exception as e:
+                        logger.warning(
+                            f"  Could not record actuals after load_subtract "
+                            f"for {exp_cfg.name}: {e}"
+                        )
                 except LoadSubtractError as e:
                     # Fail-fast guard fired — do NOT silently proceed with a
                     # broken subtract. Surface the error to the caller so the
@@ -7264,9 +7364,10 @@ class MLForecastLabApp:
         the replay tool computes bands through the same code. The caller
         owns the production-mode / history-DB gate and the error handling.
         """
-        actuals_table = self.history_db.safe_table_name(
-            exp_cfg.target_entity
-        )
+        # v2.55.0: with load_subtract, residuals against the target after
+        # subtraction — the raw target's sized the band from the subtracted
+        # loads.
+        actuals_table = self.history_db.actuals_table_for(exp_cfg)
         target_level = (
             level
             if level is not None
@@ -7682,8 +7783,24 @@ class MLForecastLabApp:
             except Exception:
                 local_tz = timezone.utc
 
+            now_local_date = issued_at.astimezone(local_tz).date()
             today_seed = 0.0
-            if exp_cfg.target_entity:
+            if getattr(exp_cfg, "load_subtract", None):
+                # v2.55.0: the forecast is of the target after
+                # load_subtract, so the curve starts from today's use after
+                # subtraction. The target's own reading includes the
+                # subtracted loads, which put the whole curve that far
+                # above the forecast.
+                net_today = self._net_today.get(exp_cfg.name)
+                if net_today and net_today.get("date") == now_local_date:
+                    today_seed = float(net_today["value"])
+                else:
+                    logger.warning(
+                        f"  {exp_cfg.name}: no use after load_subtract "
+                        f"recorded for today; the cumulative forecast "
+                        f"starts from 0."
+                    )
+            elif exp_cfg.target_entity:
                 try:
                     raw = await self.ha_interface.get_state(
                         exp_cfg.target_entity, default=None,
@@ -7693,7 +7810,6 @@ class MLForecastLabApp:
                 except Exception:
                     today_seed = 0.0
 
-            now_local_date = issued_at.astimezone(local_tz).date()
             running_by_day: dict = {}
             cum_list = []
             # Headline state = the projected end-of-today total (last forecast
@@ -7878,9 +7994,8 @@ class MLForecastLabApp:
             acc_attrs["status"] = "lab_mode"
         else:
             try:
-                actuals_table = self.history_db.safe_table_name(
-                    exp_cfg.target_entity
-                )
+                # v2.55.0: the target after load_subtract, when configured.
+                actuals_table = self.history_db.actuals_table_for(exp_cfg)
                 # Offload the scan-heavy query — three CTE passes over
                 # the actuals table per call, multiplied by N experiments
                 # per publish cycle. Running inline would freeze the

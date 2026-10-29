@@ -357,6 +357,15 @@ class RecordingHistoryDB:
         # Pure function of the entity id: passed through, not recorded.
         return self._inner.safe_table_name(entity_id)
 
+    def net_actuals_table(self, experiment: str) -> str:
+        # v2.55.0: pure function of the experiment name, like safe_table_name.
+        from ml_forecast_lab.db import HistoryDB
+        return HistoryDB.net_actuals_table(self, experiment)
+
+    def actuals_table_for(self, exp_cfg) -> str:
+        from ml_forecast_lab.db import HistoryDB
+        return HistoryDB.actuals_table_for(self, exp_cfg)
+
     def get_history(self, table_name: str) -> pd.DataFrame:
         key = _key("get_history", table_name)
         try:
@@ -382,6 +391,9 @@ class RecordingHistoryDB:
         return _decode_conformal(payload)
 
     def store_history(self, table_name, df) -> int:
+        return 0
+
+    def upsert_history(self, table_name, df) -> int:
         return 0
 
     def cleanup(self, table_name, oldest_datetime) -> int:
@@ -480,6 +492,14 @@ class ReplayHistoryDB:
         from ml_forecast_lab.db import HistoryDB
         return HistoryDB.safe_table_name(self, entity_id)
 
+    def net_actuals_table(self, experiment: str) -> str:
+        from ml_forecast_lab.db import HistoryDB
+        return HistoryDB.net_actuals_table(self, experiment)
+
+    def actuals_table_for(self, exp_cfg) -> str:
+        from ml_forecast_lab.db import HistoryDB
+        return HistoryDB.actuals_table_for(self, exp_cfg)
+
     def get_history(self, table_name: str) -> pd.DataFrame:
         return _rows_to_history_frame(
             self._queue.pop("db", _key("get_history", table_name)))
@@ -489,6 +509,9 @@ class ReplayHistoryDB:
             self._queue.pop("db", _conformal_key(*args, **kwargs)))
 
     def store_history(self, table_name, df) -> int:
+        return 0
+
+    def upsert_history(self, table_name, df) -> int:
         return 0
 
     def cleanup(self, table_name, oldest_datetime) -> int:
