@@ -89,8 +89,9 @@ If your target is an **energy-today** style sensor that resets at midnight, add:
 ```yaml
     source_is_cumulative: true
     reset_daily: true
-    max_increment: 5.0       # max kWh you'd realistically see in one 30-min slot
 ```
+
+The app caps implausible jumps between two readings on its own, allowing for sensors that update slowly. Set `max_increment` (the most a single reading can rise) only if a sensor glitches in a way that default lets through.
 
 The UI re-reads `mlfl.yaml` on each request, so hand edits and UI changes can be interleaved freely.
 

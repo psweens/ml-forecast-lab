@@ -1204,6 +1204,23 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
 # docs/investigations/2026-05-neural-pv.md for the v2.37 precedent.
 CACHE_SCHEMA_VERSION = 3
 
+# v2.55.0: version of the rule that turns a cumulative sensor into interval
+# labels (restart detection, the default increment cap) and of the
+# load_subtract deficit carry. A cached model is fed lag features built by
+# the current rule, so one trained under an older rule is served inputs on a
+# different scale. Unlike CACHE_SCHEMA_VERSION this only applies to the
+# experiments the rule touches — a cumulative target or a load_subtract —
+# so every other experiment keeps its cached model.
+LABEL_RULE_VERSION = 2
+
+
+def _label_rule_current(exp_cfg, meta: dict) -> bool:
+    """Whether a cached model's labels match the current rule for this
+    experiment. Caches written before v2.55.0 carry no ``label_rule``."""
+    if not (exp_cfg.source_is_cumulative or exp_cfg.load_subtract):
+        return True
+    return meta.get("label_rule", 1) == LABEL_RULE_VERSION
+
 # (config name, module under ml_forecast_lab.models, class) for every backend
 # beyond the four core ones. Registration skips any whose optional
 # dependencies are missing.
@@ -1302,6 +1319,7 @@ def _cache_meta(cache: dict) -> dict:
 
     return {
         "schema_version": CACHE_SCHEMA_VERSION,
+        "label_rule": LABEL_RULE_VERSION,
         "addon_version": __version__,
         "model_name": cache["model_name"],
         "feature_cols": list(cache["feature_cols"]),
@@ -1492,6 +1510,16 @@ class MLForecastLabApp:
         # mirrored to _published_entities_path (set by run(); None in tests)
         # so sensors of renamed, removed or lab experiments can be removed.
         self._published_entities: Dict[str, str] = {}
+        # v2.55.0: per experiment with load_subtract, the target's use so far
+        # today after subtraction, as {"date": local date, "value": float},
+        # from the latest fetch. Seeds the cumulative sensor, which the raw
+        # target's reading would seed with the subtracted loads included.
+        self._net_today: Dict[str, dict] = {}
+        # v2.55.0: per experiment, the newest bin written to its net-actuals
+        # table this run. The first write of a run covers the whole fetched
+        # window; later ones rewrite from two days before this bin, so a
+        # stretch without writes is filled in once they resume.
+        self._net_actuals_written: Dict[str, pd.Timestamp] = {}
         self._published_entities_path: Optional[Path] = None
         self._orphan_candidates: set = set()
         self._orphan_cleanup_disabled = False
@@ -2548,6 +2576,16 @@ class MLForecastLabApp:
             f"load={load_total:.2f} kWh, "
             f"subtracted={sub_total:.2f} kWh ({share_pct:.1f}% of load), "
             f"clipped={n_clipped} rows ({clipped_pct:.2f}%)"
+            + (
+                f", deficit carried={audit['deficit_carried_kwh']:.2f} kWh, "
+                f"left at day end={audit['deficit_dropped_kwh']:.2f} kWh"
+                if audit.get("deficit_carried_kwh") or audit.get("deficit_dropped_kwh")
+                else ""
+            )
+            + (
+                f", unmeasured days={len(audit['unmeasured_days'])}"
+                if audit.get("unmeasured_days") else ""
+            )
         )
         for sensor in audit.get("per_sensor", []):
             gap = ""
@@ -2569,6 +2607,123 @@ class MLForecastLabApp:
                 f"({sensor['violation_pct']:.2f}%)"
                 f"{gap}"
             )
+
+    # v2.55.0: after a run has written an experiment's whole fetched window
+    # to its net-actuals table, each later fetch rewrites only this much of
+    # the tail before the newest bin it wrote — the current bin and any bin
+    # a late reading or a carried deficit changed. A restart rewrites the
+    # window once more.
+    _NET_ACTUALS_REWRITE_DAYS = 2
+
+    def _local_tz(self):
+        """The configured timezone, for local-day boundaries; UTC if unset."""
+        try:
+            from zoneinfo import ZoneInfo
+            return ZoneInfo(
+                (self.config.timezone if self.config else None) or "UTC"
+            )
+        except Exception:
+            return timezone.utc
+
+    def _local_dates(self, index: pd.DatetimeIndex) -> np.ndarray:
+        """The configured timezone's calendar date of each grid timestamp
+        (naive timestamps are UTC, as everywhere in the pipeline)."""
+        idx_utc = (
+            index.tz_localize("UTC") if index.tz is None
+            else index.tz_convert("UTC")
+        )
+        return np.asarray(idx_utc.tz_convert(self._local_tz()).date)
+
+    async def _record_net_actuals(
+        self, exp_cfg, net: pd.Series, now: datetime, audit: dict,
+    ) -> None:
+        """Keep an experiment's target after ``load_subtract``.
+
+        ``net`` is the target on the grid after subtraction, before outlier
+        clipping and any log transform: what the model is trained to
+        forecast, as measured. v2.55.0: it was used only for training, while
+        the cumulative seed, accuracy, conformal bands and the comparison
+        read the raw target, so they measured the subtracted loads as well
+        as the forecast's error.
+
+        Each bin's value — its use, for a cumulative target — is written to
+        ``HistoryDB.net_actuals_table``; a cumulative target's unmeasured bin
+        is written as NULL so it is scored as unknown, not as zero use, and
+        its use so far today is recorded for the seed. Writes go through
+        ``upsert_history`` because the current bin, and any bin a late
+        reading or a carried deficit reaches, change between fetches.
+
+        Only bins this fetch measured in full are written, so a rewrite
+        never replaces a good row with a worse one: nothing when a
+        subtracted sensor's fetch failed (``audit`` lists fewer sensors than
+        are configured); nothing before every subtracted sensor's history
+        starts — days older than HA's recorder keeps, where the cached
+        target would be written with nothing taken off; and, for a
+        cumulative target, nothing before the first local midnight after
+        that, since the first reading has no rise and the deficit carried
+        from earlier that day is missing.
+        """
+        net = pd.to_numeric(net, errors="coerce").astype(float)
+        if net.empty or not isinstance(net.index, pd.DatetimeIndex):
+            return
+        tz = self._local_tz()
+        local_dates = self._local_dates(net.index)
+        bins = (
+            net.index if net.index.tz is None
+            else net.index.tz_convert("UTC").tz_localize(None)
+        )
+        cumulative = bool(getattr(exp_cfg, "source_is_cumulative", False))
+
+        # A sensor that failed to fetch was not subtracted: keep the seed and
+        # the table as the last complete fetch left them.
+        per_sensor = audit.get("per_sensor", [])
+        if len(per_sensor) < len(exp_cfg.load_subtract or []):
+            logger.info(
+                f"  {exp_cfg.name}: a load_subtract sensor was not fetched; "
+                f"actuals after subtraction are left as they were"
+            )
+            return
+        if cumulative:
+            now_utc = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+            today = now_utc.astimezone(tz).date()
+            self._net_today[exp_cfg.name] = {
+                "date": today,
+                "value": float(net[local_dates == today].sum()),
+            }
+
+        if not self.history_db:
+            return
+        step = pd.Timedelta(minutes=int(exp_cfg.interval_minutes))
+        first_full = bins.min()
+        for sensor in per_sensor:
+            # gap_start is only set for a gap at the start of the window.
+            if sensor.get("gap_start") is None:
+                continue
+            gap_end = pd.Timestamp(sensor["gap_end"])
+            if gap_end.tzinfo is not None:
+                gap_end = gap_end.tz_convert("UTC").tz_localize(None)
+            first_full = max(first_full, gap_end + step)
+        keep = np.asarray(bins >= first_full)
+        if cumulative and keep.any():
+            keep &= local_dates > local_dates[int(np.argmax(keep))]
+
+        table = self.history_db.net_actuals_table(exp_cfg.name)
+        frame = pd.DataFrame({"ds": bins, "value": net.to_numpy()})[keep]
+        if not cumulative:
+            frame = frame.dropna(subset=["value"])
+        newest = self._net_actuals_written.get(exp_cfg.name)
+        if newest is not None:
+            tail_start = min(bins.max(), newest) - pd.Timedelta(
+                days=self._NET_ACTUALS_REWRITE_DAYS,
+            )
+            frame = frame[frame["ds"] >= tail_start]
+        if not frame.empty:
+            await asyncio.to_thread(
+                self.history_db.upsert_history, table, frame,
+            )
+            self._net_actuals_written[exp_cfg.name] = frame["ds"].max()
+        oldest = now - timedelta(days=self._retention_days_for_table(table))
+        await asyncio.to_thread(self.history_db.cleanup, table, oldest)
 
     async def _analyse_entity_history(
         self,
@@ -2961,6 +3116,13 @@ class MLForecastLabApp:
                     ent, getattr(cov, "future_value_key", None),
                 ))
 
+        # v2.55.0: the experiment's own net-actuals table.
+        if getattr(exp, "load_subtract", None) and getattr(exp, "name", None):
+            try:
+                out.append(self.history_db.net_actuals_table(exp.name))
+            except (ValueError, TypeError):
+                pass
+
         return out
 
     def _retention_days_for_table(self, table: Optional[str]) -> int:
@@ -3251,6 +3413,10 @@ class MLForecastLabApp:
                     grid_index = series.index
                     series, sub_audit = apply_load_subtract(
                         series, subtract_inputs,
+                        carry_deficit_days=(
+                            self._local_dates(grid_index)
+                            if exp_cfg.source_is_cumulative else None
+                        ),
                     )
                     # `on_missing: drop` deletes rows outright. Put them
                     # back as NaN so the grid stays unbroken: a hole here
@@ -3269,6 +3435,18 @@ class MLForecastLabApp:
                             f"contiguous for feature construction."
                         )
                     self._log_load_subtract_audit(exp_cfg, sub_audit)
+                    # v2.55.0: scoring, bands and the cumulative seed use
+                    # this series too. Non-fatal: a failed write leaves the
+                    # previous actuals in place and the forecast unaffected.
+                    try:
+                        await self._record_net_actuals(
+                            exp_cfg, series, now, sub_audit,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"  Could not record actuals after load_subtract "
+                            f"for {exp_cfg.name}: {e}"
+                        )
                 except LoadSubtractError as e:
                     # Fail-fast guard fired — do NOT silently proceed with a
                     # broken subtract. Surface the error to the caller so the
@@ -6908,6 +7086,15 @@ class MLForecastLabApp:
                         f"benchmark + retrain will be scheduled)"
                     )
                     continue
+                if not _label_rule_current(exp_cfg, meta):
+                    logger.info(
+                        f"  Cached model for {exp_cfg.name} was trained on "
+                        f"labels from an earlier cumulative-conversion rule "
+                        f"(v{meta.get('label_rule', 1)}, now "
+                        f"v{LABEL_RULE_VERSION}); ignoring it so a retrain "
+                        f"builds one on the current labels"
+                    )
+                    continue
 
                 model_name = meta["model_name"]
                 model = self.model_registry.create(model_name)
@@ -7008,6 +7195,18 @@ class MLForecastLabApp:
         prev_meta = prev_dir / "cache_meta.json"
         if not prev_bin.exists() or not prev_meta.exists():
             return False, "No previous version on disk to roll back to"
+        # v2.55.0: the generation a retrain displaced may predate the label
+        # rule; restore would reject it at the next restart anyway, and until
+        # then it would be fed lags on a different scale.
+        try:
+            prev_meta_data = json.loads(prev_meta.read_text())
+        except Exception as e:
+            return False, f"Previous version's metadata is unreadable: {e}"
+        if not _label_rule_current(exp_cfg, prev_meta_data):
+            return False, (
+                "The previous version was trained on labels from an earlier "
+                "release and can't be restored"
+            )
 
         try:
             # Swap: current → previous_tmp, previous → current, previous_tmp → previous.
@@ -7264,9 +7463,10 @@ class MLForecastLabApp:
         the replay tool computes bands through the same code. The caller
         owns the production-mode / history-DB gate and the error handling.
         """
-        actuals_table = self.history_db.safe_table_name(
-            exp_cfg.target_entity
-        )
+        # v2.55.0: with load_subtract, residuals against the target after
+        # subtraction — the raw target's sized the band from the subtracted
+        # loads.
+        actuals_table = self.history_db.actuals_table_for(exp_cfg)
         target_level = (
             level
             if level is not None
@@ -7682,8 +7882,24 @@ class MLForecastLabApp:
             except Exception:
                 local_tz = timezone.utc
 
+            now_local_date = issued_at.astimezone(local_tz).date()
             today_seed = 0.0
-            if exp_cfg.target_entity:
+            if getattr(exp_cfg, "load_subtract", None):
+                # v2.55.0: the forecast is of the target after
+                # load_subtract, so the curve starts from today's use after
+                # subtraction. The target's own reading includes the
+                # subtracted loads, which put the whole curve that far
+                # above the forecast.
+                net_today = self._net_today.get(exp_cfg.name)
+                if net_today and net_today.get("date") == now_local_date:
+                    today_seed = float(net_today["value"])
+                else:
+                    logger.warning(
+                        f"  {exp_cfg.name}: no use after load_subtract "
+                        f"recorded for today; the cumulative forecast "
+                        f"starts from 0."
+                    )
+            elif exp_cfg.target_entity:
                 try:
                     raw = await self.ha_interface.get_state(
                         exp_cfg.target_entity, default=None,
@@ -7693,7 +7909,6 @@ class MLForecastLabApp:
                 except Exception:
                     today_seed = 0.0
 
-            now_local_date = issued_at.astimezone(local_tz).date()
             running_by_day: dict = {}
             cum_list = []
             # Headline state = the projected end-of-today total (last forecast
@@ -7878,9 +8093,8 @@ class MLForecastLabApp:
             acc_attrs["status"] = "lab_mode"
         else:
             try:
-                actuals_table = self.history_db.safe_table_name(
-                    exp_cfg.target_entity
-                )
+                # v2.55.0: the target after load_subtract, when configured.
+                actuals_table = self.history_db.actuals_table_for(exp_cfg)
                 # Offload the scan-heavy query — three CTE passes over
                 # the actuals table per call, multiplied by N experiments
                 # per publish cycle. Running inline would freeze the

@@ -71,7 +71,9 @@ Many HA sensors report running totals (`*_today` energy, daily heat). Configure 
 |---|---|---|---|
 | `source_is_cumulative` | bool | `false` | `true` if the target sensor reports a running total. |
 | `reset_daily` | bool | `false` | `true` if the cumulative sensor resets at local midnight. |
-| `max_increment` | float | unset (= auto) | Caps a single-interval delta. Useful to bound abnormal jumps (e.g. EV plug-ins). If unset, the 95th percentile of observed increments is used. |
+| `max_increment` | float | unset (= auto) | Caps the rise between two consecutive readings of a cumulative sensor. Useful to bound abnormal jumps (e.g. EV plug-ins). If unset, the cap grows with the time since the previous reading — twice the sensor's typical peak rate of rise times that time — so a sensor that updates slowly or irregularly isn't cut short, while a counter glitch still is. |
+
+A running total that falls back and climbs again counts as restarting only when it drops to below 90% of its last reading. A smaller dip isn't use, and counting resumes once the sensor passes its previous high. A drop that lands between half and 90% of the last reading, stays there, and is back at or above that reading within the hour is a sensor briefly reporting an old value after a dropout, so it isn't counted as a restart either.
 
 ### Covariates
 
@@ -204,6 +206,10 @@ load_subtract:
 | `scale` | float | unset | Multiplier — use to fix unit mismatches (e.g. Wh → kWh: `0.001`). |
 | `max_fraction_of_load` | float | `1.0` | Per-row ceiling on `subtract / load`. Rows exceeding it count as violations. |
 | `max_fraction_violation_pct` | float | `5.0` | Maximum percentage of rows allowed to violate `max_fraction_of_load` before the load-subtract step raises. Acts as a fail-fast guard for unit bugs. |
+
+With `load_subtract` the experiment forecasts the target with these sensors taken out, and everything that checks the forecast uses the same figure: the Forecast Accuracy and Forecast Comparison tabs, `sensor.mlfl_<name>_forecast_accuracy`, the upper and lower bands, and the starting point of `sensor.mlfl_<name>_cumulative` (today's use so far with the subtracted sensors taken out, not the target sensor's own reading).
+
+When the target is a running total (`source_is_cumulative: true`), an interval where the subtracted sensors recorded more than the target — one sensor reporting a little after the other, or the target pausing and then catching up — is set to zero and the excess is taken off the following intervals of the same day. Each day's total is then the target's use minus the subtracted sensors' use. Any excess still left at midnight is dropped, and the log reports how much was carried and how much was left. If what is left at midnight is more than 10% of both the subtracted sensors' use and the target's own use that day, the target was almost certainly not reporting while the subtracted sensors carried on, so the whole day is treated as unmeasured: it is left out of training and of the accuracy figures, and the log names it. The current day is never treated this way, since the target may still catch up. Other targets set such an interval to zero.
 
 **Note:** the older `subtract: [entity_id]` field is a deprecated stub — it loads without error but does not affect training. Migrate any existing config to `load_subtract`.
 
@@ -371,7 +377,7 @@ When an experiment is in `mode: production`, the app publishes the following sen
 |---|---|---|
 | `sensor.mlfl_<name>_forecast` | The next interval's forecast value. | Attributes include the full future curve as a list of `{datetime, value}` pairs. |
 | `sensor.mlfl_<name>_interval` | The next interval's value, expressed as a per-interval increment. | Published only when `source_is_cumulative` is true (otherwise identical to `_forecast`). |
-| `sensor.mlfl_<name>_cumulative` | The integrated forecast curve. Resets at local midnight when `source_is_cumulative` and `reset_daily` are both true; otherwise a `cumsum` anchored at zero. | Useful for daily-budget automations (EV planning, hot-water tank pre-heat). Shows `unknown` with `status: signed_predictions` when the forecast dips below zero, because a running total of signed values drifts; for targets that can't be negative (solar power, demand) set `target_is_nonnegative: true`. |
+| `sensor.mlfl_<name>_cumulative` | The integrated forecast curve. Resets at local midnight when `source_is_cumulative` and `reset_daily` are both true, starting from today's use so far (after `load_subtract`, when set); otherwise a `cumsum` anchored at zero. | Useful for daily-budget automations (EV planning, hot-water tank pre-heat). Shows `unknown` with `status: signed_predictions` when the forecast dips below zero, because a running total of signed values drifts; for targets that can't be negative (solar power, demand) set `target_is_nonnegative: true`. |
 | `sensor.mlfl_<name>_upper_<pct>` | Upper conformal band at the `<pct>` coverage level (default `80`). | Renamed to match `conformal_coverage` — e.g. `_upper_90` if you set `0.9`. Shows `unknown` with `status: no_conformal_bands` until enough residuals have been calibrated; cold-start may take ~10 forecast cycles. |
 | `sensor.mlfl_<name>_lower_<pct>` | Lower conformal band. | As above. |
 | `sensor.mlfl_<name>_forecast_accuracy` | Mean absolute error of the next-interval forecast over the last 30 days. Per interval when `source_is_cumulative` is true. | Recomputed on every forecast publish. Attributes carry the full lead-time curve (`lead_hours`, `mae`, `rmse`, `sample_count`) and the first-versus-latest revision MAE. `status` reads `accumulating` until a next-interval forecast has been scored. |

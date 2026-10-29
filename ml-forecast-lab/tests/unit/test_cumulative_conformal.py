@@ -193,6 +193,12 @@ class _RecordingDB:
     def safe_table_name(self, entity_id):
         return HistoryDB.safe_table_name(self, entity_id)
 
+    def net_actuals_table(self, experiment):
+        return HistoryDB.net_actuals_table(self, experiment)
+
+    def actuals_table_for(self, exp_cfg):
+        return HistoryDB.actuals_table_for(self, exp_cfg)
+
     def get_conformal_quantiles(self, *args, **kwargs):
         self.calls.append(kwargs)
         return self._responses.pop(0)
