@@ -417,7 +417,7 @@ Forecast sensors exist only while their experiment is in production. When you sw
 
 Open the UI via the app's **Open Web UI** button (HA ingress).
 
-- **Dashboard.** One card per experiment. Click into a card to drill in. The grid refreshes via HTMX without losing scroll position or expanded panels.
+- **Dashboard.** One card per experiment. Click into a card to drill in. The grid refreshes via HTMX without losing scroll position or expanded panels. **Run All Benchmarks** queues a benchmark for every experiment that is not already running or queued; they run one at a time. A waiting card shows **Queued (#n)**, which you can click to take it out of the queue, and **Stop Training** cancels the one running.
 - **Experiment page tabs.**
   - **Settings.** All knobs above as a form. Editing here writes back to `mlfl.yaml` atomically. Includes a pre-flight **Data sanity check** that reports rows fetched vs expected, biggest gap, recorder freshness, missing-value rate, and (for cumulative sensors) max-increment hits — run this before a benchmark to catch a 14-day flatline before you spend an hour training. The **Target** section's **Replace…** control swaps the experiment's `target_entity` for a different sensor in place (keeping its name, covariates and other settings); since everything trained or measured against the old sensor is now stale, this clears the cached model, logged forecasts and benchmark scores after a confirmation prompt.
   - **Models.** Per-model toggle, default vs tuned MAE, **Promote to Production** button. Quick-preset chips (Fast / Balanced / Thorough) flip groups of toggles to match the starter sets in `docs/MODEL_GUIDE.md`.
@@ -426,7 +426,7 @@ Open the UI via the app's **Open Web UI** button (HA ingress).
   - **Forecast Accuracy.** Three-layer diagnostic: verdict chip, per-horizon error chart, retrain-history chips (filter the chart to a specific `(model_name, model_version)` cohort). Conformal-band calibration countdown surfaces "Calibrating · N of 10 residuals" rather than a silent blank.
   - **Forecast Comparison.** Add up to five third-party forecast sensors (Solcast, a utility curve, another model) right on the tab, and it scores this app's published forecast head-to-head against each — all against the actuals — as an **accuracy leaderboard** (rank by a composite or a single metric, with #1/#2/#3 badges), plus an overlay chart, an error-by-time-of-day chart, and (for trajectory sensors) a per-horizon error curve. Unit-aware, with a per-interval ↔ cumulative toggle; sources stay provisional until they have 7 days of overlap. Scoring runs once the experiment is in production. See *Configuration reference → External forecast comparison*.
   - **Predictions** and **Covariate Analysis.** Forecast-trace overlay and an automatic search across covariate combinations to identify which signals genuinely improve forecasts.
-- **System page.** CPU-core / nice-priority controls (actually applied) and a global "Run all benchmarks" trigger.
+- **System page.** CPU-core / nice-priority controls (actually applied).
 
 ---
 
