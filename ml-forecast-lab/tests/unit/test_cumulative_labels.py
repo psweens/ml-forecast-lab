@@ -19,7 +19,13 @@ Two conversions threw real use away before the model saw it.
    dip (12.3 → 12.2) scored the whole reading as one interval's use, which
    only the old tight cap hid. A restart is now a drop below 90% of the
    previous reading, as in the analytics and HA's ``total_increasing``, and
-   a dip scores nothing until the counter passes its previous high. With
+   a dip scores nothing until the counter passes the level already scored.
+   That level, not the raw reading, is what a dip is measured from, so a
+   capped spike that comes back down no longer zeroes the labels that
+   follow, and a dip deeper than an interval's plausible use is a
+   re-baseline. A lifetime counter's drop that its next rise undoes (a
+   brief 0) is a glitch and is ignored, and the default cap's rate estimate
+   leaves glitch recoveries and spikes out, so they can't set it. With
    ``reset_daily``, a small rise across UTC midnight also counted as a
    restart, so in summer time a local-midnight counter's first hour of each
    day was scored twice; only a drop across midnight is a restart now.
@@ -52,6 +58,7 @@ from ml_forecast_lab.preprocessing import (
     COUNTER_RESTART_RATIO,
     RATE_CAP_MIN_SAMPLES,
     _carry_deficit,
+    _score_from_accepted_level,
     apply_load_subtract,
     cumulative_to_interval,
 )
@@ -174,7 +181,7 @@ class TestRateBasedCap:
         old = cumulative_to_interval(s, INTERVAL, max_increment=p95)
         assert old.sum() < 0.9 * (s.iloc[-1] - s.iloc[0])
 
-    def test_a_glitch_recovery_is_still_capped(self):
+    def test_a_glitch_recovery_scores_only_the_use_since(self):
         s = _irregular_house_meter()
         i = len(s) // 2
         t = s.index[i]
@@ -186,11 +193,26 @@ class TestRateBasedCap:
             s.iloc[i + 1:],
         ])
         inc = cumulative_to_interval(glitch, INTERVAL)
-        # The recovery re-adds the whole counter (tens of kWh); the cap holds
-        # it to what 40 seconds of use at twice the busiest rate could carry.
+        # The recovery would re-add the whole counter (tens of kWh).
         assert s.iloc[i - 1] > 10.0
+        assert inc.loc[recovery_at] == pytest.approx(0.0)
+        assert inc.sum() == pytest.approx(s.iloc[-1] - s.iloc[0])
+
+    def test_a_daily_counters_glitch_is_still_capped(self):
+        """Daily counters keep every drop below 90% as a restart, so the
+        recovery is a rise from 0 — kept out of the rate estimate, so the
+        cap still holds it."""
+        s = _irregular_house_meter()
+        i = len(s) // 2
+        t = s.index[i]
+        recovery_at = t + pd.Timedelta(seconds=40)
+        glitch = pd.concat([
+            s.iloc[:i],
+            pd.Series([0.0, s.iloc[i - 1]], index=[t, recovery_at]),
+            s.iloc[i + 1:],
+        ])
+        inc = cumulative_to_interval(glitch, INTERVAL, reset_daily=True)
         assert inc.loc[recovery_at] < 1.0
-        assert inc.sum() < (s.iloc[-1] - s.iloc[0]) + 1.0
 
     def test_a_rise_after_a_silence_is_kept_at_the_usual_rate(self):
         """A change-only counter that goes quiet for 25 minutes, still inside
@@ -223,6 +245,97 @@ class TestRateBasedCap:
         s = _counter([0.0, 0.1, 0.2, 30.0], times=times)
         inc = cumulative_to_interval(s, INTERVAL)
         assert inc.iloc[3] == pytest.approx(29.8)
+
+
+# ---------------------------------------------------------------------
+# Glitches and re-baselines
+# ---------------------------------------------------------------------
+
+def _lifetime_meter(days=28, step_min=30, seed=0):
+    """A 12,345 kWh lifetime counter read every ``step_min`` minutes,
+    using 0.2–1.0 kWh per half hour."""
+    idx = pd.date_range("2026-10-01", periods=int(days * 24 * 60 / step_min),
+                        freq=f"{step_min}min")
+    use = np.random.default_rng(seed).uniform(0.2, 1.0, len(idx)) * step_min / 30
+    return pd.Series(12345.0 + np.cumsum(use), index=idx)
+
+
+def _with_zero_glitches(s, every):
+    """Each ``every`` readings, the counter reads 0 and then its old value
+    again before its next reading."""
+    step = s.index[1] - s.index[0]
+    extra = {}
+    for i in range(every // 2, len(s) - 1, every):
+        extra[s.index[i] + step / 3] = 0.0
+        extra[s.index[i] + 2 * step / 3] = s.iloc[i]
+    return pd.concat([s, pd.Series(extra)]).sort_index()
+
+
+class TestGlitchesAndRebaselines:
+    def test_a_drop_to_zero_and_back_is_ignored_on_a_short_history(self):
+        """51 readings: the recovery's own rate was the 99th percentile, so
+        the cap let the whole counter through as one interval's use."""
+        s = _lifetime_meter(days=51 / 48)
+        inc = cumulative_to_interval(_with_zero_glitches(s, len(s)), INTERVAL)
+        assert inc.sum() == pytest.approx(s.iloc[-1] - s.iloc[0])
+        assert inc.max() < 2.0
+
+    def test_daily_glitches_do_not_lift_the_cap(self):
+        s = _lifetime_meter(days=14, step_min=15)
+        inc = cumulative_to_interval(_with_zero_glitches(s, 96), INTERVAL)
+        assert inc.sum() == pytest.approx(s.iloc[-1] - s.iloc[0])
+        assert inc.max() < 2.0
+
+    def test_a_daily_reset_is_never_taken_for_a_glitch(self):
+        """One reading after a daily reset can carry most of the day's use,
+        e.g. a charger that reports its session when it ends."""
+        day1 = pd.date_range("2026-10-20 00:00", periods=48, freq="30min")
+        times = list(day1) + [pd.Timestamp("2026-10-21 00:01"),
+                              pd.Timestamp("2026-10-21 06:00")]
+        vals = list(0.4 * np.arange(1, 49)) + [0.0, 18.0]
+        inc = cumulative_to_interval(_counter(vals, times=times), INTERVAL,
+                                     reset_daily=True)
+        assert inc.iloc[-1] == pytest.approx(18.0)
+
+    @pytest.mark.parametrize("max_increment", [None, 2.0])
+    def test_a_capped_spike_that_returns_keeps_later_labels(self, max_increment):
+        """One corrupted reading (+1000 kWh, under the 10% restart drop):
+        measured from the raw spike, every later reading scored 0 until
+        the counter passed it — 20 of 28 days."""
+        s = _lifetime_meter()
+        g = s.copy()
+        g.iloc[7 * 48] += 1000.0
+        inc = cumulative_to_interval(g, INTERVAL, max_increment=max_increment)
+        daily = inc.groupby(inc.index.date).sum()
+        assert (daily > 5.0).all()
+        assert inc.sum() == pytest.approx(s.iloc[-1] - s.iloc[0], abs=2.0)
+
+    @pytest.mark.parametrize("max_increment", [None, 2.0])
+    def test_a_small_step_down_rebaselines_the_counter(self, max_increment):
+        """A meter re-baselined 5% lower (617 kWh) scored 0 until it climbed
+        back past the old reading."""
+        s = _lifetime_meter()
+        g = s.copy()
+        g.iloc[7 * 48:] -= 0.05 * s.iloc[7 * 48]
+        inc = cumulative_to_interval(g, INTERVAL, max_increment=max_increment)
+        daily = inc.groupby(inc.index.date).sum()
+        assert (daily > 5.0).all()
+        assert inc.sum() == pytest.approx(s.iloc[-1] - s.iloc[0], abs=2.0)
+
+    def test_without_caps_or_deep_dips_the_scan_is_the_running_high_rule(self):
+        """The scan only runs when it can differ from the vectorised rule;
+        where it can't, it must agree exactly."""
+        rng = np.random.default_rng(3)
+        v = 100.0 + np.cumsum(rng.uniform(0.0, 1.0, 500))
+        v[rng.choice(500, 40, replace=False)] -= 0.3   # measurement dips
+        s = pd.Series(v)
+        high = s.cummax().shift(1)
+        expected = (s - high).clip(lower=0.0).fillna(0.0).to_numpy()
+        n = len(v)
+        got = _score_from_accepted_level(
+            v.tolist(), [False] * n, [False] * n, [np.inf] * n, np.inf,
+        )
+        assert np.asarray(got) == pytest.approx(expected)
 
 
 # ---------------------------------------------------------------------

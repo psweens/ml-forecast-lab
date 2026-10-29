@@ -2604,8 +2604,8 @@ class MLForecastLabApp:
 
     # v2.55.0: after a run has written an experiment's whole fetched window
     # to its net-actuals table, each later fetch rewrites only this much of
-    # the tail — the current day's running total and any bin a late reading
-    # changed. A restart rewrites the window once more.
+    # the tail — the current bin and any bin a late reading or a carried
+    # deficit changed. A restart rewrites the window once more.
     _NET_ACTUALS_REWRITE_DAYS = 2
 
     def _local_tz(self):
@@ -2628,7 +2628,7 @@ class MLForecastLabApp:
         return np.asarray(idx_utc.tz_convert(self._local_tz()).date)
 
     async def _record_net_actuals(
-        self, exp_cfg, net: pd.Series, now: datetime,
+        self, exp_cfg, net: pd.Series, now: datetime, audit: dict,
     ) -> None:
         """Keep an experiment's target after ``load_subtract``.
 
@@ -2639,12 +2639,22 @@ class MLForecastLabApp:
         read the raw target, so they measured the subtracted loads as well
         as the forecast's error.
 
-        For a cumulative target this records the use so far today (the
-        seed) and writes each bin's running total since local midnight to
-        ``HistoryDB.net_actuals_table``; an unmeasured bin is written as
-        NULL so it is scored as unknown, not as zero use. Otherwise each
-        measured bin's value is written. Writes go through ``upsert_history``
-        because the current bin and the day's total change between fetches.
+        Each bin's value — its use, for a cumulative target — is written to
+        ``HistoryDB.net_actuals_table``; a cumulative target's unmeasured bin
+        is written as NULL so it is scored as unknown, not as zero use, and
+        its use so far today is recorded for the seed. Writes go through
+        ``upsert_history`` because the current bin, and any bin a late
+        reading or a carried deficit reaches, change between fetches.
+
+        Only bins this fetch measured in full are written, so a rewrite
+        never replaces a good row with a worse one: nothing when a
+        subtracted sensor's fetch failed (``audit`` lists fewer sensors than
+        are configured); nothing before every subtracted sensor's history
+        starts — days older than HA's recorder keeps, where the cached
+        target would be written with nothing taken off; and, for a
+        cumulative target, nothing before the first local midnight after
+        that, since the first reading has no rise and the deficit carried
+        from earlier that day is missing.
         """
         net = pd.to_numeric(net, errors="coerce").astype(float)
         if net.empty or not isinstance(net.index, pd.DatetimeIndex):
@@ -2658,21 +2668,38 @@ class MLForecastLabApp:
         cumulative = bool(getattr(exp_cfg, "source_is_cumulative", False))
 
         if cumulative:
-            values = net.fillna(0.0).groupby(local_dates).cumsum()
-            values = values.where(net.notna())
             now_utc = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
             today = now_utc.astimezone(tz).date()
             self._net_today[exp_cfg.name] = {
                 "date": today,
                 "value": float(net[local_dates == today].sum()),
             }
-        else:
-            values = net
 
         if not self.history_db:
             return
+        per_sensor = audit.get("per_sensor", [])
+        if len(per_sensor) < len(exp_cfg.load_subtract or []):
+            logger.info(
+                f"  {exp_cfg.name}: a load_subtract sensor was not fetched; "
+                f"its stored actuals after subtraction are left as they were"
+            )
+            return
+        step = pd.Timedelta(minutes=int(exp_cfg.interval_minutes))
+        first_full = bins.min()
+        for sensor in per_sensor:
+            # gap_start is only set for a gap at the start of the window.
+            if sensor.get("gap_start") is None:
+                continue
+            gap_end = pd.Timestamp(sensor["gap_end"])
+            if gap_end.tzinfo is not None:
+                gap_end = gap_end.tz_convert("UTC").tz_localize(None)
+            first_full = max(first_full, gap_end + step)
+        keep = np.asarray(bins >= first_full)
+        if cumulative and keep.any():
+            keep &= local_dates > local_dates[int(np.argmax(keep))]
+
         table = self.history_db.net_actuals_table(exp_cfg.name)
-        frame = pd.DataFrame({"ds": bins, "value": values.to_numpy()})
+        frame = pd.DataFrame({"ds": bins, "value": net.to_numpy()})[keep]
         if not cumulative:
             frame = frame.dropna(subset=["value"])
         if exp_cfg.name in self._net_actuals_backfilled:
@@ -2680,7 +2707,10 @@ class MLForecastLabApp:
                 days=self._NET_ACTUALS_REWRITE_DAYS,
             )
             frame = frame[frame["ds"] >= tail_start]
-        await asyncio.to_thread(self.history_db.upsert_history, table, frame)
+        if not frame.empty:
+            await asyncio.to_thread(
+                self.history_db.upsert_history, table, frame,
+            )
         self._net_actuals_backfilled.add(exp_cfg.name)
         oldest = now - timedelta(days=self._retention_days_for_table(table))
         await asyncio.to_thread(self.history_db.cleanup, table, oldest)
@@ -3399,7 +3429,9 @@ class MLForecastLabApp:
                     # this series too. Non-fatal: a failed write leaves the
                     # previous actuals in place and the forecast unaffected.
                     try:
-                        await self._record_net_actuals(exp_cfg, series, now)
+                        await self._record_net_actuals(
+                            exp_cfg, series, now, sub_audit,
+                        )
                     except Exception as e:
                         logger.warning(
                             f"  Could not record actuals after load_subtract "

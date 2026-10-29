@@ -48,15 +48,31 @@ running.
 path, on the series before outlier clipping and the log transform (what
 the sensor measured once the loads are taken out):
 
-- For a cumulative target it stores today's use so far (local day, from
-  `AppConfig.timezone`) for the seed, and writes every grid bin's running
-  total since local midnight to `net_actuals_<experiment>`. An unmeasured
-  bin (NaN label, e.g. `on_missing: drop`) is written as NULL.
-- For a non-cumulative target it writes each measured bin's value.
-- Writes use `HistoryDB.upsert_history`, because the current bin and the
-  day's total change between fetches. The first fetch of a run writes the
-  whole fetched window (so history logged before the upgrade is scored
-  correctly at once); later fetches rewrite the last two days.
+- It writes each grid bin's value — its use, for a cumulative target — to
+  `net_actuals_<experiment>`. For a cumulative target an unmeasured bin
+  (NaN label, e.g. `on_missing: drop`) is written as NULL, and today's use
+  so far (local day, from `AppConfig.timezone`) is kept for the seed. For a
+  non-cumulative target only measured bins are written.
+- Writes use `HistoryDB.upsert_history`, because the current bin, and any
+  bin a late reading or a carried deficit reaches, change between fetches.
+  The first fetch of a run writes the whole fetched window (so history
+  logged before the upgrade is scored correctly at once); later fetches
+  rewrite the last two days.
+- Only bins the fetch measured in full are written, because the first
+  fetch after every restart rewrites the window over rows an earlier run
+  wrote:
+  - nothing, when a configured subtract sensor's fetch failed (net would be
+    partly subtracted);
+  - nothing before every subtract sensor's history starts (the leading
+    gap in the `apply_load_subtract` audit). The target comes from the
+    app's cache, but the subtract sensors are fetched from HA, whose
+    recorder keeps less: with the defaults (`days_history` 14, recorder 10
+    days) the oldest days would be written with nothing subtracted. Before
+    this guard, a restart reverted correct rows on those days to gross
+    (a probe day went from 28.5 to 47.5 kWh);
+  - for a cumulative target, nothing before the first local midnight after
+    that: the window opens mid-day, its first reading has no rise, and the
+    deficit carried from earlier that day is missing.
 - Retention is the experiment's `max_age`, via
   `_retention_tables_for_experiment`.
 
@@ -65,22 +81,38 @@ the sensor measured once the loads are taken out):
 listed above now goes through it. Experiments without `load_subtract` read
 exactly what they read before.
 
-The table stores the shape the existing readers already handle for a
-daily-reset counter, so no query changed shape:
+Readers recognise the `net_actuals_` prefix and take the rows as they are:
 
-- Increment mode differences consecutive rows; the midnight restart is a
-  drop below 90% of the previous reading and is read as a reset, as for a
-  raw counter.
-- The Comparison tab grid-aligns and differences the rows, discarding the
-  negative diff at the restart, as for a raw counter.
-- The daily-cumulative accuracy path reads the running total directly.
+- Increment mode (accuracy, conformal bands, coverage, trajectory,
+  evolution) builds its per-bin table from the rows directly
+  (`_materialise_net_increments`) instead of differencing a counter.
+- The Comparison tab does not difference them, and skips the
+  recorder-quiet carry-forward, which would draw a bin that was never
+  measured.
+- Daily-cumulative accuracy sums the rows within each day, split by HA's
+  time zone like the forecasts. Once a bin of the day is NULL or has no row,
+  the running total is unknown for the rest of that day.
 
-One reader rule differs. For a raw counter a bin with no readings is zero
-use, because the recorder only logs changes. A net table has a row for
-every bin, so a missing bin can only be an unmeasured label.
-`_materialise_actuals_increments` therefore sets bins holding a NULL row
-to NULL for tables with the `net_actuals_` prefix, and they are excluded
-like the window's first bin. Labels are never imputed.
+A bin with a NULL value or without a row is unknown, never zero use as for
+a change-only raw counter. Labels are never imputed.
+
+An earlier draft stored each bin's running total since local midnight, the
+shape of a daily-reset counter, so the existing counter readers could read
+it unchanged. Review found that this made every reader infer the day
+boundary from the data:
+- the increment reader saw a restart only where a day's first bin fell
+  below 90% of the previous day's total. On a daily-interval experiment
+  every bin is its own day, so a day using at least 90% of the day before
+  scored the difference (11.9 kWh as 1.9). Simulated over 20 days, 9 days
+  were scored wrong and 4 excluded, and a perfect forecast scored an MAE of
+  5.4 kWh/day;
+- the daily-cumulative view split days by HA's time zone while the totals
+  restarted at `AppConfig.timezone` midnight (default UTC). With HA on
+  UTC+1, perfect forecasts scored an end-of-day MAE of about 1 kWh;
+- bins with no row, left by a write gap longer than the rewritten tail,
+  were scored as zero use.
+
+Per-bin rows remove the inference.
 
 ## Training labels
 
@@ -108,6 +140,27 @@ times faster than normal use and is still caught. With fewer than 20
 measured rates the cap falls back to the old 95th-percentile size. Rows
 spanning more than 1.5 intervals stay exempt, as before.
 
+The rate estimate leaves out the first rise after a restart, and any rise
+the next reading takes back. In an earlier draft it didn't, and a glitch's
+own rate set the 99th percentile wherever glitches were at least about 1% of
+readings, or the counter had fewer than about 100 of them. A lifetime
+counter that briefly read 0 and recovered then scored its whole value in one
+bin. With one glitch and 51 half-hourly readings, the bin was 4,117 kWh
+(main: 1.7). A 15-minute counter glitching once a day for 14 days totalled
+53,718 kWh against 335 kWh recorded.
+
+A lifetime counter's drop that its next rise undoes is a glitch and its
+readings are ignored (`_undone_drops`): the first rise after a drop below
+90% reaches 90% of the reading before the drop, which a counter that
+genuinely restarted cannot do in one reading. The recovery then scores only
+the use since the last good reading. Those sweeps now total what was
+recorded (23.4 against 23.4; 334.7 against 334.7), and a drop to 0 lasting
+3 hours (a gap row, exempt from the cap) no longer adds 4,443 kWh, as it did
+on main. Daily counters are excluded from this rule, since one reading after
+the midnight reset can genuinely carry most of a day's use (a charger
+reporting its session when it ends); their glitch recovery is the first rise
+after a restart, kept out of the rate estimate, so the cap still holds it.
+
 A rate cap on its own overcounted the house counter by 2.4 kWh/day. Every
 drop used to count as a restart, so each time the counter stepped back by
 0.1 kWh the next reading scored its whole value as one interval's use, and
@@ -117,9 +170,21 @@ detection therefore changed too:
 - A restart is a drop below `COUNTER_RESTART_RATIO` (0.9) of the previous
   reading, the threshold `HistoryDB._COUNTER_RESTART_RATIO` and HA's
   `total_increasing` use. A test pins the two constants equal.
-- Between restarts a reading's use is its rise above the highest reading
-  since the restart, so a dip and its recovery net to zero. On a counter
-  that never dips this equals the plain difference.
+- Between restarts a reading's use is its rise above the level already
+  scored, so a dip and its recovery net to zero. On a counter that never
+  dips this equals the plain difference. The level is the highest reading
+  since the restart less any capped-off excess, so a dip is measured from
+  what was scored (`_score_from_accepted_level`); a dip deeper than an
+  interval's plausible use (the cap's rate times one interval, or
+  `max_increment`) re-baselines the counter instead. An earlier draft
+  measured from the raw high. After one corrupted reading (+1,000 kWh on a
+  12,345 kWh meter, under the 10% restart drop), or a 5% step down, every
+  later reading scored 0 until the counter passed the old high: 20 of 28
+  days of zero labels, including the most recent bins feeding inference
+  lags. Both cases now total the recorded use (811.5 against 811.5 kWh;
+  810.6 for the step). The scan only runs when a counter dips and also has a
+  capped reading or a deep dip; otherwise the vectorised running-high
+  result stands unchanged.
 
 - With `reset_daily`, a reading crossing UTC midnight was also a restart
   if it rose by less than 10% of the counter's mean. A counter that resets

@@ -38,11 +38,10 @@ FORECAST_ABS_SANITY = 1e12
 # ``load_subtract`` — the series the model is trained on and forecasts. An
 # experiment with ``load_subtract`` is scored, calibrated and seeded against
 # this table instead of the raw target's, which holds the gross reading. Each
-# row is one grid bin: ``ds`` is the bin start; ``value`` is the running total
-# since local midnight through the end of the bin for a cumulative target, or
-# the bin's value otherwise. A NULL value marks a bin whose label is unmeasured
-# (``resolve_missingness``), which the increment reader scores as unknown rather
-# than as zero use.
+# row is one grid bin: ``ds`` is the bin start and ``value`` the bin's value
+# (its use, for a cumulative target). Readers take the rows as they are — no
+# counter arithmetic, so no day boundary to guess — and a bin with a NULL
+# value (an unmeasured label) or without a row is unknown, never zero use.
 NET_ACTUALS_PREFIX = "net_actuals_"
 
 
@@ -640,6 +639,11 @@ class HistoryDB:
             # Built lazily by the daily-cumulative accuracy path for
             # non-cumulative sensors — drop any stale copy on every rebuild.
             cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_cum_tmp")
+            if increment and actuals_table.startswith(NET_ACTUALS_PREFIX):
+                self._materialise_net_increments(
+                    cursor, actuals_table, interval_sec, since_str,
+                )
+                return True
             if increment:
                 self._materialise_actuals_increments(
                     cursor, actuals_table, interval_sec, since_str,
@@ -694,8 +698,9 @@ class HistoryDB:
         recovery cancels; a bin left negative is excluded downstream by
         the ``>= 0`` guard. Training differs in three ways that are not
         copied here: since v2.55.0 a dip scores nothing and use resumes
-        once the counter passes its previous high (the same total over the
-        dip and its recovery, none of it negative), it caps spikes
+        once the counter passes the level already scored (the same total
+        over the dip and its recovery, none of it negative), and a
+        lifetime counter's drop that it then undoes is ignored, it caps spikes
         (``max_increment``, or by default a cap on the rate of rise), and
         with ``reset_daily`` it treats any drop across UTC midnight as a
         restart. These increments are what the counter measured.
@@ -772,26 +777,48 @@ class HistoryDB:
             "CREATE INDEX _mlfl_actuals_vals_tmp_idx "
             "ON _mlfl_actuals_vals_tmp(grid_dt)"
         )
-        if actuals_table.startswith(NET_ACTUALS_PREFIX):
-            # v2.55.0: a net-actuals table writes a row for every bin, NULL
-            # where the label was unmeasured. Above, a bin with no reading
-            # is zero use — right for a counter the recorder only logs on
-            # change, wrong here — so those bins become unknown and are
-            # excluded like the window's first bin. Labels are never imputed.
-            cursor.execute(
-                f"""
-                UPDATE _mlfl_actuals_vals_tmp SET value = NULL
-                WHERE grid_dt IN (
-                    SELECT strftime('%Y-%m-%d %H:%M:%S',
-                        (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
-                        'unixepoch')
-                    FROM {actuals_table}
-                    WHERE value IS NULL
-                )
-                """,
-                (interval_sec, interval_sec),
-            )
         cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_bins_tmp")
+
+    def _materialise_net_increments(
+        self, cursor, actuals_table: str, interval_sec: int,
+        since_str: Optional[str],
+    ) -> None:
+        """Build ``_mlfl_actuals_vals_tmp(grid_dt, value)`` from a
+        net-actuals table.
+
+        v2.55.0: the table already holds each bin's use after
+        ``load_subtract``, so a bin's increment is its row. A NULL row
+        stays NULL and a bin without a row is absent: both are unknown,
+        where a change-only counter's bin without a reading is zero use.
+        Labels are never imputed. With ``since``, rows start at the bin
+        holding it, as the counter path's table does. Callers hold
+        ``self._lock``.
+        """
+        if since_str:
+            since_sql = (
+                "WHERE ds >= strftime('%Y-%m-%d %H:%M:%S', "
+                "(CAST(strftime('%s', ?) AS INTEGER) / ?) * ?, 'unixepoch')"
+            )
+            since_params: tuple = (since_str, interval_sec, interval_sec)
+        else:
+            since_sql, since_params = "", ()
+        cursor.execute(
+            f"""
+            CREATE TEMP TABLE _mlfl_actuals_vals_tmp AS
+            SELECT strftime('%Y-%m-%d %H:%M:%S',
+                       (CAST(strftime('%s', SUBSTR(ds, 1, 19)) AS INTEGER) / ?) * ?,
+                       'unixepoch') AS grid_dt,
+                   SUM(value) AS value
+            FROM {actuals_table}
+            {since_sql}
+            GROUP BY grid_dt
+            """,
+            (interval_sec, interval_sec, *since_params),
+        )
+        cursor.execute(
+            "CREATE INDEX _mlfl_actuals_vals_tmp_idx "
+            "ON _mlfl_actuals_vals_tmp(grid_dt)"
+        )
 
     @staticmethod
     def _drop_actuals_grid(cursor) -> None:
@@ -1360,6 +1387,12 @@ class HistoryDB:
         # sensor already reports a total, so its scale stays 1.0.
         interval_hours = max(1, int(interval_minutes)) / 60.0
         pred_scale = 1.0 if cumulative_source else interval_hours
+        # v2.55.0: a net-actuals table holds each bin's use, not a running
+        # total, so for a cumulative experiment the running daily total is
+        # built here like an instantaneous sensor's, at scale 1.
+        net_bins = (
+            cumulative_source and actuals_table.startswith(NET_ACTUALS_PREFIX)
+        )
         interval_sec = max(60, int(interval_minutes) * 60)
         bucket_min = max(1, int(interval_minutes))
 
@@ -1430,7 +1463,7 @@ class HistoryDB:
         # drop signed sensors, so the built path only requires non-NULL.
         ag_guard = "AND ag.value >= 0" if cumulative_source else ""
         typ_guard = "AND value >= 0" if cumulative_source else ""
-        if not cumulative_source:
+        if not cumulative_source or net_bins:
             if off_seconds == 0:
                 grid_day_expr = "SUBSTR(grid_dt, 1, 10)"
             else:
@@ -1439,18 +1472,31 @@ class HistoryDB:
                     f"CAST(strftime('%s', grid_dt) AS INTEGER) + {off_seconds}, "
                     "'unixepoch')"
                 )
+            day_window = f"PARTITION BY {grid_day_expr} ORDER BY grid_dt"
+            if net_bins:
+                # Once a bin of the day is unmeasured or has no row, the
+                # day's running total is unknown from there on: summing the
+                # rest would score a perfect forecast as over-predicting.
+                bin_of_day = (
+                    f"((CAST(strftime('%s', grid_dt) AS INTEGER) + {off_seconds})"
+                    f" % 86400) / {interval_sec} + 1"
+                )
+                cum_value = (
+                    f"CASE WHEN COUNT(value) OVER ({day_window}) = {bin_of_day} "
+                    f"THEN SUM(value) OVER ({day_window}) END"
+                )
+                cum_where = ""
+            else:
+                cum_value = f"SUM(value) OVER ({day_window}) * {interval_hours}"
+                cum_where = "WHERE value IS NOT NULL"
             try:
                 cursor.execute("DROP TABLE IF EXISTS _mlfl_actuals_cum_tmp")
                 cursor.execute(
                     f"""
                     CREATE TEMP TABLE _mlfl_actuals_cum_tmp AS
-                    SELECT grid_dt,
-                        SUM(value) OVER (
-                            PARTITION BY {grid_day_expr}
-                            ORDER BY grid_dt
-                        ) * {interval_hours} AS value
+                    SELECT grid_dt, {cum_value} AS value
                     FROM _mlfl_actuals_grid_tmp
-                    WHERE value IS NOT NULL
+                    {cum_where}
                     """
                 )
                 cursor.execute(
@@ -3875,10 +3921,14 @@ class HistoryDB:
             (cutoff_str,),
         )
         actual_raw = _raw_grid(cursor.fetchall())
+        # v2.55.0: a net-actuals table already holds per-interval use, so
+        # it is not differenced even for a cumulative experiment.
+        net_actuals = actuals_table.startswith(NET_ACTUALS_PREFIX)
+        actual_cumulative = target_cumulative and not net_actuals
         if unit_aware:
-            actual_canon = _to_canon(actual_raw, t_dim, t_base, target_cumulative)
+            actual_canon = _to_canon(actual_raw, t_dim, t_base, actual_cumulative)
         else:
-            actual_canon = _legacy_eval(actual_raw, target_cumulative)
+            actual_canon = _legacy_eval(actual_raw, actual_cumulative)
         actual_disp = _display(actual_canon)
         # Chart-only view of the actuals. Identical to actual_disp unless the
         # recorder-quiet carry-forward below has something to add.
@@ -4108,7 +4158,9 @@ class HistoryDB:
         # from growing a fabricated flat tail, and makes this a no-op whenever
         # the actuals are already current.
         last_valid = actual_raw.last_valid_index() if actual_raw is not None else None
-        if last_valid is not None:
+        # A net-actuals table has a row per bin and no recorder-quiet spans;
+        # holding its last bin would draw use that was never measured.
+        if last_valid is not None and not net_actuals:
             horizon = None
             for s in [app_disp] + [it["disp"] for it in ext_items]:
                 if s is not None and not s.empty:

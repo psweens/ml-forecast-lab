@@ -34,7 +34,8 @@ COUNTER_RESTART_RATIO = 0.9
 # observed rates (rise ÷ time since the previous reading) × that reading's
 # own time since the previous reading — never below the median rise, so a
 # counter's resolution step always passes. A glitch recovery runs at
-# hundreds or thousands of times the normal rate and is still caught.
+# hundreds or thousands of times the normal rate and is still caught, as
+# long as glitches are kept out of the rate estimate (see cumulative_to_interval).
 RATE_CAP_QUANTILE = 0.99
 RATE_CAP_MULTIPLE = 2.0
 # Fewer measured rates than this and the counter's typical rate is unknown;
@@ -44,7 +45,8 @@ RATE_CAP_MIN_SAMPLES = 20
 
 def _rate_based_cap(
     rises: pd.Series, elapsed_hours: pd.Series, eligible: pd.Series,
-) -> pd.Series:
+    interval_hours: float,
+) -> Tuple[pd.Series, float]:
     """Per-reading increment cap from the counter's own rate of use.
 
     v2.55.0: the default cap was the 95th percentile of rises, a fixed size.
@@ -54,6 +56,10 @@ def _rate_based_cap(
     labels undercounted the busiest periods. A rate scales with the time a
     rise took, so a long gap between readings admits a proportionally
     larger rise.
+
+    Returns (cap per reading, the most the counter can plausibly rise over
+    one grid interval). The second bounds how far a dip may fall before it
+    is a re-baseline rather than measurement noise.
     """
     ok = eligible & (rises > 0) & (elapsed_hours > 0)
     if int(ok.sum()) < RATE_CAP_MIN_SAMPLES:
@@ -63,7 +69,7 @@ def _rate_based_cap(
             logger.warning(
                 'No positive differences found; using default max_increment=1.0'
             )
-        return pd.Series(size, index=rises.index)
+        return pd.Series(size, index=rises.index), size
     rates = rises[ok] / elapsed_hours[ok]
     rate_cap = RATE_CAP_MULTIPLE * float(rates.quantile(RATE_CAP_QUANTILE))
     floor = float(rises[ok].median())
@@ -71,7 +77,81 @@ def _rate_based_cap(
         f'Increment cap: {rate_cap:.3g} per hour × elapsed time, '
         f'floor {floor:.3g}'
     )
-    return (elapsed_hours.fillna(0.0) * rate_cap).clip(lower=floor)
+    cap = (elapsed_hours.fillna(0.0) * rate_cap).clip(lower=floor)
+    return cap, max(rate_cap * interval_hours, floor)
+
+
+def _undone_drops(series: pd.Series) -> np.ndarray:
+    """Readings of a drop that the counter undoes at its next rise.
+
+    v2.55.0: a lifetime counter that briefly reads 0 or a stale low value
+    (a device reboot, a template sensor whose source is unavailable) and
+    then returns to its old level did not restart: a counter that restarts
+    never climbs back to near its old total in one reading. The readings
+    from the drop up to that return are marked; the first rise after the
+    drop must reach COUNTER_RESTART_RATIO of the reading before it. A
+    return to exactly the reading before the drop is marked too: it carries
+    no use, and keeping its later timestamp would make the next rise look
+    faster than it was.
+    """
+    values = series.to_numpy(dtype='float64')
+    n = len(values)
+    mask = np.zeros(n, dtype=bool)
+    drops = np.flatnonzero(values[1:] < COUNTER_RESTART_RATIO * values[:-1]) + 1
+    for r in drops:
+        if mask[r]:
+            continue
+        j = r + 1
+        while j < n and values[j] <= values[r]:
+            j += 1
+        if j < n and values[j] >= COUNTER_RESTART_RATIO * values[r - 1]:
+            mask[r:j] = True
+            mask[j] = values[j] == values[r - 1]
+    return mask
+
+
+def _score_from_accepted_level(
+    values: Sequence[float],
+    restarts: Sequence[bool],
+    exempt: Sequence[bool],
+    cap: Sequence[float],
+    dip_limit: float,
+) -> list:
+    """Per-reading use, measuring each rise from the level already scored.
+
+    v2.55.0: a rise scores its excess over the highest reading since the
+    restart, so a dip and its recovery net to nothing. A capped reading,
+    though, left its raw value as that high: after a spike that came back
+    down, or a small permanent step down, every later reading scored 0
+    until the counter passed the old high — days or weeks of zero labels on
+    a lifetime counter. Here the high a dip is measured against is the
+    level scored so far (the raw high less the capped-off excess), and a
+    dip deeper than ``dip_limit`` re-baselines the counter instead of
+    absorbing its later use. Without capped readings or deep dips this is
+    exactly the running-high rule.
+    """
+    out = [0.0] * len(values)
+    high = values[0]
+    excess = 0.0
+    for i in range(1, len(values)):
+        v = values[i]
+        if restarts[i]:
+            out[i] = v if exempt[i] else min(v, cap[i])
+            high, excess = v, 0.0
+        elif v > high:
+            rise = v - high
+            scored = rise if exempt[i] or rise <= cap[i] else cap[i]
+            out[i] = scored
+            excess += rise - scored
+            high = v
+        elif v < high:
+            accepted = high - excess
+            if v >= accepted or accepted - v > dip_limit:
+                high = v
+            else:
+                high = accepted
+            excess = 0.0
+    return out
 
 
 def cumulative_to_interval(
@@ -112,10 +192,13 @@ def cumulative_to_interval(
     Notes
     -----
     The function:
-    1. Detects restarts (a drop below ``COUNTER_RESTART_RATIO`` of the
-       previous reading, or with ``reset_daily`` any drop across UTC
-       midnight); a smaller dip is not use, and use resumes once the
-       counter passes its previous high
+    1. Ignores a lifetime counter's drop that the next rise undoes (a
+       glitch), then detects restarts (a drop below
+       ``COUNTER_RESTART_RATIO`` of the previous reading, or with
+       ``reset_daily`` any drop across UTC midnight); a smaller dip is not
+       use, and use resumes once the counter passes the level already
+       scored, unless the dip is deeper than an interval's plausible use
+       (a re-baseline)
     2. Keeps the full rise across a multi-interval gap
     3. Caps spikes exceeding the increment cap (gap rows exempt)
     4. Preserves timezone information if present
@@ -143,6 +226,27 @@ def cumulative_to_interval(
         return pd.Series(
             np.zeros(len(series)), index=series.index, dtype='float64'
         )
+
+    # v2.55.0: a lifetime counter's momentary drop that it then undoes is a
+    # glitch, not a restart. Its readings are dropped, so the return scores
+    # only the use since the last good reading instead of the whole counter
+    # (which also kept the glitch's rate out of the default cap's estimate).
+    # Daily counters are left as they are: one reading after the midnight
+    # reset can genuinely carry most of a day's use.
+    if not reset_daily:
+        glitch = _undone_drops(series)
+        if glitch.any():
+            logger.debug(
+                f'Ignoring {int(glitch.sum())} reading(s) of a drop the '
+                f'counter undid'
+            )
+            # Positional, so repeated timestamps can't misalign the result.
+            out = np.zeros(len(series), dtype='float64')
+            out[~glitch] = cumulative_to_interval(
+                series[~glitch], interval_minutes, reset_daily=reset_daily,
+                max_increment=max_increment, method=method,
+            ).to_numpy()
+            return pd.Series(out, index=series.index)
 
     # Calculate raw differences
     diffs = series.diff()
@@ -191,13 +295,38 @@ def cumulative_to_interval(
     # several intervals' worth of energy isn't clamped to max_increment.
     if max_increment is not None:
         cap = pd.Series(float(max_increment), index=series.index)
+        dip_limit = float(max_increment)
     else:
-        cap = _rate_based_cap(
-            diffs_adj, time_diffs / 60.0, ~resets & ~multi_interval_gap,
+        # v2.55.0: the rate estimate leaves out the first rise after a
+        # restart and any rise the next reading takes back — a glitch's
+        # recovery or spike. With them in, a few glitches on a sparse
+        # counter set the 99th percentile themselves and were let through.
+        rises = (diffs_adj > 0) & ~resets
+        first_rise = rises & (segment > 0) & (rises.groupby(segment).cumsum() == 1)
+        taken_back = series.shift(-1) < series
+        cap, dip_limit = _rate_based_cap(
+            diffs_adj, time_diffs / 60.0,
+            ~resets & ~multi_interval_gap & ~first_rise & ~taken_back,
+            interval_minutes / 60.0,
         )
     spike_mask = (diffs_adj > cap) & ~multi_interval_gap
     if spike_mask.any():
         logger.debug(f'Found {spike_mask.sum()} spike(s) exceeding the increment cap')
+    # v2.55.0: a dip after a capped reading, or one deeper than a grid
+    # interval's plausible use, is measured from the level scored so far
+    # (_score_from_accepted_level); otherwise the running-high rule above
+    # already holds and the vectorised result stands.
+    dips = (series < previous_high) & ~resets
+    deep_dips = dips & ((previous_high - series) > dip_limit)
+    if dips.any() and (spike_mask.any() or deep_dips.any()):
+        diffs_adj = pd.Series(
+            _score_from_accepted_level(
+                series.tolist(), resets.tolist(),
+                multi_interval_gap.tolist(), cap.tolist(), dip_limit,
+            ),
+            index=series.index,
+        )
+    elif spike_mask.any():
         diffs_adj[spike_mask] = cap[spike_mask]
 
     # Restarts score the reading itself, which is never negative for an
