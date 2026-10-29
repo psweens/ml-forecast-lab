@@ -44,6 +44,58 @@ FORECAST_ABS_SANITY = 1e12
 # value (an unmeasured label) or without a row is unknown, never zero use.
 NET_ACTUALS_PREFIX = "net_actuals_"
 
+# v2.56.0: the same multiplier in the other dimension, for a suggested unit.
+_POWER_FOR_ENERGY_BASE = {0.001: "W", 1.0: "kW", 1000.0: "MW"}
+_ENERGY_FOR_POWER_BASE = {0.001: "Wh", 1.0: "kWh", 1000.0: "MWh"}
+
+
+def suspect_external_unit(
+    mode: str,
+    dim: str,
+    base: float,
+    is_cumulative: bool,
+    unit_explicit: bool,
+    interval_hours: float,
+    scale_ratio: Optional[float],
+) -> Optional[str]:
+    """The unit an external forecast's values look to be in when its sensor
+    unit looks wrong, else ``None``.
+
+    v2.56.0: an attribute-mode sensor's HA unit is the unit of its state, which
+    need not be that of its trajectory entries. A Solcast-format sensor's state
+    is the day's total in kWh while each entry is average power in kW, so the
+    entries were read as energy per interval and came out scaled by
+    1/interval_hours (×2 on a 30-minute grid) — under the 4× scale-mismatch
+    guard. Reading power as energy, or energy as power, scales the forecast
+    by ``g`` = 1/interval_hours or interval_hours respectively. A scale ratio
+    on the same side of 1 as ``g`` and nearer ``g`` than 1 in log terms
+    (|ln r| > |ln g| / 2) is the signature of that mix-up rather than of a
+    biased forecast. No constant is tuned: the threshold is the midpoint.
+
+    Applies only where the unit came from the sensor, in attribute mode, to a
+    non-cumulative power or energy series, and when the interval is not one
+    hour (where the two readings coincide).
+    """
+    if unit_explicit or mode != "attribute" or is_cumulative:
+        return None
+    if scale_ratio is None or not (scale_ratio > 0):
+        return None
+    if dim == "energy":
+        g = 1.0 / interval_hours
+        other = _POWER_FOR_ENERGY_BASE.get(base)
+    elif dim == "power":
+        g = interval_hours
+        other = _ENERGY_FOR_POWER_BASE.get(base)
+    else:
+        return None
+    lg = math.log(g)
+    if abs(lg) < 1e-9 or other is None:
+        return None
+    lr = math.log(scale_ratio)
+    if lr * lg > 0 and abs(lr) > abs(lg) / 2.0:
+        return other
+    return None
+
 
 def _locked(fn):
     """Serialise SQLite access via ``self._lock``.
@@ -3714,15 +3766,24 @@ class HistoryDB:
 
         ``externals`` is a list of specs, each a dict with ``entity``,
         ``table`` (state-mode cached-history table or None), ``mode``,
-        ``scale``, ``is_cumulative`` (None = auto-detect), ``label`` and
-        ``unit`` (HA unit_of_measurement, for unit-aware conversion).
+        ``scale``, ``is_cumulative`` (None = auto-detect), ``label``, ``unit``
+        (for unit-aware conversion) and ``unit_explicit`` (True when ``unit``
+        is the forecast's configured unit rather than its sensor's HA
+        unit_of_measurement).
 
         Unit-aware: each series is converted to a common per-interval ENERGY
-        canonical using its HA unit (power → ×interval_hours; cumulative
+        canonical using its unit (power → ×interval_hours; cumulative
         energy → differenced) so a cumulative kWh sensor lines up with an
         instantaneous kW target. When a unit isn't a recognised power/energy
         unit the series is left in its raw evaluation space and the
         scale-mismatch guard flags it.
+
+        v2.56.0: an attribute-mode sensor's HA unit describes its state, not
+        necessarily its trajectory entries (Solcast-format: state kWh, entries
+        kW), and reading a power forecast as energy per interval scales it by
+        1/interval_hours. Such a forecast is flagged ``unit_suspect`` with a
+        ``suggested_unit`` when its scale ratio sits nearer that factor than 1
+        (see the per-external block) and is left out of the skill ranking.
 
         ``analysis_mode``: ``per_interval`` (per-bin demand, in the target's
         native unit) or ``cumulative`` (running daily total in kWh / the
@@ -4136,6 +4197,9 @@ class HistoryDB:
                 "dim": e_dim, "base": e_base, "convertible": ext_convertible,
                 "canon": ext_canon, "disp": ext_disp, "edf": edf,
                 "update_min": update_min,
+                "unit": spec.get("unit"),
+                "unit_explicit": bool(spec.get("unit_explicit")),
+                "source": source,
             })
 
         # --- carry the actual forward to the comparison horizon -----------
@@ -4398,6 +4462,12 @@ class HistoryDB:
                 if mean_actual > 1e-9 and mean_ext > 1e-9:
                     scale_ratio = round(mean_ext / mean_actual, 2)
                     scale_mismatch = scale_ratio > 4.0 or scale_ratio < 0.25
+            suggested_unit = (
+                suspect_external_unit(
+                    it["mode"], it["dim"], it["base"], bool(it["is_cumulative"]),
+                    it["unit_explicit"], interval_hours, scale_ratio,
+                ) if unit_aware else None
+            )
             ext_points = int(it["disp"].notna().sum()) if it["disp"] is not None else 0
             timing = {
                 "app_median_lead_minutes": app_median_lead,
@@ -4416,11 +4486,17 @@ class HistoryDB:
             # overlapping data; below EXTERNAL_COMPARISON_WARMUP_DAYS the row
             # is flagged provisional/inconclusive.
             it["scale_mismatch"] = scale_mismatch  # consumed by the skill block
+            it["unit_suspect"] = suggested_unit is not None
             ext_block = _metrics_block(it["disp"], it["canon"])
             result["comparisons"].append({
                 "entity": it["entity"], "label": it["label"], "mode": it["mode"],
                 "head_to_head": h2h, "timing": timing, "n": n_common,
                 "scale_ratio": scale_ratio, "scale_mismatch": scale_mismatch,
+                "source": it["source"],
+                "unit": it["unit"],
+                "unit_from": "setting" if it["unit_explicit"] else "sensor",
+                "unit_suspect": suggested_unit is not None,
+                "suggested_unit": suggested_unit,
                 "auto_cumulative": it["auto_cumulative"],
                 "metrics": ext_block,
                 "days_logged": (ext_block["days_logged"] if ext_block else 0),
@@ -4527,13 +4603,16 @@ class HistoryDB:
             for it, c in ext_curves:
                 if it.get("scale_mismatch"):
                     excluded.append({"label": it["label"], "reason": "scale mismatch"})
+                elif it.get("unit_suspect"):
+                    excluded.append({"label": it["label"], "reason": "unit looks wrong"})
                 elif c.empty:
                     excluded.append({"label": it["label"], "reason": "no overlapping forecasts yet"})
             for it in ext_items:
                 if it["mode"] != "attribute":
                     excluded.append({"label": it["label"], "reason": "state-mode (nowcast only)"})
             eligible = [(it, c) for it, c in ext_curves
-                        if not it.get("scale_mismatch") and not c.empty]
+                        if not it.get("scale_mismatch")
+                        and not it.get("unit_suspect") and not c.empty]
             band = set(app_curve.index)
             for it, c in eligible:
                 band &= set(c.index)

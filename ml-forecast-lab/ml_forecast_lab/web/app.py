@@ -3213,7 +3213,10 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                     "scale": e.scale,
                     "is_cumulative": e.is_cumulative,
                     "label": e.label or _default_ext_label(e),
-                    "unit": units_map.get(e.entity_id),
+                    "unit": e.unit or units_map.get(e.entity_id),
+                    # v2.56.0: a set unit is trusted; a sensor unit is
+                    # checked against the data (see unit_suspect).
+                    "unit_explicit": e.unit is not None,
                 })
         except Exception as e:
             return JSONResponse(content={"error": _safe_error(e)}, status_code=500)
@@ -3391,7 +3394,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         """Add a third-party forecast to an experiment's external_forecasts.
 
         Body: {entity_id (required), mode?, attribute?, value_key?, scale?,
-               is_cumulative?, label?}. Capped at MAX_EXTERNAL_FORECASTS.
+               is_cumulative?, label?, unit?}. Capped at MAX_EXTERNAL_FORECASTS.
         """
         if name not in app.state.appstate.experiment_statuses:
             raise HTTPException(status_code=404, detail="Experiment not found")
@@ -3405,7 +3408,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             return JSONResponse(content={"success": False, "error": "entity_id is required"})
 
         ext = {"entity_id": entity}
-        for fld in ("mode", "attribute", "value_key", "label"):
+        for fld in ("mode", "attribute", "value_key", "label", "unit"):
             if body.get(fld) not in (None, ""):
                 ext[fld] = str(body[fld]).strip()
         if body.get("scale") not in (None, ""):
@@ -3512,6 +3515,45 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         except Exception as e:
             logger.error(f"Failed to remove external forecast: {e}", exc_info=True)
             return JSONResponse(content={"success": False, "error": _safe_error(e)})
+
+    @app.post("/experiment/{name}/external-forecast-unit")
+    async def set_external_forecast_unit(name: str, request: Request):
+        """Set or clear the unit of one configured third-party forecast.
+
+        Body: {source (the forecast's source key, as returned by the
+        comparison), unit (one of EXTERNAL_FORECAST_UNITS, or "" / null to
+        use the sensor's unit)}. v2.56.0: unlike remove + add, this keeps the
+        forecast's captured history, which is rescored under the new unit.
+        """
+        if name not in app.state.appstate.experiment_statuses:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(content={"success": False, "error": "Invalid JSON"})
+        source = (body.get("source") or "").strip()
+        if not source:
+            return JSONResponse(content={"success": False, "error": "source is required"})
+
+        from ml_forecast_lab.config import set_experiment_external_forecast_unit
+        config_path = _find_config_path()
+        if not config_path:
+            return JSONResponse(content={"success": False, "error": "Config file not found"})
+        try:
+            updated = set_experiment_external_forecast_unit(
+                config_path, name, source, body.get("unit"),
+            )
+        except ValueError as e:
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
+        except Exception as e:
+            logger.error(f"Failed to set external forecast unit: {e}", exc_info=True)
+            return JSONResponse(content={"success": False, "error": _safe_error(e)})
+        if not updated:
+            return JSONResponse(content={
+                "success": False, "error": "No such forecast on this experiment",
+            })
+        logger.info(f"Set unit of external forecast {source} on {name} to {body.get('unit') or 'the sensor unit'}")
+        return JSONResponse(content={"success": True})
 
     @app.post("/experiment/{name}/comparison-controls")
     async def comparison_controls(name: str, request: Request):
