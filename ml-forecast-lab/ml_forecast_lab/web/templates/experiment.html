@@ -480,6 +480,8 @@
                 {% if cov.role in ('future', 'both') %}
                     {% if cov.future_attribute %}<span class="cov-meta" style="font-style:italic;">attr: {{ cov.future_attribute }}</span>{% endif %}
                     {% if cov.future_value_key %}<span class="cov-meta" style="font-style:italic;">key: {{ cov.future_value_key }}</span>{% endif %}
+                    {% if cov.future_extra_entities %}<span class="cov-meta" title="{{ cov.future_extra_entities | join(', ') }}">+{{ cov.future_extra_entities | length }} sensor{{ 's' if cov.future_extra_entities | length != 1 else '' }}</span>{% endif %}
+                    {% if cov.history_source == 'stored_forecast' %}<span class="cov-meta">history: stored forecasts</span>{% endif %}
                 {% endif %}
                 {% if cov.scale is not none %}<span class="cov-meta">scale: {{ cov.scale }}</span>{% endif %}
                 {% if cov.is_binary %}<span class="cov-meta">binary</span>{% endif %}
@@ -517,6 +519,17 @@
                 <label class="field-label">Value key <span class="info-tip">?<span class="tip-text">For list-of-dict forecast attributes (Solcast, Met.no weather), which key inside each entry holds the numeric value. Auto-populated from the first entry of the chosen forecast attribute. Common values: <code>pv_estimate</code> (Solcast), <code>temperature</code> (Met.no). Leave at "Auto" to let the resolver pick from {value, pv_estimate, state, temperature, ...} in priority order — works for most weather / Solcast integrations.</span></span></label>
                 <select class="setting-input" id="cov-future-key-input">
                     <option value="">Auto-detect</option>
+                </select>
+            </div>
+            <div class="exp-field" id="cov-extra-entities-field" style="display:none;">
+                <label class="field-label">Further forecast sensors <span class="info-tip">?<span class="tip-text">For integrations that split one forecast across several sensors, e.g. one for today and one for tomorrow: list the others here, separated by commas. Their entries under the same forecast attribute and value key are joined to this sensor's, so the forecast covers the whole horizon instead of stopping where this sensor's does. Where two sensors cover the same time, this one's value is used.</span></span></label>
+                <input type="text" class="setting-input" id="cov-extra-entities-input" placeholder="Optional, e.g. sensor.forecast_tomorrow">
+            </div>
+            <div class="exp-field" id="cov-history-source-field" style="display:none;">
+                <label class="field-label">History from <span class="info-tip">?<span class="tip-text">What the model learns from. <b>The sensor's history</b>: what the sensor recorded. <b>Stored forecasts</b>: the forecast as it was issued, before each period — what the model will actually have when it forecasts. Each forecast cycle stores the forecast this covariate reads, and forecasts the Forecast Comparison tab stored for the same sensor, attribute and value key count from the start. Until enough is stored, the earlier part of the training window has no value for this covariate.</span></span></label>
+                <select class="setting-input" id="cov-history-source-input">
+                    <option value="sensor">The sensor's history</option>
+                    <option value="stored_forecast">Stored forecasts</option>
                 </select>
             </div>
             <div class="exp-field">
@@ -2812,6 +2825,10 @@ window.showTab = function(el) {
         var showFuture = (role === 'future' || role === 'both');
         document.getElementById('cov-future-attr-field').style.display =
             showFuture ? '' : 'none';
+        document.getElementById('cov-extra-entities-field').style.display =
+            showFuture ? '' : 'none';
+        document.getElementById('cov-history-source-field').style.display =
+            showFuture ? '' : 'none';
         // The value-key field appears only after a forecast attribute is
         // picked AND that attribute has sample_keys (list-of-dict format).
         // Hide it here on every role flip — refreshFutureAttrs will
@@ -3037,6 +3054,11 @@ window.showTab = function(el) {
             if (futureAttr) body.future_attribute = futureAttr;
             var futureKey = document.getElementById('cov-future-key-input').value;
             if (futureKey) body.future_value_key = futureKey;
+            var extra = document.getElementById('cov-extra-entities-input').value
+                .split(/[\s,]+/).filter(function(e){ return e; });
+            if (extra.length) body.future_extra_entities = extra;
+            var hist = document.getElementById('cov-history-source-input').value;
+            if (hist === 'stored_forecast') body.history_source = hist;
         }
 
         fetch(BASE + '/experiment/' + EXP_NAME + '/add-covariate', {
@@ -3071,6 +3093,12 @@ window.showTab = function(el) {
                     if (body.future_value_key) {
                         futureMeta += '<span class="cov-meta" style="font-style:italic;">key: ' + body.future_value_key + '</span>';
                     }
+                    if (body.future_extra_entities) {
+                        futureMeta += '<span class="cov-meta">+' + body.future_extra_entities.length + ' sensor' + (body.future_extra_entities.length !== 1 ? 's' : '') + '</span>';
+                    }
+                    if (body.history_source === 'stored_forecast') {
+                        futureMeta += '<span class="cov-meta">history: stored forecasts</span>';
+                    }
                 }
                 row.innerHTML = '<span class="cov-entity">' + entity + '</span>' +
                     '<span class="cov-meta cov-validate-chip" title="Checking data availability...">…</span>' +
@@ -3089,6 +3117,8 @@ window.showTab = function(el) {
                 // Clear form
                 document.getElementById('cov-entity-input').value = '';
                 document.getElementById('cov-scale-input').value = '';
+                document.getElementById('cov-extra-entities-input').value = '';
+                document.getElementById('cov-history-source-input').value = 'sensor';
                 document.getElementById('cov-binary-input').checked = false;
             } else {
                 mlfl.toast('Failed: ' + result.error, 'error');

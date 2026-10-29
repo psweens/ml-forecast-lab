@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 import pandas as pd
 
+from .config import stored_forecast_source
 from .ha_interface import HAInterface, normalise_history, state_to_float
 
 logger = logging.getLogger(__name__)
@@ -207,6 +208,11 @@ class CovariateResolver:
         name = cov_cfg.get("name", entity_id)
         binary_flag = cov_cfg.get("binary")
 
+        # v2.57.0: history from stored forecasts — the forecast as issued
+        # before each bin, not what the sensor later measured.
+        if cov_cfg.get("history_source") == "stored_forecast":
+            return await self._stored_forecast_history(cov_cfg, start, end, freq)
+
         # Attribute-history path (v2.38.4+): when ``future_value_key``
         # is set, pull historical numerics from
         # ``record.attributes[future_value_key]`` instead of the
@@ -255,6 +261,84 @@ class CovariateResolver:
         except Exception as e:
             logger.error(f"Error fetching covariate {entity_id}: {e}", exc_info=True)
             return pd.Series(dtype=float, name=name)
+
+    async def _stored_forecast_history(
+        self, cov_cfg: dict, start: datetime, end: datetime, freq: str,
+    ) -> pd.Series:
+        """v2.57.0: ``history_source: stored_forecast``. The covariate's
+        values on the ``freq`` grid from the forecasts stored for it
+        (``HistoryDB.get_stored_forecast_history``), with NaN-free bins only,
+        so bins no stored forecast covered stay unmeasured. Empty without a
+        history DB — there is nothing to read the forecasts from."""
+        name = cov_cfg.get("name", cov_cfg.get("entity_id"))
+        source = cov_cfg.get("stored_source") or stored_forecast_source(
+            cov_cfg.get("entity_id"), cov_cfg.get("future_attribute"),
+            cov_cfg.get("future_value_key"),
+        )
+        if self.history_db is None:
+            logger.warning(
+                f"Covariate {cov_cfg.get('entity_id')}: history from stored "
+                f"forecasts needs the history database; no history."
+            )
+            return pd.Series(dtype=float, name=name)
+        logger.info(
+            f"Fetching covariate history: {cov_cfg.get('entity_id')} "
+            f"(stored forecasts, {source})"
+        )
+        try:
+            df = await asyncio.to_thread(
+                self.history_db.get_stored_forecast_history,
+                source, start, end, freq,
+            )
+        except Exception as e:
+            logger.error(
+                f"Error reading stored forecasts for {source}: {e}", exc_info=True,
+            )
+            return pd.Series(dtype=float, name=name)
+        if df is None or df.empty:
+            logger.warning(f"No stored forecasts yet for {source}")
+            return pd.Series(dtype=float, name=name)
+        s = pd.Series(
+            pd.to_numeric(df["y"], errors="coerce").values,
+            index=pd.DatetimeIndex(pd.to_datetime(df["ds"])), name=name,
+        ).dropna()
+        return s
+
+    async def _store_live_forecast(self, cov_cfg: dict, parsed: pd.Series) -> None:
+        """v2.57.0: store the trajectory just read for a covariate whose
+        history comes from stored forecasts, so its history grows from every
+        forecast cycle. Only the source's own points are stored — never the
+        interpolated or edge-filled horizon — from two hours before now
+        onwards (an earlier point only serves to interpolate the first bins).
+        Best effort: a failure never affects the forecast."""
+        if (cov_cfg.get("history_source") != "stored_forecast"
+                or self.history_db is None or parsed is None or parsed.empty):
+            return
+        try:
+            idx = pd.DatetimeIndex(parsed.index)
+            if idx.tz is not None:
+                idx = idx.tz_convert("UTC").tz_localize(None)
+            s = pd.Series(parsed.values, index=idx).dropna()
+            s = s[~s.index.duplicated(keep="first")].sort_index()
+            now = datetime.utcnow()
+            s = s[s.index >= pd.Timestamp(now) - pd.Timedelta(hours=2)]
+            if s.empty:
+                return
+            source = cov_cfg.get("stored_source") or stored_forecast_source(
+                cov_cfg.get("entity_id"), cov_cfg.get("future_attribute"),
+                cov_cfg.get("future_value_key"),
+            )
+            n = await asyncio.to_thread(
+                self.history_db.store_covariate_forecast,
+                source, now.replace(microsecond=0),
+                [t.to_pydatetime() for t in s.index], [float(v) for v in s.values],
+            )
+            if n:
+                logger.debug(f"Stored {n} forecast points for {source}")
+        except Exception as e:
+            logger.warning(
+                f"Storing the forecast for {cov_cfg.get('entity_id')} failed: {e}"
+            )
 
     def _cov_cache_table(
         self, entity_id: str, attribute_key: Optional[str],
@@ -482,8 +566,8 @@ class CovariateResolver:
 
         Resolution order:
         1. ``constant_value`` in config — broadcast across the horizon.
-        2. The HA attribute named by ``future_attribute`` (default ``forecast``).
-           Two shapes are accepted:
+        2. The HA attribute named by ``future_attribute`` (default ``forecast``),
+           read by ``fetch_future_points``. Two shapes are accepted:
            - list of dicts with a datetime-like key and a value key. The
              datetime key is auto-detected among {datetime, period_start,
              period_end, time, dt}; the value key is taken from
@@ -496,6 +580,9 @@ class CovariateResolver:
         The resulting series is reindexed to ``future_index`` with linear
         interpolation between known points and forward+backward fill at
         the edges so the model never sees NaN inside the supplied horizon.
+
+        v2.57.0: for ``history_source: stored_forecast`` the points read are
+        also stored as the covariate's history (``_store_live_forecast``).
         """
         entity_id = cov_cfg.get("entity_id")
         name = cov_cfg.get("name", entity_id)
@@ -505,6 +592,23 @@ class CovariateResolver:
                 cov_cfg["constant_value"], index=future_index, name=name,
             )
 
+        parsed = await self.fetch_future_points(cov_cfg)
+        if parsed is None or parsed.empty:
+            return pd.Series(np.nan, index=future_index, name=name)
+        await self._store_live_forecast(cov_cfg, parsed)
+        return align_future_points(parsed, future_index, name)
+
+    async def fetch_future_points(self, cov_cfg: dict) -> Optional[pd.Series]:
+        """The forecast's own points, as published: indexed by naive UTC,
+        sorted, one value per time, with no interpolation or edge fill.
+        ``None`` when nothing parseable was read.
+
+        v2.57.0: entries from ``future_extra_entities`` (the same
+        ``future_attribute`` on further sensors, e.g. one per day) are merged
+        in; the main entity's value wins where both cover a time. Weather
+        service types return the whole horizon and take no extra entities.
+        """
+        entity_id = cov_cfg.get("entity_id")
         attr_name = cov_cfg.get("future_attribute", "forecast")
         value_key = cov_cfg.get("future_value_key")
 
@@ -536,7 +640,7 @@ class CovariateResolver:
                     "fetch_future: %s weather.get_forecasts(type=%s) failed: %s",
                     entity_id, attr_name, e,
                 )
-                return pd.Series(np.nan, index=future_index, name=name)
+                return None
 
             # HA returns ``{service_response: {entity_id: {forecast: [...]}},
             # context: ...}`` — the per-entity forecast array sits two
@@ -551,55 +655,72 @@ class CovariateResolver:
                     "returned no forecast array; returning NaN",
                     entity_id, attr_name,
                 )
-                return pd.Series(np.nan, index=future_index, name=name)
+                return None
             # Same parser as the attribute path — the forecast array
             # is a list[dict] with ``datetime`` + numeric keys, exactly
-            # the legacy attribute schema. Reuse _parse_forecast_attribute
-            # so the auto-detect / value_key logic matches.
-            parsed = _parse_forecast_attribute(
+            # the legacy attribute schema.
+            return _points_utc(_parse_forecast_attribute(
                 forecast_list, value_key=value_key,
-            )
-            if parsed is None or parsed.empty:
-                return pd.Series(np.nan, index=future_index, name=name)
-            # Skip the attribute fetch below — we already have the
-            # parsed series. Jump straight to alignment by routing
-            # through the same downstream code path.
-            # Skip the attribute fetch below — we already have the
-            # parsed series. Jump to the alignment block.
-        else:
+            ))
+
+        parts = []
+        for ent in [entity_id] + list(cov_cfg.get("future_extra_entities") or []):
             try:
-                attr = await self.iface.get_state(entity_id, attribute=attr_name)
+                attr = await self.iface.get_state(ent, attribute=attr_name)
             except Exception as e:
                 logger.warning(
-                    "fetch_future: %s attribute fetch failed: %s", entity_id, e,
+                    "fetch_future: %s attribute fetch failed: %s", ent, e,
                 )
-                return pd.Series(np.nan, index=future_index, name=name)
-
-            parsed = _parse_forecast_attribute(attr, value_key=value_key)
-            if parsed is None or parsed.empty:
+                continue
+            pts = _points_utc(_parse_forecast_attribute(attr, value_key=value_key))
+            if pts is None:
                 logger.debug(
-                    "fetch_future: %s attribute %r empty / unparseable; "
-                    "returning NaN", entity_id, attr_name,
+                    "fetch_future: %s attribute %r empty / unparseable",
+                    ent, attr_name,
                 )
-                return pd.Series(np.nan, index=future_index, name=name)
+                continue
+            parts.append(pts)
+        if not parts:
+            return None
+        merged = parts[0]
+        for extra in parts[1:]:
+            merged = merged.combine_first(extra)
+        return merged.sort_index()
 
-        # Align timezone of the parsed series to the requested future_index
-        # so reindex doesn't drop everything.
-        target_tz = future_index.tz
-        parsed_tz = parsed.index.tz
-        if target_tz is None and parsed_tz is not None:
-            parsed.index = parsed.index.tz_convert(None)
-        elif target_tz is not None and parsed_tz is None:
-            parsed.index = parsed.index.tz_localize('UTC').tz_convert(target_tz)
-        elif target_tz is not None and parsed_tz is not None and target_tz != parsed_tz:
-            parsed.index = parsed.index.tz_convert(target_tz)
 
-        # Interpolate to the request grid: union, interpolate, then reindex.
-        union = parsed.index.union(future_index).sort_values()
-        on_union = parsed.reindex(union).interpolate(method='time', limit_direction='both')
-        aligned = on_union.reindex(future_index).ffill().bfill()
-        aligned.name = name
-        return aligned
+def align_future_points(points: pd.Series, future_index: pd.DatetimeIndex,
+                        name: Optional[str] = None) -> pd.Series:
+    """A forecast's own points (naive UTC, from ``fetch_future_points``)
+    resolved onto ``future_index``: linear in time between points, the edge
+    values held beyond them, so the model never sees NaN inside the horizon.
+    """
+    parsed = points.copy()
+    # Align timezone of the points to the requested future_index so reindex
+    # doesn't drop everything.
+    if future_index.tz is not None:
+        parsed.index = parsed.index.tz_localize('UTC').tz_convert(future_index.tz)
+
+    # Interpolate to the request grid: union, interpolate, then reindex.
+    union = parsed.index.union(future_index).sort_values()
+    on_union = parsed.reindex(union).interpolate(method='time', limit_direction='both')
+    aligned = on_union.reindex(future_index).ffill().bfill()
+    aligned.name = name
+    return aligned
+
+
+def _points_utc(parsed: Optional[pd.Series]) -> Optional[pd.Series]:
+    """A parsed forecast on a naive-UTC index (naive input is taken as UTC),
+    sorted, NaN dropped, the first value kept for a repeated time. ``None``
+    when nothing is left."""
+    if parsed is None or parsed.empty:
+        return None
+    idx = pd.DatetimeIndex(parsed.index)
+    if idx.tz is not None:
+        idx = idx.tz_convert('UTC').tz_localize(None)
+    s = pd.Series(pd.to_numeric(parsed.values, errors='coerce'), index=idx,
+                  dtype='float64').dropna()
+    s = s[~s.index.duplicated(keep='first')].sort_index()
+    return s if not s.empty else None
 
 
 def _parse_forecast_attribute(

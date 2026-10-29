@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.57.0
+
+### Added
+
+**A covariate with a forecast can learn from the forecast as it was issued.**
+
+- Until now, such a covariate trained on what its sensor recorded, then
+  forecast from what its forecast said, so the model learned from data it
+  never sees when forecasting.
+- Set **History from** to **Stored forecasts** (`history_source:
+  stored_forecast`) and the app stores the forecast each time it forecasts,
+  and trains on what it said before each period.
+- Forecasts the Forecast Comparison tab stored for the same sensor count
+  from the start; earlier periods have no value until more is stored.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-stored-forecast-covariates.md)
+
+**A forecast published across several sensors can be read as one.**
+
+- Some integrations publish one sensor per day. A covariate read from one of
+  them repeated its last entry for the rest of the forecast.
+- List the others under **Further forecast sensors**
+  (`future_extra_entities`) and the covariate covers the whole forecast.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-stored-forecast-covariates.md#forecasts-across-several-sensors)
+
+### Fixed
+
+**The Forecast Comparison tab scores a forecast only where it forecast.**
+
+- A third-party forecast that ends before the app's forecast does was also
+  scored at the later times, against its last value repeated.
+- Its error at those leads was wrong, and **Same lead time** could include
+  leads it never covered.
+- Only the times a forecast covers are now stored and scored; what was
+  stored before this update is unchanged.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-stored-forecast-covariates.md#the-comparison-stored-values-a-source-never-forecast)
+
 ## 2.56.0
 
 ### Fixed

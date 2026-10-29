@@ -119,6 +119,8 @@ covariates:
 | `role` | `lagged` \| `future` \| `both` | `lagged` | `lagged` = historical only (used as a lag feature). `future` = the entity exposes a known-future forecast, available at every horizon step. `both` = lagged for training, future at inference. |
 | `future_attribute` | string | `forecast` | For `role: future` / `both`: where the future-known series comes from. For **classic attribute-exposing entities** (Met.no `weather.*` on older HA, Solcast, Forecast.Solar), this is the attribute name (`forecast`, `detailedForecast`). For **modern `weather.*` entities** (HA 2023.9+: Met Office DataHub, OpenWeatherMap, AccuWeather, etc.), set this to `hourly`, `daily`, or `twice_daily` — the app detects the weather domain and routes through the `weather.get_forecasts` service call instead of reading attributes. v2.37.7+ Add-Covariate UI auto-populates this dropdown based on the entity's actual capabilities. |
 | `future_value_key` | string | unset | For `role: future` / `both`: the key inside each forecast entry that contains the value (`temperature`, `pv_estimate`, `cloud_coverage`, …). If unset, common keys are tried in order. The Add-Covariate UI offers the entity's actual keys as a dropdown. |
+| `future_extra_entities` | list of entities | `[]` | For `role: future` / `both`, when one forecast is published across several sensors (one per day, say): the other sensors, read with the same `future_attribute` and `future_value_key` and joined to this one's entries, so the forecast covers the whole horizon. Where two sensors cover the same time, the main `entity`'s value is used. Without it, a forecast that ends before the horizon does holds its last value for the rest. Not used with `hourly` / `daily` / `twice_daily`, which already return the whole forecast. |
+| `history_source` | `sensor` \| `stored_forecast` | `sensor` | For `role: future` / `both`: what the model trains on. `sensor` is what the entity recorded. `stored_forecast` is the forecast as it was issued — see *Learning from stored forecasts* below. |
 | `scale` | float | unset | Multiplicative pre-scaling (e.g. percent → fraction: `0.01`). |
 | `transform` | `log` \| `sqrt` \| `box_cox` | unset | Per-covariate transform before model input, applied to the covariate's history and to its forecast values alike. `log` adds an offset when the history reaches zero or below; `box_cox` always adds one (larger when the history goes below zero). The offset is fixed when the model is trained, so a change to `transform` takes effect at the next retrain. A future-role covariate with `log` or `box_cox` and no numeric history has no offset to fix, so its forecast values are not used. |
 | `aggregation` | `mean` \| `sum` \| `max` \| `min` \| `last` | `mean` | Resampling method when aligning to `interval_minutes`. |
@@ -146,6 +148,22 @@ companion `<name>_missing` indicator, `1` where the value was imputed and
 actually have gaps, so a complete experiment gains no columns at all.
 Every backend receives the same matrix, so trees can split on the flag and
 neural and classical backends get it as a clean channel.
+
+**Learning from stored forecasts.** A `future` covariate normally trains on
+what its sensor recorded and then forecasts from what its forecast says. When
+the two differ — a forecast that is only ever a forecast, or a sensor whose
+state is something else entirely — the model learns a relationship it never
+sees again. With `history_source: stored_forecast` the app stores the forecast
+this covariate reads at every forecast cycle, and each training interval's
+value is taken from the latest stored forecast issued before that interval
+began, so training sees what forecasting will see. Forecasts the Forecast
+Comparison tab already stored for the same entity, `future_attribute` and
+`future_value_key` count from the start, and stored forecasts are kept for the
+longest `days_history` among the experiments using them. Until enough is
+stored, the earlier part of the training window is masked for this covariate,
+like any covariate whose history starts part-way in; only the stored part
+teaches the model what the forecast means. Forecasts are stored while an
+experiment using the covariate is in production.
 
 A binary covariate is a step function under HA's delta-storage recorder,
 where "no row" means "did not move" rather than "unknown", so its in-span
@@ -257,7 +275,7 @@ external_forecasts:
     mode: state
 ```
 
-Only collects data while the experiment is in **production** (that's when this app logs its own forecasts), and data accrues from when you add each external — apart from state-mode sensors, which are back-filled once from recorder history so they show immediately. Storage is bounded: the captured trajectory log is pruned on its own window — `external_forecast_retention_days` (default 60, editable in the System tab) — and state-mode caches to the experiment's `max_age`. Legacy single-sensor configs using the flat `external_forecast_*` keys are auto-migrated into this list on load.
+Each captured trajectory covers only the times the source itself forecast: where a source ends before the experiment's horizon does, the rest is neither stored nor scored (v2.57.0). Only collects data while the experiment is in **production** (that's when this app logs its own forecasts), and data accrues from when you add each external — apart from state-mode sensors, which are back-filled once from recorder history so they show immediately. Storage is bounded: the captured trajectory log is pruned on its own window — `external_forecast_retention_days` (default 60, editable in the System tab) — and state-mode caches to the experiment's `max_age`. Legacy single-sensor configs using the flat `external_forecast_*` keys are auto-migrated into this list on load.
 
 ### Cross-validation
 
