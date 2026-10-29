@@ -551,6 +551,13 @@ class TestTrainingTabBenchmarkSensor:
         assert "self._publish_benchmark_outcome(" in trigger
         assert '"benchmark", "failed"' in trigger
 
+    def test_benchmark_trigger_logs_an_experiment_missing_from_config(self):
+        # v2.55.1: a queued benchmark for a card whose mlfl.yaml entry is gone
+        # used to return without a log line.
+        src = inspect.getsource(MLForecastLabApp.start_web_server)
+        trigger = src[src.index("async def _benchmark_trigger"):src.index("benchmark_callback = _benchmark_trigger")]
+        assert "not found in config" in trigger
+
     def test_run_benchmark_reports_whether_it_ran(self):
         src = inspect.getsource(MLForecastLabApp._run_benchmark)
         assert "if df is None:" in src and "return False" in src

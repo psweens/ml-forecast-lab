@@ -14,6 +14,7 @@
 - The benchmarks now run one at a time; the waiting ones show
   **Queued (#n)** on their cards, and clicking that takes one out of the
   queue.
+- Installing this update also frees any experiment that is stuck now.
 - [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-run-all-benchmarks-never-ran.md)
 
 ## 2.55.0

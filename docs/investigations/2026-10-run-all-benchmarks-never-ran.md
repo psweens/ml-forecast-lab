@@ -57,9 +57,14 @@ Both routes now enqueue `{"name", "steps": ["benchmark"]}` on
 experiment page's **Run Pipeline** button already used:
 
 - `_run_pipeline` awaits the callback and clears the flag in its own
-  `finally`, so the flag clears even when the trigger fails before its own
-  `try` (`load_config` raising) or returns early (experiment absent from the
-  reloaded config: `_benchmark_trigger` has no `else` for `exp_cfg is None`).
+  `finally`, so the flag clears even when the trigger returns early or fails
+  before its own `try`. The early return is reachable: a dashboard card
+  outlives its `mlfl.yaml` entry when the file is edited by hand while the
+  app runs, because `experiment_statuses` is built at startup and not
+  reconciled. The trigger now logs "Benchmark trigger: experiment '…' not
+  found in config" there instead of returning silently. Failing before the
+  `try` is close to unreachable, since `load_config` catches config-load
+  errors itself.
 - One benchmark runs at a time. Only the running experiment is flagged; the
   rest show **Queued (#n)**, and clicking that removes them via
   `remove_from_queue`. Stop Training cancels the running one through
@@ -80,22 +85,22 @@ behaviour checks, it fixes the repro but:
   `_training_lock`, which is FIFO, so a scheduled retrain that arrives
   during a run-all waits behind the whole batch (the same reason tune-all
   takes the lock per model);
-- it still leaves the flag stuck when the trigger raises before its
-  `finally` or finds no `exp_cfg`;
+- it still leaves the flag stuck when the trigger finds no `exp_cfg`;
 - an experiment already queued by run-pipeline runs twice, and the two
   tasks share one `_pipeline_tasks[name]` slot, so the first one's done
   callback drops the second and Stop cannot find it.
 
 ## Left on the same path (not changed)
 
-- `_benchmark_trigger` returns silently when the experiment is not in the
-  reloaded config (`main.py`, `if exp_cfg:` with no `else`). Harmless now
-  that the queue clears the flag, but there is no log line.
-  `experiment_statuses` is built at startup and not reconciled when
-  `mlfl.yaml` is edited by hand.
-- `_stop_training_trigger` checks `_running_tasks` before `_pipeline_tasks`.
-  If a UI benchmark for X is waiting behind a scheduled retrain of X, Stop
-  cancels the retrain and the benchmark still runs.
+- `_stop_training_trigger` cancels only one task: it checks `_running_tasks`
+  before `_pipeline_tasks`. If a UI benchmark for X has left the queue and is
+  waiting on the training lock behind a scheduled run of X, Stop cancels the
+  scheduled run and the UI benchmark still runs. This predates v2.55.1 (Run
+  Pipeline had it), but run-all now releases the lock between experiments,
+  so a lab experiment's scheduled retrain, itself a benchmark, can land in
+  that window. The fix is to cancel both tasks when both exist.
+- When the experiment has gone from `mlfl.yaml`, a queued run is still a
+  no-op beyond the log line: no Training event and no lifecycle sensor.
 - `delete_experiment_route` does not discard the name from
   `running_benchmarks` or `training_queue`. The queue processor skips deleted
   names, and `_run_pipeline` clears the flag when the run ends, so this only
