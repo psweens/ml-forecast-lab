@@ -71,7 +71,7 @@ Many HA sensors report running totals (`*_today` energy, daily heat). Configure 
 |---|---|---|---|
 | `source_is_cumulative` | bool | `false` | `true` if the target sensor reports a running total. |
 | `reset_daily` | bool | `false` | `true` if the cumulative sensor resets at local midnight. |
-| `max_increment` | float | unset (= auto) | Caps a single-interval delta. Useful to bound abnormal jumps (e.g. EV plug-ins). If unset, the 95th percentile of observed increments is used. |
+| `max_increment` | float | unset (= auto) | Caps the rise between two consecutive readings of a cumulative sensor. Useful to bound abnormal jumps (e.g. EV plug-ins). If unset, the cap grows with the time since the previous reading — twice the sensor's typical peak rate of rise times that time — so a sensor that updates slowly or irregularly isn't cut short, while a counter glitch still is. |
 
 ### Covariates
 
@@ -206,6 +206,8 @@ load_subtract:
 | `max_fraction_violation_pct` | float | `5.0` | Maximum percentage of rows allowed to violate `max_fraction_of_load` before the load-subtract step raises. Acts as a fail-fast guard for unit bugs. |
 
 With `load_subtract` the experiment forecasts the target with these sensors taken out, and everything that checks the forecast uses the same figure: the Forecast Accuracy and Forecast Comparison tabs, `sensor.mlfl_<name>_forecast_accuracy`, the upper and lower bands, and the starting point of `sensor.mlfl_<name>_cumulative` (today's use so far with the subtracted sensors taken out, not the target sensor's own reading).
+
+When the target is a running total (`source_is_cumulative: true`), an interval where the subtracted sensors recorded more than the target — one sensor reporting a little after the other, or the target pausing and then catching up — is set to zero and the excess is taken off the following intervals of the same day. Each day's total is then the target's use minus the subtracted sensors' use. Any excess still left at midnight is dropped, and the log reports how much was carried and how much was left. Other targets set such an interval to zero.
 
 **Note:** the older `subtract: [entity_id]` field is a deprecated stub — it loads without error but does not affect training. Migrate any existing config to `load_subtract`.
 

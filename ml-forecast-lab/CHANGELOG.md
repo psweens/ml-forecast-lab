@@ -7,14 +7,37 @@
 **Experiments with `load_subtract` are now checked against what they forecast.**
 
 - The accuracy sensor, the Forecast Accuracy and Forecast Comparison tabs and
-  the upper and lower bands compared each forecast with the target sensor's
-  full reading.
+  the upper and lower bands compared each forecast with the full reading of
+  the sensor being forecast.
 - The `_cumulative` sensor also started from that full reading, so it sat
   above the forecast by everything subtracted so far that day.
-- Both now use the target with the subtracted sensors taken out, including
+- Both now use the reading with the subtracted sensors taken out, including
   for past forecasts.
 - Expect lower error figures and narrower bands on these experiments.
 - [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-load-subtract-scoring-basis.md)
+
+**Experiments on a meter that counts up learn from all the use it recorded.**
+
+- When such a meter updated slowly or in bursts, large rises were cut short,
+  so the busiest periods were learned as quieter than they were.
+- Some use could also be counted twice: when a meter stepped back slightly
+  and recovered, and, for meters that reset at midnight, the first hour of
+  each day during summer time.
+- This affects experiments forecasting such a meter, or with one in
+  `load_subtract`; a `max_increment` you set still applies.
+- These experiments retrain once after updating, so their forecasts, and
+  their scores at the next benchmark, may change.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-load-subtract-scoring-basis.md#training-labels)
+
+**With `load_subtract`, energy a subtracted sensor reports late is still taken off.**
+
+- When a subtracted sensor recorded its energy a little after the main
+  meter, or the main meter paused and then caught up, that energy was often
+  not taken off, so those days were learned as busier than they were.
+- Each day now comes to the main meter's use minus the subtracted sensors'.
+- This applies when the main meter counts up over the day.
+- These experiments retrain once after updating.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-10-load-subtract-scoring-basis.md#training-labels)
 
 ## 2.54.0
 

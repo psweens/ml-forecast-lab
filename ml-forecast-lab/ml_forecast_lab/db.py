@@ -693,11 +693,12 @@ class HistoryDB:
         reading that is not a restart counts as negative use, which the
         recovery cancels; a bin left negative is excluded downstream by
         the ``>= 0`` guard. Training differs in three ways that are not
-        copied here: it treats every drop as a reset (a dip on a lifetime
-        counter then scores the whole reading, cut back by the spike
-        cap), it caps spikes (``max_increment``), and with
-        ``reset_daily`` it treats a small rise across UTC midnight as a
-        reset. These increments are what the counter measured.
+        copied here: since v2.55.0 a dip scores nothing and use resumes
+        once the counter passes its previous high (the same total over the
+        dip and its recovery, none of it negative), it caps spikes
+        (``max_increment``, or by default a cap on the rate of rise), and
+        with ``reset_daily`` it treats any drop across UTC midnight as a
+        restart. These increments are what the counter measured.
 
         With ``since``, the scan starts at the last reading before it, so
         an idle counter's quiet bins at the start of the window are zero

@@ -23,6 +23,57 @@ class LoadSubtractError(ValueError):
     """
 
 
+# A reading below this fraction of the previous one is a counter restart
+# (daily reset, meter swap, device reboot); a smaller drop is a measurement
+# dip. Same threshold as HA's total_increasing reset detection and as
+# HistoryDB._COUNTER_RESTART_RATIO, which the analytics' increments use.
+COUNTER_RESTART_RATIO = 0.9
+
+# v2.55.0: the default increment cap is a rate, not a size. The cap on a
+# reading is RATE_CAP_MULTIPLE × the RATE_CAP_QUANTILE of the counter's
+# observed rates (rise ÷ time since the previous reading) × that reading's
+# own time since the previous reading — never below the median rise, so a
+# counter's resolution step always passes. A glitch recovery runs at
+# hundreds or thousands of times the normal rate and is still caught.
+RATE_CAP_QUANTILE = 0.99
+RATE_CAP_MULTIPLE = 2.0
+# Fewer measured rates than this and the counter's typical rate is unknown;
+# the cap falls back to the 95th percentile of rises (the pre-v2.55.0 rule).
+RATE_CAP_MIN_SAMPLES = 20
+
+
+def _rate_based_cap(
+    rises: pd.Series, elapsed_hours: pd.Series, eligible: pd.Series,
+) -> pd.Series:
+    """Per-reading increment cap from the counter's own rate of use.
+
+    v2.55.0: the default cap was the 95th percentile of rises, a fixed size.
+    By construction it cut the largest 5% of real rises — wherever a slow or
+    irregular update cadence let a large genuine rise build up between two
+    readings, and on change-only counters whose use comes in bursts — so
+    labels undercounted the busiest periods. A rate scales with the time a
+    rise took, so a long gap between readings admits a proportionally
+    larger rise.
+    """
+    ok = eligible & (rises > 0) & (elapsed_hours > 0)
+    if int(ok.sum()) < RATE_CAP_MIN_SAMPLES:
+        positive = rises[rises > 0]
+        size = float(positive.quantile(0.95)) if len(positive) else 1.0
+        if not len(positive):
+            logger.warning(
+                'No positive differences found; using default max_increment=1.0'
+            )
+        return pd.Series(size, index=rises.index)
+    rates = rises[ok] / elapsed_hours[ok]
+    rate_cap = RATE_CAP_MULTIPLE * float(rates.quantile(RATE_CAP_QUANTILE))
+    floor = float(rises[ok].median())
+    logger.debug(
+        f'Increment cap: {rate_cap:.3g} per hour × elapsed time, '
+        f'floor {floor:.3g}'
+    )
+    return (elapsed_hours.fillna(0.0) * rate_cap).clip(lower=floor)
+
+
 def cumulative_to_interval(
     series: pd.Series,
     interval_minutes: int,
@@ -45,8 +96,11 @@ def cumulative_to_interval(
     reset_daily : bool, default False
         If True, sensor resets daily (e.g. 'today' energy meters).
     max_increment : float, optional
-        Maximum allowed increment; larger values indicate anomalies or resets.
-        If None, computed as 95th percentile of observed increments.
+        Maximum allowed increment per reading; larger values indicate
+        anomalies or resets. If None (v2.55.0), the cap is a rate: twice the
+        99th percentile of the counter's rate of rise, times the reading's
+        time since the previous reading, never below the median rise
+        (``_rate_based_cap``).
     method : str, default 'diff'
         Conversion method; currently only 'diff' is supported.
 
@@ -58,11 +112,13 @@ def cumulative_to_interval(
     Notes
     -----
     The function:
-    1. Detects and handles resets (where cumulative value decreases)
-    2. Performs gap-aware interpolation for missing intervals
-    3. Caps spikes exceeding max_increment
-    4. Handles negative differences intelligently
-    5. Preserves timezone information if present
+    1. Detects restarts (a drop below ``COUNTER_RESTART_RATIO`` of the
+       previous reading, or with ``reset_daily`` any drop across UTC
+       midnight); a smaller dip is not use, and use resumes once the
+       counter passes its previous high
+    2. Keeps the full rise across a multi-interval gap
+    3. Caps spikes exceeding the increment cap (gap rows exempt)
+    4. Preserves timezone information if present
 
     Examples
     --------
@@ -91,30 +147,34 @@ def cumulative_to_interval(
     # Calculate raw differences
     diffs = series.diff()
 
-    # Detect resets (negative differences)
-    resets = diffs < 0
+    # Detect restarts. v2.55.0: a restart is a drop below
+    # COUNTER_RESTART_RATIO of the previous reading (daily reset, meter swap,
+    # device reboot), the rule the analytics' increment actuals and HA's
+    # total_increasing use. Every drop used to count as a restart, so a
+    # counter dipping 12.3 → 12.2 scored its whole reading as one
+    # interval's use, cut back only by the spike cap.
+    resets = series < COUNTER_RESTART_RATIO * series.shift(1)
     if reset_daily:
-        # For daily-reset sensors, also flag suspected resets based on time
+        # A daily counter that read little the day before can restart without
+        # dropping below COUNTER_RESTART_RATIO, so any drop across midnight
+        # is a restart too. v2.55.0: only a drop. A small rise across UTC
+        # midnight also used to count, but a counter that resets at local
+        # midnight has already restarted by then whenever local time is
+        # ahead of UTC (summer time in Europe), so each day the use between
+        # local and UTC midnight was scored twice.
         current_dates = series.index.normalize()
         previous_dates = pd.Series(current_dates, index=series.index).shift(1)
         midnight_crosses = current_dates != previous_dates
-        resets = resets | (midnight_crosses & (diffs < 0.1 * series.abs().mean()))
+        resets = resets | (midnight_crosses & (diffs < 0))
 
-    # Estimate max_increment if not provided
-    if max_increment is None:
-        positive_diffs = diffs[diffs > 0]
-        if len(positive_diffs) > 0:
-            max_increment = positive_diffs.quantile(0.95)
-        else:
-            max_increment = 1.0
-            logger.warning(
-                'No positive differences found; using default max_increment=1.0'
-            )
-
-    logger.debug(f'Using max_increment={max_increment:.2f}')
-
-    # Handle resets: assume the reset value is the interval
-    diffs_adj = diffs.copy()
+    # v2.55.0: between restarts, a reading's use is its rise above the
+    # highest reading since the restart. A dip and its recovery then net to
+    # nothing, instead of the dip scoring zero and the recovery scoring the
+    # rise again. On a counter that never dips this equals the plain
+    # difference.
+    segment = resets.cumsum()
+    previous_high = series.groupby(segment).cummax().groupby(segment).shift(1)
+    diffs_adj = (series - previous_high).clip(lower=0.0)
     diffs_adj[resets] = series[resets]
 
     # Identify rows where the time gap exceeds one interval. These hold the
@@ -129,14 +189,19 @@ def cumulative_to_interval(
 
     # Cap spikes — but skip gap rows so a legitimate 4 h outage carrying
     # several intervals' worth of energy isn't clamped to max_increment.
-    spike_mask = (diffs_adj > max_increment) & ~multi_interval_gap
-    if spike_mask.any():
-        logger.debug(f'Found {spike_mask.sum()} spike(s) exceeding max_increment')
-        diffs_adj[spike_mask] = np.clip(
-            diffs_adj[spike_mask], 0, max_increment
+    if max_increment is not None:
+        cap = pd.Series(float(max_increment), index=series.index)
+    else:
+        cap = _rate_based_cap(
+            diffs_adj, time_diffs / 60.0, ~resets & ~multi_interval_gap,
         )
+    spike_mask = (diffs_adj > cap) & ~multi_interval_gap
+    if spike_mask.any():
+        logger.debug(f'Found {spike_mask.sum()} spike(s) exceeding the increment cap')
+        diffs_adj[spike_mask] = cap[spike_mask]
 
-    # Handle negative differences (after reset handling)
+    # Restarts score the reading itself, which is never negative for an
+    # energy or demand counter; guard anyway.
     diffs_adj[diffs_adj < 0] = 0
 
     # Multi-interval gaps — for a CUMULATIVE source, the value rising across
@@ -423,9 +488,61 @@ def subtract_series(
     return result.ffill()
 
 
+def _carry_deficit(
+    values: pd.Series, day_keys: Sequence,
+) -> Tuple[pd.Series, float, float]:
+    """Carry each below-zero row's deficit into the following rows of its day.
+
+    v2.55.0: when the subtracted sensors and the parent meter record the same
+    energy in different rows — one reports a few minutes after the other, or
+    the parent meter stalls and later catches up in one step — the row where
+    the subtracted energy lands goes negative. Clipping that row at zero
+    threw the deficit away, so the energy was never subtracted and the net
+    series overstated use. Carrying it forward instead takes it off the next
+    rows with use until it is absorbed, so each day's net total equals the
+    day's parent total minus the subtracted totals whenever that is
+    non-negative. A deficit still left at the end of the day (the subtracted
+    sensors recorded more than the parent did) is dropped, as before.
+
+    NaN rows (unmeasured labels) pass through unchanged and keep the deficit
+    for the next measured row. Returns (adjusted, carried, dropped).
+    """
+    keys = np.asarray(day_keys)
+    if len(keys) != len(values):
+        raise ValueError(
+            f"carry_deficit_days has {len(keys)} entries for {len(values)} rows"
+        )
+    vals = values.to_numpy(dtype="float64", copy=True)
+    carry = 0.0
+    created = 0.0
+    dropped = 0.0
+    current = None
+    for i in range(len(vals)):
+        if current is None or keys[i] != current:
+            dropped += -carry
+            carry = 0.0
+            current = keys[i]
+        v = vals[i]
+        if np.isnan(v):
+            continue
+        if v < 0:
+            created += -v
+        v = v + carry
+        if v < 0:
+            carry = v
+            vals[i] = 0.0
+        else:
+            carry = 0.0
+            vals[i] = v
+    dropped += -carry
+    carried = created - dropped
+    return pd.Series(vals, index=values.index), float(carried), float(dropped)
+
+
 def apply_load_subtract(
     load: pd.Series,
     subtracts: Sequence[Tuple[Mapping[str, Any], pd.Series]],
+    carry_deficit_days: Optional[Sequence] = None,
 ) -> Tuple[pd.Series, dict]:
     """Subtract one or more sensor signals from a load series, robustly.
 
@@ -455,7 +572,11 @@ def apply_load_subtract(
       ``trailing_gap_start``/``trailing_gap_end``. Interior gaps roll up
       into ``rows_missing`` without per-window detail.
     - **negative clip**: after subtraction, the result is ``clip(lower=0)``
-      and the number of clipped rows is counted. > 5 % → warning.
+      and the number of clipped rows is counted. > 5 % → warning. With
+      ``carry_deficit_days`` (v2.55.0) a row's deficit is instead carried
+      into the following rows of the same day (``_carry_deficit``), so the
+      day's net total is preserved; the audit records how much was carried
+      and how much was left over at day end.
     - **fraction guard**: per-row ``(sum_subtract / load)`` is checked against
       ``max_fraction_of_load``. If the violation rate exceeds
       ``max_fraction_violation_pct`` for ANY sensor, raises
@@ -472,6 +593,12 @@ def apply_load_subtract(
         ``DatetimeIndex``.
     subtracts : sequence of (cfg_mapping, pd.Series)
         One entry per subtract sensor.
+    carry_deficit_days : sequence, optional
+        One day label per ``load`` row (e.g. the row's local date). When
+        given, a below-zero row's deficit is carried into later rows with
+        the same label rather than clipped away. Meaningful for per-interval
+        energy, so callers pass it for cumulative sources. None (default)
+        clips each row at zero.
 
     Returns
     -------
@@ -528,6 +655,8 @@ def apply_load_subtract(
             "n_rows": len(load),
             "n_clipped_rows": 0,
             "clipped_pct": 0.0,
+            "deficit_carried_kwh": 0.0,
+            "deficit_dropped_kwh": 0.0,
             "load_total_kwh": float(load.sum()) if len(load) else 0.0,
             "subtract_total_kwh": 0.0,
             "per_sensor": [],
@@ -715,7 +844,16 @@ def apply_load_subtract(
     # measurement-noise band, but the count is a useful health metric).
     clipped_mask = raw_adjusted < 0
     n_clipped = int(clipped_mask.sum())
-    adjusted = raw_adjusted.clip(lower=0.0)
+    deficit_carried = 0.0
+    deficit_dropped = 0.0
+    if carry_deficit_days is not None:
+        # v2.55.0: rows about to be dropped neither create nor absorb a
+        # deficit — their subtract value is a placeholder.
+        adjusted, deficit_carried, deficit_dropped = _carry_deficit(
+            raw_adjusted.where(~drop_mask), carry_deficit_days,
+        )
+    else:
+        adjusted = raw_adjusted.clip(lower=0.0)
 
     # Apply any 'drop' masks last so clip/fraction-guard see the full signal.
     if drop_mask.any():
@@ -733,15 +871,25 @@ def apply_load_subtract(
         # Noise band is usually < 1%. 5% is the warn threshold — any higher
         # almost certainly means a miscalibrated subtract rather than jitter.
         log = logger.warning if clipped_pct > 5.0 else logger.info
-        log(
-            f"load_subtract: clipped {n_clipped}/{n_rows} rows ({clipped_pct:.2f}%) "
-            f"to zero after subtraction"
-        )
+        if carry_deficit_days is not None:
+            log(
+                f"load_subtract: {n_clipped}/{n_rows} rows ({clipped_pct:.2f}%) "
+                f"went below zero after subtraction; "
+                f"{deficit_carried:.2f} carried into later rows of the same "
+                f"day, {deficit_dropped:.2f} left over at day end"
+            )
+        else:
+            log(
+                f"load_subtract: clipped {n_clipped}/{n_rows} rows ({clipped_pct:.2f}%) "
+                f"to zero after subtraction"
+            )
 
     audit = {
         "n_rows": n_rows,
         "n_clipped_rows": n_clipped,
         "clipped_pct": clipped_pct,
+        "deficit_carried_kwh": deficit_carried,
+        "deficit_dropped_kwh": deficit_dropped,
         "load_total_kwh": float(kept_load.sum()) if len(kept_load) else 0.0,
         "subtract_total_kwh": (
             float(kept_subtract.sum()) if len(kept_subtract) else 0.0

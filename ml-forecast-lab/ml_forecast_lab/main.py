@@ -1204,6 +1204,23 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
 # docs/investigations/2026-05-neural-pv.md for the v2.37 precedent.
 CACHE_SCHEMA_VERSION = 3
 
+# v2.55.0: version of the rule that turns a cumulative sensor into interval
+# labels (restart detection, the default increment cap) and of the
+# load_subtract deficit carry. A cached model is fed lag features built by
+# the current rule, so one trained under an older rule is served inputs on a
+# different scale. Unlike CACHE_SCHEMA_VERSION this only applies to the
+# experiments the rule touches — a cumulative target or a load_subtract —
+# so every other experiment keeps its cached model.
+LABEL_RULE_VERSION = 2
+
+
+def _label_rule_current(exp_cfg, meta: dict) -> bool:
+    """Whether a cached model's labels match the current rule for this
+    experiment. Caches written before v2.55.0 carry no ``label_rule``."""
+    if not (exp_cfg.source_is_cumulative or exp_cfg.load_subtract):
+        return True
+    return meta.get("label_rule", 1) == LABEL_RULE_VERSION
+
 # (config name, module under ml_forecast_lab.models, class) for every backend
 # beyond the four core ones. Registration skips any whose optional
 # dependencies are missing.
@@ -1302,6 +1319,7 @@ def _cache_meta(cache: dict) -> dict:
 
     return {
         "schema_version": CACHE_SCHEMA_VERSION,
+        "label_rule": LABEL_RULE_VERSION,
         "addon_version": __version__,
         "model_name": cache["model_name"],
         "feature_cols": list(cache["feature_cols"]),
@@ -2556,6 +2574,12 @@ class MLForecastLabApp:
             f"load={load_total:.2f} kWh, "
             f"subtracted={sub_total:.2f} kWh ({share_pct:.1f}% of load), "
             f"clipped={n_clipped} rows ({clipped_pct:.2f}%)"
+            + (
+                f", deficit carried={audit['deficit_carried_kwh']:.2f} kWh, "
+                f"left at day end={audit['deficit_dropped_kwh']:.2f} kWh"
+                if audit.get("deficit_carried_kwh") or audit.get("deficit_dropped_kwh")
+                else ""
+            )
         )
         for sensor in audit.get("per_sensor", []):
             gap = ""
@@ -2594,6 +2618,15 @@ class MLForecastLabApp:
         except Exception:
             return timezone.utc
 
+    def _local_dates(self, index: pd.DatetimeIndex) -> np.ndarray:
+        """The configured timezone's calendar date of each grid timestamp
+        (naive timestamps are UTC, as everywhere in the pipeline)."""
+        idx_utc = (
+            index.tz_localize("UTC") if index.tz is None
+            else index.tz_convert("UTC")
+        )
+        return np.asarray(idx_utc.tz_convert(self._local_tz()).date)
+
     async def _record_net_actuals(
         self, exp_cfg, net: pd.Series, now: datetime,
     ) -> None:
@@ -2617,12 +2650,11 @@ class MLForecastLabApp:
         if net.empty or not isinstance(net.index, pd.DatetimeIndex):
             return
         tz = self._local_tz()
-        idx_utc = (
-            net.index.tz_localize("UTC") if net.index.tz is None
-            else net.index.tz_convert("UTC")
+        local_dates = self._local_dates(net.index)
+        bins = (
+            net.index if net.index.tz is None
+            else net.index.tz_convert("UTC").tz_localize(None)
         )
-        local_dates = np.asarray(idx_utc.tz_convert(tz).date)
-        bins = idx_utc.tz_localize(None)
         cumulative = bool(getattr(exp_cfg, "source_is_cumulative", False))
 
         if cumulative:
@@ -3341,6 +3373,10 @@ class MLForecastLabApp:
                     grid_index = series.index
                     series, sub_audit = apply_load_subtract(
                         series, subtract_inputs,
+                        carry_deficit_days=(
+                            self._local_dates(grid_index)
+                            if exp_cfg.source_is_cumulative else None
+                        ),
                     )
                     # `on_missing: drop` deletes rows outright. Put them
                     # back as NaN so the grid stays unbroken: a hole here
@@ -7008,6 +7044,15 @@ class MLForecastLabApp:
                         f"benchmark + retrain will be scheduled)"
                     )
                     continue
+                if not _label_rule_current(exp_cfg, meta):
+                    logger.info(
+                        f"  Cached model for {exp_cfg.name} was trained on "
+                        f"labels from an earlier cumulative-conversion rule "
+                        f"(v{meta.get('label_rule', 1)}, now "
+                        f"v{LABEL_RULE_VERSION}); ignoring it so a retrain "
+                        f"builds one on the current labels"
+                    )
+                    continue
 
                 model_name = meta["model_name"]
                 model = self.model_registry.create(model_name)
@@ -7108,6 +7153,18 @@ class MLForecastLabApp:
         prev_meta = prev_dir / "cache_meta.json"
         if not prev_bin.exists() or not prev_meta.exists():
             return False, "No previous version on disk to roll back to"
+        # v2.55.0: the generation a retrain displaced may predate the label
+        # rule; restore would reject it at the next restart anyway, and until
+        # then it would be fed lags on a different scale.
+        try:
+            prev_meta_data = json.loads(prev_meta.read_text())
+        except Exception as e:
+            return False, f"Previous version's metadata is unreadable: {e}"
+        if not _label_rule_current(exp_cfg, prev_meta_data):
+            return False, (
+                "The previous version was trained on labels from an earlier "
+                "release and can't be restored"
+            )
 
         try:
             # Swap: current → previous_tmp, previous → current, previous_tmp → previous.
