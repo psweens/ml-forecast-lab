@@ -706,6 +706,38 @@ def _apply_covariate_transform(series, rec: dict):
     )
 
 
+def _within_points_span(series, points):
+    """``series`` (a forecast resolved onto a grid) restricted to the span
+    ``points`` (the source's own points, naive UTC) covers. Empty when there
+    are no points. v2.57.0."""
+    if points is None or len(points) == 0 or series is None or series.empty:
+        return series.iloc[0:0] if series is not None else pd.Series(dtype="float64")
+    idx = pd.DatetimeIndex(series.index)
+    if idx.tz is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    keep = (idx >= points.index.min()) & (idx <= points.index.max())
+    return series[keep]
+
+
+def _cov_future_dict(cov_cfg, cov_name: str) -> dict:
+    """The resolver spec for a covariate's forecast: entity, attribute and
+    value key, plus (v2.57.0) the further entities that continue it and where
+    its history comes from, so the forecast it reads is stored when that
+    history is stored forecasts."""
+    from ml_forecast_lab.config import stored_forecast_source
+    attr = getattr(cov_cfg, "future_attribute", "forecast")
+    key = getattr(cov_cfg, "future_value_key", None)
+    return {
+        "entity_id": cov_cfg.entity,
+        "name": cov_name,
+        "future_attribute": attr,
+        "future_value_key": key,
+        "future_extra_entities": list(getattr(cov_cfg, "future_extra_entities", None) or []),
+        "history_source": getattr(cov_cfg, "history_source", "sensor"),
+        "stored_source": stored_forecast_source(cov_cfg.entity, attr, key),
+    }
+
+
 def _future_covariate_on_model_scale(series, cov_cfg, cov_name, transforms):
     """A covariate's fetched forecast on the scale its history was fed at:
     ``scale``, then the transform recorded for this cycle's history (the
@@ -3534,6 +3566,9 @@ class MLForecastLabApp:
                             cov_cfg, "future_value_key", None,
                         ),
                     }
+                    # v2.57.0: history from the forecast as issued.
+                    if getattr(cov_cfg, "history_source", "sensor") == "stored_forecast":
+                        cov_dict.update(_cov_future_dict(cov_cfg, canonical_name))
 
                     cov_series = await self.covariate_resolver.fetch_history(
                         cov_dict, start, now, freq
@@ -5668,12 +5703,7 @@ class MLForecastLabApp:
                         if cov_cfg is None:
                             continue
                         try:
-                            cov_dict = {
-                                "entity_id": cov_cfg.entity,
-                                "name": cov_name,
-                                "future_attribute": getattr(cov_cfg, "future_attribute", "forecast"),
-                                "future_value_key": getattr(cov_cfg, "future_value_key", None),
-                            }
+                            cov_dict = _cov_future_dict(cov_cfg, cov_name)
                             future_series = await self.covariate_resolver.fetch_future(
                                 cov_dict, future_index_prod,
                             )
@@ -5780,12 +5810,7 @@ class MLForecastLabApp:
                     )
                     if cov_name in covariate_cols and cov_cfg.role in ('future', 'both'):
                         try:
-                            cov_dict = {
-                                "entity_id": cov_cfg.entity,
-                                "name": cov_name,
-                                "future_attribute": getattr(cov_cfg, "future_attribute", "forecast"),
-                                "future_value_key": getattr(cov_cfg, "future_value_key", None),
-                            }
+                            cov_dict = _cov_future_dict(cov_cfg, cov_name)
                             future_series = await self.covariate_resolver.fetch_future(
                                 cov_dict, future_index,
                             )
@@ -6185,6 +6210,12 @@ class MLForecastLabApp:
                         f"  external_forecast_log retention prune failed for "
                         f"{exp_cfg.name}: {e}"
                     )
+                # v2.57.0: stored forecasts used as covariate history are
+                # training data, so they are kept for the longest
+                # days_history among the experiments using them rather than
+                # the comparison's window, and the comparison's own copies
+                # of the same forecast are backfilled in before they age out.
+                await self._maintain_stored_forecasts(exp_cfg)
         except Exception as e:
             logger.error(f"Retrain failed for {exp_cfg.name}: {e}", exc_info=True)
             # v2.52.7: a failed replacement must not leave the experiment
@@ -7308,6 +7339,48 @@ class MLForecastLabApp:
         except Exception as e:
             logger.error(f"Error in forecast cycle: {e}", exc_info=True)
 
+    async def _maintain_stored_forecasts(self, exp_cfg) -> None:
+        """v2.57.0: backfill and prune the stored forecasts behind each of
+        ``exp_cfg``'s ``history_source: stored_forecast`` covariates
+        (``HistoryDB.maintain_stored_forecasts``). They are kept for the
+        longest ``days_history`` among every experiment whose covariates read
+        the same forecast, plus a day, since the store is shared."""
+        if not self.history_db:
+            return
+        from ml_forecast_lab.config import stored_forecast_source
+
+        def _sources(exp):
+            out = set()
+            for c in (getattr(exp, "covariates", None) or []):
+                if getattr(c, "history_source", "sensor") == "stored_forecast":
+                    out.add(stored_forecast_source(
+                        c.entity, getattr(c, "future_attribute", "forecast"),
+                        getattr(c, "future_value_key", None),
+                    ))
+            return out
+
+        mine = _sources(exp_cfg)
+        if not mine:
+            return
+        experiments = list(getattr(self.config, "experiments", None) or [exp_cfg])
+        for source in sorted(mine):
+            keep = max(
+                int(getattr(e, "days_history", 0) or 0)
+                for e in experiments + [exp_cfg] if source in _sources(e)
+            ) + 1
+            try:
+                res = await asyncio.to_thread(
+                    self.history_db.maintain_stored_forecasts, source, keep,
+                )
+                if res.get("copied") or res.get("pruned"):
+                    logger.info(
+                        f"  stored forecasts for {source}: copied "
+                        f"{res.get('copied', 0)} from the Forecast Comparison, "
+                        f"pruned {res.get('pruned', 0)} older than {keep}d"
+                    )
+            except Exception as e:
+                logger.warning(f"  stored-forecast maintenance failed for {source}: {e}")
+
     async def _capture_external_forecast(
         self, exp_cfg, issued_at: datetime, ds_future: pd.DatetimeIndex,
     ) -> None:
@@ -7361,10 +7434,18 @@ class MLForecastLabApp:
                         "future_attribute": attr_name,
                         "future_value_key": value_key,
                     }
-                    series = await resolver.fetch_future(cov_cfg, ds_future)
-                    if series is None or len(series) == 0:
+                    # v2.57.0: only targets inside the source's own span.
+                    # Resolving onto the grid holds the last point across the
+                    # rest of the horizon (and the first back to its start);
+                    # those are values the source never forecast, and logging
+                    # them scored it at leads it does not cover — and they
+                    # would reach a covariate's stored-forecast history.
+                    from ml_forecast_lab.covariates import align_future_points
+                    points = await resolver.fetch_future_points(cov_cfg)
+                    if points is None or points.empty:
                         continue
-                    series = series.dropna()
+                    series = align_future_points(points, ds_future).dropna()
+                    series = _within_points_span(series, points)
                     if series.empty:
                         continue
                     targets = [
@@ -8467,12 +8548,7 @@ class MLForecastLabApp:
                             )
                             continue
                         try:
-                            cov_dict = {
-                                "entity_id": cov_cfg.entity,
-                                "name": cov_name,
-                                "future_attribute": getattr(cov_cfg, "future_attribute", "forecast"),
-                                "future_value_key": getattr(cov_cfg, "future_value_key", None),
-                            }
+                            cov_dict = _cov_future_dict(cov_cfg, cov_name)
                             future_series = await self.covariate_resolver.fetch_future(
                                 cov_dict, future_index,
                             )
@@ -8676,12 +8752,7 @@ class MLForecastLabApp:
                     )
                     if cov_name in raw_cov_cols and cov_cfg.role in ('future', 'both'):
                         try:
-                            cov_dict = {
-                                "entity_id": cov_cfg.entity,
-                                "name": cov_name,
-                                "future_attribute": getattr(cov_cfg, "future_attribute", "forecast"),
-                                "future_value_key": getattr(cov_cfg, "future_value_key", None),
-                            }
+                            cov_dict = _cov_future_dict(cov_cfg, cov_name)
                             future_series = await self.covariate_resolver.fetch_future(
                                 cov_dict, future_index,
                             )

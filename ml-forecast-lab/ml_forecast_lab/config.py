@@ -142,6 +142,25 @@ class SubtractCfg:
             raise ValueError("entity_id must be non-empty")
 
 
+COVARIATE_HISTORY_SOURCES = {'sensor', 'stored_forecast'}
+"""Valid ``CovariateCfg.history_source`` values (v2.57.0)."""
+
+STORED_FORECAST_PREFIX = 'covariate:'
+"""``external_forecast_log.source`` prefix for trajectories stored as
+covariate history (v2.57.0). Kept apart from the Forecast Comparison's own
+sources, which are scored and pruned on that tab's terms, and stored with an
+empty ``experiment`` so every experiment using the same forecast shares
+them."""
+
+
+def stored_forecast_source(entity: str, attribute: Optional[str],
+                           value_key: Optional[str]) -> str:
+    """The comparison-style source key of a covariate's forecast: the same
+    key an attribute-mode external forecast of that entity, attribute and
+    value key is logged under (``external_source_key``)."""
+    return external_source_key(entity, 'attribute', attribute or 'forecast', value_key)
+
+
 @dataclass
 class CovariateCfg:
     """Configuration for a single covariate (external feature)."""
@@ -177,6 +196,28 @@ class CovariateCfg:
     wind_speed) in order. Ignored when the attribute is a flat
     ``{iso_dt: value}`` mapping."""
 
+    future_extra_entities: List[str] = field(default_factory=list)
+    """For role='future' / 'both': further entities whose ``future_attribute``
+    continues the same forecast, for integrations that publish one sensor per
+    day. Their entries are merged with the main entity's; the main entity's
+    entry wins where both cover a time. Not used with the weather
+    ``hourly`` / ``daily`` / ``twice_daily`` service types, which already
+    return the whole horizon. v2.57.0."""
+
+    history_source: str = 'sensor'
+    """Where the training history comes from, for role='future' / 'both':
+
+    - ``sensor``: the entity's recorded state (or, with
+      ``future_value_key``, that attribute) — what the sensor measured.
+    - ``stored_forecast``: the forecast as it was issued. Each forecast
+      cycle stores the trajectory the covariate reads, and each grid bin's
+      history is the value from the latest stored trajectory issued at or
+      before the bin's start. Trajectories the Forecast Comparison tab
+      stored for the same entity, attribute and value key count too.
+
+    ``stored_forecast`` makes training see what forecasting sees: a forecast,
+    not the measured value it later turned into. v2.57.0."""
+
     def __post_init__(self) -> None:
         """Validate configuration."""
         valid_roles = {'future', 'lagged', 'both', 'concurrent'}
@@ -184,6 +225,24 @@ class CovariateCfg:
             raise ValueError(
                 f'role must be one of {valid_roles}, got {self.role!r}'
             )
+        if self.history_source not in COVARIATE_HISTORY_SOURCES:
+            raise ValueError(
+                f'history_source must be one of '
+                f'{sorted(COVARIATE_HISTORY_SOURCES)}, got {self.history_source!r}'
+            )
+        if self.history_source == 'stored_forecast' and self.role not in ('future', 'both'):
+            raise ValueError(
+                "history_source 'stored_forecast' needs role 'future' or "
+                f"'both' (a covariate with a forecast), got role {self.role!r}"
+            )
+        if self.future_extra_entities is None:
+            self.future_extra_entities = []
+        elif isinstance(self.future_extra_entities, str):
+            self.future_extra_entities = [self.future_extra_entities]
+        self.future_extra_entities = [
+            str(e).strip() for e in self.future_extra_entities
+            if str(e).strip() and str(e).strip() != self.entity
+        ]
         valid_transforms = {None, 'log', 'sqrt', 'box_cox'}
         if self.transform not in valid_transforms:
             raise ValueError(
@@ -199,6 +258,26 @@ class CovariateCfg:
 MAX_EXTERNAL_FORECASTS = 5
 """Cap on the number of third-party forecasts compared per experiment.
 Keeps the comparison tab legible and bounds the per-cycle capture work."""
+
+EXTERNAL_FORECAST_UNITS = ('W', 'kW', 'MW', 'Wh', 'kWh', 'MWh')
+"""Units an external forecast's ``unit`` may name: the power and energy
+units the comparison converts between."""
+
+
+def normalise_external_unit(unit: Any) -> Optional[str]:
+    """``unit`` in its canonical spelling (``kw`` → ``kW``); ``None`` for
+    blank. Raises ``ValueError`` for anything outside
+    ``EXTERNAL_FORECAST_UNITS``."""
+    if unit is None or str(unit).strip() == '':
+        return None
+    key = str(unit).strip().lower()
+    for u in EXTERNAL_FORECAST_UNITS:
+        if u.lower() == key:
+            return u
+    raise ValueError(
+        f'external forecast unit must be one of '
+        f'{", ".join(EXTERNAL_FORECAST_UNITS)}, got {unit!r}'
+    )
 
 
 @dataclass
@@ -245,9 +324,17 @@ class ExternalForecastCfg:
     """Friendly name for this forecast in the comparison tab. ``None`` falls
     back to the entity's short suffix."""
 
+    unit: Optional[str] = None
+    """Unit of the forecast's values, one of ``EXTERNAL_FORECAST_UNITS``.
+    ``None`` uses the entity's HA ``unit_of_measurement``. In ``attribute``
+    mode that unit describes the entity's state, which need not be the unit
+    of its trajectory entries: a forecast sensor's state can be the day's
+    total in kWh while each entry is average power in kW. v2.56.0."""
+
     def __post_init__(self) -> None:
         if not self.entity_id:
             raise ValueError('external forecast entity_id must be non-empty')
+        self.unit = normalise_external_unit(self.unit)
         valid_modes = {'state', 'attribute'}
         if self.mode not in valid_modes:
             raise ValueError(
@@ -1027,6 +1114,16 @@ def load_config(config_path: Path | str) -> AppConfig:
                         f'Ignoring unknown external_forecasts fields: {unknown_ext}'
                     )
                     ext = {k: v for k, v in ext.items() if k in ext_fields}
+                # An unrecognised unit drops back to the sensor's own unit
+                # rather than failing the whole config load.
+                try:
+                    normalise_external_unit(ext.get('unit'))
+                except ValueError as e:
+                    logger.warning(
+                        'external forecast %r: %s; using the sensor unit',
+                        ext.get('entity_id'), e,
+                    )
+                    ext = {k: v for k, v in ext.items() if k != 'unit'}
                 external_forecasts.append(ExternalForecastCfg(**ext))
 
             # Migrate legacy flat single-sensor keys into the list.
@@ -1691,8 +1788,10 @@ def add_experiment_external_forecast(
         raise ValueError(f'Unknown external_forecasts fields: {unknown}')
     if not external.get('entity_id'):
         raise ValueError('external forecast must include a non-empty "entity_id"')
-    # Validate (raises on bad mode / empty entity).
-    ExternalForecastCfg(**external)
+    # Validate (raises on bad mode / unit / empty entity).
+    parsed = ExternalForecastCfg(**external)
+    if parsed.unit is not None:
+        external = dict(external, unit=parsed.unit)
 
     config_path = Path(config_path)
     with open(config_path, 'r', encoding='utf-8') as f:
@@ -1779,6 +1878,50 @@ def remove_experiment_external_forecast(
     if removed:
         atomic_yaml_write(config_path, data)
     return removed
+
+
+def set_experiment_external_forecast_unit(
+    config_path: Path | str,
+    experiment_name: str,
+    source: str,
+    unit: Optional[str],
+) -> bool:
+    """
+    Set (or, with ``unit=None``, clear) the ``unit`` of the external forecast
+    whose ``source_key`` is ``source``. The captured trajectory log is keyed
+    by source, so its history is kept and rescored under the new unit.
+    Returns True if an entry was updated.
+
+    Raises ``ValueError`` for a unit outside ``EXTERNAL_FORECAST_UNITS``.
+    """
+    unit = normalise_external_unit(unit)
+    config_path = Path(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    for exp in data.get('experiments', []):
+        if exp.get('name') != experiment_name:
+            continue
+        items = exp.get('external_forecasts') or []
+        for i, item in enumerate(items):
+            it = {'entity_id': item} if isinstance(item, str) else dict(item or {})
+            if not it.get('entity_id'):
+                continue
+            key = external_source_key(
+                it['entity_id'], it.get('mode'), it.get('attribute'),
+                it.get('value_key'),
+            )
+            if key != source:
+                continue
+            if unit is None:
+                it.pop('unit', None)
+            else:
+                it['unit'] = unit
+            items[i] = it
+            atomic_yaml_write(config_path, data)
+            return True
+        return False
+    return False
 
 
 _ISO_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')

@@ -119,6 +119,8 @@ covariates:
 | `role` | `lagged` \| `future` \| `both` | `lagged` | `lagged` = historical only (used as a lag feature). `future` = the entity exposes a known-future forecast, available at every horizon step. `both` = lagged for training, future at inference. |
 | `future_attribute` | string | `forecast` | For `role: future` / `both`: where the future-known series comes from. For **classic attribute-exposing entities** (Met.no `weather.*` on older HA, Solcast, Forecast.Solar), this is the attribute name (`forecast`, `detailedForecast`). For **modern `weather.*` entities** (HA 2023.9+: Met Office DataHub, OpenWeatherMap, AccuWeather, etc.), set this to `hourly`, `daily`, or `twice_daily` — the app detects the weather domain and routes through the `weather.get_forecasts` service call instead of reading attributes. v2.37.7+ Add-Covariate UI auto-populates this dropdown based on the entity's actual capabilities. |
 | `future_value_key` | string | unset | For `role: future` / `both`: the key inside each forecast entry that contains the value (`temperature`, `pv_estimate`, `cloud_coverage`, …). If unset, common keys are tried in order. The Add-Covariate UI offers the entity's actual keys as a dropdown. |
+| `future_extra_entities` | list of entities | `[]` | For `role: future` / `both`, when one forecast is published across several sensors (one per day, say): the other sensors, read with the same `future_attribute` and `future_value_key` and joined to this one's entries, so the forecast covers the whole horizon. Where two sensors cover the same time, the main `entity`'s value is used. Without it, a forecast that ends before the horizon does holds its last value for the rest. Not used with `hourly` / `daily` / `twice_daily`, which already return the whole forecast. |
+| `history_source` | `sensor` \| `stored_forecast` | `sensor` | For `role: future` / `both`: what the model trains on. `sensor` is what the entity recorded. `stored_forecast` is the forecast as it was issued — see *Learning from stored forecasts* below. |
 | `scale` | float | unset | Multiplicative pre-scaling (e.g. percent → fraction: `0.01`). |
 | `transform` | `log` \| `sqrt` \| `box_cox` | unset | Per-covariate transform before model input, applied to the covariate's history and to its forecast values alike. `log` adds an offset when the history reaches zero or below; `box_cox` always adds one (larger when the history goes below zero). The offset is fixed when the model is trained, so a change to `transform` takes effect at the next retrain. A future-role covariate with `log` or `box_cox` and no numeric history has no offset to fix, so its forecast values are not used. |
 | `aggregation` | `mean` \| `sum` \| `max` \| `min` \| `last` | `mean` | Resampling method when aligning to `interval_minutes`. |
@@ -146,6 +148,22 @@ companion `<name>_missing` indicator, `1` where the value was imputed and
 actually have gaps, so a complete experiment gains no columns at all.
 Every backend receives the same matrix, so trees can split on the flag and
 neural and classical backends get it as a clean channel.
+
+**Learning from stored forecasts.** A `future` covariate normally trains on
+what its sensor recorded and then forecasts from what its forecast says. When
+the two differ — a forecast that is only ever a forecast, or a sensor whose
+state is something else entirely — the model learns a relationship it never
+sees again. With `history_source: stored_forecast` the app stores the forecast
+this covariate reads at every forecast cycle, and each training interval's
+value is taken from the latest stored forecast issued before that interval
+began, so training sees what forecasting will see. Forecasts the Forecast
+Comparison tab already stored for the same entity, `future_attribute` and
+`future_value_key` count from the start, and stored forecasts are kept for the
+longest `days_history` among the experiments using them. Until enough is
+stored, the earlier part of the training window is masked for this covariate,
+like any covariate whose history starts part-way in; only the stored part
+teaches the model what the forecast means. Forecasts are stored while an
+experiment using the covariate is in production.
 
 A binary covariate is a step function under HA's delta-storage recorder,
 where "no row" means "did not move" rather than "unknown", so its in-span
@@ -234,11 +252,14 @@ Compare this app's forecast against up to **five third-party forecasts of the sa
 | `mode` | `state` \| `attribute` | `state` | `state`: the entity's recorded value at each time is its estimate for that moment (cached each cycle like the actuals; newly added sensors are backfilled from recorder history so the comparison shows immediately). `attribute`: read a forecast trajectory from an attribute and log it per cycle (tagged by source) for a per-horizon comparison. |
 | `attribute` | string | `forecast` | `attribute` mode only — which attribute (or weather `hourly`/`daily`/`twice_daily` service type) holds the trajectory. |
 | `value_key` | string | `null` | `attribute` mode only — the value key inside each trajectory entry (e.g. `pv_estimate`). `null` auto-detects. |
-| `scale` | float | `null` | Optional multiplier override. Usually unnecessary — base units (W/kW/MW, Wh/kWh/MWh) are reconciled automatically from each sensor's HA unit. |
+| `scale` | float | `null` | Optional multiplier override. Usually unnecessary — base units (W/kW/MW, Wh/kWh/MWh) are reconciled automatically from each forecast's unit. |
+| `unit` | `W` \| `kW` \| `MW` \| `Wh` \| `kWh` \| `MWh` | `null` | The unit of the forecast's values. `null` uses the sensor's HA unit. Set it in `attribute` mode when the forecast entries are in a different unit from the sensor's state — a sensor whose state is today's total in kWh while each entry is average power in kW needs `unit: kW`. |
 | `is_cumulative` | bool | `null` | Override for whether the sensor is a running total. `null` auto-detects the cumulative shape (and differences it before comparison). |
 | `label` | string | `null` | Friendly name in the tab's chart/legend. |
 
-The comparison is **unit-aware**: it reads each sensor's HA `unit_of_measurement` and converts everything into a common space, so a cumulative **kWh** energy sensor lines up correctly against an instantaneous **kW** power target with no manual setup (cumulative shape is differenced; power↔energy is reconciled via the interval length and base units). When a unit isn't a recognised power/energy unit, the series is left raw and a scale-mismatch guard warns rather than guessing. The tab has a **per-interval ↔ cumulative** toggle: per-interval shows per-bin demand in the target's native unit; cumulative shows the running daily total in kWh (integrating power forecasts to energy), which is what makes a daily-total energy sensor directly comparable.
+The comparison is **unit-aware**: it takes each forecast's `unit` (or, when unset, its sensor's HA `unit_of_measurement`) and converts everything into a common space, so a cumulative **kWh** energy sensor lines up correctly against an instantaneous **kW** power target with no manual setup (cumulative shape is differenced; power↔energy is reconciled via the interval length and base units). When a unit isn't a recognised power/energy unit, the series is left raw and a scale-mismatch guard warns rather than guessing.
+
+A sensor's HA unit describes its state, which for a forecast attribute need not be the unit of the entries. Read in the wrong one, a power forecast taken as energy per interval comes out scaled by 1 ÷ the interval in hours (double at 30 minutes), and energy taken as power the other way round. So when an `attribute`-mode forecast has no `unit`, isn't cumulative, the interval isn't one hour, and its values come out nearer that factor than 1 against the actuals, the tab says which unit it looks to be in, leaves it out of the ranking, and offers a button to set that unit. Setting the unit keeps the forecast's captured history and rescores it; removing and re-adding the forecast would discard it. A forecast with `unit` set is always scored as it stands, so one that really runs high shows as a bad forecast rather than being flagged. The tab has a **per-interval ↔ cumulative** toggle: per-interval shows per-bin demand in the target's native unit; cumulative shows the running daily total in kWh (integrating power forecasts to energy), which is what makes a daily-total energy sensor directly comparable.
 
 The tab presents an **accuracy leaderboard** that ranks this app inline against every external (with #1/#2/#3 badges like the Results tab). A **Rank by** selector chooses the basis — *Overall* (a composite mean rank across MAE, RMSE and Daily MAE; the default) or a single metric (MAE, RMSE, Bias, % of typical, Daily MAE, Daily bias) — and the ranking, column highlighting, the "vs MLFL" gap and the verdict all follow it. Each source is held **provisional until it has 7 days of overlapping data** (shown as an `n/7 ⏳` badge with a "results are provisional" banner) so a winner isn't declared off a handful of samples. Alongside the overlay there's an **error-by-time-of-day** chart and, for trajectory externals, a per-horizon error curve; a comparison-basis line reports each forecaster's median lead so the head-to-head is read at the right horizon. External forecast lead times reflect the source's own freshness (its HA `last_updated`), not the app's capture cadence.
 
@@ -248,12 +269,13 @@ external_forecasts:
     mode: attribute
     attribute: detailedForecast
     value_key: pv_estimate
+    unit: kW          # the entries are kW; the sensor's own unit is kWh
     label: Solcast
   - entity_id: sensor.neighbour_model
     mode: state
 ```
 
-Only collects data while the experiment is in **production** (that's when this app logs its own forecasts), and data accrues from when you add each external — apart from state-mode sensors, which are back-filled once from recorder history so they show immediately. Storage is bounded: the captured trajectory log is pruned on its own window — `external_forecast_retention_days` (default 60, editable in the System tab) — and state-mode caches to the experiment's `max_age`. Legacy single-sensor configs using the flat `external_forecast_*` keys are auto-migrated into this list on load.
+Each captured trajectory covers only the times the source itself forecast: where a source ends before the experiment's horizon does, the rest is neither stored nor scored (v2.57.0). Only collects data while the experiment is in **production** (that's when this app logs its own forecasts), and data accrues from when you add each external — apart from state-mode sensors, which are back-filled once from recorder history so they show immediately. Storage is bounded: the captured trajectory log is pruned on its own window — `external_forecast_retention_days` (default 60, editable in the System tab) — and state-mode caches to the experiment's `max_age`. Legacy single-sensor configs using the flat `external_forecast_*` keys are auto-migrated into this list on load.
 
 ### Cross-validation
 
