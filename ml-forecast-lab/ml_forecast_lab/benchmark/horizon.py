@@ -313,40 +313,136 @@ class HorizonEvaluation:
         return pd.DataFrame(rows).set_index('name').sort_values('crps')
 
 
+# How a point-only forecaster's earlier errors are grouped before their
+# quantiles are added to a new forecast.
+#   'lead'  — by lead bucket: how far ahead the forecast was.
+#   'level' — by the size of the point forecast: errors made when the
+#             forecast was high are applied where it is high again.
+#   'slot'  — by local time of day (three-hour blocks) and weekday/weekend.
+RESIDUAL_CONDITIONS = ('lead', 'level', 'slot')
+LEVEL_BINS = 4
+
+
+def level_conditioned_offsets(
+    predicted: np.ndarray, residual: np.ndarray, new_predicted: np.ndarray,
+    levels: Sequence[float], bins: int = LEVEL_BINS,
+    min_samples: int = MIN_RESIDUALS_PER_BUCKET,
+) -> Optional[np.ndarray]:
+    """
+    Quantile offsets for new forecasts from past signed errors, grouped by
+    the size of the forecast.
+
+    ``residual`` is ``actual − predicted`` for past forecasts. Past
+    forecasts are split into ``bins`` equal-count groups by their value;
+    each new forecast takes the error quantiles of the group it falls in.
+    On a non-negative skewed target the errors made when little was
+    forecast are small and one-sided, and those made when a lot was
+    forecast are large — one pooled set of quantiles is too wide for the
+    first and too narrow for the second. A group with fewer than
+    ``min_samples`` errors uses the pooled quantiles.
+
+    Returns an array of shape ``(len(new_predicted), len(levels))`` to add
+    to the new forecasts, or ``None`` when there are fewer than
+    ``min_samples`` past errors in total. This is the one construction
+    behind both the published asymmetric band and the evaluation's
+    ``'level'`` distribution.
+    """
+    predicted = np.asarray(predicted, dtype=float).ravel()
+    residual = np.asarray(residual, dtype=float).ravel()
+    ok = np.isfinite(predicted) & np.isfinite(residual)
+    predicted, residual = predicted[ok], residual[ok]
+    if residual.size < min_samples:
+        return None
+    new_predicted = np.asarray(new_predicted, dtype=float)
+    lv = np.asarray(levels, dtype=float)
+    pooled = np.quantile(residual, lv)
+    edges = np.unique(
+        np.quantile(predicted, np.linspace(0, 1, bins + 1)[1:-1])
+    )
+    past_bin = np.searchsorted(edges, predicted, side='right')
+    new_bin = np.searchsorted(edges, new_predicted, side='right')
+    out = np.empty((new_predicted.size, lv.size))
+    for b in np.unique(new_bin):
+        e = residual[past_bin == b]
+        out[new_bin == b] = np.quantile(e, lv) if e.size >= min_samples else pooled
+    return out
+
+
+def _residual_keys(
+    condition: str, point: np.ndarray, origin_pos: np.ndarray, horizon: int,
+    lead_bucket: int, future_times: List[pd.DatetimeIndex],
+    interval_minutes: int, tz: Optional[str],
+) -> Callable[[int, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
+    """Return ``keys(i, prior)`` → (keys of origin *i*'s cells, keys of the
+    prior origins' cells), integers that group like with like."""
+    n_orig = point.shape[0]
+    if condition == 'lead':
+        row = np.arange(horizon) // max(1, lead_bucket)
+        fixed = np.tile(row, (n_orig, 1))
+        return lambda i, prior: (fixed[i], fixed[prior])
+    if condition == 'slot':
+        per_block = max(1, 180 // max(1, int(interval_minutes)))
+        fixed = np.empty((n_orig, horizon), dtype=int)
+        for i, fut in enumerate(future_times):
+            slot, weekend = slot_keys(fut, interval_minutes, tz)
+            fixed[i] = slot // per_block + 100 * weekend.astype(int)
+        return lambda i, prior: (fixed[i], fixed[prior])
+    raise ValueError(
+        f'condition must be one of {RESIDUAL_CONDITIONS}, got {condition!r}'
+    )
+
+
 def _residual_quantiles(
     point: np.ndarray, actual: np.ndarray, usable: np.ndarray,
     origin_pos: np.ndarray, horizon: int, lead_bucket: int,
-    nonnegative: bool,
+    nonnegative: bool, condition: str = 'level',
+    future_times: Optional[List[pd.DatetimeIndex]] = None,
+    interval_minutes: int = 30, tz: Optional[str] = None,
 ) -> np.ndarray:
     """Predictive quantiles for a point-only forecaster.
 
-    For origin *i* the distribution at lead *h* is the point forecast plus
-    the empirical quantiles of the signed errors this forecaster made, in
-    the same lead bucket, at origins whose scored targets were all measured
-    before origin *i* was issued. Signed, not absolute: on a skewed target
-    the errors above and below a mean forecast are not the same size.
-    Origins with too few earlier errors get NaN and are left out of the
-    probabilistic scores for every forecaster alike.
+    For origin *i* the distribution of a cell is the point forecast plus
+    the empirical quantiles of the signed errors this forecaster made in
+    like cells (see ``RESIDUAL_CONDITIONS``) at origins whose scored
+    targets were all measured before origin *i* was issued. Signed, not
+    absolute: on a skewed target the errors above and below a mean forecast
+    are not the same size. A group with too few earlier errors borrows the
+    pooled ones; origins with too few earlier errors at all get NaN and are
+    left out of the probabilistic scores for every forecaster alike.
     """
     n_orig, H = point.shape
     L = len(QUANTILE_LEVELS)
     out = np.full((n_orig, H, L), np.nan)
     err = np.where(usable, actual - point, np.nan)
-    buckets = np.arange(H) // max(1, lead_bucket)
-    n_buckets = int(buckets.max()) + 1
+    if condition not in RESIDUAL_CONDITIONS:
+        raise ValueError(
+            f'condition must be one of {RESIDUAL_CONDITIONS}, got {condition!r}'
+        )
+    keys = None if condition == 'level' else _residual_keys(
+        condition, point, origin_pos, horizon, lead_bucket,
+        future_times, interval_minutes, tz,
+    )
     for i in range(n_orig):
         # Earlier origins whose horizon ended at or before this issue time.
         prior = np.flatnonzero(origin_pos + H <= origin_pos[i])
         if prior.size == 0:
             continue
-        pooled = err[prior].ravel()
-        pooled = pooled[np.isfinite(pooled)]
+        prior_err = err[prior]
+        if condition == 'level':
+            offsets = level_conditioned_offsets(
+                point[prior], prior_err, point[i], QUANTILE_LEVELS,
+            )
+            if offsets is not None:
+                out[i] = point[i, :, None] + offsets
+            continue
+        pooled = prior_err[np.isfinite(prior_err)]
         if pooled.size < MIN_RESIDUALS_PER_BUCKET:
             continue
         pooled_q = np.quantile(pooled, QUANTILE_LEVELS)
-        for b in range(n_buckets):
-            cols = np.flatnonzero(buckets == b)
-            e = err[np.ix_(prior, cols)].ravel()
+        own_keys, prior_keys = keys(i, prior)
+        for k in np.unique(own_keys):
+            cols = np.flatnonzero(own_keys == k)
+            e = prior_err[prior_keys == k]
             e = e[np.isfinite(e)]
             q = (
                 np.quantile(e, QUANTILE_LEVELS)
@@ -406,6 +502,7 @@ def evaluate_forecasters(
     nonnegative: bool = False,
     coverage_level: float = 0.8,
     lead_bucket: Optional[int] = None,
+    residual_condition: str = 'level',
 ) -> HorizonEvaluation:
     """
     Score forecasters from a sequence of issue times on one series.
@@ -430,6 +527,9 @@ def evaluate_forecasters(
     lead_bucket : int, optional
         Steps per lead bucket for residual quantiles and the per-lead
         table. Defaults to six hours.
+    residual_condition : {'lead', 'level', 'slot'}
+        How a point-only forecaster's earlier errors are grouped when its
+        distribution is built (``RESIDUAL_CONDITIONS``).
     """
     if not isinstance(series.index, pd.DatetimeIndex):
         raise TypeError('series must have a DatetimeIndex')
@@ -469,6 +569,8 @@ def evaluate_forecasters(
                     own_q[i] = np.maximum(q, 0.0) if nonnegative else q
         quant = own_q if own_q is not None else _residual_quantiles(
             point, actual, usable, origin_pos, horizon, lead_bucket, nonnegative,
+            condition=residual_condition, future_times=future_times,
+            interval_minutes=interval_minutes, tz=tz,
         )
         raw[fc.name] = (point, quant)
 

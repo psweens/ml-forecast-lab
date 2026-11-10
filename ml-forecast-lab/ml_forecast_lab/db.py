@@ -2088,6 +2088,7 @@ class HistoryDB:
         min_samples: int = 10,
         model_version: Optional[str] = None,
         source_is_cumulative: bool = False,
+        signed: bool = False,
     ) -> dict:
         """
         Compute per-lead-time conformal nonconformity quantiles from
@@ -2144,6 +2145,13 @@ class HistoryDB:
             ``get_forecast_accuracy``), which follow the training
             label's rule. v2.52.4: before this, cumulative bands were
             sized from |delta − running counter|.
+
+        signed : bool
+            Also return the calibration pairs themselves, as
+            ``signed_residuals``: a list of ``[predicted, actual −
+            predicted]`` from the same cohorts the quantiles use. The
+            asymmetric band is built from these (v2.58.0); the absolute
+            quantiles are returned either way.
 
         Returns
         -------
@@ -2220,7 +2228,9 @@ class HistoryDB:
                     CAST((fl.lead_minutes / ?) * ? AS INTEGER) AS lead_bucket,
                     ABS(fl.predicted - ag.value) AS abs_residual,
                     fl.model_name,
-                    fl.model_version
+                    fl.model_version,
+                    fl.predicted,
+                    ag.value - fl.predicted AS signed_residual
                 FROM forecast_log fl
                 INNER JOIN {actuals_rel} ag ON ag.grid_dt = fl.target_dt
                 WHERE fl.experiment = ?
@@ -2251,7 +2261,8 @@ class HistoryDB:
 
         df = pd.DataFrame(
             rows,
-            columns=["lead_bucket", "abs_residual", "model_name", "model_version"],
+            columns=["lead_bucket", "abs_residual", "model_name",
+                     "model_version", "predicted", "signed_residual"],
         )
         df = df.dropna(subset=["lead_bucket", "abs_residual"])
 
@@ -2299,13 +2310,19 @@ class HistoryDB:
         )
         fallback = float(df["abs_residual"].quantile(q)) if len(df) > 0 else None
 
-        return {
+        result = {
             "quantiles": {int(k): float(v) for k, v in quantiles.items()},
             "fallback_quantile": fallback,
             "sample_counts": {int(k): int(v) for k, v in counts.items()},
             "total_samples": int(len(df)),
             "level": level,
         }
+        if signed:
+            pairs = df[["predicted", "signed_residual"]].dropna()
+            result["signed_residuals"] = [
+                [float(p), float(r)] for p, r in pairs.to_numpy()
+            ]
+        return result
 
     @_locked
     def get_forecast_coverage(

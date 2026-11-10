@@ -188,6 +188,31 @@ through the same code.
   errors pooled by lead, which is blunter than a per-slot empirical
   distribution; that, not the point forecast, is most of the CRPS gap.
 
+### Interval construction
+
+How a point forecast's past signed errors are grouped before their
+quantiles are added to a new forecast decides most of its CRPS on this
+series (same 74 issue times; the seasonal-mean profile with its own
+per-slot quantiles scores 0.940):
+
+| Point forecast | by lead | by forecast size | by local time block |
+|---|---|---|---|
+| LightGBM Huber | 1.009 | 0.941 | 1.041 |
+| LightGBM L2 | 1.041 | 0.975 | 1.074 |
+| LightGBM Tweedie | 1.090 | 0.989 | 1.105 |
+| seasonal-mean profile, point only | 1.156 | 1.002 | 1.112 |
+
+Errors depend on how much was forecast far more than on how far ahead:
+when little is forecast they are small and one-sided, when a lot is
+forecast they are large and right-skewed. Grouping by forecast size into
+four equal-count bins (`level_conditioned_offsets`) captures that with a
+few dozen errors per bin; grouping by three-hour local block and
+weekday/weekend spreads the same errors over sixteen groups and is worse
+than grouping by lead. The published asymmetric band
+(`interval_method`) and the evaluation's default distribution both use
+the forecast-size grouping. Realised coverage of the nominal 80 % band on
+this window was 0.76 – 0.77.
+
 Two properties of this class of target limit what any evaluation can say:
 
 - **Slot-level scores barely separate a daily profile from a constant.**

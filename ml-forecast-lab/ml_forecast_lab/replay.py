@@ -162,6 +162,10 @@ def _conformal_key(*args, **kwargs) -> str:
     # which this tree no longer asks for: it replays as UnrecordedCall.
     if not params.get("source_is_cumulative"):
         params.pop("source_is_cumulative", None)
+    # v2.58.0: likewise for the signed-residual request behind the
+    # asymmetric band.
+    if not params.get("signed"):
+        params.pop("signed", None)
     return _key("get_conformal_quantiles",
                 json.dumps(params, sort_keys=True, default=str))
 

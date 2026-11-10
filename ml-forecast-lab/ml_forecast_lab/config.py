@@ -683,6 +683,20 @@ class ExperimentCfg:
     regime change). The Results tab surfaces achieved coverage so users
     can diagnose calibration gaps."""
 
+    interval_method: str = 'auto'
+    """How the published prediction interval is built from past forecast
+    errors (v2.58.0).
+
+    - ``symmetric``: the point forecast ± one width, the ``conformal_coverage``
+      quantile of past absolute errors at each lead time.
+    - ``asymmetric``: separate lower and upper offsets, the quantiles of past
+      signed errors made when the forecast was of similar size. Right for a
+      non-negative skewed target, where a symmetric band spends its lower
+      half on values that cannot occur and stops short of the large ones.
+    - ``auto`` (default): ``asymmetric`` when the target is non-negative
+      (``source_is_cumulative`` or ``target_is_nonnegative``), else
+      ``symmetric``."""
+
     quantiles: List[float] = field(default_factory=list)
     """Optional list of quantiles in (0, 1) for native-quantile training.
     Empty (default) trains a point forecast and wraps it in a post-hoc
@@ -795,6 +809,11 @@ class ExperimentCfg:
         if self.cv_strategy not in valid_cv:
             raise ValueError(
                 f'cv_strategy must be one of {valid_cv}, got {self.cv_strategy!r}'
+            )
+        if self.interval_method not in ('auto', 'symmetric', 'asymmetric'):
+            raise ValueError(
+                "interval_method must be 'auto', 'symmetric' or 'asymmetric', "
+                f"got {self.interval_method!r}"
             )
         if self.cv_folds < 2:
             raise ValueError(f'cv_folds must be >= 2, got {self.cv_folds}')

@@ -5190,6 +5190,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "patience": lambda v: int(v) if 1 <= int(v) <= 500 else None,
             "max_increment": lambda v: float(v) if float(v) > 0 else None,
             "conformal_coverage": lambda v: float(v) if 0.5 <= float(v) <= 0.99 else None,
+            "interval_method": lambda v: v if v in ("auto", "symmetric", "asymmetric") else None,
             "country": lambda v: (str(v).strip().upper() or None) if v else None,
             "gap_handling": lambda v: v if v in ("ffill", "interpolate", "mask") else None,
             "gap_max_minutes": lambda v: int(v) if int(v) >= 1 else None,

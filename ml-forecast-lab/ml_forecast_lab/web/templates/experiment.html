@@ -389,6 +389,15 @@
                        onchange="saveSettingsField(this)">
             </div>
             <div class="exp-field">
+                <label class="field-label">Interval shape <span class="info-tip">?<span class="tip-text">How the prediction interval is built from past forecast errors. <b>Symmetric</b>: the forecast plus and minus one width. <b>Asymmetric</b>: separate lower and upper edges, taken from the errors made when the forecast was of similar size — better for values that cannot go below zero and occasionally spike, where a symmetric band wastes its lower half and stops short of the spikes. <b>Auto</b> uses asymmetric for non-negative targets and symmetric otherwise.</span></span></label>
+                <select class="setting-input" data-field="interval_method" onchange="saveSettingsField(this)">
+                    {% set _im = exp_config.interval_method if exp_config else 'auto' %}
+                    <option value="auto" {{ 'selected' if _im == 'auto' else '' }}>Auto</option>
+                    <option value="symmetric" {{ 'selected' if _im == 'symmetric' else '' }}>Symmetric</option>
+                    <option value="asymmetric" {{ 'selected' if _im == 'asymmetric' else '' }}>Asymmetric</option>
+                </select>
+            </div>
+            <div class="exp-field">
                 <label class="field-label">Early-stop patience <span class="info-tip">?<span class="tip-text">Epochs (neural) or boosting rounds (tree) with no smoothed-val-loss improvement before training stops. <b>Leave empty</b> to use each backend's default (20 neural, 50 tree). Set to an integer to override uniformly across every model in this experiment — useful when "neural runs cut off at 20, LightGBM at 50" makes results hard to compare. v2.40.12 added an EMA-smoothed stop decision so single noisy epochs don't reset patience; a 0.1% min_delta margin so micro-improvements don't either. Set very high (≥ epochs) to effectively disable early stopping — but disabling almost always hurts generalisation; consider raising rather than disabling.</span></span></label>
                 <input type="number" class="setting-input" data-field="patience" min="1" max="500" step="1"
                        value="{{ exp_config.patience if exp_config and exp_config.patience is not none else '' }}"

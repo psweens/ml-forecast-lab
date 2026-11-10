@@ -15,6 +15,22 @@
   may shift at the next retrain.
 - [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
 
+### Changed
+
+**The upper and lower forecast sensors fit values that cannot go below zero.**
+
+- For sensors that are mostly near zero with occasional spikes, the band
+  was the same distance above and below the forecast: half of it covered
+  values that cannot happen, and it stopped short of the spikes.
+- This affects experiments whose sensor is a running total, or that have
+  **Target is non-negative** set. Other experiments are unchanged.
+- The band is now narrow when little is forecast and reaches further up
+  than down when a lot is. It switches over once about 30 forecasts have
+  been checked against what happened.
+- To keep the old band, set **Interval shape** to **Symmetric** on the
+  Settings tab (`interval_method: symmetric`).
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
 ## 2.57.0
 
 ### Added

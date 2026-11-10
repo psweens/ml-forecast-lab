@@ -323,6 +323,7 @@ Each captured trajectory covers only the times the source itself forecast: where
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `conformal_coverage` | float in (0, 1) | `0.8` | Nominal coverage of the prediction interval. Default 0.8 publishes `_upper_80` / `_lower_80` companion sensors. Raise to 0.9 if downstream automations need wider safety margins; lower to 0.5 for diagnostic plots. |
+| `interval_method` | `auto` / `symmetric` / `asymmetric` | `auto` | Shape of the prediction interval. `symmetric` publishes the forecast ± one width. `asymmetric` publishes separate lower and upper edges, for values that cannot go below zero and occasionally spike. `auto` uses `asymmetric` when `source_is_cumulative` or `target_is_nonnegative` is set, `symmetric` otherwise. |
 | `clear_forecast_log_on_retrain` | bool | `true` | Whether to prune forecast-log rows older than the latest retrain when a champion is promoted. Keeps stability metrics honest — set `false` only if you want to preserve full history for offline analysis. |
 
 #### How the conformal bands are calibrated
@@ -354,6 +355,15 @@ trades the formal coverage guarantee for zero retraining cost:
   (Before v2.41.0 the `(1 − α/2)` signed-residual rule was applied to
   `|residual|`, so nominal-80% bands realised ~90% coverage and were
   ~1.5× wider than calibrated.)
+- **Asymmetric band.** With `interval_method: asymmetric` (the `auto`
+  choice for non-negative targets) the band is not centred on the
+  forecast. Past errors are kept with their sign and grouped by how large
+  the forecast was when they were made; each new forecast takes its lower
+  and upper edge from the group it falls in. A low forecast gets a narrow
+  band that sits just above zero, and a high forecast gets a wide one that
+  reaches further up than down. The lower edge is held at zero only where
+  it would otherwise be negative. Until about 30 errors have been
+  collected the symmetric band is published.
 - **Cohort filtering.** Quantiles are filtered to the current
   `(model_name, model_version)` so the band width reflects the
   champion's actual behaviour, not a previous version's. If the

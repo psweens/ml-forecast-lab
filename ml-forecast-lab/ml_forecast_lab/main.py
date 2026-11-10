@@ -1151,6 +1151,23 @@ def _apply_patience(model, exp_cfg, overrides=None) -> None:
     model.patience = int(p)
 
 
+def _interval_is_asymmetric(exp_cfg) -> bool:
+    """Whether the published interval uses separate lower/upper offsets.
+
+    ``interval_method: auto`` resolves to asymmetric for a non-negative
+    target, where errors above and below the forecast differ in size.
+    """
+    method = getattr(exp_cfg, "interval_method", "auto") or "auto"
+    if method == "asymmetric":
+        return True
+    if method == "symmetric":
+        return False
+    return bool(
+        getattr(exp_cfg, "source_is_cumulative", False)
+        or getattr(exp_cfg, "target_is_nonnegative", False)
+    )
+
+
 def _apply_experiment_loss(model, exp_cfg, overrides=None) -> None:
     """Give a freshly-created backend the experiment's ``loss_fn``.
 
@@ -7594,6 +7611,10 @@ class MLForecastLabApp:
         source_is_cumulative = bool(
             getattr(exp_cfg, "source_is_cumulative", False)
         )
+        asymmetric = _interval_is_asymmetric(exp_cfg)
+        # ``signed`` is passed only when set, so a symmetric experiment's
+        # query — and its replay-bundle key — is unchanged.
+        _cq_extra = {"signed": True} if asymmetric else {}
         # Offloaded: this query joins forecast_log against the
         # actuals grid and scales with both; running it inline
         # froze the event loop (web UI + scheduler) for the
@@ -7607,6 +7628,7 @@ class MLForecastLabApp:
             model_version=current_version,
             interval_minutes=exp_cfg.interval_minutes,
             source_is_cumulative=source_is_cumulative,
+            **_cq_extra,
         )
         pooled = False
         if (
@@ -7623,6 +7645,7 @@ class MLForecastLabApp:
                 model_version=None,
                 interval_minutes=exp_cfg.interval_minutes,
                 source_is_cumulative=source_is_cumulative,
+                **_cq_extra,
             )
             if cq_all.get("fallback_quantile") is not None:
                 logger.info(
@@ -7655,12 +7678,40 @@ class MLForecastLabApp:
         ], dtype=float)
         y_pred_upper = (y_pred + q_vec).astype(np.float32)
         y_pred_lower = (y_pred - q_vec).astype(np.float32)
-        if getattr(exp_cfg, "source_is_cumulative", False):
+        shape = "symmetric"
+        if asymmetric:
+            # v2.58.0: lower and upper offsets from past signed errors made
+            # when the forecast was of similar size. Falls back to the
+            # symmetric band above until enough pairs are calibrated.
+            from ml_forecast_lab.benchmark.horizon import (
+                level_conditioned_offsets,
+            )
+            pairs = np.asarray(
+                cq.get("signed_residuals") or [], dtype=float,
+            ).reshape(-1, 2)
+            offsets = level_conditioned_offsets(
+                pairs[:, 0], pairs[:, 1], np.asarray(y_pred, dtype=float),
+                [(1.0 - target_level) / 2.0, (1.0 + target_level) / 2.0],
+            )
+            if offsets is not None:
+                y_pred_lower = (y_pred + offsets[:, 0]).astype(np.float32)
+                y_pred_upper = (y_pred + offsets[:, 1]).astype(np.float32)
+                # The band always contains the point forecast.
+                y_pred_lower = np.minimum(y_pred_lower, y_pred).astype(np.float32)
+                y_pred_upper = np.maximum(y_pred_upper, y_pred).astype(np.float32)
+                q_vec = ((y_pred_upper - y_pred_lower) / 2.0).astype(float)
+                shape = "asymmetric"
+        if (
+            getattr(exp_cfg, "source_is_cumulative", False)
+            or (asymmetric and getattr(exp_cfg, "target_is_nonnegative", False))
+        ):
+            # Only where the band would go negative; the clip does not
+            # construct the band.
             y_pred_lower = np.maximum(y_pred_lower, 0.0)
         logger.info(
-            f"  Conformal {int(target_level*100)}% band: "
+            f"  Conformal {int(target_level*100)}% band ({shape}): "
             f"n={cq.get('total_samples', 0)} residuals, "
-            f"median width={float(np.median(q_vec*2)):.3f}"
+            f"median width={float(np.median(y_pred_upper - y_pred_lower)):.3f}"
         )
         return ConformalBands(
             level=target_level,
