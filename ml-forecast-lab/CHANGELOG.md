@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.58.0
+
+### Fixed
+
+**The loss you choose in Settings is now used by the model that publishes your forecasts.**
+
+- For LightGBM, XGBoost and CatBoost, the **Loss function** setting
+  (`loss_fn`) was used when benchmarking and tuning, but the model retrained
+  for production always used the default loss.
+- This affected experiments in production mode with a tree model and a loss
+  other than Huber. Experiments left on the default are unchanged.
+- The production model now trains with the loss you chose, so its forecasts
+  may shift at the next retrain.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
 ## 2.57.0
 
 ### Added

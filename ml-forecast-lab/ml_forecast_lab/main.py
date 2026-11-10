@@ -1151,6 +1151,22 @@ def _apply_patience(model, exp_cfg, overrides=None) -> None:
     model.patience = int(p)
 
 
+def _apply_experiment_loss(model, exp_cfg, overrides=None) -> None:
+    """Give a freshly-created backend the experiment's ``loss_fn``.
+
+    Applies to every backend that has a ``loss_fn`` — tree backends map it
+    onto a native objective — unless ``overrides`` already sets one. The
+    holdout refit, production inference and production retrain used to
+    apply it to neural backends only, so an experiment set to a non-default
+    loss was benchmarked and tuned with one tree objective and retrained
+    for production with the backend's default: the model publishing
+    forecasts was not the one the leaderboard ranked.
+    """
+    if not hasattr(model, 'loss_fn') or 'loss_fn' in (overrides or {}):
+        return
+    model.set_params(loss_fn=exp_cfg.loss_fn)
+
+
 def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
     """
     Propagate experiment-level neural training settings to a model.
@@ -5099,8 +5115,7 @@ class MLForecastLabApp:
                 try:
                     m = self.model_registry.create(m_name)
                     overrides = self.config.model_overrides.get(m_name, {})
-                    if m.is_neural and hasattr(m, 'loss_fn') and 'loss_fn' not in overrides:
-                        m.set_params(loss_fn=exp_cfg.loss_fn)
+                    _apply_experiment_loss(m, exp_cfg, overrides)
                     _apply_patience(m, exp_cfg, overrides)
                     if (m.is_neural and hasattr(m, 'optimiser')
                             and 'optimiser' not in overrides):
@@ -5535,8 +5550,7 @@ class MLForecastLabApp:
         # 4. Train model on full data
         model = self.model_registry.create(prod_model_name)
         overrides = self.config.model_overrides.get(prod_model_name, {})
-        if model.is_neural and hasattr(model, 'loss_fn') and 'loss_fn' not in overrides:
-            model.set_params(loss_fn=exp_cfg.loss_fn)
+        _apply_experiment_loss(model, exp_cfg, overrides)
         _apply_patience(model, exp_cfg, overrides)
         if (model.is_neural and hasattr(model, 'optimiser')
                 and 'optimiser' not in overrides):
@@ -6784,8 +6798,7 @@ class MLForecastLabApp:
         exp_params = getattr(exp_cfg, 'model_params', {}).get(prod_model_name, {})
         if exp_params:
             overrides.update(exp_params)
-        if model.is_neural and hasattr(model, 'loss_fn') and 'loss_fn' not in overrides:
-            model.set_params(loss_fn=exp_cfg.loss_fn)
+        _apply_experiment_loss(model, exp_cfg, overrides)
         _apply_patience(model, exp_cfg, overrides)
         if (model.is_neural and hasattr(model, 'optimiser')
                 and 'optimiser' not in overrides):
