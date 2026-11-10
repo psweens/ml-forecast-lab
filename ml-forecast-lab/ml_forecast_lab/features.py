@@ -1133,3 +1133,105 @@ def build_inference_window(
     return X, channel_names
 
 
+
+
+def recursive_tree_forecast(
+    predict,
+    feature_cols: List[str],
+    history: pd.Series,
+    periods: int,
+    interval_minutes: int,
+    n_lags: int = 12,
+    lag_windows: Optional[List[int]] = None,
+    country: Optional[str] = None,
+    exogenous: Optional[pd.DataFrame] = None,
+) -> pd.Series:
+    """
+    Multi-step forecast from a one-step tabular model, feeding each
+    prediction back as the next step's lags.
+
+    This is the forecast a tree backend publishes: beyond the first step
+    every lag and rolling statistic is the model's own output, so its
+    accuracy can differ sharply from a one-step prediction made with
+    measured lags. The benchmark scores models through this function for
+    that reason (``benchmark.horizon``).
+
+    The row built for each step matches :func:`build_features` column for
+    column for a frame without the clear-sky gate: calendar features,
+    ``y_lag_1..n_lags``, the two periodic lags, rolling mean / std (ddof=1)
+    / max over ``target.shift(1)``, and ``y_diff_1``.
+
+    Parameters
+    ----------
+    predict : callable
+        ``predict(X)`` for a float32 matrix of shape (1, len(feature_cols)).
+    feature_cols : list of str
+        Training column order. A column this function does not construct
+        is taken from ``exogenous`` when present there, else set to 0.
+    history : pd.Series
+        Target on a complete grid ending at the forecast origin. NaN cells
+        are filled with the last measured value before seeding the buffer.
+    periods : int
+        Steps to forecast.
+    exogenous : pd.DataFrame, optional
+        Known-future columns indexed by the forecast timestamps.
+
+    Returns
+    -------
+    pd.Series
+        Point forecast indexed by the ``periods`` timestamps after
+        ``history``.
+    """
+    if lag_windows is None:
+        lag_windows = default_lag_windows(interval_minutes)
+    steps_per_day = max(1, 1440 // max(interval_minutes, 1))
+    reach = max(n_lags, steps_per_day * 2, max(lag_windows)) + 1
+    seed = history.ffill().bfill().to_numpy(dtype=float)[-reach:]
+    buf = list(seed)
+    step = pd.Timedelta(minutes=interval_minutes)
+    last_ts = history.index[-1]
+    future_index = pd.DatetimeIndex(
+        [last_ts + step * (i + 1) for i in range(periods)]
+    )
+    need_holiday = 'is_holiday' in feature_cols
+    preds = np.empty(periods, dtype=float)
+    for i, ts in enumerate(future_index):
+        hr_rad = 2 * np.pi * ts.hour / 24
+        dw_rad = 2 * np.pi * ts.dayofweek / 7
+        row = {
+            'hour_of_day': ts.hour,
+            'day_of_week': ts.dayofweek,
+            'is_weekend': 1.0 if ts.dayofweek >= 5 else 0.0,
+            'month': ts.month,
+            'day_of_month': ts.day,
+            'hour_sin': float(np.sin(hr_rad)),
+            'hour_cos': float(np.cos(hr_rad)),
+            'dow_sin': float(np.sin(dw_rad)),
+            'dow_cos': float(np.cos(dw_rad)),
+        }
+        if need_holiday:
+            row['is_holiday'] = float(is_holiday(ts, country))
+        n = len(buf)
+        for lag in range(1, n_lags + 1):
+            row[f'y_lag_{lag}'] = buf[-lag] if lag <= n else 0.0
+        for d in (1, 2):
+            lag_steps = steps_per_day * d
+            row[f'y_lag_{lag_steps}'] = buf[-lag_steps] if lag_steps <= n else 0.0
+        for w in lag_windows:
+            window = buf[-w:]
+            row[f'y_rolling_mean_{w}'] = float(np.mean(window))
+            row[f'y_rolling_std_{w}'] = (
+                float(np.std(window, ddof=1)) if len(window) > 1 else 0.0
+            )
+            row[f'y_rolling_max_{w}'] = float(np.max(window))
+        row['y_diff_1'] = buf[-1] - buf[-2] if n >= 2 else 0.0
+        if exogenous is not None and ts in exogenous.index:
+            for c in exogenous.columns:
+                row[c] = float(exogenous.at[ts, c])
+        x = np.array(
+            [[row.get(c, 0.0) for c in feature_cols]], dtype=np.float32,
+        )
+        val = float(np.asarray(predict(x)).ravel()[0])
+        preds[i] = val
+        buf.append(val)
+    return pd.Series(preds, index=future_index)
