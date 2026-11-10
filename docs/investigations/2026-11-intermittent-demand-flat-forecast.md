@@ -147,16 +147,60 @@ of demand; with events spread over several readings, 1 – 1.5 %. It does not
 account for a 20 % shortfall on the synthetic series, but the loss depends
 on a sensor's update cadence and should be pinned by a test.
 
-## Not established
+## Confirmation on a measured series
 
-The reported forecast was flatter (within ±0.5 % of 1.0) than any default
-run here. A model that insensitive has received almost no boosting. The
-likeliest route is a tuned `model_params` entry with a very small
-`learning_rate` or `n_estimators` (the Tuning tab searches 0.001 – 1.0 and
-10 – 5000), which reproduces the range and the level on the synthetic series;
-the stored hyperparameters and the retrain's best iteration would confirm
-it. A replay bundle from the affected experiment settles this and the size
-of the increment-cap loss on the real sensor's cadence.
+A reference series from a real counter of this kind (change-only readings
+about every two minutes for ten days, hourly totals for forty) was then run
+through the same code.
+
+- **Target construction is exact on it.** The reconstructed half-hourly
+  target matched the counter's own totals on every day (0.0 % overall). The
+  default increment cap clipped no reading: at that cadence it allows about
+  7 units per minute and the largest single increment is 4.6, although 24 %
+  of demand arrives in increments of 3 or more. The 0.999 outlier clip
+  removed 0.3 %. The loss seen on the synthetic counter comes from readings
+  seconds apart, where a cap that scales with elapsed time has almost no
+  allowance; flooring the elapsed time would stop that but lets through the
+  glitch recovery `test_a_daily_counters_glitch_is_still_capped` pins, so
+  the cap is unchanged.
+- **The flat forecast reproduces.** With ten days of readings and default
+  settings the production forecast ranged 0.66 – 1.11 with a day-1 total of
+  40.8 against a measured mean of 57. With `learning_rate: 0.001` it ranged
+  0.86 – 1.13, mean 0.995, day-1 total 47.6 — the reported output.
+- **Scored as published**, from 74 issue times over the last 12.6 days
+  (`benchmark.horizon`):
+
+  | Forecast | MAE | RMSE | Level | CRPS |
+  |---|---|---|---|---|
+  | seasonal profile, median | 1.14 | 2.91 | −40 % | 0.940 |
+  | seasonal profile, mean | 1.40 | 2.86 | +9 % | 0.940 |
+  | constant mean | 1.51 | 2.97 | +8 % | 0.957 |
+  | LightGBM Huber, `learning_rate` 0.001 | 1.38 | 2.94 | −6 % | 0.962 |
+  | LightGBM Huber (default) | 1.29 | 2.86 | −11 % | 1.009 |
+  | LightGBM L2 | 1.56 | 2.92 | +19 % | 1.041 |
+  | LightGBM Tweedie | 1.39 | 2.90 | −0 % | 1.090 |
+  | zero | 1.25 | 3.22 | −100 % | 1.246 |
+  | same slot previous day | 1.63 | 3.89 | +3 % | 1.441 |
+
+  No LightGBM variant beats the seasonal-mean profile; the default Huber,
+  L2 and Tweedie models are worse on a paired day-block bootstrap. The
+  models' distributions here are their point forecast plus earlier signed
+  errors pooled by lead, which is blunter than a per-slot empirical
+  distribution; that, not the point forecast, is most of the CRPS gap.
+
+Two properties of this class of target limit what any evaluation can say:
+
+- **Slot-level scores barely separate a daily profile from a constant.**
+  CRPS 0.940 against 0.957, RMSE 2.86 against 2.97. Most of the
+  distribution sits at the background level in every slot, so shape moves
+  the score by a few percent. The remaining-in-day total separates
+  forecasts far more sharply: at a midnight issue the seasonal-mean profile
+  has an RMSE of 19 and the MAE-preferred median profile 35.
+- **Level cannot be verified to 5 % on short windows.** Daily totals have
+  a coefficient of variation of 0.35, so the standard error of a mean
+  daily total is 11 % over ten days and 5.5 % over forty. A seasonal mean
+  fitted on twelve days of the synthetic series was 18 % off the following
+  four weeks by sampling alone.
 
 ## Direction
 
