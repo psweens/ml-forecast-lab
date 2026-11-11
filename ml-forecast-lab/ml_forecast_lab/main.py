@@ -4284,7 +4284,9 @@ class MLForecastLabApp:
             # never aggregated or shown. The leaderboard reordered with every
             # visible column contradicting it.
             _agg_metrics = list(dict.fromkeys(
-                list(exp_cfg.metrics) + [exp_cfg.production_metric]
+                list(exp_cfg.metrics)
+                + ([] if exp_cfg.production_metric == "crps"
+                   else [exp_cfg.production_metric])
             ))
             for metric_name in _agg_metrics:
                 values = [
@@ -4356,10 +4358,23 @@ class MLForecastLabApp:
                     mean=metric_means.get("mase", 0.0),
                     std=metric_stds.get("mase", 0.0),
                 ),
-                selection_metric=exp_cfg.production_metric,
-                selection_value=MetricValue(
-                    mean=metric_means.get(exp_cfg.production_metric, 0.0),
-                    std=metric_stds.get(exp_cfg.production_metric, 0.0),
+                # v2.58.0: when the published forecast chose the winner the
+                # column shows each model's CRPS from it, not a fold metric.
+                selection_metric=(
+                    "crps" if selection_metric == "crps"
+                    else exp_cfg.production_metric
+                ),
+                selection_value=(
+                    MetricValue(
+                        mean=float(runner_model_result.metrics.get("crps", np.nan)),
+                        std=0.0,
+                    ) if selection_metric == "crps" and np.isfinite(
+                        runner_model_result.metrics.get("crps", np.nan)
+                    ) else None if selection_metric == "crps"
+                    else MetricValue(
+                        mean=metric_means.get(exp_cfg.production_metric, 0.0),
+                        std=metric_stds.get(exp_cfg.production_metric, 0.0),
+                    )
                 ),
                 train_time_seconds=runner_model_result.mean_train_time,
                 rank=rank,
@@ -5590,6 +5605,9 @@ class MLForecastLabApp:
         # function did include it; this one was missing the kwarg, so the
         # last-write-wins overwrite landed with daily_rank=None for every
         # model).
+        # v2.58.0: and every other field of the first "completed" update —
+        # without them this last write replaced the published-forecast table,
+        # the selection metric and the did-not-complete lists with defaults.
         if self.web_app:
             self._update_web_benchmark(
                 exp_cfg, completed_models, rankings,
@@ -5598,6 +5616,10 @@ class MLForecastLabApp:
                 daily_rankings=daily_rankings,
                 naive_was_enabled=_naive_was_enabled,
                 drift=drift_stats,
+                did_not_complete=dnc_interval,
+                did_not_complete_daily=dnc_daily_only,
+                published=published,
+                selection_metric=selection_metric,
             )
 
         # Final results summary table

@@ -32,6 +32,18 @@ except ImportError:
     )
 
 
+
+def _eval_values(metrics: dict) -> list:
+    """The validation values of the eval metric. CatBoost keys them by the
+    metric's own name, which for a parametrised metric such as Tweedie
+    includes its parameters, so the single entry is taken whatever its
+    name; RMSE is preferred when several are present."""
+    if not metrics:
+        return []
+    if "RMSE" in metrics:
+        return list(metrics["RMSE"])
+    return list(next(iter(metrics.values())))
+
 class CatBoostModel(ForecastModel):
     """
     CatBoost-based forecasting model for time-series prediction.
@@ -147,10 +159,15 @@ class CatBoostModel(ForecastModel):
             "l2_leaf_reg": self.l2_leaf_reg,
             "min_data_in_leaf": self.min_data_in_leaf,
             "loss_function": loss_function,
-            # Pin RMSE as the eval metric so early stopping and the
-            # epoch callback always have a stable key to read, even when
-            # loss_function is Huber / Tweedie / MAE.
-            "eval_metric": "RMSE",
+            # RMSE is the eval metric so early stopping and the epoch
+            # callback have a stable key, except under Tweedie (v2.58.0):
+            # stopping a log-link fit on RMSE halts it within a few rounds,
+            # before it has learned the daily shape — the same defect
+            # LightGBM had. Huber / MAE stay on RMSE deliberately (see the
+            # LightGBM backend).
+            "eval_metric": (
+                loss_function if loss_function.startswith("Tweedie") else "RMSE"
+            ),
             "verbose": self.verbose,
             "allow_writing_files": False,
             "random_seed": 42,
@@ -189,7 +206,7 @@ class CatBoostModel(ForecastModel):
                 def after_iteration(self_cb, info):
                     nonlocal best_val_loss, patience_counter
                     val_metrics = info.metrics.get("validation", {})
-                    rmse_vals = val_metrics.get("RMSE", [])
+                    rmse_vals = _eval_values(val_metrics)
                     val_loss = rmse_vals[-1] if rmse_vals else None
                     if val_loss is not None:
                         # v2.40.12: min_delta margin.
@@ -227,9 +244,10 @@ class CatBoostModel(ForecastModel):
         )
 
         best_iteration = int(self.model.get_best_iteration() or 0)
-        best_val = float(
-            self.model.get_best_score().get("validation", {}).get("RMSE", 0.0)
-        )
+        _best = self.model.get_best_score().get("validation", {})
+        best_val = float(_eval_values({k: [v] for k, v in _best.items()})[-1]
+                         if _best else 0.0)
+        _eval_name = "rmse" if params["eval_metric"] == "RMSE" else "tweedie"
 
         importances = self.model.get_feature_importance(type="FeatureImportance")
         feature_importances = dict(zip(self.feature_names_, importances))
@@ -251,7 +269,7 @@ class CatBoostModel(ForecastModel):
         self._is_fitted = True
         logger.info(
             f"CatBoost trained: best_iteration={best_iteration}, "
-            f"best_val_rmse={best_val:.6f}, n_features={len(self.feature_names_)}"
+            f"best_val_{_eval_name}={best_val:.6f}, n_features={len(self.feature_names_)}"
         )
         return {"time_seconds": 0.0, **self.training_metadata}
 

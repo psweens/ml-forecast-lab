@@ -425,3 +425,32 @@ Changes made after review of the first cut, all in v2.58.0.
   must score the multi-step forecast that is published.
 - Calendar features in the configured timezone, with a slot-of-day feature.
 - Asymmetric (quantile) intervals for non-negative targets.
+
+
+## After release (v2.59.0)
+
+Found on the first benchmark of a real hot-water experiment on v2.58.0
+(`production_metric: crps`, `loss_fn: tweedie`, LightGBM, CatBoost and two
+profile baselines, 76 days scored):
+
+- **The Published forecast table disappeared after the benchmark.** The
+  benchmark writes its web result twice with `status="completed"`; the
+  second write, after the holdout predictions, passed neither `published`
+  nor `selection_metric` nor the did-not-complete lists, so it replaced
+  them with defaults. Both writes now pass the same fields, pinned by a
+  source-contract test.
+- **The ranking column read `nan ± nan`.** With `production_metric: crps`
+  the runner added `crps` to the per-fold metrics; it is not a one-step
+  metric, so each model and fold logged "Metric 'crps' not registered"
+  three times and the aggregate was NaN. `crps` is no longer computed per
+  fold (`BenchmarkRunner.PUBLISHED_ONLY_METRICS`); the fold log names MAE
+  instead, and when the published forecast chose the winner the column
+  shows each model's published-forecast CRPS.
+- **CatBoost Tweedie stopped on RMSE.** CatBoost pinned `eval_metric:
+  RMSE` for every loss, so a Tweedie fit stopped within 0–10 rounds (best
+  iterations 0, 1, 2 and 10 across the eight folds) with a level 17 %
+  under the measured one. Tweedie fits now stop on the Tweedie metric, as
+  LightGBM's do; Huber and MAE stay on RMSE. On a synthetic intermittent
+  series the best iteration rose from single digits to 113 and the
+  forecast range from about 0.6–1.6 to 0.24–6.4 around a mean of 0.85.
+  XGBoost's `reg:tweedie` already stops on its default Tweedie metric.

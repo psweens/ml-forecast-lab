@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.59.0
+
+### Fixed
+
+**The Results tab shows the Published forecast table and real CRPS values.**
+
+- After a benchmark the **Published forecast** table could be missing, and
+  the ranking column of the main table showed `nan ± nan`.
+- This affected experiments chosen on the published forecast, including
+  any with **Production metric** set to **CRPS on the published forecast**.
+- The table now stays after the benchmark finishes, and the ranking column
+  shows each model's CRPS from it.
+- The benchmark log no longer repeats a "not registered" warning for every
+  model and fold.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
+**CatBoost with the Tweedie loss now learns the daily pattern.**
+
+- With **Loss function** set to Tweedie, CatBoost stopped training after a handful
+  of rounds and forecast an almost flat line, too low at peaks.
+- It now stops on the Tweedie loss itself, as LightGBM already did, so it
+  trains long enough to pick up the pattern.
+- Benchmark results for these experiments may change at the next run.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
 ## 2.58.0
 
 ### Added

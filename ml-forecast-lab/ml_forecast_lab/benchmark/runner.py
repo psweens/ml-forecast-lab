@@ -943,7 +943,7 @@ class BenchmarkRunner:
             # h=1 column, and we use the original 1D y_test from the fold.
             # This guarantees tree and neural models are scored on the
             # SAME prediction horizon, with the SAME number of samples.
-            metrics_to_compute = list(set(self.metrics + [self.production_metric]))
+            metrics_to_compute = self._fold_metric_names()
             # Defensively flatten any leftover singleton 2D arrays
             yt_metric = y_test.ravel() if y_test.ndim == 2 and y_test.shape[1] == 1 else y_test
             yp_metric = y_pred.ravel() if y_pred.ndim == 2 and y_pred.shape[1] == 1 else y_pred
@@ -1085,17 +1085,17 @@ class BenchmarkRunner:
                         'val_loss': [float(v) for v in vl],
                     }
 
-            fold_metric_val = fold_metrics.get(self.production_metric, np.nan)
+            fold_metric_val = fold_metrics.get(self._fold_log_metric(), np.nan)
             logger.info(
                 f'  [fold {fold_idx + 1}/{n_folds}] {model.name} done: '
-                f'{self.production_metric}={fold_metric_val:.4f} '
+                f'{self._fold_log_metric()}={fold_metric_val:.4f} '
                 f'(train={train_time:.1f}s, infer={inference_time:.2f}s, '
                 f'total={time.time() - fold_start_time:.1f}s)'
             )
 
         # Aggregate across folds — compute mean for all metrics
         if model_result.fold_metrics:
-            metrics_to_compute = list(set(self.metrics + [self.production_metric]))
+            metrics_to_compute = self._fold_metric_names()
             for metric_name in metrics_to_compute:
                 values = [
                     fm.get(metric_name, np.nan)
@@ -1107,7 +1107,7 @@ class BenchmarkRunner:
 
         # Aggregate daily-cumulative metrics across folds
         if model_result.daily_fold_metrics:
-            metrics_to_compute = list(set(self.metrics + [self.production_metric]))
+            metrics_to_compute = self._fold_metric_names()
             for metric_name in metrics_to_compute:
                 values = [
                     fm.get(metric_name, np.nan)
@@ -1120,7 +1120,7 @@ class BenchmarkRunner:
 
         # Aggregate train metrics across folds
         if model_result.fold_train_metrics:
-            for metric_name in list(set(self.metrics + [self.production_metric])):
+            for metric_name in self._fold_metric_names():
                 values = [
                     fm.get(metric_name, np.nan)
                     for fm in model_result.fold_train_metrics
@@ -1131,7 +1131,8 @@ class BenchmarkRunner:
 
         logger.info(
             f'Model {model.name} completed: '
-            f'metric={model_result.metrics.get(self.production_metric, np.nan):.4f}, '
+            f'{self._fold_log_metric()}='
+            f'{model_result.metrics.get(self._fold_log_metric(), np.nan):.4f}, '
             f'train_time={model_result.mean_train_time:.2f}s'
         )
 
@@ -1334,6 +1335,28 @@ class BenchmarkRunner:
     # zero most of the time they rank a near-constant forecast at the
     # background level above a correctly-levelled one.
     MEDIAN_SEEKING_METRICS = frozenset({'mae', 'mase', 'seasonal_mase'})
+
+    # Metrics scored on the published forecast rather than per fold; a
+    # production_metric of this kind is not computed one step ahead.
+    PUBLISHED_ONLY_METRICS = frozenset({'crps'})
+
+    def _fold_metric_names(self) -> list:
+        """The one-step metrics computed per fold: the display list plus the
+        production metric, unless that is scored only on the published
+        forecast (v2.58.0 — computing ``crps`` per fold logged a "not
+        registered" warning for every model and fold and left NaN)."""
+        extra = (
+            [] if self.production_metric in self.PUBLISHED_ONLY_METRICS
+            else [self.production_metric]
+        )
+        return list(dict.fromkeys(list(self.metrics) + extra))
+
+    def _fold_log_metric(self) -> str:
+        """The metric named in per-fold log lines."""
+        return (
+            'mae' if self.production_metric in self.PUBLISHED_ONLY_METRICS
+            else self.production_metric
+        )
 
     def _nonnegative_target(self) -> bool:
         return bool(

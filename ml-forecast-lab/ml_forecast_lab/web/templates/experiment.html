@@ -792,7 +792,7 @@
 <!-- ====== TAB: Results ====== -->
 <div class="tab-section" id="sec-results" style="display:none;">
 <section class="section">
-    <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Two complementary views: <strong>Per-Interval Accuracy</strong> measures the next-step (h=1) prediction error — what the model gets right at the 30-minute level. <strong>Daily Cumulative Accuracy</strong> (table below) sums each day's predictions and actuals before computing errors — better for use cases like daily energy or hot-water demand where you care about totals rather than exact timing. Both rankings use a composite mean rank over MAE, RMSE, and MASE — the Demšar-style averaging step, not the full Demšar (2006) Friedman/Nemenyi test (which assumes independent datasets, not CV folds of one series; see <code>docs/RANKING_NOTES.md</code>). 95% bootstrap CIs over fold resamples express the within-experiment noise — when two models' CIs overlap the leaderboard is genuinely "tied". The Per-Interval rank still drives Promote, Tuning, and live forecasting; the Daily rank is informational.</span></span></h2>
+    <h2>Model Comparison <span class="info-tip">?<span class="tip-text">Two complementary views: <strong>Per-Interval Accuracy</strong> measures the next-step (h=1) prediction error — what the model gets right at the 30-minute level. <strong>Daily Cumulative Accuracy</strong> (table below) sums each day's predictions and actuals before computing errors — better for use cases like daily energy or hot-water demand where you care about totals rather than exact timing. Both rankings use a composite mean rank over MAE, RMSE, and MASE — the Demšar-style averaging step, not the full Demšar (2006) Friedman/Nemenyi test (which assumes independent datasets, not CV folds of one series; see <code>docs/RANKING_NOTES.md</code>). 95% bootstrap CIs over fold resamples express the within-experiment noise — when two models' CIs overlap the leaderboard is genuinely "tied". {% if benchmark_result and benchmark_result.selection_metric == 'crps' %}For this experiment the ranking comes from the <strong>Published forecast</strong> table (CRPS of each model's whole forecast); the Daily rank is informational.{% else %}The Per-Interval rank drives Promote, Tuning, and live forecasting; the Daily rank is informational.{% endif %}</span></span></h2>
 
     {# leader_rank_high: CI upper bound of the rank-1 model. Used below
        to mark other models as "tied with #1" when their CI low end is
@@ -887,7 +887,11 @@
                        cell raised UndefinedError. #}
                     {% if models and models[0].selection_metric
                           and models[0].selection_metric not in ('mae', 'rmse', 'mase') %}
+                    {% if models[0].selection_metric == 'crps' %}
+                    <th>CRPS <span class="info-tip">?<span class="tip-text">The score that decided the ranking: CRPS of each model's published forecast, from the <b>Published forecast</b> table below. The MAE / RMSE / MASE columns are next-step errors shown for context. Lower is better.</span></span></th>
+                    {% else %}
                     <th>{{ models[0].selection_metric | replace('_', ' ') | title }} <span class="info-tip">?<span class="tip-text">The metric this experiment ranks by (Settings &rarr; Production metric). This is the number that decides the champion — the MAE / RMSE / MASE columns are shown for context and do not drive the ranking. Lower is better; the ± value is variation across CV folds.</span></span></th>
+                    {% endif %}
                     {% endif %}
                     <th>Train Time <span class="info-tip">?<span class="tip-text">Average wall-clock training time per CV fold in seconds.</span></span></th>
                     <th>Mean Rank <span class="info-tip">?<span class="tip-text">Composite mean rank across CV folds (1.0 = ranked 1st in every fold). Lower is better. The bracketed numbers are a 95% bootstrap confidence interval over fold resamples — when two models' CIs overlap they're "tied within fold noise" and the leader badge isn't really meaningful. This is the Demšar-style averaging step only; the full Demšar (2006) Friedman/Nemenyi test does not apply to CV folds of one series — see <code>docs/RANKING_NOTES.md</code>.</span></span></th>
@@ -922,7 +926,7 @@
                        diverge from the column count. #}
                     {% if models and models[0].selection_metric
                           and models[0].selection_metric not in ('mae', 'rmse', 'mase') %}
-                    <td>{% if model.selection_value %}{{ "%.4f" | format(model.selection_value.mean) }}<span style="color:var(--text-secondary);font-size:0.85em;"> ± {{ "%.4f" | format(model.selection_value.std) }}</span>{% else %}—{% endif %}</td>
+                    <td>{% if model.selection_value %}{{ "%.4f" | format(model.selection_value.mean) }}{% if model.selection_metric != 'crps' %}<span style="color:var(--text-secondary);font-size:0.85em;"> ± {{ "%.4f" | format(model.selection_value.std) }}</span>{% endif %}{% else %}—{% endif %}</td>
                     {% endif %}
                     <td>{{ "%.1f" | format(model.train_time_seconds) }}s</td>
                     <td>
