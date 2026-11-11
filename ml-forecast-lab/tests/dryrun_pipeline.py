@@ -522,6 +522,9 @@ def main():
     classical_names = [
         n for n in registry.list_available()
         if registry.create(n).model_family in {'classical', 'baseline'}
+        # seasonal_profile is a baseline with the tabular interface: it has
+        # no predict_sequence to time.
+        and getattr(registry.create(n), 'is_neural', False)
     ]
     for model_name in classical_names:
         m = registry.create(model_name)

@@ -322,7 +322,10 @@ class HorizonEvaluation:
 #             forecast was high are applied where it is high again.
 #   'slot'  — by local time of day (three-hour blocks) and weekday/weekend.
 RESIDUAL_CONDITIONS = ('lead', 'level', 'slot')
-LEVEL_BINS = 4
+# Eight equal-count bins: against four, CRPS improved for every forecaster
+# on every series tried (by 0.005 - 0.027); sixteen was no better and left
+# too few errors per bin on a fortnight of forecasts.
+LEVEL_BINS = 8
 
 
 def level_conditioned_offsets(

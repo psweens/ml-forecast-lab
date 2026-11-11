@@ -118,6 +118,26 @@ class TestXGBoost:
         assert "level_scale" not in plain.training_metadata
 
 
+class TestCatBoost:
+    def test_tweedie_fit_matches_the_training_mean_and_round_trips(self, tmp_path):
+        pytest.importorskip("catboost")
+        from ml_forecast_lab.models.catboost_backend import CatBoostModel
+        X, y, cols = _xy()
+        m = CatBoostModel(loss_fn="tweedie", n_estimators=200)
+        m.fit(X, y, feature_names=cols)
+        k = int(len(X) * 0.8)
+        assert "level_scale" in m.training_metadata
+        assert m.predict(X[:k]).mean() == pytest.approx(y[:k].mean(), rel=1e-3)
+        path = str(tmp_path / "m.cbm")
+        m.save(path)
+        again = CatBoostModel()
+        again.load(path)
+        np.testing.assert_allclose(again.predict(X[:50]), m.predict(X[:50]), rtol=1e-5)
+        plain = CatBoostModel(loss_fn="mse", n_estimators=50)
+        plain.fit(X, y, feature_names=cols)
+        assert "level_scale" not in plain.training_metadata
+
+
 class TestTuningRanges:
     @pytest.mark.parametrize("backend", ["lightgbm", "xgboost", "catboost"])
     def test_ranges_cannot_leave_a_tree_model_unboosted(self, backend):

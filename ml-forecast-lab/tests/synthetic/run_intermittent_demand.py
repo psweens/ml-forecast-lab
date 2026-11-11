@@ -12,6 +12,9 @@ against a stub history source, then reports for each configuration:
   - one-step validation error of constant forecasts, to show how the
     ranking metrics order a degenerate forecast
 
+The cases cover the tree objectives, a tuned-down learning rate and the
+seasonal profile backend.
+
 Findings are recorded in
 ``docs/investigations/2026-11-intermittent-demand-flat-forecast.md``.
 
@@ -84,8 +87,12 @@ def run_case(label, exp_kw=None, overrides=None, days=40, seed=0):
     app.config.timezone = gen.TZ
     app.covariate_resolver = CovariateResolver(ha, history_db=None)
     reg = ModelRegistry()
-    reg.register("lightgbm", importlib.import_module(
-        "ml_forecast_lab.models.lightgbm_backend").LightGBMModel)
+    for slug, module, cls in (
+        ("lightgbm", "lightgbm_backend", "LightGBMModel"),
+        ("seasonal_profile", "seasonal_profile_backend", "SeasonalProfileModel"),
+    ):
+        reg.register(slug, getattr(importlib.import_module(
+            f"ml_forecast_lab.models.{module}"), cls))
     app.model_registry = reg
 
     async def _noop(*a, **k):
@@ -121,7 +128,7 @@ def run_case(label, exp_kw=None, overrides=None, days=40, seed=0):
     imp = sorted(
         (
             (cols[int(k.split("_")[1])] if k.startswith("feature_") else k, v)
-            for k, v in model.training_metadata["feature_importances"].items()
+            for k, v in model.training_metadata.get("feature_importances", {}).items()
         ),
         key=lambda kv: -kv[1],
     )
@@ -134,12 +141,14 @@ def run_case(label, exp_kw=None, overrides=None, days=40, seed=0):
         f"{(target.loc[common].sum() / truth.loc[common].sum() - 1) * 100:+.1f} %)"
     )
     print(
-        f"model: objective loss_fn={model.loss_fn!r} (experiment loss_fn="
+        f"model: {cache['model_name']}, loss_fn="
+        f"{getattr(model, 'loss_fn', None)!r} (experiment loss_fn="
         f"{exp.loss_fn!r}), best_iteration="
         f"{model.training_metadata.get('best_iteration')}, "
         f"calendar gain share {calendar:.2f}"
     )
-    print("  top gain:", [(k, round(v, 3)) for k, v in imp[:6]])
+    if imp:
+        print("  top gain:", [(k, round(v, 3)) for k, v in imp[:6]])
     print(
         f"forecast: range [{y_pred.min():.3f}, {y_pred.max():.3f}], "
         f"day-1 total {y_pred[:48].sum():.1f} "
@@ -174,6 +183,9 @@ def main() -> None:
              exp_kw=dict(model_params={"lightgbm": {"loss_fn": "tweedie"}}))
     run_case("model_params learning_rate: 0.001",
              exp_kw=dict(model_params={"lightgbm": {"learning_rate": 0.001}}))
+    run_case("seasonal_profile",
+             exp_kw=dict(models_enabled=["seasonal_profile"],
+                         production_model="seasonal_profile"))
     constant_scores(base["target"])
 
 

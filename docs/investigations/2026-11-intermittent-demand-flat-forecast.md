@@ -205,8 +205,9 @@ per-slot quantiles scores 0.940):
 Errors depend on how much was forecast far more than on how far ahead:
 when little is forecast they are small and one-sided, when a lot is
 forecast they are large and right-skewed. Grouping by forecast size into
-four equal-count bins (`level_conditioned_offsets`) captures that with a
-few dozen errors per bin; grouping by three-hour local block and
+equal-count bins (`level_conditioned_offsets`) captures that with a few
+dozen errors per bin (the table used four bins; eight, the value adopted,
+improved every forecaster on every series by a further 0.005 – 0.027); grouping by three-hour local block and
 weekday/weekend spreads the same errors over sixteen groups and is worse
 than grouping by lead. The published asymmetric band
 (`interval_method`) and the evaluation's default distribution both use
@@ -300,6 +301,62 @@ test window differs from its training window by sampling alone):
   non-negative experiment off Huber, and with selection made on the
   published forecast and a profile backend on the leaderboard, an
   under-levelled Huber tree is no longer what gets published.
+
+### After the calendar change
+
+With calendar features in local time and `slot_of_day` present, the same
+comparison (CRPS / level; eight error bins):
+
+| | reference | synthetic 0 | synthetic 1 | synthetic 2 |
+|---|---|---|---|---|
+| seasonal-mean profile (own quantiles) | 0.940 / +9 % | 0.997 / −7 % | 1.044 / −2 % | 0.963 / −8 % |
+| `seasonal_profile` backend | 0.970 / +4 % | 1.035 / −5 % | 1.053 / +0 % | |
+| LightGBM Huber | 0.943 / −11 % | 1.067 / −31 % | 1.092 / −45 % | (1.026 / −36 %) |
+| LightGBM L2 | (0.976 / +29 %) | (1.070 / −18 %) | (1.103 / −5 %) | (1.014 / −13 %) |
+| LightGBM Tweedie | 0.986 / +24 % | 1.058 / −23 % | 1.039 / −7 % | (0.986 / −12 %) |
+
+Bracketed cells were measured with four bins. Three things stand out.
+
+- **The profile backend and the profile reference make the same point
+  forecast and score differently.** The reference carries each slot's own
+  empirical quantiles; the backend, like every backend, gets its
+  distribution from pooled past errors. That costs it 0.01 – 0.04 CRPS, so
+  no backend beats the seasonal reference on CRPS on any series, although
+  the profile backend matches or beats it on RMSE and level. Closing that
+  gap needs backends that return their own quantiles, which the
+  `ForecastModel` interface does not provide.
+- **Default Huber is worse on level after the change, not better.** With
+  a sharper calendar signal it trains longer and slides further towards
+  the median: on the production path of the synthetic series its day-1
+  total went from 34 % to 57 % under, and it fails the period-total
+  guardrail on two of three synthetic series. On the reference series it
+  has the best backend CRPS with a level 11 % under.
+- **Tweedie beats L2 and Huber on CRPS on all three synthetic series and
+  is last on the reference series**, on 12.6 days where none of those
+  differences is separable.
+
+### Intraday state features
+
+Tested as a direct multi-horizon LightGBM (one row per issue time and
+lead; target slot, weekend flag and lead as features) with and without
+state known at issue time: intervals since the last event of 1 or more,
+whether the day's first event has happened, events so far today, and
+demand so far today.
+
+| | reference CRPS | synthetic CRPS |
+|---|---|---|
+| calendar and lead | 1.008 | 1.039 |
+| plus state | 0.982 | 1.038 |
+| paired difference | −0.026 [−0.047, −0.005] | −0.000 [−0.008, +0.008] |
+
+The state features help on the measured series and not on the synthetic
+one, whose events are independent by construction — consistent with a
+late event replacing an early one. But the gain appears at every lead,
+including 42 – 48 hours, where issue-time state should carry little; RMSE
+is not separable; the remaining-in-day total is worse (15.1 against
+14.2); and both direct models score below the seasonal profile. On one
+series and under a fortnight that does not justify a second training path
+for tabular backends. Not adopted.
 
 ## Direction (as first written)
 
