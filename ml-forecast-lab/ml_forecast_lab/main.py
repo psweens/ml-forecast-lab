@@ -1531,6 +1531,24 @@ class ConformalBands:
     pooled_versions: bool
 
 
+
+def _jsonable_promotion(promotion):
+    """The promotion decision with non-finite floats as None, for the web
+    result model and its JSON persistence."""
+    if not promotion:
+        return None
+
+    def _clean(v):
+        if isinstance(v, dict):
+            return {k: _clean(x) for k, x in v.items()}
+        if isinstance(v, (float, np.floating)):
+            return float(v) if np.isfinite(v) else None
+        if isinstance(v, np.integer):
+            return int(v)
+        return v
+
+    return _clean(promotion)
+
 class MLForecastLabApp:
     """
     Main application controller for ML Forecast Lab.
@@ -4469,6 +4487,7 @@ class MLForecastLabApp:
                 (published or {}).get("enough_evidence", False)
             ),
             selection_metric=selection_metric,
+            promotion=_jsonable_promotion((published or {}).get("promotion")),
         )
 
         self.web_app.state.appstate.benchmark_results[exp_cfg.name] = web_result
@@ -4548,8 +4567,26 @@ class MLForecastLabApp:
         logger.info(f"  Covariates: {len(exp_cfg.covariates)}" + (
             f" ({', '.join(c.entity.split('.')[-1] for c in exp_cfg.covariates)})" if exp_cfg.covariates else ""
         ))
-        logger.info(f"  CV: {exp_cfg.cv_strategy}, {exp_cfg.cv_folds} folds, metric={exp_cfg.production_metric}")
+        _metric_label = (
+            exp_cfg.production_metric if exp_cfg.production_metric_explicit
+            else "automatic"
+        )
+        logger.info(f"  CV: {exp_cfg.cv_strategy}, {exp_cfg.cv_folds} folds, metric={_metric_label}")
         logger.info(f"{'=' * 60}")
+
+        # v2.58.0: the champion of the previous benchmark, when that one was
+        # chosen on the published forecast. A challenger replaces it only on
+        # a clear paired win (benchmark.horizon.promotion_decision). Read
+        # before the progressive leaderboard updates below overwrite it.
+        _incumbent = None
+        if self.web_app:
+            _prev = self.web_app.state.appstate.benchmark_results.get(exp_cfg.name)
+            if (
+                _prev is not None
+                and getattr(_prev, "status", None) == "completed"
+                and getattr(_prev, "selection_metric", None) == "crps"
+            ):
+                _incumbent = getattr(_prev, "best_model_name", None) or None
 
         if self.web_app:
             self.web_app.state.appstate.start_benchmark(exp_cfg.name)
@@ -5074,6 +5111,14 @@ class MLForecastLabApp:
                 rankings = _new_ranks
                 best_model_name = published["winner"]
                 selection_metric = "crps"
+                from ml_forecast_lab.benchmark import horizon as _H
+                promotion = _H.promotion_decision(
+                    published["evaluation"], published["rows"],
+                    challenger=best_model_name, incumbent=_incumbent,
+                )
+                published["promotion"] = promotion
+                if not promotion["promote"]:
+                    best_model_name = _incumbent
                 best_metric_value = completed_models[best_model_name].metrics.get(
                     "crps", np.nan,
                 )
@@ -5098,6 +5143,16 @@ class MLForecastLabApp:
                     + ("" if published["enough_evidence"] else
                        " (fewer than 14 days scored — close models are "
                        "not reliably separated)")
+                )
+                _promo = published.get("promotion") or {}
+                if _promo.get("reason"):
+                    logger.info(f"  Promotion: {_promo['reason']}")
+            elif runner.median_seeking_override():
+                logger.info(
+                    f"  production_metric is set to {runner.production_metric}, "
+                    "which favours near-constant forecasts on a target that "
+                    "cannot go below zero; leave it unset (automatic) or set "
+                    "crps to choose on the published forecast."
                 )
 
         # Log final rankings — composite mean rank (Demšar-style

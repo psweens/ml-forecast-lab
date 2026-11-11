@@ -231,8 +231,9 @@ Two properties of this class of target limit what any evaluation can say:
 ## What changed
 
 - **Selection** (v2.58.0): the benchmark scores each backend's published
-  forecast and, for non-negative targets or `production_metric: crps`,
-  selects and tunes on CRPS with a period-total guardrail. On ten days of
+  forecast and, for non-negative targets with `production_metric` unset
+  or for `production_metric: crps`, selects and tunes on CRPS with a
+  period-total guardrail and a promotion gate (see *Review follow-up*). On ten days of
   the reference series with LightGBM, XGBoost, the seasonal-naive backend
   and one linear sequence backend, the one-step composite rank put XGBoost
   first; its published forecast was 40 % under the measured level and
@@ -357,6 +358,61 @@ is not separable; the remaining-in-day total is worse (15.1 against
 14.2); and both direct models score below the seasonal profile. On one
 series and under a fortnight that does not justify a second training path
 for tabular backends. Not adopted.
+
+## Review follow-up
+
+Changes made after review of the first cut, all in v2.58.0.
+
+- **A configured metric is honoured.** The first cut selected every
+  non-negative experiment on CRPS whenever `production_metric` was `mae`,
+  `mase` or `seasonal_mase`, including where the user had chosen it.
+  `production_metric` is now unset by default, which is automatic (CRPS
+  on a non-negative target, `seasonal_mase` otherwise); `ExperimentCfg`
+  resolves it to `seasonal_mase` for every consumer and records
+  `production_metric_explicit`. A configured median-seeking metric on a
+  non-negative target is used as set and named in the benchmark log.
+- **Promotion gate.** Slot-level CRPS separates forecasts on this target
+  by a few per cent, lab mode re-benchmarks on every update cycle, and a
+  change of champion resets the band's calibration, so the CRPS winner
+  could change on noise. `horizon.promotion_decision` keeps the previous
+  CRPS-selected champion unless the challenger wins a paired day-block
+  comparison over shared issue times by at least 1 %, or the incumbent was
+  not scored or fails the guardrail. Champions chosen by the one-step rank
+  are not incumbents. Measured on the forty days of hourly reference
+  totals (29.4 days scored; LightGBM default Huber, LightGBM Tweedie,
+  `seasonal_profile`):
+
+  | Challenger → incumbent | paired CRPS difference [95 %] | decision |
+  |---|---|---|
+  | `seasonal_profile` → LightGBM Huber | −0.105 [−0.204, −0.001], −5.8 % | promoted |
+  | LightGBM Huber → `seasonal_profile` | +0.105 [+0.001, +0.204] | kept |
+  | `seasonal_profile` → LightGBM Tweedie | −0.005 [−0.092, +0.082], −0.3 % | kept |
+  | LightGBM Tweedie → LightGBM Huber | −0.099 [−0.148, −0.053], −5.5 % | promoted |
+
+  The cost is stickiness on thin evidence: on the ten-day half-hourly
+  reference the same harness scored 4.1 days and no pair separated, so
+  whichever model was champion would stay unless it failed the guardrail.
+  Evidence grows with `days_history`; the guardrail is the escape for a
+  champion whose level is wrong.
+- **Tweedie on forty days.** On the hourly reference series above,
+  Tweedie (level-corrected) and the profile are inseparable on CRPS
+  (1.699 against 1.679) and Tweedie has the lowest rest-of-day RMSE of any
+  forecast (12.8 against 13.2 for the profile and 17.1 for Huber); Huber
+  is 22 % under the measured level and 5.5 % worse on CRPS than Tweedie.
+  That is the longest real window measured, and it reverses the
+  ten-day result where Tweedie was last. It bears on the default-objective
+  decision, which this release leaves unchanged.
+- **The level correction is weighted like the fit.** With recency
+  weighting a tree fit tracks the weighted mean, so
+  `log_link_level_scale` now compares weighted means; unweighted, it
+  would pull a model whose recent level rose back towards older, lower
+  data. The correction itself is an in-sample ratio, so a level the
+  features explain is carried through.
+- **Residuals grouped by time of day were not adopted.** Grouping a point
+  forecast's past errors by local time block is worse than grouping by
+  lead or by forecast size on every forecaster (see *Interval
+  construction*). The remaining CRPS gap between `seasonal_profile` and
+  the per-slot reference needs backends that return their own quantiles.
 
 ## Direction (as first written)
 

@@ -380,6 +380,13 @@ def _same_external(a: dict, b: dict) -> bool:
     return True
 
 
+# The one-step metric an unset ``production_metric`` resolves to. On a
+# non-negative target the automatic choice is CRPS on the published
+# forecast, with this metric as the one-step fallback (see
+# ``BenchmarkRunner.selects_on_published_forecast``).
+DEFAULT_PRODUCTION_METRIC = 'seasonal_mase'
+
+
 @dataclass
 class ExperimentCfg:
     """Configuration for a single sensor prediction experiment."""
@@ -487,20 +494,33 @@ class ExperimentCfg:
     whichever model the next benchmark cycle ranked first, which
     appeared to users as "I chose XGBoost but the page forgets"."""
 
-    production_metric: str = 'seasonal_mase'
-    """Metric to use for automatic model selection. Default ``seasonal_mase``
-    (MAE scaled by the same-time-yesterday baseline at the configured
-    ``interval_minutes``) is the right comparison for the daily-seasonal HA
-    sensors most users forecast. ``mase`` (1-step naive) is retained for
-    backwards compatibility but understates skill on seasonal series.
+    production_metric: Optional[str] = None
+    """Metric to use for automatic model selection.
+
+    Unset (the default) is automatic: a non-negative target
+    (``source_is_cumulative`` or ``target_is_nonnegative``) is selected on
+    ``crps``, anything else on ``seasonal_mase``. After ``__post_init__``
+    this field always holds a metric name — ``seasonal_mase`` when unset —
+    and ``production_metric_explicit`` records whether it was configured.
+
+    ``seasonal_mase`` (MAE scaled by the same-time-yesterday baseline at the
+    configured ``interval_minutes``) is the right comparison for the
+    daily-seasonal HA sensors most users forecast. ``mase`` (1-step naive)
+    is retained for backwards compatibility but understates skill on
+    seasonal series.
 
     ``crps`` (v2.58.0) selects on the forecast as published — the whole
     horizon from many issue times, scored as a distribution — with a
-    guardrail on the remaining-in-day total. A non-negative target
-    (``source_is_cumulative`` or ``target_is_nonnegative``) is selected
-    this way whenever the configured metric is ``mae``, ``mase`` or
-    ``seasonal_mase``: each is minimised by the median, which on a target
-    that sits near zero most of the time is a near-constant forecast."""
+    guardrail on the remaining-in-day total. It is the automatic choice for
+    non-negative targets because ``mae``, ``mase`` and ``seasonal_mase`` are
+    each minimised by the median, which on a target that sits near zero
+    most of the time is a near-constant forecast. A metric set explicitly
+    is honoured as configured, including one of those three on a
+    non-negative target."""
+
+    production_metric_explicit: bool = field(default=False, init=False)
+    """Whether ``production_metric`` was configured rather than left unset.
+    Derived in ``__post_init__``; not a YAML key."""
 
     publish_prefix: str = 'mlfl_'
     """Prefix for published Home Assistant sensor entities."""
@@ -808,6 +828,12 @@ class ExperimentCfg:
 
     def __post_init__(self) -> None:
         """Validate configuration."""
+        # v2.58.0: an unset production_metric is automatic (see the field).
+        # Every consumer reads a concrete metric name; the selection rule
+        # reads production_metric_explicit.
+        self.production_metric_explicit = self.production_metric is not None
+        if self.production_metric is None:
+            self.production_metric = DEFAULT_PRODUCTION_METRIC
         valid_modes = {'lab', 'production'}
         if self.mode not in valid_modes:
             raise ValueError(
@@ -1041,7 +1067,8 @@ def load_config(config_path: Path | str) -> AppConfig:
     experiments_data = data.pop('experiments', [])
     experiments = []
 
-    exp_fields = {f.name for f in dataclasses.fields(ExperimentCfg)}
+    # Derived fields (init=False) are not YAML keys.
+    exp_fields = {f.name for f in dataclasses.fields(ExperimentCfg) if f.init}
     cov_fields = {f.name for f in dataclasses.fields(CovariateCfg)}
     sub_fields = {f.name for f in dataclasses.fields(SubtractCfg)}
     ext_fields = {f.name for f in dataclasses.fields(ExternalForecastCfg)}

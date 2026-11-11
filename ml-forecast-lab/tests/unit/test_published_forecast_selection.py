@@ -11,9 +11,9 @@ near-constant forecast — and the forecast scored was not the one published.
   folds (recursive for a tabular backend) and scores it with the reference
   forecasts;
 - selection is by CRPS with a period-total guardrail when
-  ``production_metric`` is ``crps``, or when the target is non-negative and
-  the metric is median-seeking; otherwise the one-step ranking stands and
-  the scores are informational;
+  ``production_metric`` is ``crps``, or when it is left unset on a
+  non-negative target; a configured metric is honoured, and otherwise the
+  one-step ranking stands and the scores are informational;
 - a backend that could not be scored leaves selection on the one-step rank;
 - the guardrail removes a forecast whose totals are badly wrong even when
   its CRPS is the lowest;
@@ -130,16 +130,36 @@ class TestCollection:
 
 
 class TestWhenItSelects:
+    # production_metric_explicit is what ExperimentCfg derives: False when
+    # production_metric was left unset (automatic), True when configured.
     @pytest.mark.parametrize("cfg,expected", [
-        (dict(production_metric="crps", source_is_cumulative=False), True),
+        (dict(production_metric="crps", source_is_cumulative=False,
+              production_metric_explicit=True), True),
+        # Automatic on a non-negative target: published forecast.
         (dict(production_metric="seasonal_mase"), True),
-        (dict(production_metric="mae", source_is_cumulative=False,
+        (dict(production_metric="seasonal_mase", source_is_cumulative=False,
               target_is_nonnegative=True), True),
-        (dict(production_metric="rmse"), False),
+        # Automatic on a signed target: one-step rank.
         (dict(production_metric="seasonal_mase", source_is_cumulative=False), False),
+        # Configured metrics are honoured, median-seeking ones included.
+        (dict(production_metric="seasonal_mase", production_metric_explicit=True), False),
+        (dict(production_metric="mae", source_is_cumulative=False,
+              target_is_nonnegative=True, production_metric_explicit=True), False),
+        (dict(production_metric="rmse", production_metric_explicit=True), False),
     ])
     def test_rule(self, cfg, expected):
         assert _runner(**cfg).selects_on_published_forecast() is expected
+
+    @pytest.mark.parametrize("cfg,expected", [
+        (dict(production_metric="mae", production_metric_explicit=True), True),
+        (dict(production_metric="seasonal_mase", production_metric_explicit=True), True),
+        (dict(production_metric="rmse", production_metric_explicit=True), False),
+        (dict(production_metric="seasonal_mase"), False),
+        (dict(production_metric="mae", source_is_cumulative=False,
+              production_metric_explicit=True), False),
+    ])
+    def test_median_seeking_hint(self, cfg, expected):
+        assert _runner(**cfg).median_seeking_override() is expected
 
 
 class TestSelection:

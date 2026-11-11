@@ -764,3 +764,88 @@ def paired_difference(
     verdict = 'better' if hi < 0 else 'worse' if lo > 0 else 'indistinguishable'
     return {'mean': float(d.mean()), 'lo': float(lo), 'hi': float(hi),
             'n_days': int(uniq.size), 'verdict': verdict}
+
+
+# A challenger replaces the incumbent champion only when its paired CRPS
+# advantage is clear: the day-block bootstrap interval of the difference
+# lies below zero, and the mean improvement is at least this fraction of
+# the incumbent's CRPS. Slot-level CRPS separates forecasts on a
+# non-negative target by a few per cent at most, so without a margin the
+# winner can change on every benchmark with sampling noise — and each
+# change resets the published band's calibration.
+PROMOTION_MIN_IMPROVEMENT = 0.01
+
+
+def promotion_decision(
+    evaluation: HorizonEvaluation, rows: Sequence[dict],
+    challenger: Optional[str], incumbent: Optional[str],
+) -> dict:
+    """
+    Whether the CRPS winner should replace the incumbent champion.
+
+    ``rows`` are ``select_by_crps``'s rows. The challenger is promoted when
+    there is no incumbent, it is the incumbent, the incumbent was not
+    scored this time or fails the period-total guardrail, or the challenger
+    is better on a paired comparison over the issue times both were scored
+    on (``paired_difference``) by at least ``PROMOTION_MIN_IMPROVEMENT``.
+    Otherwise the incumbent is kept.
+
+    Returns ``{'promote', 'challenger', 'incumbent', 'reason', 'paired'}``;
+    ``paired`` is ``paired_difference``'s result when a comparison was run,
+    else None.
+    """
+    out = {'promote': True, 'challenger': challenger, 'incumbent': incumbent,
+           'reason': '', 'paired': None}
+    if not challenger or not incumbent or challenger == incumbent:
+        return out
+    by_name = {r['name']: r for r in rows}
+    inc_row = by_name.get(incumbent)
+    if (
+        inc_row is None or not inc_row.get('candidate')
+        or not np.isfinite(inc_row.get('crps', np.nan))
+    ):
+        out['reason'] = f'{challenger} replaces {incumbent}, which was not scored'
+        return out
+    if not inc_row.get('eligible', True):
+        out['reason'] = (
+            f'{challenger} replaces {incumbent}, which now fails the '
+            'period-total guardrail'
+        )
+        return out
+    ch, inc = evaluation.scores.get(challenger), evaluation.scores.get(incumbent)
+    if ch is None or inc is None or ch.origin_crps is None or inc.origin_crps is None:
+        out['reason'] = f'{challenger} replaces {incumbent}; no paired scores'
+        return out
+    a = pd.Series(np.asarray(ch.origin_crps, float), index=pd.DatetimeIndex(ch.origin_times))
+    b = pd.Series(np.asarray(inc.origin_crps, float), index=pd.DatetimeIndex(inc.origin_times))
+    a = a[~a.index.duplicated()]
+    b = b[~b.index.duplicated()]
+    common = a.index.intersection(b.index)
+    paired = paired_difference(
+        a.reindex(common).to_numpy(), b.reindex(common).to_numpy(), common,
+    )
+    out['paired'] = paired
+    base = float(np.nanmean(b.reindex(common).to_numpy())) if len(common) else float('nan')
+    rel = -paired['mean'] / base if np.isfinite(base) and base > 0 else float('nan')
+    if paired['verdict'] == 'better' and np.isfinite(rel) and rel >= PROMOTION_MIN_IMPROVEMENT:
+        out['reason'] = (
+            f'{challenger} replaces {incumbent}: CRPS {rel:.1%} lower '
+            f'over {paired["n_days"]} days, clearly better'
+        )
+        return out
+    out['promote'] = False
+    diff = (
+        f"{challenger}'s CRPS was {abs(rel):.1%} "
+        f"{'lower' if rel > 0 else 'higher'}" if np.isfinite(rel)
+        else f'{challenger} could not be compared'
+    )
+    verdict = (
+        'not a clear enough improvement to switch'
+        if np.isfinite(rel) and rel > 0 else 'no improvement'
+    )
+    out['reason'] = (
+        f'kept {incumbent}: {diff} over {paired["n_days"]} days, {verdict} '
+        f'(a switch needs a paired win of at least '
+        f'{PROMOTION_MIN_IMPROVEMENT:.0%})'
+    )
+    return out

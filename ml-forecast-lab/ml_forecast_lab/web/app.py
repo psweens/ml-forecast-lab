@@ -253,6 +253,10 @@ class BenchmarkResult(BaseModel):
     published_evaluation_days: float = 0.0
     published_enough_evidence: bool = False
     selection_metric: Optional[str] = None
+    # Whether the CRPS winner replaced the previous champion
+    # (benchmark.horizon.promotion_decision): promote, challenger,
+    # incumbent, reason, paired.
+    promotion: Optional[Dict[str, Any]] = None
 
 
 class ExperimentStatus(BaseModel):
@@ -5226,7 +5230,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         }
 
         # Fields where None/null means "use global default" (valid, not an error)
-        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country", "patience"}
+        # production_metric: null removes the key, i.e. automatic (v2.58.0).
+        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country", "patience", "production_metric"}
 
         updates = {}
         for field, validator in editable.items():
@@ -5287,6 +5292,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 for exp_cfg in cfg.experiments:
                     if exp_cfg.name == exp_name:
                         for k, v in updates.items():
+                            if k == "production_metric":
+                                # Keep the derived explicit flag in step.
+                                from ml_forecast_lab.config import DEFAULT_PRODUCTION_METRIC
+                                exp_cfg.production_metric_explicit = v is not None
+                                v = v or DEFAULT_PRODUCTION_METRIC
                             setattr(exp_cfg, k, v)
                         break
             except Exception:

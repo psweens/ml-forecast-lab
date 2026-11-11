@@ -55,3 +55,25 @@ def test_settings_redirect_to_system(client):
     resp = client.get("/settings", follow_redirects=False)
     assert resp.status_code == 301
     assert "/system" in resp.headers["location"]
+
+
+def test_production_metric_null_returns_to_automatic(client, seeded_experiment, mlfl_config):
+    """v2.58.0: choosing Automatic sends null, which removes the key so the
+    experiment's metric is resolved automatically again."""
+    resp = client.post(
+        "/api/experiment-settings",
+        json={"experiment": seeded_experiment, "production_metric": "mae"},
+    )
+    assert resp.json().get("success") is True
+    exp = next(e for e in yaml.safe_load(mlfl_config.read_text())["experiments"]
+               if e["name"] == seeded_experiment)
+    assert exp["production_metric"] == "mae"
+
+    resp = client.post(
+        "/api/experiment-settings",
+        json={"experiment": seeded_experiment, "production_metric": None},
+    )
+    assert resp.json().get("success") is True, resp.json()
+    exp = next(e for e in yaml.safe_load(mlfl_config.read_text())["experiments"]
+               if e["name"] == seeded_experiment)
+    assert "production_metric" not in exp

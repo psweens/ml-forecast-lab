@@ -248,7 +248,13 @@ class BenchmarkRunner:
 
         self.cv_strategy = experiment_cfg.get('cv_strategy', 'walk_forward')
         self.cv_folds = experiment_cfg.get('cv_folds', 5)
-        self.production_metric = experiment_cfg.get('production_metric', 'mae')
+        self.production_metric = experiment_cfg.get('production_metric') or 'mae'
+        # v2.58.0: whether the metric was configured or left automatic (see
+        # selects_on_published_forecast). A bare dict without the key is
+        # treated as automatic.
+        self.production_metric_explicit = bool(
+            experiment_cfg.get('production_metric_explicit', False)
+        )
         self.metrics = experiment_cfg.get('metrics', ['mae', 'rmse', 'mase'])
 
         logger.info(
@@ -1329,23 +1335,35 @@ class BenchmarkRunner:
     # background level above a correctly-levelled one.
     MEDIAN_SEEKING_METRICS = frozenset({'mae', 'mase', 'seasonal_mase'})
 
-    def selects_on_published_forecast(self) -> bool:
-        """Whether the winner is chosen by CRPS on the published forecast.
-
-        True when ``production_metric`` is ``crps``, and also when the
-        target is non-negative (``source_is_cumulative`` or
-        ``target_is_nonnegative``) and the configured metric is one of
-        ``MEDIAN_SEEKING_METRICS``. Otherwise the one-step composite rank
-        selects, as before, and the published-forecast scores are shown
-        for information.
-        """
-        if self.production_metric == 'crps':
-            return True
-        nonneg = bool(
+    def _nonnegative_target(self) -> bool:
+        return bool(
             self.experiment_cfg.get('source_is_cumulative')
             or self.experiment_cfg.get('target_is_nonnegative')
         )
-        return nonneg and self.production_metric in self.MEDIAN_SEEKING_METRICS
+
+    def selects_on_published_forecast(self) -> bool:
+        """Whether the winner is chosen by CRPS on the published forecast.
+
+        True when ``production_metric`` is ``crps``, and when it was left
+        unset on a non-negative target (``source_is_cumulative`` or
+        ``target_is_nonnegative``). A metric the user set is honoured: the
+        one-step composite rank selects, as before, and the
+        published-forecast scores are shown for information.
+        """
+        if self.production_metric == 'crps':
+            return True
+        return self._nonnegative_target() and not self.production_metric_explicit
+
+    def median_seeking_override(self) -> bool:
+        """Whether a configured metric is likely to favour a near-constant
+        forecast: one of ``MEDIAN_SEEKING_METRICS`` set explicitly on a
+        non-negative target. Selection still honours it; this drives a
+        hint in the log and on the Results tab."""
+        return (
+            self.production_metric_explicit
+            and self._nonnegative_target()
+            and self.production_metric in self.MEDIAN_SEEKING_METRICS
+        )
 
     def published_objective(
         self, df: pd.DataFrame, model_result: ModelResult,

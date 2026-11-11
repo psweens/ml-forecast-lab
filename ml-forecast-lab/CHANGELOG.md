@@ -69,18 +69,15 @@
 
 **The best model for a sensor that is mostly near zero is no longer a flat, too-low forecast.**
 
-- For sensors with long quiet spells and occasional spikes, the benchmark
-  could pick a model that forecast nearly the same low value all day, with
-  a daily total well under the real one.
-- This affected experiments whose sensor is a running total, or that have
-  **Target is non-negative** set, with **Selection metric** left on Seasonal
-  MASE, MASE or MAE.
-- These experiments now choose the best model, and tune models, from the
-  **Published forecast** table. A model whose rest-of-day totals are much
-  worse than a plain average is not chosen.
-- Your best model may change at the next benchmark. To choose this way on
-  any experiment, set **Selection metric** to **CRPS on the published
-  forecast** (`production_metric: crps`).
+- The benchmark could pick a model that forecast nearly the same low value
+  all day, with a daily total well under the real one.
+- This affected experiments with **Cumulative source** or **Non-negative
+  target** on.
+- With **Production metric** on its default, now called **Automatic**,
+  these experiments choose their best model from the **Published
+  forecast** table, and only switch when another model is clearly better.
+- If you chose a **Production metric** yourself, it is kept. Choose
+  **Automatic** to use the new selection.
 - [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
 
 **The loss you choose in Settings is now used by the model that publishes your forecasts.**
@@ -102,7 +99,7 @@
   was the same distance above and below the forecast: half of it covered
   values that cannot happen, and it stopped short of the spikes.
 - This affects experiments whose sensor is a running total, or that have
-  **Target is non-negative** set. Other experiments are unchanged.
+  **Non-negative target** set. Other experiments are unchanged.
 - The band is now narrow when little is forecast and reaches further up
   than down when a lot is. It switches over once about 30 forecasts have
   been checked against what happened.

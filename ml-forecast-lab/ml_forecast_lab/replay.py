@@ -1216,6 +1216,12 @@ def _load_config(app_config: dict, experiment_config: dict):
     from ml_forecast_lab.config import load_config
 
     data = dict(app_config)
+    experiment_config = dict(experiment_config)
+    # v2.58.0: production_metric_explicit is derived, not a YAML key. An
+    # automatic metric was captured as its resolved name; drop it so the
+    # loader resolves it the same way instead of reading it as configured.
+    if experiment_config.pop("production_metric_explicit", True) is False:
+        experiment_config.pop("production_metric", None)
     data["experiments"] = [experiment_config]
     with tempfile.TemporaryDirectory() as tmp:
         p = Path(tmp) / "mlfl.yaml"

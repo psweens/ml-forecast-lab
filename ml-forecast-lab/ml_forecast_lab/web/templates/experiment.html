@@ -336,15 +336,17 @@
                        onchange="saveSettingsField(this)">
             </div>
             <div class="exp-field">
-                <label class="field-label">Production metric <span class="info-tip">?<span class="tip-text">Which error metric the composite mean rank weighs most heavily when picking the winner (Demšar-style averaging step only; see <code>docs/RANKING_NOTES.md</code>). <b>Seasonal MASE</b> (default): error relative to "same time yesterday" — handles diurnal patterns gracefully; usually the right pick for household sensors. <b>MAE</b>: raw absolute error, easy to read in your sensor's units. <b>RMSE</b>: penalises large misses more — pick if a few big errors hurt much more than many small ones. <b>MASE</b>: vs 1-step naive — only beats seasonal MASE on signals without daily seasonality. <b>Peak-weighted MAE</b>: up-weights intervals where the actual value is high — pick this for a load that is off most of the time (hot water, EV, appliances), where plain MAE crowns the model that flatlines through the middle of your spikes. <b>Pinball q90</b>: under-shooting costs 9x more than over-shooting — pick if missing a peak is much worse than over-predicting one.</span></span></label>
+                <label class="field-label">Production metric <span class="info-tip">?<span class="tip-text">Which error metric the composite mean rank weighs most heavily when picking the winner (Demšar-style averaging step only; see <code>docs/RANKING_NOTES.md</code>). <b>Automatic</b> (default): CRPS on the published forecast when <b>Cumulative source</b> or <b>Non-negative target</b> is on, Seasonal MASE otherwise. Choosing any other metric here overrides that. <b>Seasonal MASE</b>: error relative to "same time yesterday" — handles diurnal patterns gracefully; usually the right pick for household sensors. <b>MAE</b>: raw absolute error, easy to read in your sensor's units. <b>RMSE</b>: penalises large misses more — pick if a few big errors hurt much more than many small ones. <b>MASE</b>: vs 1-step naive — only beats seasonal MASE on signals without daily seasonality. <b>Peak-weighted MAE</b>: up-weights intervals where the actual value is high — pick this for a load that is off most of the time (hot water, EV, appliances), where plain MAE crowns the model that flatlines through the middle of your spikes. <b>Pinball q90</b>: under-shooting costs 9x more than over-shooting — pick if missing a peak is much worse than over-predicting one.</span></span></label>
                 <select class="setting-input" data-field="production_metric" onchange="saveSettingsField(this)">
-                    <option value="seasonal_mase" {% if not exp_config or exp_config.production_metric == 'seasonal_mase' %}selected{% endif %}>Seasonal MASE (vs same time yesterday)</option>
-                    <option value="mae" {% if exp_config and exp_config.production_metric == 'mae' %}selected{% endif %}>MAE</option>
-                    <option value="rmse" {% if exp_config and exp_config.production_metric == 'rmse' %}selected{% endif %}>RMSE</option>
-                    <option value="mase" {% if exp_config and exp_config.production_metric == 'mase' %}selected{% endif %}>MASE (vs 1-step naive)</option>
-                    <option value="peak_weighted_mae" {% if exp_config and exp_config.production_metric == 'peak_weighted_mae' %}selected{% endif %}>Peak-weighted MAE (for spiky loads)</option>
-                    <option value="pinball_q90" {% if exp_config and exp_config.production_metric == 'pinball_q90' %}selected{% endif %}>Pinball q90 (penalises under-shooting peaks)</option>
-                    <option value="crps" {% if exp_config and exp_config.production_metric == 'crps' %}selected{% endif %}>CRPS on the published forecast</option>
+                    {% set _pm = exp_config.production_metric if exp_config and exp_config.production_metric_explicit else '' %}
+                    <option value="" {{ 'selected' if _pm == '' else '' }}>Automatic (recommended)</option>
+                    <option value="seasonal_mase" {{ 'selected' if _pm == 'seasonal_mase' else '' }}>Seasonal MASE (vs same time yesterday)</option>
+                    <option value="mae" {{ 'selected' if _pm == 'mae' else '' }}>MAE</option>
+                    <option value="rmse" {{ 'selected' if _pm == 'rmse' else '' }}>RMSE</option>
+                    <option value="mase" {{ 'selected' if _pm == 'mase' else '' }}>MASE (vs 1-step naive)</option>
+                    <option value="peak_weighted_mae" {{ 'selected' if _pm == 'peak_weighted_mae' else '' }}>Peak-weighted MAE (for spiky loads)</option>
+                    <option value="pinball_q90" {{ 'selected' if _pm == 'pinball_q90' else '' }}>Pinball q90 (penalises under-shooting peaks)</option>
+                    <option value="crps" {{ 'selected' if _pm == 'crps' else '' }}>CRPS on the published forecast</option>
                 </select>
             </div>
             <div class="exp-field">
@@ -1019,7 +1021,9 @@
         </div>
         {% endif %}
     </div>
+    {% endif %}
 
+    {# v2.58.0: independent of the daily table — shown whenever scored. #}
     {% if benchmark_result and benchmark_result.published_scores %}
     <div class="card" style="margin-top:1rem;">
         <h3 style="margin-top:0;">Published forecast <span class="info-tip">?<span class="tip-text">Each model scored on the forecast it would actually publish: the whole forecast window, issued from many times of day, instead of one step ahead. <b>CRPS</b> rewards putting probability where the values fall (lower is better); unlike MAE it cannot be won by forecasting "almost nothing, always". <b>Level</b> is the forecast total against the measured total. <b>Rest-of-day error</b> is the typical error in the total still to come that day. The reference rows (zero, average, typical day, yesterday) show what a forecast with no model achieves. A model marked ⚠ gets the rest of the day more than 25% worse than a plain average and is not chosen automatically.</span></span></h3>
@@ -1027,8 +1031,12 @@
             {{ "%.1f"|format(benchmark_result.published_evaluation_days) }} days scored.
             {% if benchmark_result.selection_metric == 'crps' %}The best model was chosen from this table.{% else %}Shown for information; the best model was chosen from the table above.{% endif %}
             {% if not benchmark_result.published_enough_evidence %}With fewer than 14 days, close scores are not a reliable difference.{% endif %}
+            {% if benchmark_result.selection_metric == 'crps' and benchmark_result.promotion and benchmark_result.promotion.incumbent and benchmark_result.promotion.challenger != benchmark_result.promotion.incumbent %}
+                {% if benchmark_result.promotion.promote %}{{ benchmark_result.promotion.challenger | model_display }} replaced {{ benchmark_result.promotion.incumbent | model_display }}.{% else %}{{ benchmark_result.promotion.incumbent | model_display }} was kept: {{ benchmark_result.promotion.challenger | model_display }} scored best here but not by a clear enough margin to switch.{% endif %}
+            {% endif %}
         </p>
-        <table class="data-table">
+        <div class="table-container">
+        <table class="metrics-table">
             <thead><tr>
                 <th>Forecast</th><th>CRPS</th><th>RMSE</th><th>MAE</th><th>Level</th>
                 <th>Rest-of-day error</th><th>Interval coverage</th>
@@ -1037,7 +1045,7 @@
             {% set _labels = {'baseline_zero': 'Reference: zero', 'baseline_mean': 'Reference: average', 'baseline_profile_mean': 'Reference: typical day (mean)', 'baseline_profile_median': 'Reference: typical day (median)', 'baseline_previous_day': 'Reference: same time yesterday'} %}
             {% for row in benchmark_result.published_scores %}{% if row.crps is not none %}
                 <tr{% if not row.candidate %} style="color:var(--text-secondary);"{% endif %}>
-                    <td>{{ _labels.get(row.name, row.name) }}{% if row.candidate and not row.eligible %} ⚠{% endif %}{% if row.name == benchmark_result.best_model_name and benchmark_result.selection_metric == 'crps' %} ★{% endif %}</td>
+                    <td>{{ _labels[row.name] if row.name in _labels else (row.name | model_display) }}{% if row.candidate and not row.eligible %} ⚠{% endif %}{% if row.name == benchmark_result.best_model_name and benchmark_result.selection_metric == 'crps' %} ★{% endif %}</td>
                     <td>{{ "%.4f"|format(row.crps) }}</td>
                     <td>{{ "%.4f"|format(row.rmse) }}</td>
                     <td>{{ "%.4f"|format(row.mae) }}</td>
@@ -1048,8 +1056,8 @@
             {% endif %}{% endfor %}
             </tbody>
         </table>
+        </div>
     </div>
-    {% endif %}
     {% endif %}
 
     {% if benchmark_result and benchmark_result.pairwise_dm %}
@@ -2680,7 +2688,7 @@ window.showTab = function(el) {
         var value = el.value;
         var intFields = ['days_history', 'interval_minutes', 'future_periods', 'forecast_every_minutes', 'cv_folds'];
         var floatFields = ['recency_half_life_days', 'retrain_every_hours', 'max_increment'];
-        var nullableFields = ['forecast_every_minutes', 'retrain_every_hours', 'max_increment'];
+        var nullableFields = ['forecast_every_minutes', 'retrain_every_hours', 'max_increment', 'production_metric'];
 
         if ((value === '' || value === null) && nullableFields.indexOf(field) >= 0) {
             value = null;

@@ -130,13 +130,20 @@ out-of-sample signed errors grouped by forecast size — the same
 construction as the published asymmetric interval.
 
 **When it selects.** `selects_on_published_forecast` is true when
-`production_metric` is `crps`, or when the target is non-negative and the
-metric is `mae`, `mase` or `seasonal_mase`. Then the winner is the lowest
-CRPS among backends passing the guardrail, the leaderboard follows that
-order, and tuning minimises the same score. Otherwise the composite rank
-selects and the table is informational. If any ranked backend could not be
-scored (no forecasts collected, or a fold too short for one horizon), the
-composite rank selects.
+`production_metric` is `crps`, or when it is left unset on a non-negative
+target (`source_is_cumulative` or `target_is_nonnegative`). An unset
+metric is automatic: `ExperimentCfg` resolves it to `seasonal_mase` for
+every consumer and records `production_metric_explicit = False`. A metric
+the user configured is honoured, including `mae`, `mase` or
+`seasonal_mase` on a non-negative target; the log then says that the
+metric favours near-constant forecasts there. A first cut overrode those
+three whenever the target was non-negative, which silently replaced a
+deliberate choice. When it selects, the winner is the lowest CRPS among
+backends passing the guardrail, the leaderboard follows that order, and
+tuning minimises the same score. Otherwise the composite rank selects and
+the table is informational. If any ranked backend could not be scored (no
+forecasts collected, or a fold too short for one horizon), the composite
+rank selects.
 
 **The guardrail.** Slot-level CRPS on such a target barely separates
 forecasts by level: a seasonal-mean and a seasonal-median profile share
@@ -144,10 +151,36 @@ their quantiles and score identically while their totals differ by 40 %.
 A backend whose remaining-in-day total RMSE exceeds 1.25 × that of a
 constant at the history mean is not eligible. The tolerance is a fixed
 constant. If every backend fails, the lowest CRPS still wins and is
-marked.
+marked. The remaining-in-day total is the sum of the forecast from the
+issue time to local midnight, for any target, not only one that resets
+daily: for a rate (W, W/m²) the sum is proportional to the energy still to
+come, and for a level-type target (a signed one under `production_metric:
+crps`) it is a check on the forecast's level over the rest of the day. An
+issue time is scored only when every slot to midnight is inside the
+horizon and measured.
 
 **Evidence.** Scores over fewer than 14 days are flagged. Model
 differences on this class of target are a few percent of the score and
-daily totals vary by a third from day to day; `horizon.paired_difference`
-(day-block bootstrap on per-origin scores) is the tool for asking whether
-a candidate beats an incumbent, and is not yet used to gate promotion.
+daily totals vary by a third from day to day, so the CRPS winner can
+change from one benchmark to the next on sampling noise alone — and each
+change of champion resets the published band's calibration.
+
+**Promotion gate.** When the previous benchmark also selected on the
+published forecast, its winner is the incumbent, and
+`horizon.promotion_decision` decides whether this benchmark's winner
+replaces it. The challenger is promoted when there is no incumbent, when
+the incumbent was not scored this time (disabled, failed, or excluded), or
+when it now fails the guardrail. Otherwise the two are compared on the
+issue times both were scored on with `horizon.paired_difference` — the
+per-origin CRPS difference, with a day-block bootstrap because issue times
+on the same day share their targets — and the challenger is promoted only
+if the 95 % interval lies below zero **and** the mean improvement is at
+least `PROMOTION_MIN_IMPROVEMENT` (1 %) of the incumbent's CRPS. The
+interval alone is not enough: over several weeks a consistent 0.3 %
+difference becomes significant without being worth a switch. When the
+incumbent is kept, the leaderboard still lists backends in CRPS order and
+the Results tab says the challenger did not win clearly enough. A
+champion chosen by the one-step composite rank — every experiment's
+champion before v2.58.0 — is not an incumbent here, so the first
+published-forecast selection after the upgrade is not held back by a
+champion picked on the metrics this selection replaces.
