@@ -149,6 +149,23 @@ class TestCatBoost:
         plain.fit(X, y, feature_names=cols)
         assert "level_scale" not in plain.training_metadata
 
+    def test_tweedie_stops_on_its_own_metric(self, caplog):
+        # v2.58.0: CatBoost stopped Tweedie fits on RMSE, which halted them
+        # within ~10 rounds on an intermittent target — a forecast with
+        # almost no daily shape.
+        pytest.importorskip("catboost")
+        from ml_forecast_lab.models.catboost_backend import CatBoostModel
+        X, y, cols = _xy()
+        tw = CatBoostModel(loss_fn="tweedie", n_estimators=400)
+        with caplog.at_level("INFO"):
+            tw.fit(X, y, feature_names=cols)
+        assert tw.model.get_params()["eval_metric"].startswith("Tweedie")
+        assert "best_val_tweedie=" in caplog.text
+        assert tw.training_metadata["best_iteration"] > 30
+        hub = CatBoostModel(loss_fn="huber", n_estimators=50)
+        hub.fit(X, y, feature_names=cols)
+        assert hub.model.get_params()["eval_metric"] == "RMSE"
+
 
 class TestTuningRanges:
     @pytest.mark.parametrize("backend", ["lightgbm", "xgboost", "catboost"])
