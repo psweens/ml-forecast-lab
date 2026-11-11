@@ -314,7 +314,7 @@ Each captured trajectory covers only the times the source itself forecast: where
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `metrics` | list | `[mae, rmse, mase, seasonal_mase]` | Metrics to compute during benchmarking. Available: `mae`, `rmse`, `mape`, `smape`, `mase`, `seasonal_mase`, `r2`, `pinball`, `coverage`. |
-| `production_metric` | string | `seasonal_mase` | Metric used to auto-select the best model when `production_model` is unset. `seasonal_mase` (scaled by the same-time-yesterday baseline) is the right comparison for daily-seasonal HA sensors. |
+| `production_metric` | string | `seasonal_mase` | Metric used to auto-select the best model when `production_model` is unset. `seasonal_mase` (scaled by the same-time-yesterday baseline) is the right comparison for daily-seasonal HA sensors. `crps` chooses from the **Published forecast** table instead: each model is scored on the whole forecast window as it would be published, and the lowest CRPS wins unless its rest-of-day totals are more than 25% worse than a plain average. Experiments with `source_is_cumulative` or `target_is_nonnegative` set are chosen this way whenever the metric is `mae`, `mase` or `seasonal_mase`, because those three favour a forecast of "almost nothing, always" on values that are mostly near zero. |
 | `production_model` | string | unset | Pin a specific model name. Unset = auto-pick by `production_metric`. |
 | `selected_model` | string | unset | Which model the Results-tab UI highlights by default. The `/select-model` click in the UI persists here. |
 

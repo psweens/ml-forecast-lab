@@ -1194,6 +1194,7 @@ def recursive_tree_forecast(
         [last_ts + step * (i + 1) for i in range(periods)]
     )
     need_holiday = 'is_holiday' in feature_cols
+    gated = exogenous is not None and 'clear_sky_ghi' in exogenous.columns
     preds = np.empty(periods, dtype=float)
     for i, ts in enumerate(future_index):
         hr_rad = 2 * np.pi * ts.hour / 24
@@ -1233,5 +1234,9 @@ def recursive_tree_forecast(
         )
         val = float(np.asarray(predict(x)).ravel()[0])
         preds[i] = val
-        buf.append(val)
+        # Clear-sky gate, as build_features applies to the lags: a step
+        # with no sun feeds 0 forward, not the prediction, so the next
+        # row's lags match what training saw after a night step.
+        ghi_now = row.get('clear_sky_ghi') if gated else None
+        buf.append(0.0 if ghi_now is not None and ghi_now <= 0 else val)
     return pd.Series(preds, index=future_index)

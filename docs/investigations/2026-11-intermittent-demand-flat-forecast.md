@@ -227,6 +227,26 @@ Two properties of this class of target limit what any evaluation can say:
   fitted on twelve days of the synthetic series was 18 % off the following
   four weeks by sampling alone.
 
+## What changed
+
+- **Selection** (v2.58.0): the benchmark scores each backend's published
+  forecast and, for non-negative targets or `production_metric: crps`,
+  selects and tunes on CRPS with a period-total guardrail. On ten days of
+  the reference series with LightGBM, XGBoost, the seasonal-naive backend
+  and one linear sequence backend, the one-step composite rank put XGBoost
+  first; its published forecast was 40 % under the measured level and
+  failed the guardrail, and LightGBM (−12 %) was selected. Both seasonal
+  profile references scored better than every backend. Design and rules:
+  `docs/RANKING_NOTES.md`.
+- **Production loss**: tree backends are retrained with the experiment's
+  `loss_fn`.
+- **Intervals**: asymmetric by default for non-negative targets.
+
+Still open: the default tree objective and its early stopping (findings 1),
+calendar features in local time (finding 5), and whether a seasonal-profile
+backend should exist as a selectable model, since no backend beats that
+reference on this series.
+
 ## Direction
 
 - Tree objective for non-negative skewed targets must estimate the mean

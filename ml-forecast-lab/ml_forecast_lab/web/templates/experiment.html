@@ -344,6 +344,7 @@
                     <option value="mase" {% if exp_config and exp_config.production_metric == 'mase' %}selected{% endif %}>MASE (vs 1-step naive)</option>
                     <option value="peak_weighted_mae" {% if exp_config and exp_config.production_metric == 'peak_weighted_mae' %}selected{% endif %}>Peak-weighted MAE (for spiky loads)</option>
                     <option value="pinball_q90" {% if exp_config and exp_config.production_metric == 'pinball_q90' %}selected{% endif %}>Pinball q90 (penalises under-shooting peaks)</option>
+                    <option value="crps" {% if exp_config and exp_config.production_metric == 'crps' %}selected{% endif %}>CRPS on the published forecast</option>
                 </select>
             </div>
             <div class="exp-field">
@@ -1018,6 +1019,37 @@
         </div>
         {% endif %}
     </div>
+
+    {% if benchmark_result and benchmark_result.published_scores %}
+    <div class="card" style="margin-top:1rem;">
+        <h3 style="margin-top:0;">Published forecast <span class="info-tip">?<span class="tip-text">Each model scored on the forecast it would actually publish: the whole forecast window, issued from many times of day, instead of one step ahead. <b>CRPS</b> rewards putting probability where the values fall (lower is better); unlike MAE it cannot be won by forecasting "almost nothing, always". <b>Level</b> is the forecast total against the measured total. <b>Rest-of-day error</b> is the typical error in the total still to come that day. The reference rows (zero, average, typical day, yesterday) show what a forecast with no model achieves. A model marked ⚠ gets the rest of the day more than 25% worse than a plain average and is not chosen automatically.</span></span></h3>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin:0 0 0.75rem 0;">
+            {{ "%.1f"|format(benchmark_result.published_evaluation_days) }} days scored.
+            {% if benchmark_result.selection_metric == 'crps' %}The best model was chosen from this table.{% else %}Shown for information; the best model was chosen from the table above.{% endif %}
+            {% if not benchmark_result.published_enough_evidence %}With fewer than 14 days, close scores are not a reliable difference.{% endif %}
+        </p>
+        <table class="data-table">
+            <thead><tr>
+                <th>Forecast</th><th>CRPS</th><th>RMSE</th><th>MAE</th><th>Level</th>
+                <th>Rest-of-day error</th><th>Interval coverage</th>
+            </tr></thead>
+            <tbody>
+            {% set _labels = {'baseline_zero': 'Reference: zero', 'baseline_mean': 'Reference: average', 'baseline_profile_mean': 'Reference: typical day (mean)', 'baseline_profile_median': 'Reference: typical day (median)', 'baseline_previous_day': 'Reference: same time yesterday'} %}
+            {% for row in benchmark_result.published_scores %}{% if row.crps is not none %}
+                <tr{% if not row.candidate %} style="color:var(--text-secondary);"{% endif %}>
+                    <td>{{ _labels.get(row.name, row.name) }}{% if row.candidate and not row.eligible %} ⚠{% endif %}{% if row.name == benchmark_result.best_model_name and benchmark_result.selection_metric == 'crps' %} ★{% endif %}</td>
+                    <td>{{ "%.4f"|format(row.crps) }}</td>
+                    <td>{{ "%.4f"|format(row.rmse) }}</td>
+                    <td>{{ "%.4f"|format(row.mae) }}</td>
+                    <td>{% if row.bias_pct is not none %}{{ "%+.0f"|format(row.bias_pct) }}%{% else %}—{% endif %}</td>
+                    <td>{% if row.period_total_rmse is not none %}{{ "%.3f"|format(row.period_total_rmse) }}{% else %}—{% endif %}</td>
+                    <td>{% if row.coverage is not none %}{{ "%.0f"|format(row.coverage * 100) }}%{% else %}—{% endif %}</td>
+                </tr>
+            {% endif %}{% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
     {% endif %}
 
     {% if benchmark_result and benchmark_result.pairwise_dm %}

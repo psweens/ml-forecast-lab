@@ -246,6 +246,13 @@ class BenchmarkResult(BaseModel):
     # so a per-interval-ranked model isn't confusingly shown as
     # "did not complete".
     did_not_complete_daily: List[str] = []
+    # v2.58.0: each backend's published forecast (full horizon, many issue
+    # times) scored against the reference forecasts, best CRPS first.
+    # ``selection_metric`` is ``crps`` when that score chose the winner.
+    published_scores: List[Dict[str, Any]] = []
+    published_evaluation_days: float = 0.0
+    published_enough_evidence: bool = False
+    selection_metric: Optional[str] = None
 
 
 class ExperimentStatus(BaseModel):
@@ -5175,7 +5182,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "retrain_every_hours": lambda v: float(v) if float(v) >= 0.1 else None,
             "production_metric": lambda v: v if v in (
                 "mae", "rmse", "mase", "seasonal_mase",
-                "peak_weighted_mae", "pinball_q90",
+                "peak_weighted_mae", "pinball_q90", "crps",
             ) else None,
             "loss_fn": lambda v: v if v in ("mse", "mae", "huber", "tweedie", "dilate") else None,
             "optimiser": lambda v: v if v in ("adamw", "adam") else None,

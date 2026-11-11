@@ -492,7 +492,15 @@ class ExperimentCfg:
     (MAE scaled by the same-time-yesterday baseline at the configured
     ``interval_minutes``) is the right comparison for the daily-seasonal HA
     sensors most users forecast. ``mase`` (1-step naive) is retained for
-    backwards compatibility but understates skill on seasonal series."""
+    backwards compatibility but understates skill on seasonal series.
+
+    ``crps`` (v2.58.0) selects on the forecast as published — the whole
+    horizon from many issue times, scored as a distribution — with a
+    guardrail on the remaining-in-day total. A non-negative target
+    (``source_is_cumulative`` or ``target_is_nonnegative``) is selected
+    this way whenever the configured metric is ``mae``, ``mase`` or
+    ``seasonal_mase``: each is minimised by the median, which on a target
+    that sits near zero most of the time is a near-constant forecast."""
 
     publish_prefix: str = 'mlfl_'
     """Prefix for published Home Assistant sensor entities."""

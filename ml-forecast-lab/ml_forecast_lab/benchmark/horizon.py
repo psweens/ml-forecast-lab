@@ -284,6 +284,7 @@ class HorizonScores:
     coverage: float
     interval_width: float
     amplitude_ratio: float
+    period_total_rmse: float = float('nan')
     by_lead: pd.DataFrame = field(repr=False, default=None)
     period_total: pd.DataFrame = field(repr=False, default=None)
     # Per-origin mean CRPS and squared error, for paired comparisons.
@@ -298,6 +299,7 @@ class HorizonScores:
             'crps': self.crps, 'coverage': self.coverage,
             'interval_width': self.interval_width,
             'amplitude_ratio': self.amplitude_ratio,
+            'period_total_rmse': self.period_total_rmse,
         }
 
 
@@ -503,6 +505,8 @@ def evaluate_forecasters(
     coverage_level: float = 0.8,
     lead_bucket: Optional[int] = None,
     residual_condition: str = 'level',
+    origin_positions: Optional[Sequence[int]] = None,
+    precomputed: Optional[Dict[str, np.ndarray]] = None,
 ) -> HorizonEvaluation:
     """
     Score forecasters from a sequence of issue times on one series.
@@ -530,13 +534,26 @@ def evaluate_forecasters(
     residual_condition : {'lead', 'level', 'slot'}
         How a point-only forecaster's earlier errors are grouped when its
         distribution is built (``RESIDUAL_CONDITIONS``).
+    origin_positions : sequence of int, optional
+        Explicit issue positions, replacing ``first_origin`` /
+        ``origin_stride``. Position *p* forecasts rows ``p .. p+horizon-1``
+        from the rows before *p*.
+    precomputed : dict[str, np.ndarray], optional
+        Point forecasts already made elsewhere, one ``(n_origins, horizon)``
+        array per name, aligned with the origins. A NaN cell means "no
+        forecast" and is left out of every forecaster's scores. This is how
+        the benchmark scores backends it trained in its own folds.
     """
     if not isinstance(series.index, pd.DatetimeIndex):
         raise TypeError('series must have a DatetimeIndex')
     n = len(series)
     if lead_bucket is None:
         lead_bucket = max(1, 360 // max(1, int(interval_minutes)))
-    origin_pos = np.arange(first_origin, n - horizon + 1, origin_stride)
+    if origin_positions is not None:
+        origin_pos = np.asarray(sorted(set(int(p) for p in origin_positions)), dtype=int)
+        origin_pos = origin_pos[(origin_pos >= 1) & (origin_pos + horizon <= n)]
+    else:
+        origin_pos = np.arange(first_origin, n - horizon + 1, origin_stride)
     if origin_pos.size == 0:
         raise ValueError('series too short for one forecast horizon after first_origin')
     values = series.to_numpy(dtype=float)
@@ -573,6 +590,21 @@ def evaluate_forecasters(
             interval_minutes=interval_minutes, tz=tz,
         )
         raw[fc.name] = (point, quant)
+
+    for name, point in (precomputed or {}).items():
+        point = np.asarray(point, dtype=float)
+        if point.shape != (len(origin_pos), horizon):
+            raise ValueError(
+                f'precomputed[{name!r}] has shape {point.shape}, expected '
+                f'{(len(origin_pos), horizon)}'
+            )
+        if nonnegative:
+            point = np.where(np.isfinite(point), np.maximum(point, 0.0), point)
+        raw[name] = (point, _residual_quantiles(
+            point, actual, usable, origin_pos, horizon, lead_bucket, nonnegative,
+            condition=residual_condition, future_times=future_times,
+            interval_minutes=interval_minutes, tz=tz,
+        ))
 
     # One scored set for everyone: a (origin, lead) cell counts only when
     # its label was measured and every forecaster has a distribution there.
@@ -614,6 +646,16 @@ def evaluate_forecasters(
         o_sq = np.full(len(origin_pos), np.nan)
         o_crps[has] = np.nanmean(crps[has], axis=1)
         o_sq[has] = np.nanmean(err[has] ** 2, axis=1)
+        period_total = _period_total_errors(
+            point, actual, prob_ok, origin_times, future_times, tz,
+        )
+        if len(period_total):
+            pt_rmse = float(np.sqrt(
+                (period_total['rmse'] ** 2 * period_total['n']).sum()
+                / period_total['n'].sum()
+            ))
+        else:
+            pt_rmse = float('nan')
         scores[name] = HorizonScores(
             name=name,
             n_origins=int(scored_origins.sum()),
@@ -629,10 +671,8 @@ def evaluate_forecasters(
                 if truth_profile_sd > 0 else float('nan')
             ),
             by_lead=by_lead,
-            period_total=_period_total_errors(
-                point, actual, prob_ok, origin_times,
-                future_times, tz,
-            ),
+            period_total_rmse=pt_rmse,
+            period_total=period_total,
             origin_crps=o_crps[scored_origins],
             origin_sq_err=o_sq[scored_origins],
             origin_times=origin_times[scored_origins],
@@ -643,6 +683,48 @@ def evaluate_forecasters(
         enough_evidence=evaluation_days >= MIN_EVALUATION_DAYS,
         coverage_level=coverage_level,
     )
+
+
+# A model whose remaining-in-day totals are this much worse than a constant
+# at the history mean is not selected, whatever its CRPS. Slot-level CRPS on
+# a target that sits near zero most of the time barely separates forecasts
+# by level — two forecasts with the same quantiles and point forecasts 40 %
+# apart score the same — while the period total separates them at once.
+PERIOD_TOTAL_TOLERANCE = 1.25
+GUARDRAIL_REFERENCE = 'baseline_mean'
+
+
+def select_by_crps(
+    evaluation: HorizonEvaluation, candidates: Sequence[str],
+) -> Tuple[Optional[str], List[dict]]:
+    """
+    Pick the candidate with the lowest CRPS among those that pass the
+    period-total guardrail.
+
+    Returns ``(winner, rows)``. ``rows`` lists every scored forecaster,
+    candidates and reference forecasts alike, best CRPS first, each with
+    ``eligible`` (passed the guardrail) and ``candidate`` flags. The winner
+    is ``None`` when no candidate has a finite CRPS. If every candidate
+    fails the guardrail the lowest-CRPS candidate still wins — a benchmark
+    must name a model — and its row says it was not eligible.
+    """
+    ref = evaluation.scores.get(GUARDRAIL_REFERENCE)
+    limit = (
+        PERIOD_TOTAL_TOLERANCE * ref.period_total_rmse
+        if ref is not None and np.isfinite(ref.period_total_rmse) else float('inf')
+    )
+    rows = []
+    for name, sc in evaluation.scores.items():
+        row = sc.summary()
+        total = sc.period_total_rmse
+        row['eligible'] = bool(not np.isfinite(total) or total <= limit)
+        row['candidate'] = name in candidates
+        rows.append(row)
+    rows.sort(key=lambda r: (not np.isfinite(r['crps']), r['crps']))
+    scored = [r for r in rows if r['candidate'] and np.isfinite(r['crps'])]
+    eligible = [r for r in scored if r['eligible']]
+    pool = eligible or scored
+    return (pool[0]['name'] if pool else None), rows
 
 
 def paired_difference(

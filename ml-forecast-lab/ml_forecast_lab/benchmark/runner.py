@@ -23,6 +23,13 @@ from .metrics import MetricRegistry, get_metric_registry
 
 logger = logging.getLogger(__name__)
 
+# Issue times per test fold for the published-forecast evaluation. The
+# stride is not a divisor of a day at any common interval, so issue times
+# walk through the day; the cap bounds a tabular backend's recursion cost
+# (one predict call per step per origin) on small hardware.
+HORIZON_ORIGIN_STRIDE = 7
+HORIZON_MAX_ORIGINS_PER_FOLD = 24
+
 
 @dataclass
 class ModelResult:
@@ -60,6 +67,12 @@ class ModelResult:
     # more than per-interval precision (e.g. daily energy / hot-water demand).
     daily_fold_metrics: List[Dict[str, float]] = field(default_factory=list)
     daily_metrics: Dict[str, float] = field(default_factory=dict)
+    # Full-horizon forecasts issued from inside each test fold, as
+    # (issue timestamps, point forecasts of shape (n, future_periods)) in
+    # the sensor's own units. The forecast a backend publishes — recursive
+    # for tabular backends, the multi-horizon head for sequence backends —
+    # scored by ``BenchmarkRunner.score_published_forecasts``.
+    horizon_folds: List[Tuple[pd.DatetimeIndex, np.ndarray]] = field(default_factory=list)
 
     @property
     def mean_train_time(self) -> float:
@@ -137,6 +150,12 @@ class BenchmarkResult:
     # surfaces; the UI shows them in a "did not complete" list rather
     # than at the bottom of the leaderboard.
     did_not_complete: List[str] = field(default_factory=list)
+    # Published-forecast evaluation (``score_published_forecasts``): one
+    # row per backend and reference forecast, best CRPS first, plus how
+    # many days the scored forecasts span. Empty when it could not run.
+    published_scores: List[Dict[str, Any]] = field(default_factory=list)
+    published_evaluation_days: float = 0.0
+    published_enough_evidence: bool = False
     # Models excluded from the daily-cumulative ranking specifically
     # (ranked in the per-interval leaderboard, but a fold's daily totals
     # weren't computable). Surfaced under the Daily table, not the main
@@ -697,6 +716,12 @@ class BenchmarkRunner:
             except Exception:
                 pass  # Never break benchmark for diagnostics
 
+            # Full-horizon output of a sequence backend and the timestamp
+            # of each row's first target, kept for the published-forecast
+            # evaluation; the leaderboard metrics below use h=1 only.
+            _hz_full = None
+            _hz_first_ts = None
+
             # Predict — use predict_sequence for neural models
             inference_start = time.time()
             try:
@@ -813,6 +838,11 @@ class BenchmarkRunner:
                             )
                             if y_pred_full.ndim == 2:
                                 y_pred = y_pred_full[:, 0]
+                                _hz_full = y_pred_full
+                                _hz_first_ts = df_combined_test.index[
+                                    (np.asarray(_kept_t) if _kept_t is not None
+                                     else np.arange(len(y_pred_full))) + window_size
+                                ]
                             else:
                                 y_pred = y_pred_full
                             if _kept_t is not None:
@@ -887,6 +917,19 @@ class BenchmarkRunner:
                 continue
 
             inference_time = time.time() - inference_start
+
+            # Published-forecast evaluation inputs. Never breaks a fold.
+            try:
+                _hz = self._fold_horizon_forecasts(
+                    df, model, feat_names, test_idx, _hz_full, _hz_first_ts,
+                )
+                if _hz is not None:
+                    model_result.horizon_folds.append(_hz)
+            except Exception as e:
+                logger.debug(
+                    f'Published-forecast evaluation skipped for '
+                    f'{model.name} fold {fold_idx + 1}: {e}'
+                )
 
             # Compute metrics on h=1 (next-step) predictions only.
             # For tree models, y_pred / y_test are already 1D.
@@ -1088,6 +1131,275 @@ class BenchmarkRunner:
 
         return model_result
 
+    # ------------------------------------------------------------------
+    # Published-forecast evaluation
+    # ------------------------------------------------------------------
+
+    def _grid_target(self, df: pd.DataFrame) -> Optional[pd.Series]:
+        """The frame's target on a complete time grid, NaN where the
+        supervised frame has no row. None without a DatetimeIndex."""
+        if not isinstance(df.index, pd.DatetimeIndex) or len(df) < 2:
+            return None
+        if 'target' not in df.columns:
+            return None
+        interval = max(1, int(self.experiment_cfg.get('interval_minutes', 30)))
+        grid = pd.date_range(df.index[0], df.index[-1], freq=f'{interval}min')
+        return df['target'].reindex(grid)
+
+    def _fold_horizon_forecasts(
+        self, df, model, feat_names, test_idx, seq_full, seq_first_ts,
+    ) -> Optional[Tuple[pd.DatetimeIndex, np.ndarray]]:
+        """Full-horizon forecasts issued from inside one test fold.
+
+        A sequence backend already produced them: each row of its output
+        is the forecast for the ``future_periods`` steps from that row's
+        first target. A tabular backend is run the way production runs it,
+        recursively, from issue times spread through the fold, with the
+        frame's measured covariates as the known-future inputs (the same
+        "perfect covariate" basis as the one-step score).
+
+        Returns ``(first target timestamps, forecasts)`` in the frame's
+        own space (log space under ``log_transform``), or None.
+        """
+        from ml_forecast_lab.features import (
+            ENGINEERED_TEMPORAL_COLUMNS, recursive_tree_forecast,
+        )
+        from ml_forecast_lab.preprocessing import is_target_derived_feature
+
+        target = self._grid_target(df)
+        if target is None:
+            return None
+        horizon = int(self.experiment_cfg.get('future_periods', 48))
+        interval = max(1, int(self.experiment_cfg.get('interval_minutes', 30)))
+        n = len(target)
+
+        if seq_full is not None and seq_first_ts is not None:
+            full = np.asarray(seq_full, dtype=float)
+            if full.ndim != 2 or full.shape[1] < horizon:
+                return None
+            ts = pd.DatetimeIndex(seq_first_ts)
+            keep = np.arange(0, len(ts), HORIZON_ORIGIN_STRIDE)
+            if len(keep) > HORIZON_MAX_ORIGINS_PER_FOLD:
+                keep = keep[np.linspace(
+                    0, len(keep) - 1, HORIZON_MAX_ORIGINS_PER_FOLD,
+                ).round().astype(int)]
+            return ts[keep], full[keep, :horizon]
+
+        if getattr(model, 'is_neural', False):
+            return None
+
+        test_ts = df.index[test_idx]
+        pos = target.index.get_indexer(test_ts)
+        pos = pos[(pos >= 1) & (pos + horizon <= n)]
+        pos = pos[::HORIZON_ORIGIN_STRIDE]
+        if len(pos) == 0:
+            return None
+        if len(pos) > HORIZON_MAX_ORIGINS_PER_FOLD:
+            pos = pos[np.linspace(
+                0, len(pos) - 1, HORIZON_MAX_ORIGINS_PER_FOLD,
+            ).round().astype(int)]
+        exo_cols = [
+            c for c in feat_names
+            if c not in ENGINEERED_TEMPORAL_COLUMNS
+            and not is_target_derived_feature(c)
+        ]
+        exogenous = (
+            df[exo_cols].reindex(target.index).ffill().fillna(0.0)
+            if exo_cols else None
+        )
+        out = np.empty((len(pos), horizon))
+        for i, p in enumerate(pos):
+            fc = recursive_tree_forecast(
+                model.predict, feat_names, target.iloc[:p], horizon, interval,
+                country=self.experiment_cfg.get('country') or None,
+                exogenous=exogenous,
+            )
+            out[i] = fc.to_numpy()
+        return target.index[pos], out
+
+    def score_published_forecasts(
+        self,
+        df: pd.DataFrame,
+        model_results: Dict[str, ModelResult],
+        tz: Optional[str] = None,
+        exclude: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Score every backend's published forecast against the reference
+        forecasts and pick a winner by CRPS.
+
+        Uses the forecasts collected in ``ModelResult.horizon_folds``.
+        Returns None — leaving the caller on the one-step ranking — when
+        the frame has no DatetimeIndex or no backend produced a forecast.
+        Otherwise returns ``rows`` (every forecaster, best CRPS first),
+        ``winner`` (lowest CRPS among backends passing the period-total
+        guardrail, None unless every backend in ``model_results`` minus
+        ``exclude`` was scored), ``evaluation_days`` and
+        ``enough_evidence``, and writes ``crps``, ``published_rmse``,
+        ``published_mae``, ``published_bias_pct``, ``period_total_rmse``
+        and ``interval_coverage`` onto each scored ModelResult's metrics.
+        """
+        from . import horizon as H
+
+        target = self._grid_target(df)
+        if target is None:
+            return None
+        horizon = int(self.experiment_cfg.get('future_periods', 48))
+        interval = max(1, int(self.experiment_cfg.get('interval_minutes', 30)))
+        log_space = bool(self.experiment_cfg.get('log_transform'))
+        nonneg = bool(
+            self.experiment_cfg.get('source_is_cumulative')
+            or self.experiment_cfg.get('target_is_nonnegative')
+            or log_space
+        )
+
+        per_model: Dict[str, Dict[int, np.ndarray]] = {}
+        for name, mr in model_results.items():
+            cells: Dict[int, np.ndarray] = {}
+            for ts, mat in mr.horizon_folds:
+                pos = target.index.get_indexer(pd.DatetimeIndex(ts))
+                for p, row in zip(pos, np.asarray(mat, dtype=float)):
+                    if p >= 1 and p + horizon <= len(target):
+                        cells[int(p)] = row
+            if cells:
+                per_model[name] = cells
+        if not per_model:
+            return None
+
+        origins = sorted(set().union(*[set(c) for c in per_model.values()]))
+        series = target
+        precomputed = {}
+        for name, cells in per_model.items():
+            mat = np.full((len(origins), horizon), np.nan)
+            for i, p in enumerate(origins):
+                if p in cells:
+                    mat[i] = cells[p]
+            if log_space:
+                mat = np.expm1(mat)
+            precomputed[name] = mat
+        if log_space:
+            series = np.expm1(target)
+
+        evaluation = H.evaluate_forecasters(
+            series, H.default_baselines(interval, tz),
+            interval_minutes=interval, horizon=horizon,
+            first_origin=0, origin_stride=1, refit_every=1,
+            tz=tz, nonnegative=nonneg,
+            coverage_level=float(self.experiment_cfg.get('conformal_coverage', 0.8)),
+            origin_positions=origins, precomputed=precomputed,
+        )
+        exclude = set(exclude or [])
+        candidates = [n for n in precomputed if n not in exclude]
+        winner, rows = H.select_by_crps(evaluation, candidates)
+        for row in rows:
+            mr = model_results.get(row['name'])
+            if mr is None or not np.isfinite(row['crps']):
+                continue
+            mr.metrics['crps'] = row['crps']
+            mr.metrics['published_rmse'] = row['rmse']
+            mr.metrics['published_mae'] = row['mae']
+            mr.metrics['published_bias_pct'] = row['bias_pct']
+            mr.metrics['period_total_rmse'] = row['period_total_rmse']
+            mr.metrics['interval_coverage'] = row['coverage']
+        expected = [n for n in model_results if n not in exclude]
+        unscored = [
+            n for n in expected
+            if n not in precomputed
+            or not np.isfinite(evaluation.scores[n].crps)
+        ]
+        if unscored:
+            logger.info(
+                'Published-forecast scores unavailable for %s; model '
+                'selection stays on the one-step ranking.',
+                ', '.join(sorted(unscored)),
+            )
+            winner = None
+        return {
+            'rows': rows,
+            'winner': winner,
+            'unscored': sorted(unscored),
+            'evaluation_days': evaluation.evaluation_days,
+            'enough_evidence': evaluation.enough_evidence,
+            'evaluation': evaluation,
+        }
+
+    # One-step metrics that are an absolute error up to a constant. Each is
+    # minimised by the median, so on a non-negative target that sits near
+    # zero most of the time they rank a near-constant forecast at the
+    # background level above a correctly-levelled one.
+    MEDIAN_SEEKING_METRICS = frozenset({'mae', 'mase', 'seasonal_mase'})
+
+    def selects_on_published_forecast(self) -> bool:
+        """Whether the winner is chosen by CRPS on the published forecast.
+
+        True when ``production_metric`` is ``crps``, and also when the
+        target is non-negative (``source_is_cumulative`` or
+        ``target_is_nonnegative``) and the configured metric is one of
+        ``MEDIAN_SEEKING_METRICS``. Otherwise the one-step composite rank
+        selects, as before, and the published-forecast scores are shown
+        for information.
+        """
+        if self.production_metric == 'crps':
+            return True
+        nonneg = bool(
+            self.experiment_cfg.get('source_is_cumulative')
+            or self.experiment_cfg.get('target_is_nonnegative')
+        )
+        return nonneg and self.production_metric in self.MEDIAN_SEEKING_METRICS
+
+    def published_objective(
+        self, df: pd.DataFrame, model_result: ModelResult,
+        tz: Optional[str] = None,
+    ) -> Optional[float]:
+        """One backend's tuning objective on its published forecast.
+
+        Its CRPS, inflated by how far its period-total error exceeds the
+        guardrail when it fails it — so a search cannot buy a lower CRPS
+        with a forecast that gets the day's total badly wrong. None when
+        the forecast could not be scored.
+        """
+        from . import horizon as H
+
+        published = self.score_published_forecasts(
+            df, {model_result.model_name: model_result}, tz=tz,
+        )
+        if not published:
+            return None
+        rows = {r['name']: r for r in published['rows']}
+        row = rows.get(model_result.model_name)
+        if row is None or not np.isfinite(row['crps']):
+            return None
+        value = float(row['crps'])
+        ref = rows.get(H.GUARDRAIL_REFERENCE)
+        if (
+            not row['eligible'] and ref is not None
+            and np.isfinite(ref['period_total_rmse'])
+            and ref['period_total_rmse'] > 0
+        ):
+            limit = H.PERIOD_TOTAL_TOLERANCE * ref['period_total_rmse']
+            value *= float(row['period_total_rmse']) / limit
+        return value
+
+    @staticmethod
+    def rank_by_published_scores(
+        published: Optional[Dict[str, Any]], fallback_rankings: Dict[str, int],
+    ) -> Optional[Dict[str, int]]:
+        """Leaderboard order from the published-forecast scores.
+
+        Backends that pass the period-total guardrail come first, each
+        group by ascending CRPS. Returns None — keep ``fallback_rankings``
+        — when there is no winner, i.e. when not every backend was scored.
+        """
+        if not published or not published.get('winner'):
+            return None
+        rows = [
+            r for r in published['rows']
+            if r['candidate'] and r['name'] in fallback_rankings
+            and np.isfinite(r['crps'])
+        ]
+        rows.sort(key=lambda r: (not r['eligible'], r['crps']))
+        return {r['name']: i + 1 for i, r in enumerate(rows)}
+
     def run_benchmark(
         self,
         df: pd.DataFrame,
@@ -1195,6 +1507,45 @@ class BenchmarkRunner:
             result.best_metric_value = result.model_results[sorted_models[0][0]].metrics.get(
                 self.production_metric, np.nan
             )
+
+        # Selection on the forecast that is published: lowest CRPS among
+        # backends passing the period-total guardrail. The one-step
+        # composite rank above stands when a backend could not be scored
+        # this way (no DatetimeIndex, or a fold too short for one horizon).
+        published = None
+        try:
+            ranked = {
+                k: v for k, v in result.model_results.items()
+                if k in interval_ranks
+            }
+            published = self.score_published_forecasts(
+                df, ranked, tz=self.experiment_cfg.get('timezone') or None,
+            )
+        except Exception as e:
+            logger.warning(f'Published-forecast evaluation failed: {e}')
+        if published:
+            result.published_scores = published['rows']
+            result.published_evaluation_days = published['evaluation_days']
+            result.published_enough_evidence = published['enough_evidence']
+            new_ranks = (
+                self.rank_by_published_scores(published, interval_ranks)
+                if self.selects_on_published_forecast() else None
+            )
+            if new_ranks:
+                result.rankings = new_ranks
+                result.best_model = published['winner']
+                result.metric_used = 'crps'
+                result.best_metric_value = result.model_results[
+                    result.best_model
+                ].metrics.get('crps', np.nan)
+                logger.info(
+                    f'Benchmark complete. Best model on the published '
+                    f'forecast: {result.best_model} '
+                    f'(crps={result.best_metric_value:.4f}, '
+                    f'{published["evaluation_days"]:.1f} days scored'
+                    f'{"" if published["enough_evidence"] else " — too few to separate close models"})'
+                )
+                return result
 
         logger.info(
             f'Benchmark complete. Best model: {result.best_model} '

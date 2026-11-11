@@ -2,7 +2,40 @@
 
 ## 2.58.0
 
+### Added
+
+**The benchmark now scores each model on the forecast it would actually publish.**
+
+- The Results tab has a new **Published forecast** table. It scores the
+  whole forecast window from many times of day, where the main table scores
+  only the next step.
+- It includes reference rows — zero, the average, a typical day, and the
+  same time yesterday — so you can see whether a model beats having no
+  model.
+- It reports CRPS, the forecast's overall level against what was measured,
+  the error in the rest-of-day total, and how often values fell inside the
+  interval.
+- With fewer than 14 days scored, the table says so: close scores are not a
+  reliable difference.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
 ### Fixed
+
+**The best model for a sensor that is mostly near zero is no longer a flat, too-low forecast.**
+
+- For sensors with long quiet spells and occasional spikes, the benchmark
+  could pick a model that forecast nearly the same low value all day, with
+  a daily total well under the real one.
+- This affected experiments whose sensor is a running total, or that have
+  **Target is non-negative** set, with **Selection metric** left on Seasonal
+  MASE, MASE or MAE.
+- These experiments now choose the best model, and tune models, from the
+  **Published forecast** table. A model whose rest-of-day totals are much
+  worse than a plain average is not chosen.
+- Your best model may change at the next benchmark. To choose this way on
+  any experiment, set **Selection metric** to **CRPS on the published
+  forecast** (`production_metric: crps`).
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
 
 **The loss you choose in Settings is now used by the model that publishes your forecasts.**
 

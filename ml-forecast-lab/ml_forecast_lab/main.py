@@ -4203,6 +4203,8 @@ class MLForecastLabApp:
         drift: Optional[dict] = None,
         did_not_complete: Optional[List[str]] = None,
         did_not_complete_daily: Optional[List[str]] = None,
+        published: Optional[dict] = None,
+        selection_metric: Optional[str] = None,
     ):
         """
         Update web app state with current benchmark progress.
@@ -4442,6 +4444,18 @@ class MLForecastLabApp:
             drift=drift,
             did_not_complete=list(did_not_complete or []),
             did_not_complete_daily=list(did_not_complete_daily or []),
+            published_scores=[
+                {k: (None if isinstance(v, float) and not np.isfinite(v) else v)
+                 for k, v in row.items()}
+                for row in (published or {}).get("rows", [])
+            ],
+            published_evaluation_days=float(
+                (published or {}).get("evaluation_days", 0.0)
+            ),
+            published_enough_evidence=bool(
+                (published or {}).get("enough_evidence", False)
+            ),
+            selection_metric=selection_metric,
         )
 
         self.web_app.state.appstate.benchmark_results[exp_cfg.name] = web_result
@@ -5018,6 +5032,61 @@ class MLForecastLabApp:
             runner.production_metric, np.nan
         ) if best_model_name else np.nan
 
+        # v2.58.0: score the forecast each backend would publish — the
+        # full horizon from many issue times — against the reference
+        # forecasts. Where the runner selects on it (see
+        # BenchmarkRunner.selects_on_published_forecast) the lowest CRPS
+        # among backends passing the period-total guardrail wins and the
+        # leaderboard follows that order; otherwise it is shown only.
+        published = None
+        selection_metric = runner.production_metric
+        try:
+            _ranked = {k: v for k, v in completed_models.items() if k in rankings}
+            published = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: runner.score_published_forecasts(
+                    combined, _ranked,
+                    tz=getattr(self.config, "timezone", None) or None,
+                    exclude=[] if _naive_was_enabled else ["seasonal_naive"],
+                ),
+            )
+        except Exception as e:
+            logger.warning(f"  Published-forecast evaluation failed: {e}")
+        if published and runner.selects_on_published_forecast():
+            _new_ranks = runner.rank_by_published_scores(published, rankings)
+            if _new_ranks:
+                # A backend left out of selection keeps a place after the
+                # ranked ones so it still has a row on the leaderboard.
+                for _n in sorted(rankings, key=rankings.get):
+                    _new_ranks.setdefault(_n, len(_new_ranks) + 1)
+                rankings = _new_ranks
+                best_model_name = published["winner"]
+                selection_metric = "crps"
+                best_metric_value = completed_models[best_model_name].metrics.get(
+                    "crps", np.nan,
+                )
+        if published:
+            logger.info("")
+            logger.info(
+                f"  Published forecast, {published['evaluation_days']:.1f} days "
+                f"scored (CRPS; * = fails the period-total guardrail):"
+            )
+            for _r in published["rows"]:
+                if not np.isfinite(_r["crps"]):
+                    continue
+                logger.info(
+                    f"    {_r['name']}{'' if _r['eligible'] else ' *'}: "
+                    f"crps={_r['crps']:.4f}, rmse={_r['rmse']:.4f}, "
+                    f"level={_r['bias_pct']:+.0f}%, "
+                    f"period_total_rmse={_r['period_total_rmse']:.3f}"
+                )
+            if selection_metric == "crps":
+                logger.info(
+                    f"  Selected on the published forecast: {best_model_name}"
+                    + ("" if published["enough_evidence"] else
+                       " (fewer than 14 days scored — close models are "
+                       "not reliably separated)")
+                )
+
         # Log final rankings — composite mean rank (Demšar-style
         # averaging across folds; not a Friedman/Nemenyi test). CI
         # printed in [low, high] form so a reader can spot ties.
@@ -5063,6 +5132,8 @@ class MLForecastLabApp:
                 drift=drift_stats,
                 did_not_complete=dnc_interval,
                 did_not_complete_daily=dnc_daily_only,
+                published=published,
+                selection_metric=selection_metric,
             )
 
         # Build a BenchmarkResult-compatible object for downstream use
@@ -5073,11 +5144,14 @@ class MLForecastLabApp:
             rankings=rankings,
             best_model=best_model_name or "",
             best_metric_value=best_metric_value,
-            metric_used=runner.production_metric,
+            metric_used=selection_metric,
             cv_strategy=runner.cv_strategy,
             n_folds=runner.cv_folds,
             did_not_complete=dnc_interval,
             did_not_complete_daily=dnc_daily_only,
+            published_scores=(published or {}).get("rows", []),
+            published_evaluation_days=(published or {}).get("evaluation_days", 0.0),
+            published_enough_evidence=(published or {}).get("enough_evidence", False),
         )
 
         # 7. Generate holdout predictions from each model for visualisation
@@ -5479,7 +5553,7 @@ class MLForecastLabApp:
                 f"{'#' + str(rank):>5}{marker}"
             )
         logger.info(f"  {'─' * 56}")
-        logger.info(f"  Best model: {best_model_name} ({runner.production_metric}={best_metric_value:.4f})")
+        logger.info(f"  Best model: {best_model_name} ({selection_metric}={best_metric_value:.4f})")
         logger.info(f"{'=' * 60}")
         logger.info(f"")
 
@@ -9553,6 +9627,16 @@ class MLForecastLabApp:
                     exp_cfg.production_metric,
                     result.metrics.get("mae", float("inf")),
                 )
+                # v2.58.0: where selection is made on the published
+                # forecast, tuning searches on it too, so the tuned model
+                # is tuned for what the leaderboard will rank.
+                if runner.selects_on_published_forecast():
+                    _pub = runner.published_objective(
+                        combined, result,
+                        tz=getattr(self.config, "timezone", None) or None,
+                    )
+                    if _pub is not None:
+                        primary = _pub
                 status = "completed"
             except Exception as e:
                 logger.warning(f"  Trial {trial.number} failed: {e}", exc_info=True)
