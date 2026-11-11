@@ -1532,10 +1532,10 @@ class ConformalBands:
 
 
 
-def _jsonable_promotion(promotion):
-    """The promotion decision with non-finite floats as None, for the web
-    result model and its JSON persistence."""
-    if not promotion:
+def _jsonable_result(result):
+    """A dict with non-finite floats as None, for the web result model and
+    its JSON persistence."""
+    if not result:
         return None
 
     def _clean(v):
@@ -1547,7 +1547,7 @@ def _jsonable_promotion(promotion):
             return int(v)
         return v
 
-    return _clean(promotion)
+    return _clean(result)
 
 class MLForecastLabApp:
     """
@@ -4487,7 +4487,9 @@ class MLForecastLabApp:
                 (published or {}).get("enough_evidence", False)
             ),
             selection_metric=selection_metric,
-            promotion=_jsonable_promotion((published or {}).get("promotion")),
+            production_comparison=_jsonable_result(
+                (published or {}).get("production_comparison")
+            ),
         )
 
         self.web_app.state.appstate.benchmark_results[exp_cfg.name] = web_result
@@ -4573,20 +4575,6 @@ class MLForecastLabApp:
         )
         logger.info(f"  CV: {exp_cfg.cv_strategy}, {exp_cfg.cv_folds} folds, metric={_metric_label}")
         logger.info(f"{'=' * 60}")
-
-        # v2.58.0: the champion of the previous benchmark, when that one was
-        # chosen on the published forecast. A challenger replaces it only on
-        # a clear paired win (benchmark.horizon.promotion_decision). Read
-        # before the progressive leaderboard updates below overwrite it.
-        _incumbent = None
-        if self.web_app:
-            _prev = self.web_app.state.appstate.benchmark_results.get(exp_cfg.name)
-            if (
-                _prev is not None
-                and getattr(_prev, "status", None) == "completed"
-                and getattr(_prev, "selection_metric", None) == "crps"
-            ):
-                _incumbent = getattr(_prev, "best_model_name", None) or None
 
         if self.web_app:
             self.web_app.state.appstate.start_benchmark(exp_cfg.name)
@@ -5111,18 +5099,21 @@ class MLForecastLabApp:
                 rankings = _new_ranks
                 best_model_name = published["winner"]
                 selection_metric = "crps"
-                from ml_forecast_lab.benchmark import horizon as _H
-                promotion = _H.promotion_decision(
-                    published["evaluation"], published["rows"],
-                    challenger=best_model_name, incumbent=_incumbent,
-                )
-                published["promotion"] = promotion
-                if not promotion["promote"]:
-                    best_model_name = _incumbent
                 best_metric_value = completed_models[best_model_name].metrics.get(
                     "crps", np.nan,
                 )
         if published:
+            # v2.58.0: how the top of the table compares with the model the
+            # user promoted — shown to inform the next Promote, never acted on.
+            try:
+                from ml_forecast_lab.benchmark import horizon as _H
+                published["production_comparison"] = _H.compare_with_production(
+                    published["evaluation"], published["rows"],
+                    top=published.get("winner"),
+                    production=exp_cfg.production_model or None,
+                )
+            except Exception as e:
+                logger.warning(f"  Comparison with the production model failed: {e}")
             logger.info("")
             logger.info(
                 f"  Published forecast, {published['evaluation_days']:.1f} days "
@@ -5144,10 +5135,16 @@ class MLForecastLabApp:
                        " (fewer than 14 days scored — close models are "
                        "not reliably separated)")
                 )
-                _promo = published.get("promotion") or {}
-                if _promo.get("reason"):
-                    logger.info(f"  Promotion: {_promo['reason']}")
-            elif runner.median_seeking_override():
+            _cmp = published.get("production_comparison")
+            if _cmp and not _cmp["same"] and np.isfinite(_cmp["improvement"]):
+                _imp = _cmp["improvement"]
+                logger.info(
+                    f"  vs production model {_cmp['production']}: "
+                    f"{_cmp['top']} CRPS {abs(_imp):.1%} "
+                    f"{'lower' if _imp > 0 else 'higher'} over "
+                    f"{_cmp['n_days']} days ({_cmp['verdict']})"
+                )
+            if selection_metric != "crps" and runner.median_seeking_override():
                 logger.info(
                     f"  production_metric is set to {runner.production_metric}, "
                     "which favours near-constant forecasts on a target that "

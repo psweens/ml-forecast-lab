@@ -766,86 +766,52 @@ def paired_difference(
             'n_days': int(uniq.size), 'verdict': verdict}
 
 
-# A challenger replaces the incumbent champion only when its paired CRPS
-# advantage is clear: the day-block bootstrap interval of the difference
-# lies below zero, and the mean improvement is at least this fraction of
-# the incumbent's CRPS. Slot-level CRPS separates forecasts on a
-# non-negative target by a few per cent at most, so without a margin the
-# winner can change on every benchmark with sampling noise — and each
-# change resets the published band's calibration.
-PROMOTION_MIN_IMPROVEMENT = 0.01
 
-
-def promotion_decision(
+def compare_with_production(
     evaluation: HorizonEvaluation, rows: Sequence[dict],
-    challenger: Optional[str], incumbent: Optional[str],
-) -> dict:
+    top: Optional[str], production: Optional[str],
+) -> Optional[dict]:
     """
-    Whether the CRPS winner should replace the incumbent champion.
+    How the top model on the published-forecast table compares with the
+    model the user promoted to production.
 
-    ``rows`` are ``select_by_crps``'s rows. The challenger is promoted when
-    there is no incumbent, it is the incumbent, the incumbent was not
-    scored this time or fails the period-total guardrail, or the challenger
-    is better on a paired comparison over the issue times both were scored
-    on (``paired_difference``) by at least ``PROMOTION_MIN_IMPROVEMENT``.
-    Otherwise the incumbent is kept.
-
-    Returns ``{'promote', 'challenger', 'incumbent', 'reason', 'paired'}``;
-    ``paired`` is ``paired_difference``'s result when a comparison was run,
-    else None.
+    Informational: the user decides whether to promote. ``rows`` are
+    ``select_by_crps``'s rows and ``top`` its winner. Returns None when
+    there is nothing to compare — no top model, no production model, or a
+    production model that was not scored on this benchmark. When the
+    production model is the top model, returns ``{'same': True, ...}``.
+    Otherwise compares the two on the issue times both were scored on with
+    ``paired_difference`` (per-origin CRPS, day-block bootstrap) and returns
+    ``top``, ``production``, ``same``, ``improvement`` (the top model's CRPS
+    reduction as a fraction of the production model's; negative if it is
+    worse there), ``n_days`` and ``verdict`` (``'better'``, ``'worse'`` or
+    ``'indistinguishable'``, for the top model).
     """
-    out = {'promote': True, 'challenger': challenger, 'incumbent': incumbent,
-           'reason': '', 'paired': None}
-    if not challenger or not incumbent or challenger == incumbent:
-        return out
+    if not top or not production:
+        return None
+    if top == production:
+        return {'top': top, 'production': production, 'same': True,
+                'improvement': 0.0, 'n_days': None, 'verdict': None}
     by_name = {r['name']: r for r in rows}
-    inc_row = by_name.get(incumbent)
-    if (
-        inc_row is None or not inc_row.get('candidate')
-        or not np.isfinite(inc_row.get('crps', np.nan))
-    ):
-        out['reason'] = f'{challenger} replaces {incumbent}, which was not scored'
-        return out
-    if not inc_row.get('eligible', True):
-        out['reason'] = (
-            f'{challenger} replaces {incumbent}, which now fails the '
-            'period-total guardrail'
-        )
-        return out
-    ch, inc = evaluation.scores.get(challenger), evaluation.scores.get(incumbent)
-    if ch is None or inc is None or ch.origin_crps is None or inc.origin_crps is None:
-        out['reason'] = f'{challenger} replaces {incumbent}; no paired scores'
-        return out
-    a = pd.Series(np.asarray(ch.origin_crps, float), index=pd.DatetimeIndex(ch.origin_times))
-    b = pd.Series(np.asarray(inc.origin_crps, float), index=pd.DatetimeIndex(inc.origin_times))
-    a = a[~a.index.duplicated()]
-    b = b[~b.index.duplicated()]
+    prod_row = by_name.get(production)
+    if prod_row is None or not np.isfinite(prod_row.get('crps', np.nan)):
+        return None
+    a_sc, b_sc = evaluation.scores.get(top), evaluation.scores.get(production)
+    if (a_sc is None or b_sc is None
+            or a_sc.origin_crps is None or b_sc.origin_crps is None):
+        return None
+    a = pd.Series(np.asarray(a_sc.origin_crps, float),
+                  index=pd.DatetimeIndex(a_sc.origin_times))
+    b = pd.Series(np.asarray(b_sc.origin_crps, float),
+                  index=pd.DatetimeIndex(b_sc.origin_times))
+    a, b = a[~a.index.duplicated()], b[~b.index.duplicated()]
     common = a.index.intersection(b.index)
-    paired = paired_difference(
-        a.reindex(common).to_numpy(), b.reindex(common).to_numpy(), common,
-    )
-    out['paired'] = paired
-    base = float(np.nanmean(b.reindex(common).to_numpy())) if len(common) else float('nan')
-    rel = -paired['mean'] / base if np.isfinite(base) and base > 0 else float('nan')
-    if paired['verdict'] == 'better' and np.isfinite(rel) and rel >= PROMOTION_MIN_IMPROVEMENT:
-        out['reason'] = (
-            f'{challenger} replaces {incumbent}: CRPS {rel:.1%} lower '
-            f'over {paired["n_days"]} days, clearly better'
-        )
-        return out
-    out['promote'] = False
-    diff = (
-        f"{challenger}'s CRPS was {abs(rel):.1%} "
-        f"{'lower' if rel > 0 else 'higher'}" if np.isfinite(rel)
-        else f'{challenger} could not be compared'
-    )
-    verdict = (
-        'not a clear enough improvement to switch'
-        if np.isfinite(rel) and rel > 0 else 'no improvement'
-    )
-    out['reason'] = (
-        f'kept {incumbent}: {diff} over {paired["n_days"]} days, {verdict} '
-        f'(a switch needs a paired win of at least '
-        f'{PROMOTION_MIN_IMPROVEMENT:.0%})'
-    )
-    return out
+    if len(common) == 0:
+        return None
+    a, b = a.reindex(common).to_numpy(), b.reindex(common).to_numpy()
+    paired = paired_difference(a, b, common)
+    base = float(np.nanmean(b))
+    improvement = -paired['mean'] / base if np.isfinite(base) and base > 0 else float('nan')
+    return {'top': top, 'production': production, 'same': False,
+            'improvement': float(improvement), 'n_days': paired['n_days'],
+            'verdict': paired['verdict']}

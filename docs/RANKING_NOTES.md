@@ -161,26 +161,20 @@ horizon and measured.
 
 **Evidence.** Scores over fewer than 14 days are flagged. Model
 differences on this class of target are a few percent of the score and
-daily totals vary by a third from day to day, so the CRPS winner can
-change from one benchmark to the next on sampling noise alone — and each
-change of champion resets the published band's calibration.
+daily totals vary by a third from day to day, so a different model topping
+the table is not by itself a reason to switch.
 
-**Promotion gate.** When the previous benchmark also selected on the
-published forecast, its winner is the incumbent, and
-`horizon.promotion_decision` decides whether this benchmark's winner
-replaces it. The challenger is promoted when there is no incumbent, when
-the incumbent was not scored this time (disabled, failed, or excluded), or
-when it now fails the guardrail. Otherwise the two are compared on the
-issue times both were scored on with `horizon.paired_difference` — the
-per-origin CRPS difference, with a day-block bootstrap because issue times
-on the same day share their targets — and the challenger is promoted only
-if the 95 % interval lies below zero **and** the mean improvement is at
-least `PROMOTION_MIN_IMPROVEMENT` (1 %) of the incumbent's CRPS. The
-interval alone is not enough: over several weeks a consistent 0.3 %
-difference becomes significant without being worth a switch. When the
-incumbent is kept, the leaderboard still lists backends in CRPS order and
-the Results tab says the challenger did not win clearly enough. A
-champion chosen by the one-step composite rank — every experiment's
-champion before v2.58.0 — is not an incumbent here, so the first
-published-forecast selection after the upgrade is not held back by a
-champion picked on the metrics this selection replaces.
+**Comparison with the production model.** The user decides which model
+publishes forecasts by promoting it, which pins `production_model`; a
+later benchmark only informs that decision. When a production model is
+set and was scored, `horizon.compare_with_production` compares the
+table's winner with it on the issue times both were scored on, using
+`horizon.paired_difference` — the per-origin CRPS difference with a
+day-block bootstrap, because issue times on the same day share their
+targets. The Results tab states the difference and whether it is
+consistent (95 % interval excludes zero) or within the day-to-day
+variation. It is never acted on. A first cut used the same comparison as
+a promotion gate that kept the previous winner as "Best" unless beaten by
+at least 1 %; with promotion in the user's hands that only made the
+"Best" label disagree with the table being chosen from, so it was
+replaced by this note.

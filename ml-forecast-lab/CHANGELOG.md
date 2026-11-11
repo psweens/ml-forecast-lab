@@ -17,6 +17,9 @@
   interval.
 - With fewer than 14 days scored, the table says so: close scores are not a
   reliable difference.
+- If you have promoted a model, the table says whether its top model is
+  consistently better than yours or only by chance, to help you decide
+  whether to promote it.
 - [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
 
 **A new Seasonal Profile model forecasts the usual amount for each time of day.**
@@ -75,7 +78,7 @@
   target** on.
 - With **Production metric** on its default, now called **Automatic**,
   these experiments choose their best model from the **Published
-  forecast** table, and only switch when another model is clearly better.
+  forecast** table.
 - If you chose a **Production metric** yourself, it is kept. Choose
   **Automatic** to use the new selection.
 - [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)

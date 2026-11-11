@@ -1031,8 +1031,13 @@
             {{ "%.1f"|format(benchmark_result.published_evaluation_days) }} days scored.
             {% if benchmark_result.selection_metric == 'crps' %}The best model was chosen from this table.{% else %}Shown for information; the best model was chosen from the table above.{% endif %}
             {% if not benchmark_result.published_enough_evidence %}With fewer than 14 days, close scores are not a reliable difference.{% endif %}
-            {% if benchmark_result.selection_metric == 'crps' and benchmark_result.promotion and benchmark_result.promotion.incumbent and benchmark_result.promotion.challenger != benchmark_result.promotion.incumbent %}
-                {% if benchmark_result.promotion.promote %}{{ benchmark_result.promotion.challenger | model_display }} replaced {{ benchmark_result.promotion.incumbent | model_display }}.{% else %}{{ benchmark_result.promotion.incumbent | model_display }} was kept: {{ benchmark_result.promotion.challenger | model_display }} scored best here but not by a clear enough margin to switch.{% endif %}
+            {% set _cmp = benchmark_result.production_comparison %}
+            {% if _cmp %}
+                {% if _cmp.same %}Your production model, {{ _cmp.production | model_display }}, is the best model in this table.
+                {% elif _cmp.improvement is not none %}
+                    {% set _pct = "%.1f"|format((_cmp.improvement * 100)|abs) %}
+                    {% if _cmp.improvement > 0 %}{{ _cmp.top | model_display }} scored {{ _pct }}% better than your production model, {{ _cmp.production | model_display }}, over {{ _cmp.n_days }} days{% else %}{{ _cmp.top | model_display }} scored {{ _pct }}% worse than your production model, {{ _cmp.production | model_display }}, over {{ _cmp.n_days }} days{% endif %}{% if _cmp.verdict == 'better' %} — consistently, so promoting it should help.{% elif _cmp.verdict == 'worse' %} — consistently.{% else %} — within the day-to-day variation, so switching is unlikely to make a real difference.{% endif %}
+                {% endif %}
             {% endif %}
         </p>
         <div class="table-container">

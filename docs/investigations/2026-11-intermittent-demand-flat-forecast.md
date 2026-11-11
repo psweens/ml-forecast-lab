@@ -233,7 +233,7 @@ Two properties of this class of target limit what any evaluation can say:
 - **Selection** (v2.58.0): the benchmark scores each backend's published
   forecast and, for non-negative targets with `production_metric` unset
   or for `production_metric: crps`, selects and tunes on CRPS with a
-  period-total guardrail and a promotion gate (see *Review follow-up*). On ten days of
+  period-total guardrail (see *Review follow-up*). On ten days of
   the reference series with LightGBM, XGBoost, the seasonal-naive backend
   and one linear sequence backend, the one-step composite rank put XGBoost
   first; its published forecast was 40 % under the measured level and
@@ -371,29 +371,28 @@ Changes made after review of the first cut, all in v2.58.0.
   resolves it to `seasonal_mase` for every consumer and records
   `production_metric_explicit`. A configured median-seeking metric on a
   non-negative target is used as set and named in the benchmark log.
-- **Promotion gate.** Slot-level CRPS separates forecasts on this target
-  by a few per cent, lab mode re-benchmarks on every update cycle, and a
-  change of champion resets the band's calibration, so the CRPS winner
-  could change on noise. `horizon.promotion_decision` keeps the previous
-  CRPS-selected champion unless the challenger wins a paired day-block
-  comparison over shared issue times by at least 1 %, or the incumbent was
-  not scored or fails the guardrail. Champions chosen by the one-step rank
-  are not incumbents. Measured on the forty days of hourly reference
-  totals (29.4 days scored; LightGBM default Huber, LightGBM Tweedie,
+- **Paired comparison with the production model, not a promotion gate.**
+  The review first added a gate that kept the previous CRPS winner as
+  "Best" unless a challenger won a paired day-block comparison by at least
+  1 %. Promotion is the user's decision — **Promote** pins
+  `production_model`, and lab mode only reports — so the gate's one
+  effect in normal use was a "Best" label that disagreed with the table.
+  It was replaced by `horizon.compare_with_production`: the Results tab
+  states how the table's winner compares with the promoted model over the
+  issue times both were scored on, and whether the difference is
+  consistent. Measured on the forty days of hourly reference totals
+  (29.4 days scored; LightGBM default Huber, LightGBM Tweedie,
   `seasonal_profile`):
 
-  | Challenger → incumbent | paired CRPS difference [95 %] | decision |
+  | Pair | paired CRPS difference [95 %] | verdict |
   |---|---|---|
-  | `seasonal_profile` → LightGBM Huber | −0.105 [−0.204, −0.001], −5.8 % | promoted |
-  | LightGBM Huber → `seasonal_profile` | +0.105 [+0.001, +0.204] | kept |
-  | `seasonal_profile` → LightGBM Tweedie | −0.005 [−0.092, +0.082], −0.3 % | kept |
-  | LightGBM Tweedie → LightGBM Huber | −0.099 [−0.148, −0.053], −5.5 % | promoted |
+  | `seasonal_profile` vs LightGBM Huber | −0.105 [−0.204, −0.001], −5.8 % | consistent |
+  | `seasonal_profile` vs LightGBM Tweedie | −0.005 [−0.092, +0.082], −0.3 % | within variation |
+  | LightGBM Tweedie vs LightGBM Huber | −0.099 [−0.148, −0.053], −5.5 % | consistent |
 
-  The cost is stickiness on thin evidence: on the ten-day half-hourly
-  reference the same harness scored 4.1 days and no pair separated, so
-  whichever model was champion would stay unless it failed the guardrail.
-  Evidence grows with `days_history`; the guardrail is the escape for a
-  champion whose level is wrong.
+  On the ten-day half-hourly reference the same harness scored 4.1 days
+  and no pair separated, so on a fortnight of history the note will
+  usually say a difference is within the variation.
 - **Tweedie on forty days.** On the hourly reference series above,
   Tweedie (level-corrected) and the profile are inseparable on CRPS
   (1.699 against 1.679) and Tweedie has the lowest rest-of-day RMSE of any

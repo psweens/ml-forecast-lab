@@ -253,10 +253,10 @@ class BenchmarkResult(BaseModel):
     published_evaluation_days: float = 0.0
     published_enough_evidence: bool = False
     selection_metric: Optional[str] = None
-    # Whether the CRPS winner replaced the previous champion
-    # (benchmark.horizon.promotion_decision): promote, challenger,
-    # incumbent, reason, paired.
-    promotion: Optional[Dict[str, Any]] = None
+    # The top of the published-forecast table against the promoted
+    # production model (benchmark.horizon.compare_with_production): top,
+    # production, same, improvement, n_days, verdict. Informational.
+    production_comparison: Optional[Dict[str, Any]] = None
 
 
 class ExperimentStatus(BaseModel):
