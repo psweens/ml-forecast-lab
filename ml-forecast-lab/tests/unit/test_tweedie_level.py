@@ -54,6 +54,18 @@ class TestLevelScale:
         assert log_link_level_scale([1.0], [0.0]) == 1.0
         assert log_link_level_scale([np.nan], [1.0]) == 1.0
 
+    def test_weighted_like_the_fit(self):
+        # With recency weights the fit tracks the weighted mean; the
+        # correction compares weighted means, so a recent rise in level
+        # is not undone by older, lower data.
+        y, fitted = [1.0, 3.0], [1.0, 3.0]
+        assert log_link_level_scale(y, fitted, weights=[0.1, 1.0]) == pytest.approx(1.0)
+        assert log_link_level_scale([1.0, 3.0], [1.0, 2.0], weights=[0.0, 1.0]) == pytest.approx(1.5)
+
+    def test_unusable_weights_fall_back_to_unweighted(self):
+        for w in ([1.0], [np.nan, 1.0], [0.0, 0.0]):
+            assert log_link_level_scale([1.0, 3.0], [1.0, 1.0], weights=w) == pytest.approx(2.0)
+
 
 class TestLightGBM:
     def test_tweedie_fit_matches_the_training_mean(self):

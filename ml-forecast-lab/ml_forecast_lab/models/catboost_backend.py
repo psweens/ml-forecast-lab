@@ -245,7 +245,7 @@ class CatBoostModel(ForecastModel):
         if loss_function.startswith("Tweedie"):
             # v2.58.0: see log_link_level_scale.
             self.training_metadata["level_scale"] = log_link_level_scale(
-                y_tr, self.model.predict(X_tr),
+                y_tr, self.model.predict(X_tr), weights=w_tr,
             )
 
         self._is_fitted = True

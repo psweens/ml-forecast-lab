@@ -331,7 +331,7 @@ class LightGBMModel(ForecastModel):
         if objective == "tweedie":
             # v2.58.0: see log_link_level_scale.
             self.training_metadata["level_scale"] = log_link_level_scale(
-                y_train_split, self.model.predict(X_train_split),
+                y_train_split, self.model.predict(X_train_split), weights=w_train,
             )
 
         self._is_fitted = True
