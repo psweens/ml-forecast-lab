@@ -47,6 +47,26 @@
   longer than usual. Check that `timezone:` is set to your own.
 - [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
 
+**Tree models using the Tweedie loss no longer forecast too low.**
+
+- With **Loss function** set to Tweedie, LightGBM, XGBoost and CatBoost
+  forecasts averaged noticeably less than the sensor's real average.
+- This affected experiments that chose the Tweedie loss. Other losses are
+  unchanged.
+- These models are now corrected to match the sensor's average, so their
+  forecasts will rise at the next retrain.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
+**Tuning can no longer produce a tree model that forecasts a flat line.**
+
+- On the Tuning tab, LightGBM, XGBoost and CatBoost could be tuned to a
+  learning rate so small that the model barely learned, and forecast almost
+  the same value all day.
+- The smallest learning rate is now 0.01 and the fewest trees 50.
+- If one of these models has a tuned learning rate below 0.01, run tuning
+  again or clear its tuned settings on the Models tab.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
 **The best model for a sensor that is mostly near zero is no longer a flat, too-low forecast.**
 
 - For sensors with long quiet spells and occasional spikes, the benchmark

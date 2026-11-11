@@ -432,6 +432,36 @@ class TrainingCancelled(Exception):
     """
 
 
+# Bounds on the level correction below. A ratio outside them means the fit
+# is degenerate, not merely shrunk, and scaling it would hide that.
+LEVEL_SCALE_BOUNDS = (0.5, 2.0)
+
+
+def log_link_level_scale(y, fitted) -> float:
+    """Factor that brings a log-link fit's mean back to the training mean.
+
+    A Tweedie objective boosts in log space. Early stopping leaves the
+    boosted term shrunk towards its starting value, and because the mean of
+    an exponential is dominated by its large values, a shrunken log-space
+    fit has a lower arithmetic mean than the data — about 17 % lower on an
+    intermittent target after thirty rounds. A squared-error fit has no
+    such gap: its in-sample mean equals the training mean at every round.
+    Multiplying the prediction by mean(y) / mean(fitted) restores that
+    property and leaves the fitted shape untouched.
+
+    Returns 1.0 when either mean is not positive and finite, and clips to
+    ``LEVEL_SCALE_BOUNDS``.
+    """
+    try:
+        y_mean = float(np.mean(np.asarray(y, dtype=float)))
+        f_mean = float(np.mean(np.asarray(fitted, dtype=float)))
+    except Exception:
+        return 1.0
+    if not (np.isfinite(y_mean) and np.isfinite(f_mean)) or y_mean <= 0 or f_mean <= 0:
+        return 1.0
+    return float(np.clip(y_mean / f_mean, *LEVEL_SCALE_BOUNDS))
+
+
 def resolve_tree_loss_for_target(loss_fn: str, y, model_name: str = "tree") -> str:
     """Demote a Tweedie-family loss to Huber when the target goes negative.
 

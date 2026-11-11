@@ -876,11 +876,16 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     # ---- Model parameter schema (type, default, display label) ----
 
+    # v2.58.0: tree backends' learning rate starts at 0.01 and tree count
+    # at 50. Their product bounds how far boosting can move from the
+    # starting constant: at 0.001 × a few hundred rounds a tuned model was
+    # effectively unboosted — a flat line at the training mean — and on a
+    # noisy single-fold objective such a trial can win.
     MODEL_PARAM_SCHEMA: Dict[str, Dict[str, dict]] = {
         "lightgbm": {
-            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 10, "max": 5000},
+            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 50, "max": 5000},
             "max_depth": {"type": "int", "default": 6, "label": "Max tree depth", "min": 1, "max": 20},
-            "learning_rate": {"type": "float", "default": 0.05, "label": "Learning rate", "min": 0.001, "max": 1.0, "step": 0.001},
+            "learning_rate": {"type": "float", "default": 0.05, "label": "Learning rate", "min": 0.01, "max": 1.0, "step": 0.001},
             "num_leaves": {"type": "int", "default": 31, "label": "Max leaves", "min": 2, "max": 256},
             "min_child_samples": {"type": "int", "default": 10, "label": "Min samples per leaf", "min": 1, "max": 100},
             "subsample": {"type": "float", "default": 0.8, "label": "Row subsample ratio", "min": 0.1, "max": 1.0, "step": 0.05},
@@ -889,9 +894,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "reg_lambda": {"type": "float", "default": 0.1, "label": "L2 regularisation", "min": 0.0, "max": 10.0, "step": 0.01},
         },
         "xgboost": {
-            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 10, "max": 5000},
+            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 50, "max": 5000},
             "max_depth": {"type": "int", "default": 6, "label": "Max tree depth", "min": 1, "max": 20},
-            "learning_rate": {"type": "float", "default": 0.05, "label": "Learning rate", "min": 0.001, "max": 1.0, "step": 0.001},
+            "learning_rate": {"type": "float", "default": 0.05, "label": "Learning rate", "min": 0.01, "max": 1.0, "step": 0.001},
             "subsample": {"type": "float", "default": 0.8, "label": "Row subsample ratio", "min": 0.1, "max": 1.0, "step": 0.05},
             "colsample_bytree": {"type": "float", "default": 0.8, "label": "Column subsample ratio", "min": 0.1, "max": 1.0, "step": 0.05},
             "reg_alpha": {"type": "float", "default": 0.1, "label": "L1 regularisation", "min": 0.0, "max": 10.0, "step": 0.01},
@@ -1012,9 +1017,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             # 6-10). n_estimators capped at 2000 so a pathological
             # lr=0.001 trial that never triggers early-stopping still
             # finishes within the study budget.
-            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 10, "max": 2000},
+            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 50, "max": 2000},
             "max_depth": {"type": "int", "default": 6, "label": "Max tree depth", "min": 3, "max": 10},
-            "learning_rate": {"type": "float", "default": 0.05, "label": "Learning rate", "min": 0.001, "max": 1.0, "step": 0.001},
+            "learning_rate": {"type": "float", "default": 0.05, "label": "Learning rate", "min": 0.01, "max": 1.0, "step": 0.001},
             "l2_leaf_reg": {"type": "float", "default": 3.0, "label": "L2 leaf regularisation", "min": 0.0, "max": 30.0, "step": 0.1},
             "subsample": {"type": "float", "default": 0.8, "label": "Row subsample ratio", "min": 0.1, "max": 1.0, "step": 0.05},
             "colsample_bylevel": {"type": "float", "default": 0.8, "label": "Column subsample ratio", "min": 0.1, "max": 1.0, "step": 0.05},

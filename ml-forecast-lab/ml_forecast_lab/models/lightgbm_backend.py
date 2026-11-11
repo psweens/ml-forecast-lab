@@ -13,7 +13,9 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from .base import ForecastModel, resolve_tree_loss_for_target
+from .base import (
+    ForecastModel, log_link_level_scale, resolve_tree_loss_for_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +59,6 @@ class LightGBMModel(ForecastModel):
         loss_fn: str = 'huber',
         tweedie_variance_power: float = 1.5,
         patience: int = 50,
-        early_stopping_metric: str = 'rmse',
     ):
         """
         Initialise LightGBM forecasting model.
@@ -108,7 +109,6 @@ class LightGBMModel(ForecastModel):
         # Now configurable per-instance and via the per-experiment
         # `patience` Setting (main.py:_apply_patience).
         self.patience = patience
-        self.early_stopping_metric = early_stopping_metric
 
         self.model: Optional[lgb.Booster] = None
         self.feature_names_: Optional[list] = None
@@ -219,11 +219,14 @@ class LightGBMModel(ForecastModel):
         objective = objective_map.get(_loss, "huber")
         params = {
             "objective": objective,
-            "metric": (
-                "rmse" if self.early_stopping_metric == "rmse"
-                else {"regression": "l2", "regression_l1": "l1",
-                      "huber": "huber", "tweedie": "tweedie"}.get(objective, "rmse")
-            ),
+            # Early stopping watches RMSE, except under Tweedie, which is
+            # watched on its own deviance (v2.58.0): its fit improves the
+            # deviance for rounds after validation RMSE has gone flat.
+            # Huber stays on RMSE deliberately. Its own metric keeps
+            # improving while the fit slides from the mean towards the
+            # median, which on a skewed target took the level from 30 % to
+            # 60 % under; RMSE stops that slide early.
+            "metric": "tweedie" if objective == "tweedie" else "rmse",
             "max_depth": self.max_depth,
             "learning_rate": self.learning_rate,
             "num_leaves": self.num_leaves,
@@ -325,6 +328,11 @@ class LightGBMModel(ForecastModel):
             "feature_importances": feature_importances,
             "num_features": len(self.feature_names_),
         }
+        if objective == "tweedie":
+            # v2.58.0: see log_link_level_scale.
+            self.training_metadata["level_scale"] = log_link_level_scale(
+                y_train_split, self.model.predict(X_train_split),
+            )
 
         self._is_fitted = True
         logger.info(
@@ -372,6 +380,9 @@ class LightGBMModel(ForecastModel):
             )
 
         predictions = self.model.predict(X)
+        scale = float(self.training_metadata.get("level_scale", 1.0))
+        if scale != 1.0:
+            predictions = predictions * scale
         return np.array(predictions, dtype=np.float32)
 
     def get_params(self) -> Dict[str, Any]:

@@ -261,7 +261,47 @@ Two properties of this class of target limit what any evaluation can say:
   CRPS; their forecasts carried a quarter to a third of the true
   amplitude against the profile's half.
 
-## Direction
+### Tree objectives, measured on the published forecast
+
+LightGBM on the reference series and three synthetic series, 96-step
+recursive forecasts, level relative to the measured total (the
+seasonal-mean profile's own level on each window is shown, since a short
+test window differs from its training window by sampling alone):
+
+| | reference | synthetic 0 | synthetic 1 | synthetic 2 |
+|---|---|---|---|---|
+| seasonal-mean profile: CRPS / level | 0.940 / +9 % | 0.997 / −7 % | 1.044 / −2 % | 0.963 / −8 % |
+| Huber, stop on RMSE | 0.941 / −11 % | 1.121 / −29 % | 1.216 / −37 % | 1.060 / −38 % |
+| Huber, stop on Huber | 0.933 / −14 % | 1.080 / −62 % | 1.151 / −57 % | |
+| L2 | 0.975 / +19 % | 1.111 / −20 % | 1.224 / −4 % | 1.095 / −12 % |
+| Tweedie, stop on deviance | 0.971 / +0 % | 1.084 / −35 % | 1.154 / −17 % | 1.069 / −24 % |
+| Tweedie, level-corrected | 0.990 / +21 % | 1.092 / −20 % | 1.162 / −3 % | 1.078 / −14 % |
+
+- **Stopping Huber on its own metric is worse.** Training runs four to six
+  times longer and the level falls to 57 – 62 % under: the Huber metric
+  keeps improving as the fit slides to the median. RMSE stopping is what
+  limits the damage, so Huber keeps it.
+- **Tweedie's shortfall is the log link.** Its in-sample fit averaged
+  17 % below the training mean (correction factors 1.17 – 1.21), where an
+  L2 fit matches it (0.97 – 1.00). Early stopping leaves the log-space
+  term shrunk, and a shrunken exponent has a lower arithmetic mean. With
+  the correction (`log_link_level_scale`) Tweedie's level tracks L2's on
+  every series. Its uncorrected level on the reference series was right
+  by coincidence of that shortfall and a test window lower than its
+  training window.
+- **Stopping Tweedie on its deviance** is a small consistent gain
+  (0.971 vs 0.989, 1.084 vs 1.091, 1.154 vs 1.173).
+- **The correction costs about 0.01 CRPS** on every series and takes the
+  remaining-in-day RMSE down by 9 – 21 %. A distribution built from
+  signed errors absorbs a level error; a total does not.
+- **No default objective is changed.** Tweedie is better than Huber on
+  level and totals everywhere and on CRPS on the synthetic series, and
+  worse on CRPS on the reference series. That is not enough to move every
+  non-negative experiment off Huber, and with selection made on the
+  published forecast and a profile backend on the leaderboard, an
+  under-levelled Huber tree is no longer what gets published.
+
+## Direction (as first written)
 
 - Tree objective for non-negative skewed targets must estimate the mean
   (Tweedie, or a hurdle model), applied identically in benchmark, tuning and
