@@ -272,6 +272,7 @@ def main():
         ("timexer", "timexer_backend", "TimeXerModel"),
         ("moderntcn", "moderntcn_backend", "ModernTCNModel"),
         ("seasonal_naive", "seasonal_naive_backend", "SeasonalNaiveModel"),
+        ("seasonal_profile", "seasonal_profile_backend", "SeasonalProfileModel"),
         ("daily_profile", "daily_profile_backend", "DailyProfileModel"),
         ("arima", "statsforecast_backend", "ARIMAModel"),
         ("ets", "statsforecast_backend", "ETSModel"),

@@ -242,10 +242,24 @@ Two properties of this class of target limit what any evaluation can say:
   `loss_fn`.
 - **Intervals**: asymmetric by default for non-negative targets.
 
-Still open: the default tree objective and its early stopping (findings 1),
-calendar features in local time (finding 5), and whether a seasonal-profile
-backend should exist as a selectable model, since no backend beats that
-reference on this series.
+- **Calendar features** are read in the configured timezone through one
+  process-wide setting (`features.set_calendar_timezone`, set at the start
+  of every pipeline) rather than a parameter: nine places build a calendar
+  value — the feature frame, future-known features, two sliding-window
+  builders, the neural inference window and three recursive forecast rows
+  — and a path that missed a parameter would train on one calendar and
+  forecast on another. Sub-hourly frames gain `slot_of_day`. With the zone
+  unset or UTC every earlier column is unchanged. The model-cache schema
+  moved to 4, so every experiment retrains once.
+- **`seasonal_profile` backend**: the mean by local slot-of-day and
+  weekday/weekend. In the app's benchmark on ten days of the reference
+  series it was selected (CRPS 0.839, level +2 %, against LightGBM 0.916
+  and −13 %, XGBoost 0.856 and −43 %); its production forecast ranged
+  0.03 – 8.7 with a day-1 total of 56.1 against a measured mean of 57.
+  On four series — the reference and three synthetic — no LightGBM
+  objective, with or without a level correction, beat this profile on
+  CRPS; their forecasts carried a quarter to a third of the true
+  amplitude against the profile's half.
 
 ## Direction
 

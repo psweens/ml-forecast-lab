@@ -245,7 +245,11 @@ from ml_forecast_lab.preprocessing import (  # noqa: E402
 from ml_forecast_lab.features import (  # noqa: E402
     MISSING_SUFFIX,
     TARGET_MISSING_COLUMN,
+    calendar_index,
+    calendar_row,
+    calendar_timestamp,
     is_holiday,
+    set_calendar_timezone,
     neural_covariate_columns,
     rebuild_fold_features,
 )
@@ -1267,7 +1271,10 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
 # different distribution than it was fitted on. Old caches are silently
 # ignored on load and a fresh training cycle is scheduled — see
 # docs/investigations/2026-05-neural-pv.md for the v2.37 precedent.
-CACHE_SCHEMA_VERSION = 3
+# Bumped to 4 in v2.58.0: calendar features are read in the configured
+# timezone and sub-hourly experiments gain a slot_of_day column, so a model
+# cached earlier was fitted on a UTC calendar and a different column set.
+CACHE_SCHEMA_VERSION = 4
 
 # v2.55.0: version of the rule that turns a cumulative sensor into interval
 # labels (restart detection, the default increment cap) and of the
@@ -1312,6 +1319,7 @@ _OPTIONAL_BACKENDS = [
     ("timexer", "timexer_backend", "TimeXerModel"),
     ("moderntcn", "moderntcn_backend", "ModernTCNModel"),
     ("seasonal_naive", "seasonal_naive_backend", "SeasonalNaiveModel"),
+    ("seasonal_profile", "seasonal_profile_backend", "SeasonalProfileModel"),
     ("daily_profile", "daily_profile_backend", "DailyProfileModel"),
     ("arima", "statsforecast_backend", "ARIMAModel"),
     ("ets", "statsforecast_backend", "ETSModel"),
@@ -3268,6 +3276,11 @@ class MLForecastLabApp:
             LoadSubtractError,
             _describe_gap_spans,
         )
+
+        # v2.58.0: every pipeline — benchmark, tuning, retrain, forecast —
+        # starts here, so setting the calendar zone here puts the frames it
+        # builds and the forecast rows that follow on the same calendar.
+        set_calendar_timezone(getattr(self.config, "timezone", None))
 
         if now is None:
             now = datetime.now(timezone.utc)
@@ -5573,13 +5586,14 @@ class MLForecastLabApp:
                 work[c] = df_slice[c]
         idx = df_slice.index
         if isinstance(idx, pd.DatetimeIndex):
-            hour_rad = 2 * np.pi * idx.hour / 24
-            dow_rad = 2 * np.pi * idx.dayofweek / 7
+            _cal = calendar_index(idx)
+            hour_rad = 2 * np.pi * _cal.hour / 24
+            dow_rad = 2 * np.pi * _cal.dayofweek / 7
             work['hour_sin'] = np.sin(hour_rad)
             work['hour_cos'] = np.cos(hour_rad)
             work['dow_sin'] = np.sin(dow_rad)
             work['dow_cos'] = np.cos(dow_rad)
-            work['is_weekend'] = (idx.dayofweek >= 5).astype(np.float32)
+            work['is_weekend'] = (_cal.dayofweek >= 5).astype(np.float32)
         return work.values.astype(np.float32)
 
     async def _run_production_inference(self, exp_cfg):
@@ -5732,9 +5746,13 @@ class MLForecastLabApp:
                 await asyncio.get_running_loop().run_in_executor(None, _train_neural)
             else:
                 is_neural = False
-                await asyncio.get_running_loop().run_in_executor(None, model.fit, X, y)
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: model.fit(X, y, feature_names=feature_cols),
+                )
         else:
-            await asyncio.get_running_loop().run_in_executor(None, model.fit, X, y)
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: model.fit(X, y, feature_names=feature_cols),
+            )
 
         train_time = time.time() - train_start
         logger.info(f"Training completed in {train_time:.1f}s")
@@ -5972,19 +5990,10 @@ class MLForecastLabApp:
             def _build_feature_row(ts, buf, step_idx):
                 row = {}
                 # Temporal
-                row['hour_of_day'] = ts.hour
-                row['day_of_week'] = ts.dayofweek
-                row['is_weekend'] = 1.0 if ts.dayofweek >= 5 else 0.0
-                row['month'] = ts.month
-                row['day_of_month'] = ts.day
-                hr_rad = 2 * np.pi * ts.hour / 24
-                dw_rad = 2 * np.pi * ts.dayofweek / 7
-                row['hour_sin'] = float(np.sin(hr_rad))
-                row['hour_cos'] = float(np.cos(hr_rad))
-                row['dow_sin'] = float(np.sin(dw_rad))
-                row['dow_cos'] = float(np.cos(dw_rad))
+                # v2.58.0: one shared construction, in the calendar zone.
+                row.update(calendar_row(ts, exp_cfg.interval_minutes))
                 if 'is_holiday' in feature_cols:
-                    row['is_holiday'] = float(is_holiday(ts, exp_cfg.country))
+                    row['is_holiday'] = float(is_holiday(calendar_timestamp(ts), exp_cfg.country))
                 # Lag features
                 for lag in range(1, n_lags + 1):
                     row[f'y_lag_{lag}'] = float(buf[-lag]) if lag <= len(buf) else 0.0
@@ -6942,12 +6951,22 @@ class MLForecastLabApp:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(
                     None,
-                    lambda: model.fit(X, y, epoch_callback=_cancel_cb),
+                    lambda: model.fit(
+                        X, y, epoch_callback=_cancel_cb,
+                        feature_names=feature_cols,
+                    ),
                 )
         else:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(
-                None, lambda: model.fit(X, y, epoch_callback=_cancel_cb),
+                # v2.58.0: tabular backends get the column names, as the
+                # benchmark gives them — a backend that reads a column by
+                # name (seasonal_profile) could not be retrained without
+                # them, and stored feature importances were unlabelled.
+                None, lambda: model.fit(
+                    X, y, epoch_callback=_cancel_cb,
+                    feature_names=feature_cols,
+                ),
             )
 
         # Debug bundle: capture training inputs for offline analysis. Gated
@@ -7222,8 +7241,8 @@ class MLForecastLabApp:
                 if meta.get("schema_version") != CACHE_SCHEMA_VERSION:
                     logger.info(
                         f"  Cached model for {exp_cfg.name} has schema "
-                        f"v{meta.get('schema_version')}, ignoring (v2.51.0 "
-                        f"complete-grid windows require schema_version="
+                        f"v{meta.get('schema_version')}, ignoring (this "
+                        f"version requires schema_version="
                         f"{CACHE_SCHEMA_VERSION} — a fresh "
                         f"benchmark + retrain will be scheduled)"
                     )
@@ -8948,19 +8967,10 @@ class MLForecastLabApp:
                 """Construct a single feature row matching the training schema."""
                 row = {}
                 # Temporal
-                row['hour_of_day'] = ts.hour
-                row['day_of_week'] = ts.dayofweek
-                row['is_weekend'] = 1.0 if ts.dayofweek >= 5 else 0.0
-                row['month'] = ts.month
-                row['day_of_month'] = ts.day
-                hr_rad = 2 * np.pi * ts.hour / 24
-                dw_rad = 2 * np.pi * ts.dayofweek / 7
-                row['hour_sin'] = float(np.sin(hr_rad))
-                row['hour_cos'] = float(np.cos(hr_rad))
-                row['dow_sin'] = float(np.sin(dw_rad))
-                row['dow_cos'] = float(np.cos(dw_rad))
+                # v2.58.0: one shared construction, in the calendar zone.
+                row.update(calendar_row(ts, exp_cfg.interval_minutes))
                 if 'is_holiday' in feature_cols:
-                    row['is_holiday'] = float(is_holiday(ts, exp_cfg.country))
+                    row['is_holiday'] = float(is_holiday(calendar_timestamp(ts), exp_cfg.country))
                 # Lag features (buf is chronological: oldest..newest,
                 # y_lag_i = i-th most recent past value)
                 for lag in range(1, n_lags + 1):
@@ -9875,7 +9885,7 @@ class MLForecastLabApp:
                     p = aligned
                 else:
                     # Tree path: flat features
-                    m.fit(X_tr_h, y_tr_h)
+                    m.fit(X_tr_h, y_tr_h, feature_names=feature_cols)
                     p = m.predict(X_te_h)
                     p = p.ravel() if p.ndim > 1 else p
                 del m
@@ -10190,7 +10200,9 @@ class MLForecastLabApp:
                             X_tr, X_te = X[:split], X[split:]
                             y_tr_for_naive, y_te = y_all[:split], y_all[split:]
 
-                            model.fit(X_tr, y_tr_for_naive)
+                            model.fit(
+                                X_tr, y_tr_for_naive, feature_names=feature_cols,
+                            )
                             y_pred = model.predict(X_te)
                             y_pred_flat = y_pred.ravel() if y_pred.ndim > 1 else y_pred
 

@@ -1125,6 +1125,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         "seasonal_naive": {
             "seasonal_period": {"type": "int", "default": 48, "label": "Seasonal period (steps)", "min": 1, "max": 1440, "tunable": False},
         },
+        "seasonal_profile": {
+            "split_weekend": {"type": "bool", "default": True, "label": "Separate weekday and weekend profiles", "tunable": False},
+        },
         # Same non-tunable treatment as the other baselines: these are
         # properties of the data (how long a day is, how far back "recent"
         # reaches), not search dimensions. Without this entry the Models page
@@ -1334,6 +1337,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         {"name": "seasonal_naive", "display_name": "Seasonal Naive", "model_type": "Baseline",
          "description": "Reference baseline: ŷ[t+h] = y[t+h-period]. No training.",
          "speed": "⚡ Instant", "best_for": "Sanity-check reference for all other models"},
+        {"name": "seasonal_profile", "display_name": "Seasonal Profile", "model_type": "Baseline",
+         "description": "The average at each time of day, weekdays and weekends separately. No training.",
+         "speed": "⚡ Instant", "best_for": "Values that are mostly near zero with events at habitual times of day"},
         {"name": "daily_profile", "display_name": "Daily Profile", "model_type": "Baseline",
          "description": "Hierarchical: the recent day's shape scaled toward a projected daily total. No training.",
          "speed": "⚡ Instant", "best_for": "Loads where the daily total matters more than the exact timing"},

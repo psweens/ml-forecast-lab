@@ -19,7 +19,33 @@
   reliable difference.
 - [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
 
+**A new Seasonal Profile model forecasts the usual amount for each time of day.**
+
+- It forecasts the average at each time of day, with weekdays and weekends
+  kept apart. It needs no training.
+- It suits sensors that are mostly near zero with events at regular times:
+  when an event happens is hard to predict, but how much is usual at each
+  time of day is not.
+- Enable **Seasonal Profile** on the Models tab (`seasonal_profile` in
+  `models_enabled`) and run a benchmark to compare it with your other
+  models.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
 ### Fixed
+
+**Time-of-day and day-of-week patterns follow your local time.**
+
+- Models read the hour and the day from UTC. Outside the UTC timezone, a
+  daily routine appeared to shift by an hour when the clocks changed, and
+  the weekend started and ended at the wrong hour.
+- This affected every experiment in a timezone other than UTC. Forecasts
+  were least accurate for a few weeks after each clock change.
+- Models now use the timezone set in `mlfl.yaml` (`timezone:`), and
+  experiments with intervals under an hour can tell the intervals within
+  an hour apart.
+- All models retrain once after this update, so the first forecasts take
+  longer than usual. Check that `timezone:` is set to your own.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
 
 **The best model for a sensor that is mostly near zero is no longer a flat, too-low forecast.**
 

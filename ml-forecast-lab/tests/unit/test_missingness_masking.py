@@ -1151,7 +1151,12 @@ class TestNeuralChannels:
         combined = _assemble(
             pd.DataFrame({"y": _target(idx), "cov": _target(idx, seed=3)})
         )
-        cols = list(combined.columns)
+        # slot_of_day (v2.58.0) is a calendar column no earlier release
+        # produced. It is a tabular feature only: sequence backends carry
+        # their own temporal channels, so it must not become a channel.
+        assert "slot_of_day" in combined.columns
+        assert "slot_of_day" not in neural_covariate_columns(combined.columns)
+        cols = [c for c in combined.columns if c != "slot_of_day"]
         assert legacy(cols) == neural_covariate_columns(cols)
 
     def test_the_two_modules_agree_on_the_indicator_names(self):

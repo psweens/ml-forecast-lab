@@ -11,7 +11,8 @@ import pytest
 
 
 @pytest.mark.parametrize("model_name", [
-    "arima", "ets", "theta", "seasonal_naive", "chronos_bolt", "ttm",
+    "arima", "ets", "theta", "seasonal_naive", "seasonal_profile",
+    "chronos_bolt", "ttm",
 ])
 def test_tuning_rejected_for_auto_models(client, seeded_experiment, model_name):
     """Models with all-non-tunable params get a clear 400, not a silent hang."""

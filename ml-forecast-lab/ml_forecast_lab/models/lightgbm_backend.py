@@ -57,6 +57,7 @@ class LightGBMModel(ForecastModel):
         loss_fn: str = 'huber',
         tweedie_variance_power: float = 1.5,
         patience: int = 50,
+        early_stopping_metric: str = 'rmse',
     ):
         """
         Initialise LightGBM forecasting model.
@@ -107,6 +108,7 @@ class LightGBMModel(ForecastModel):
         # Now configurable per-instance and via the per-experiment
         # `patience` Setting (main.py:_apply_patience).
         self.patience = patience
+        self.early_stopping_metric = early_stopping_metric
 
         self.model: Optional[lgb.Booster] = None
         self.feature_names_: Optional[list] = None
@@ -217,7 +219,11 @@ class LightGBMModel(ForecastModel):
         objective = objective_map.get(_loss, "huber")
         params = {
             "objective": objective,
-            "metric": "rmse",
+            "metric": (
+                "rmse" if self.early_stopping_metric == "rmse"
+                else {"regression": "l2", "regression_l1": "l1",
+                      "huber": "huber", "tweedie": "tweedie"}.get(objective, "rmse")
+            ),
             "max_depth": self.max_depth,
             "learning_rate": self.learning_rate,
             "num_leaves": self.num_leaves,
