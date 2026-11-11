@@ -1,5 +1,115 @@
 # Changelog
 
+## 2.58.0
+
+### Added
+
+**The benchmark now scores each model on the forecast it would actually publish.**
+
+- The Results tab has a new **Published forecast** table. It scores the
+  whole forecast window from many times of day, where the main table scores
+  only the next step.
+- It includes reference rows — zero, the average, a typical day, and the
+  same time yesterday — so you can see whether a model beats having no
+  model.
+- It reports CRPS, the forecast's overall level against what was measured,
+  the error in the rest-of-day total, and how often values fell inside the
+  interval.
+- With fewer than 14 days scored, the table says so: close scores are not a
+  reliable difference.
+- If you have promoted a model, the table says whether its top model is
+  consistently better than yours or only by chance, to help you decide
+  whether to promote it.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
+**A new Seasonal Profile model forecasts the usual amount for each time of day.**
+
+- It forecasts the average at each time of day, with weekdays and weekends
+  kept apart. It needs no training.
+- It suits sensors that are mostly near zero with events at regular times:
+  when an event happens is hard to predict, but how much is usual at each
+  time of day is not.
+- Enable **Seasonal Profile** on the Models tab (`seasonal_profile` in
+  `models_enabled`) and run a benchmark to compare it with your other
+  models.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
+### Fixed
+
+**Time-of-day and day-of-week patterns follow your local time.**
+
+- Models read the hour and the day from UTC. Outside the UTC timezone, a
+  daily routine appeared to shift by an hour when the clocks changed, and
+  the weekend started and ended at the wrong hour.
+- This affected every experiment in a timezone other than UTC. Forecasts
+  were least accurate for a few weeks after each clock change.
+- Models now use the timezone set in `mlfl.yaml` (`timezone:`), and
+  experiments with intervals under an hour can tell the intervals within
+  an hour apart.
+- All models retrain once after this update, so the first forecasts take
+  longer than usual. Check that `timezone:` is set to your own.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
+**Tree models using the Tweedie loss no longer forecast too low.**
+
+- With **Loss function** set to Tweedie, LightGBM, XGBoost and CatBoost
+  forecasts averaged noticeably less than the sensor's real average.
+- This affected experiments that chose the Tweedie loss. Other losses are
+  unchanged.
+- These models are now corrected to match the sensor's average, so their
+  forecasts will rise at the next retrain.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
+**Tuning can no longer produce a tree model that forecasts a flat line.**
+
+- On the Tuning tab, LightGBM, XGBoost and CatBoost could be tuned to a
+  learning rate so small that the model barely learned, and forecast almost
+  the same value all day.
+- The smallest learning rate is now 0.01 and the fewest trees 50.
+- If one of these models has a tuned learning rate below 0.01, run tuning
+  again or clear its tuned settings on the Models tab.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
+**The best model for a sensor that is mostly near zero is no longer a flat, too-low forecast.**
+
+- The benchmark could pick a model that forecast nearly the same low value
+  all day, with a daily total well under the real one.
+- This affected experiments with **Cumulative source** or **Non-negative
+  target** on.
+- With **Production metric** on its default, now called **Automatic**,
+  these experiments choose their best model from the **Published
+  forecast** table.
+- If you chose a **Production metric** yourself, it is kept. Choose
+  **Automatic** to use the new selection.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
+**The loss you choose in Settings is now used by the model that publishes your forecasts.**
+
+- For LightGBM, XGBoost and CatBoost, the **Loss function** setting
+  (`loss_fn`) was used when benchmarking and tuning, but the model retrained
+  for production always used the default loss.
+- This affected experiments in production mode with a tree model and a loss
+  other than Huber. Experiments left on the default are unchanged.
+- The production model now trains with the loss you chose, so its forecasts
+  may shift at the next retrain.
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
+### Changed
+
+**The upper and lower forecast sensors fit values that cannot go below zero.**
+
+- For sensors that are mostly near zero with occasional spikes, the band
+  was the same distance above and below the forecast: half of it covered
+  values that cannot happen, and it stopped short of the spikes.
+- This affects experiments whose sensor is a running total, or that have
+  **Non-negative target** set. Other experiments are unchanged.
+- The band is now narrow when little is forecast and reaches further up
+  than down when a lot is. It switches over once about 30 forecasts have
+  been checked against what happened.
+- To keep the old band, set **Interval shape** to **Symmetric** on the
+  Settings tab (`interval_method: symmetric`).
+- [Technical details](https://github.com/psweens/ml-forecast-lab/blob/main/docs/investigations/2026-11-intermittent-demand-flat-forecast.md)
+
 ## 2.57.0
 
 ### Added

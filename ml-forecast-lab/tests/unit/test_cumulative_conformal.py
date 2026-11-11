@@ -211,6 +211,11 @@ def _exp(**kw):
         mode="production", units="kWh",
     )
     params.update(kw)
+    # These tests pin the scale the band is sized on (per-interval, not the
+    # running counter), which they read off the symmetric width. The
+    # asymmetric shape a cumulative target gets by default (v2.58.0) is
+    # pinned in test_asymmetric_interval.py.
+    params.setdefault("interval_method", "symmetric")
     return ExperimentCfg(**params)
 
 

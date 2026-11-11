@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from .base import ForecastModel, resolve_tree_loss_for_target
+from .base import log_link_level_scale
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +242,11 @@ class CatBoostModel(ForecastModel):
             "feature_importances": feature_importances,
             "num_features": len(self.feature_names_),
         }
+        if loss_function.startswith("Tweedie"):
+            # v2.58.0: see log_link_level_scale.
+            self.training_metadata["level_scale"] = log_link_level_scale(
+                y_tr, self.model.predict(X_tr), weights=w_tr,
+            )
 
         self._is_fitted = True
         logger.info(
@@ -258,7 +264,8 @@ class CatBoostModel(ForecastModel):
             raise ValueError(
                 f"Expected {len(self.feature_names_)} features, got {X.shape[1]}"
             )
-        return np.asarray(self.model.predict(X), dtype=np.float32)
+        scale = float(self.training_metadata.get("level_scale", 1.0))
+        return np.asarray(self.model.predict(X) * scale, dtype=np.float32)
 
     def get_params(self) -> Dict[str, Any]:
         return deepcopy({

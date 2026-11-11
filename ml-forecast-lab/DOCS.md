@@ -1,6 +1,6 @@
 # ML Forecast Lab — Documentation
 
-This is the full reference for users running the app. For a quick install and a first forecast, see [README.md](README.md). For picking which of the 32 backends to enable, see [`docs/MODEL_GUIDE.md`](https://github.com/psweens/ml-forecast-lab/blob/main/docs/MODEL_GUIDE.md) in the repository.
+This is the full reference for users running the app. For a quick install and a first forecast, see [README.md](README.md). For picking which of the 33 backends to enable, see [`docs/MODEL_GUIDE.md`](https://github.com/psweens/ml-forecast-lab/blob/main/docs/MODEL_GUIDE.md) in the repository.
 
 ## Contents
 
@@ -289,7 +289,7 @@ Each captured trajectory covers only the times the source itself forecast: where
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `models_enabled` | list | `[lightgbm, xgboost, lstm, cnn]` | Backends to train. Names match the registry slugs in `docs/MODEL_GUIDE.md` (`seasonal_naive`, `daily_profile`, `lightgbm`, `xgboost`, `catboost`, `lstm`, `gru`, `segrnn`, `cnn`, `dlinear`, `nlinear`, `tsmixer`, `timemixer`, `tide`, `sparsetsf`, `xpatch`, `cyclenet`, `fits`, `nbeats`, `nhits`, `patchtst`, `itransformer`, `crossformer`, `timesnet`, `tft`, `timexer`, `moderntcn`, `arima`, `ets`, `theta`, `chronos_bolt`, `ttm`). The zero-shot foundation backends (`chronos_bolt`, `ttm`) download pretrained weights from the Hugging Face Hub on first use (cached afterwards) and are unavailable on `armv7`. |
+| `models_enabled` | list | `[lightgbm, xgboost, lstm, cnn]` | Backends to train. Names match the registry slugs in `docs/MODEL_GUIDE.md` (`seasonal_naive`, `seasonal_profile`, `daily_profile`, `lightgbm`, `xgboost`, `catboost`, `lstm`, `gru`, `segrnn`, `cnn`, `dlinear`, `nlinear`, `tsmixer`, `timemixer`, `tide`, `sparsetsf`, `xpatch`, `cyclenet`, `fits`, `nbeats`, `nhits`, `patchtst`, `itransformer`, `crossformer`, `timesnet`, `tft`, `timexer`, `moderntcn`, `arima`, `ets`, `theta`, `chronos_bolt`, `ttm`). The zero-shot foundation backends (`chronos_bolt`, `ttm`) download pretrained weights from the Hugging Face Hub on first use (cached afterwards) and are unavailable on `armv7`. |
 | `model_params` | mapping | `{}` | Per-experiment hyperparameter overrides; keys are model names. Takes precedence over global `model_overrides`. Easier path: tune in the UI and use **Apply Tuned Params, Promote & Retrain**. |
 | `loss_fn` | `mse` \| `mae` \| `huber` \| `tweedie` \| `dilate` | `huber` | Training loss for neural models. `huber` is quadratic near zero and linear in the tails, which is right for the spiky near-zero HA signals most users forecast. `tweedie` is honoured only by tree backends (LightGBM / XGBoost / CatBoost). | `dilate` is a shape+timing loss (soft-DTW) for spiky targets: a peak predicted slightly early costs its timing error only, where a point loss charges twice — a false alarm at the predicted step and a miss at the true one — which is exactly what teaches a model to flatten spikes. It costs roughly **2.5x the training time** (measured against a full LSTM training step at a 96-step horizon), so trial it on one experiment before rolling it out. Neural backends only; tree backends fall back to `tweedie`, the peak-appropriate tree objective.
 | `optimiser` | `adam` \| `adamw` | `adamw` | Neural optimiser. `adamw` (decoupled weight decay) matches every published time-series transformer paper; `adam` is the classic. Ignored by tree models. |
@@ -314,7 +314,7 @@ Each captured trajectory covers only the times the source itself forecast: where
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `metrics` | list | `[mae, rmse, mase, seasonal_mase]` | Metrics to compute during benchmarking. Available: `mae`, `rmse`, `mape`, `smape`, `mase`, `seasonal_mase`, `r2`, `pinball`, `coverage`. |
-| `production_metric` | string | `seasonal_mase` | Metric used to auto-select the best model when `production_model` is unset. `seasonal_mase` (scaled by the same-time-yesterday baseline) is the right comparison for daily-seasonal HA sensors. |
+| `production_metric` | string | unset (automatic) | Metric used to auto-select the best model when `production_model` is unset. Left unset, it is automatic: `crps` when `source_is_cumulative` or `target_is_nonnegative` is set, `seasonal_mase` otherwise. `seasonal_mase` (scaled by the same-time-yesterday baseline) is the right comparison for daily-seasonal HA sensors. `crps` chooses from the **Published forecast** table instead: each model is scored on the whole forecast window as it would be published, and the lowest CRPS wins unless its rest-of-day totals are more than 25% worse than a plain average. A metric you set is always used as set; on a sensor that is mostly near zero, `mae`, `mase` and `seasonal_mase` favour a forecast of "almost nothing, always", and the log says so. |
 | `production_model` | string | unset | Pin a specific model name. Unset = auto-pick by `production_metric`. |
 | `selected_model` | string | unset | Which model the Results-tab UI highlights by default. The `/select-model` click in the UI persists here. |
 
@@ -323,6 +323,7 @@ Each captured trajectory covers only the times the source itself forecast: where
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `conformal_coverage` | float in (0, 1) | `0.8` | Nominal coverage of the prediction interval. Default 0.8 publishes `_upper_80` / `_lower_80` companion sensors. Raise to 0.9 if downstream automations need wider safety margins; lower to 0.5 for diagnostic plots. |
+| `interval_method` | `auto` / `symmetric` / `asymmetric` | `auto` | Shape of the prediction interval. `symmetric` publishes the forecast ± one width. `asymmetric` publishes separate lower and upper edges, for values that cannot go below zero and occasionally spike. `auto` uses `asymmetric` when `source_is_cumulative` or `target_is_nonnegative` is set, `symmetric` otherwise. |
 | `clear_forecast_log_on_retrain` | bool | `true` | Whether to prune forecast-log rows older than the latest retrain when a champion is promoted. Keeps stability metrics honest — set `false` only if you want to preserve full history for offline analysis. |
 
 #### How the conformal bands are calibrated
@@ -354,6 +355,15 @@ trades the formal coverage guarantee for zero retraining cost:
   (Before v2.41.0 the `(1 − α/2)` signed-residual rule was applied to
   `|residual|`, so nominal-80% bands realised ~90% coverage and were
   ~1.5× wider than calibrated.)
+- **Asymmetric band.** With `interval_method: asymmetric` (the `auto`
+  choice for non-negative targets) the band is not centred on the
+  forecast. Past errors are kept with their sign and grouped by how large
+  the forecast was when they were made; each new forecast takes its lower
+  and upper edge from the group it falls in. A low forecast gets a narrow
+  band that sits just above zero, and a high forecast gets a wide one that
+  reaches further up than down. The lower edge is held at zero only where
+  it would otherwise be negative. Until about 30 errors have been
+  collected the symmetric band is published.
 - **Cohort filtering.** Quantiles are filtered to the current
   `(model_name, model_version)` so the band width reflects the
   champion's actual behaviour, not a previous version's. If the
@@ -590,7 +600,7 @@ For anything else, the `[BENCH]`, `[MODEL]`, `[WEB]`, `[HA]`, `[PREP]`, `[FEAT]`
 ## Upgrading and version compatibility
 
 - **Backwards compatibility.** `mlfl.yaml` is auto-migrated where possible: deprecated fields (`horizons_minutes`, `database`, and the v2.41.0-removed `output_units`, `custom_metrics`, `stability_focus`, `future_covariate_features`, `daily_loss_weight`, `loss_balance`) are silently stripped and the file is rewritten, and the legacy `subtract: [entity_id]` list is loaded but ignored with a deprecation warning in the log. Migrate to `load_subtract` with explicit `source` / `on_missing` per sensor.
-- **Default changes between versions.** Several knobs have changed their defaults in recent releases — most notably `production_metric` (`mae` → `seasonal_mase`), `outlier_quantile` (`0.995` → `0.999`), and `recency_half_life_days` (`7` → `0`). The CHANGELOG calls these out per version.
+- **Default changes between versions.** Several knobs have changed their defaults in recent releases — most notably `production_metric` (`mae` → `seasonal_mase` → automatic), `outlier_quantile` (`0.995` → `0.999`), and `recency_half_life_days` (`7` → `0`). The CHANGELOG calls these out per version.
 - **2.30.0 ingress-only.** Direct port 5052 exposure was removed. The web UI is now reached exclusively through HA's authenticated ingress proxy. If you were proxying directly to the port, switch to ingress.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.

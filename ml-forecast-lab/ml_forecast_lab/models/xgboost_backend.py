@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from .base import ForecastModel, resolve_tree_loss_for_target
+from .base import log_link_level_scale
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +305,11 @@ class XGBoostModel(ForecastModel):
             "feature_importances": feature_importances,
             "num_features": len(self.feature_names_),
         }
+        if objective == "reg:tweedie":
+            # v2.58.0: see log_link_level_scale.
+            self.training_metadata["level_scale"] = log_link_level_scale(
+                y_train_split, self.model.predict(X_train_split), weights=w_train,
+            )
 
         self._is_fitted = True
         logger.info(
@@ -351,6 +357,9 @@ class XGBoostModel(ForecastModel):
             )
 
         predictions = self.model.predict(X)
+        scale = float(self.training_metadata.get("level_scale", 1.0))
+        if scale != 1.0:
+            predictions = predictions * scale
         return np.array(predictions, dtype=np.float32)
 
 

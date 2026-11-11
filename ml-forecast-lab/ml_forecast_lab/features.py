@@ -62,6 +62,55 @@ def is_holiday(date: pd.Timestamp, country: Optional[str]) -> bool:
     return date.date() in _holiday_cache[cache_key]
 
 
+# The zone calendar features are read in (v2.58.0). History is held on a
+# tz-naive UTC index, and hour-of-day, day-of-week and the weekend flag used
+# to be read straight off it. Habits follow the wall clock: in a zone with
+# daylight saving a training window spanning a change held two profiles an
+# hour apart under one ``hour_of_day``, and the day flipped at UTC midnight.
+# One process-wide setting rather than a parameter, because the same
+# calendar has to be used by every path that builds a row — feature frames,
+# sequence-window channels, future-known features and the recursive
+# forecast rows — and a path that missed the parameter would silently
+# train on one calendar and forecast on another. ``None`` is UTC, which
+# leaves every value exactly as it was.
+_CALENDAR_TZ: Optional[str] = None
+
+
+def set_calendar_timezone(tz: Optional[str]) -> None:
+    """Set the zone calendar features are computed in (None or 'UTC' = UTC)."""
+    global _CALENDAR_TZ
+    _CALENDAR_TZ = None if not tz or str(tz).upper() == 'UTC' else str(tz)
+
+
+def get_calendar_timezone() -> Optional[str]:
+    return _CALENDAR_TZ
+
+
+def calendar_index(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """``index`` as local wall-clock time, tz-naive, for calendar features.
+
+    A tz-naive index is taken as UTC. With no calendar zone set the index
+    is returned unchanged.
+    """
+    if _CALENDAR_TZ is None:
+        return index
+    aware = index.tz_localize('UTC') if index.tz is None else index
+    return aware.tz_convert(_CALENDAR_TZ).tz_localize(None)
+
+
+def calendar_timestamp(ts: pd.Timestamp) -> pd.Timestamp:
+    """Scalar form of :func:`calendar_index`."""
+    if _CALENDAR_TZ is None:
+        return ts
+    aware = ts.tz_localize('UTC') if ts.tzinfo is None else ts
+    return aware.tz_convert(_CALENDAR_TZ).tz_localize(None)
+
+
+def slot_of_day(index_or_ts, interval_minutes: int):
+    """Position of each (local) timestamp within its day, in intervals."""
+    return (index_or_ts.hour * 60 + index_or_ts.minute) // max(1, int(interval_minutes))
+
+
 # Suffix used for the companion indicator column that marks which cells of a
 # feature column were imputed rather than observed. Emitted only for columns
 # that actually have gaps, so a complete experiment gains no columns at all.
@@ -165,6 +214,7 @@ def feature_warmup_rows(
 ENGINEERED_TEMPORAL_COLUMNS = frozenset({
     'hour_of_day', 'day_of_week', 'is_weekend', 'month', 'day_of_month',
     'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_holiday',
+    'slot_of_day',
 })
 
 # The single indicator that covers every target-derived feature — the lags,
@@ -283,11 +333,17 @@ def build_features(
     features = pd.DataFrame(index=df.index)
 
     # Temporal features
-    features['hour_of_day'] = df.index.hour
-    features['day_of_week'] = df.index.dayofweek
-    features['is_weekend'] = (df.index.dayofweek >= 5).astype(int)
-    features['month'] = df.index.month
-    features['day_of_month'] = df.index.day
+    cal = calendar_index(df.index)
+    features['hour_of_day'] = cal.hour
+    features['day_of_week'] = cal.dayofweek
+    features['is_weekend'] = (cal.dayofweek >= 5).astype(int)
+    features['month'] = cal.month
+    features['day_of_month'] = cal.day
+    # v2.58.0: below an hourly grid the hour alone cannot tell the
+    # intervals of an hour apart, so a tree could place an event to the
+    # hour but not to the interval except through lags.
+    if interval_minutes < 60:
+        features['slot_of_day'] = slot_of_day(cal, interval_minutes)
 
     # Circular encoding for hour (0-23)
     hour_rad = 2 * np.pi * features['hour_of_day'] / 24
@@ -380,7 +436,7 @@ def build_features(
 
     # Holiday indicator
     if country is not None:
-        features['is_holiday'] = df.index.map(
+        features['is_holiday'] = cal.map(
             lambda d: int(is_holiday(d, country))
         )
 
@@ -521,17 +577,18 @@ def compute_known_future_features(
         return out
 
     if add_temporal:
-        hour_rad = 2 * np.pi * future_index.hour / 24
-        dow_rad = 2 * np.pi * future_index.dayofweek / 7
+        cal = calendar_index(future_index)
+        hour_rad = 2 * np.pi * cal.hour / 24
+        dow_rad = 2 * np.pi * cal.dayofweek / 7
         out['hour_sin'] = np.sin(hour_rad).astype(np.float32)
         out['hour_cos'] = np.cos(hour_rad).astype(np.float32)
         out['dow_sin'] = np.sin(dow_rad).astype(np.float32)
         out['dow_cos'] = np.cos(dow_rad).astype(np.float32)
-        out['is_weekend'] = (future_index.dayofweek >= 5).astype(np.float32)
+        out['is_weekend'] = (cal.dayofweek >= 5).astype(np.float32)
 
     if country is not None and _HOLIDAYS_AVAILABLE:
         out['is_holiday'] = np.array(
-            [int(is_holiday(d, country)) for d in future_index],
+            [int(is_holiday(d, country)) for d in calendar_index(future_index)],
             dtype=np.float32,
         )
 
@@ -902,13 +959,14 @@ def create_sliding_windows(
                 work_df[c] = df[c]
 
     if add_temporal and isinstance(df.index, pd.DatetimeIndex):
-        hour_rad = 2 * np.pi * df.index.hour / 24
-        dow_rad = 2 * np.pi * df.index.dayofweek / 7
+        cal = calendar_index(df.index)
+        hour_rad = 2 * np.pi * cal.hour / 24
+        dow_rad = 2 * np.pi * cal.dayofweek / 7
         work_df['hour_sin'] = np.sin(hour_rad)
         work_df['hour_cos'] = np.cos(hour_rad)
         work_df['dow_sin'] = np.sin(dow_rad)
         work_df['dow_cos'] = np.cos(dow_rad)
-        work_df['is_weekend'] = (df.index.dayofweek >= 5).astype(np.float32)
+        work_df['is_weekend'] = (cal.dayofweek >= 5).astype(np.float32)
         channel_names.extend(['hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_weekend'])
 
     data = work_df.values.astype(np.float32)
@@ -1103,13 +1161,14 @@ def build_inference_window(
                 work_df[c] = tail[c]
 
     if add_temporal and isinstance(tail.index, pd.DatetimeIndex):
-        hour_rad = 2 * np.pi * tail.index.hour / 24
-        dow_rad = 2 * np.pi * tail.index.dayofweek / 7
+        cal = calendar_index(tail.index)
+        hour_rad = 2 * np.pi * cal.hour / 24
+        dow_rad = 2 * np.pi * cal.dayofweek / 7
         work_df['hour_sin'] = np.sin(hour_rad)
         work_df['hour_cos'] = np.cos(hour_rad)
         work_df['dow_sin'] = np.sin(dow_rad)
         work_df['dow_cos'] = np.cos(dow_rad)
-        work_df['is_weekend'] = (tail.index.dayofweek >= 5).astype(np.float32)
+        work_df['is_weekend'] = (cal.dayofweek >= 5).astype(np.float32)
         channel_names.extend(
             ['hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'is_weekend']
         )
@@ -1133,3 +1192,121 @@ def build_inference_window(
     return X, channel_names
 
 
+
+
+def calendar_row(ts: pd.Timestamp, interval_minutes: int) -> dict:
+    """Calendar features of one forecast timestamp, as build_features
+    computes them for a frame row — the single construction every
+    recursive forecast row uses."""
+    loc = calendar_timestamp(ts)
+    hr_rad = 2 * np.pi * loc.hour / 24
+    dw_rad = 2 * np.pi * loc.dayofweek / 7
+    row = {
+        'hour_of_day': loc.hour,
+        'day_of_week': loc.dayofweek,
+        'is_weekend': 1.0 if loc.dayofweek >= 5 else 0.0,
+        'month': loc.month,
+        'day_of_month': loc.day,
+        'hour_sin': float(np.sin(hr_rad)),
+        'hour_cos': float(np.cos(hr_rad)),
+        'dow_sin': float(np.sin(dw_rad)),
+        'dow_cos': float(np.cos(dw_rad)),
+    }
+    if interval_minutes < 60:
+        row['slot_of_day'] = float(slot_of_day(loc, interval_minutes))
+    return row
+
+
+def recursive_tree_forecast(
+    predict,
+    feature_cols: List[str],
+    history: pd.Series,
+    periods: int,
+    interval_minutes: int,
+    n_lags: int = 12,
+    lag_windows: Optional[List[int]] = None,
+    country: Optional[str] = None,
+    exogenous: Optional[pd.DataFrame] = None,
+) -> pd.Series:
+    """
+    Multi-step forecast from a one-step tabular model, feeding each
+    prediction back as the next step's lags.
+
+    This is the forecast a tree backend publishes: beyond the first step
+    every lag and rolling statistic is the model's own output, so its
+    accuracy can differ sharply from a one-step prediction made with
+    measured lags. The benchmark scores models through this function for
+    that reason (``benchmark.horizon``).
+
+    The row built for each step matches :func:`build_features` column for
+    column for a frame without the clear-sky gate: calendar features,
+    ``y_lag_1..n_lags``, the two periodic lags, rolling mean / std (ddof=1)
+    / max over ``target.shift(1)``, and ``y_diff_1``.
+
+    Parameters
+    ----------
+    predict : callable
+        ``predict(X)`` for a float32 matrix of shape (1, len(feature_cols)).
+    feature_cols : list of str
+        Training column order. A column this function does not construct
+        is taken from ``exogenous`` when present there, else set to 0.
+    history : pd.Series
+        Target on a complete grid ending at the forecast origin. NaN cells
+        are filled with the last measured value before seeding the buffer.
+    periods : int
+        Steps to forecast.
+    exogenous : pd.DataFrame, optional
+        Known-future columns indexed by the forecast timestamps.
+
+    Returns
+    -------
+    pd.Series
+        Point forecast indexed by the ``periods`` timestamps after
+        ``history``.
+    """
+    if lag_windows is None:
+        lag_windows = default_lag_windows(interval_minutes)
+    steps_per_day = max(1, 1440 // max(interval_minutes, 1))
+    reach = max(n_lags, steps_per_day * 2, max(lag_windows)) + 1
+    seed = history.ffill().bfill().to_numpy(dtype=float)[-reach:]
+    buf = list(seed)
+    step = pd.Timedelta(minutes=interval_minutes)
+    last_ts = history.index[-1]
+    future_index = pd.DatetimeIndex(
+        [last_ts + step * (i + 1) for i in range(periods)]
+    )
+    need_holiday = 'is_holiday' in feature_cols
+    gated = exogenous is not None and 'clear_sky_ghi' in exogenous.columns
+    preds = np.empty(periods, dtype=float)
+    for i, ts in enumerate(future_index):
+        row = calendar_row(ts, interval_minutes)
+        if need_holiday:
+            row['is_holiday'] = float(is_holiday(calendar_timestamp(ts), country))
+        n = len(buf)
+        for lag in range(1, n_lags + 1):
+            row[f'y_lag_{lag}'] = buf[-lag] if lag <= n else 0.0
+        for d in (1, 2):
+            lag_steps = steps_per_day * d
+            row[f'y_lag_{lag_steps}'] = buf[-lag_steps] if lag_steps <= n else 0.0
+        for w in lag_windows:
+            window = buf[-w:]
+            row[f'y_rolling_mean_{w}'] = float(np.mean(window))
+            row[f'y_rolling_std_{w}'] = (
+                float(np.std(window, ddof=1)) if len(window) > 1 else 0.0
+            )
+            row[f'y_rolling_max_{w}'] = float(np.max(window))
+        row['y_diff_1'] = buf[-1] - buf[-2] if n >= 2 else 0.0
+        if exogenous is not None and ts in exogenous.index:
+            for c in exogenous.columns:
+                row[c] = float(exogenous.at[ts, c])
+        x = np.array(
+            [[row.get(c, 0.0) for c in feature_cols]], dtype=np.float32,
+        )
+        val = float(np.asarray(predict(x)).ravel()[0])
+        preds[i] = val
+        # Clear-sky gate, as build_features applies to the lags: a step
+        # with no sun feeds 0 forward, not the prediction, so the next
+        # row's lags match what training saw after a night step.
+        ghi_now = row.get('clear_sky_ghi') if gated else None
+        buf.append(0.0 if ghi_now is not None and ghi_now <= 0 else val)
+    return pd.Series(preds, index=future_index)

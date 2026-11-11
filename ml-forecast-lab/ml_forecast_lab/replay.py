@@ -162,6 +162,10 @@ def _conformal_key(*args, **kwargs) -> str:
     # which this tree no longer asks for: it replays as UnrecordedCall.
     if not params.get("source_is_cumulative"):
         params.pop("source_is_cumulative", None)
+    # v2.58.0: likewise for the signed-residual request behind the
+    # asymmetric band.
+    if not params.get("signed"):
+        params.pop("signed", None)
     return _key("get_conformal_quantiles",
                 json.dumps(params, sort_keys=True, default=str))
 
@@ -1212,6 +1216,12 @@ def _load_config(app_config: dict, experiment_config: dict):
     from ml_forecast_lab.config import load_config
 
     data = dict(app_config)
+    experiment_config = dict(experiment_config)
+    # v2.58.0: production_metric_explicit is derived, not a YAML key. An
+    # automatic metric was captured as its resolved name; drop it so the
+    # loader resolves it the same way instead of reading it as configured.
+    if experiment_config.pop("production_metric_explicit", True) is False:
+        experiment_config.pop("production_metric", None)
     data["experiments"] = [experiment_config]
     with tempfile.TemporaryDirectory() as tmp:
         p = Path(tmp) / "mlfl.yaml"

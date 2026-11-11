@@ -245,7 +245,11 @@ from ml_forecast_lab.preprocessing import (  # noqa: E402
 from ml_forecast_lab.features import (  # noqa: E402
     MISSING_SUFFIX,
     TARGET_MISSING_COLUMN,
+    calendar_index,
+    calendar_row,
+    calendar_timestamp,
     is_holiday,
+    set_calendar_timezone,
     neural_covariate_columns,
     rebuild_fold_features,
 )
@@ -1151,6 +1155,39 @@ def _apply_patience(model, exp_cfg, overrides=None) -> None:
     model.patience = int(p)
 
 
+def _interval_is_asymmetric(exp_cfg) -> bool:
+    """Whether the published interval uses separate lower/upper offsets.
+
+    ``interval_method: auto`` resolves to asymmetric for a non-negative
+    target, where errors above and below the forecast differ in size.
+    """
+    method = getattr(exp_cfg, "interval_method", "auto") or "auto"
+    if method == "asymmetric":
+        return True
+    if method == "symmetric":
+        return False
+    return bool(
+        getattr(exp_cfg, "source_is_cumulative", False)
+        or getattr(exp_cfg, "target_is_nonnegative", False)
+    )
+
+
+def _apply_experiment_loss(model, exp_cfg, overrides=None) -> None:
+    """Give a freshly-created backend the experiment's ``loss_fn``.
+
+    Applies to every backend that has a ``loss_fn`` — tree backends map it
+    onto a native objective — unless ``overrides`` already sets one. The
+    holdout refit, production inference and production retrain used to
+    apply it to neural backends only, so an experiment set to a non-default
+    loss was benchmarked and tuned with one tree objective and retrained
+    for production with the backend's default: the model publishing
+    forecasts was not the one the leaderboard ranked.
+    """
+    if not hasattr(model, 'loss_fn') or 'loss_fn' in (overrides or {}):
+        return
+    model.set_params(loss_fn=exp_cfg.loss_fn)
+
+
 def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
     """
     Propagate experiment-level neural training settings to a model.
@@ -1234,7 +1271,10 @@ def _apply_experiment_neural_params(model, exp_cfg, overrides=None) -> None:
 # different distribution than it was fitted on. Old caches are silently
 # ignored on load and a fresh training cycle is scheduled — see
 # docs/investigations/2026-05-neural-pv.md for the v2.37 precedent.
-CACHE_SCHEMA_VERSION = 3
+# Bumped to 4 in v2.58.0: calendar features are read in the configured
+# timezone and sub-hourly experiments gain a slot_of_day column, so a model
+# cached earlier was fitted on a UTC calendar and a different column set.
+CACHE_SCHEMA_VERSION = 4
 
 # v2.55.0: version of the rule that turns a cumulative sensor into interval
 # labels (restart detection, the default increment cap) and of the
@@ -1279,6 +1319,7 @@ _OPTIONAL_BACKENDS = [
     ("timexer", "timexer_backend", "TimeXerModel"),
     ("moderntcn", "moderntcn_backend", "ModernTCNModel"),
     ("seasonal_naive", "seasonal_naive_backend", "SeasonalNaiveModel"),
+    ("seasonal_profile", "seasonal_profile_backend", "SeasonalProfileModel"),
     ("daily_profile", "daily_profile_backend", "DailyProfileModel"),
     ("arima", "statsforecast_backend", "ARIMAModel"),
     ("ets", "statsforecast_backend", "ETSModel"),
@@ -1489,6 +1530,24 @@ class ConformalBands:
     total_samples: int
     pooled_versions: bool
 
+
+
+def _jsonable_result(result):
+    """A dict with non-finite floats as None, for the web result model and
+    its JSON persistence."""
+    if not result:
+        return None
+
+    def _clean(v):
+        if isinstance(v, dict):
+            return {k: _clean(x) for k, x in v.items()}
+        if isinstance(v, (float, np.floating)):
+            return float(v) if np.isfinite(v) else None
+        if isinstance(v, np.integer):
+            return int(v)
+        return v
+
+    return _clean(result)
 
 class MLForecastLabApp:
     """
@@ -3236,6 +3295,11 @@ class MLForecastLabApp:
             _describe_gap_spans,
         )
 
+        # v2.58.0: every pipeline — benchmark, tuning, retrain, forecast —
+        # starts here, so setting the calendar zone here puts the frames it
+        # builds and the forecast rows that follow on the same calendar.
+        set_calendar_timezone(getattr(self.config, "timezone", None))
+
         if now is None:
             now = datetime.now(timezone.utc)
         start = now - timedelta(days=exp_cfg.days_history)
@@ -4170,6 +4234,8 @@ class MLForecastLabApp:
         drift: Optional[dict] = None,
         did_not_complete: Optional[List[str]] = None,
         did_not_complete_daily: Optional[List[str]] = None,
+        published: Optional[dict] = None,
+        selection_metric: Optional[str] = None,
     ):
         """
         Update web app state with current benchmark progress.
@@ -4409,6 +4475,21 @@ class MLForecastLabApp:
             drift=drift,
             did_not_complete=list(did_not_complete or []),
             did_not_complete_daily=list(did_not_complete_daily or []),
+            published_scores=[
+                {k: (None if isinstance(v, float) and not np.isfinite(v) else v)
+                 for k, v in row.items()}
+                for row in (published or {}).get("rows", [])
+            ],
+            published_evaluation_days=float(
+                (published or {}).get("evaluation_days", 0.0)
+            ),
+            published_enough_evidence=bool(
+                (published or {}).get("enough_evidence", False)
+            ),
+            selection_metric=selection_metric,
+            production_comparison=_jsonable_result(
+                (published or {}).get("production_comparison")
+            ),
         )
 
         self.web_app.state.appstate.benchmark_results[exp_cfg.name] = web_result
@@ -4488,7 +4569,11 @@ class MLForecastLabApp:
         logger.info(f"  Covariates: {len(exp_cfg.covariates)}" + (
             f" ({', '.join(c.entity.split('.')[-1] for c in exp_cfg.covariates)})" if exp_cfg.covariates else ""
         ))
-        logger.info(f"  CV: {exp_cfg.cv_strategy}, {exp_cfg.cv_folds} folds, metric={exp_cfg.production_metric}")
+        _metric_label = (
+            exp_cfg.production_metric if exp_cfg.production_metric_explicit
+            else "automatic"
+        )
+        logger.info(f"  CV: {exp_cfg.cv_strategy}, {exp_cfg.cv_folds} folds, metric={_metric_label}")
         logger.info(f"{'=' * 60}")
 
         if self.web_app:
@@ -4985,6 +5070,88 @@ class MLForecastLabApp:
             runner.production_metric, np.nan
         ) if best_model_name else np.nan
 
+        # v2.58.0: score the forecast each backend would publish — the
+        # full horizon from many issue times — against the reference
+        # forecasts. Where the runner selects on it (see
+        # BenchmarkRunner.selects_on_published_forecast) the lowest CRPS
+        # among backends passing the period-total guardrail wins and the
+        # leaderboard follows that order; otherwise it is shown only.
+        published = None
+        selection_metric = runner.production_metric
+        try:
+            _ranked = {k: v for k, v in completed_models.items() if k in rankings}
+            published = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: runner.score_published_forecasts(
+                    combined, _ranked,
+                    tz=getattr(self.config, "timezone", None) or None,
+                    exclude=[] if _naive_was_enabled else ["seasonal_naive"],
+                ),
+            )
+        except Exception as e:
+            logger.warning(f"  Published-forecast evaluation failed: {e}")
+        if published and runner.selects_on_published_forecast():
+            _new_ranks = runner.rank_by_published_scores(published, rankings)
+            if _new_ranks:
+                # A backend left out of selection keeps a place after the
+                # ranked ones so it still has a row on the leaderboard.
+                for _n in sorted(rankings, key=rankings.get):
+                    _new_ranks.setdefault(_n, len(_new_ranks) + 1)
+                rankings = _new_ranks
+                best_model_name = published["winner"]
+                selection_metric = "crps"
+                best_metric_value = completed_models[best_model_name].metrics.get(
+                    "crps", np.nan,
+                )
+        if published:
+            # v2.58.0: how the top of the table compares with the model the
+            # user promoted — shown to inform the next Promote, never acted on.
+            try:
+                from ml_forecast_lab.benchmark import horizon as _H
+                published["production_comparison"] = _H.compare_with_production(
+                    published["evaluation"], published["rows"],
+                    top=published.get("winner"),
+                    production=exp_cfg.production_model or None,
+                )
+            except Exception as e:
+                logger.warning(f"  Comparison with the production model failed: {e}")
+            logger.info("")
+            logger.info(
+                f"  Published forecast, {published['evaluation_days']:.1f} days "
+                f"scored (CRPS; * = fails the period-total guardrail):"
+            )
+            for _r in published["rows"]:
+                if not np.isfinite(_r["crps"]):
+                    continue
+                logger.info(
+                    f"    {_r['name']}{'' if _r['eligible'] else ' *'}: "
+                    f"crps={_r['crps']:.4f}, rmse={_r['rmse']:.4f}, "
+                    f"level={_r['bias_pct']:+.0f}%, "
+                    f"period_total_rmse={_r['period_total_rmse']:.3f}"
+                )
+            if selection_metric == "crps":
+                logger.info(
+                    f"  Selected on the published forecast: {best_model_name}"
+                    + ("" if published["enough_evidence"] else
+                       " (fewer than 14 days scored — close models are "
+                       "not reliably separated)")
+                )
+            _cmp = published.get("production_comparison")
+            if _cmp and not _cmp["same"] and np.isfinite(_cmp["improvement"]):
+                _imp = _cmp["improvement"]
+                logger.info(
+                    f"  vs production model {_cmp['production']}: "
+                    f"{_cmp['top']} CRPS {abs(_imp):.1%} "
+                    f"{'lower' if _imp > 0 else 'higher'} over "
+                    f"{_cmp['n_days']} days ({_cmp['verdict']})"
+                )
+            if selection_metric != "crps" and runner.median_seeking_override():
+                logger.info(
+                    f"  production_metric is set to {runner.production_metric}, "
+                    "which favours near-constant forecasts on a target that "
+                    "cannot go below zero; leave it unset (automatic) or set "
+                    "crps to choose on the published forecast."
+                )
+
         # Log final rankings — composite mean rank (Demšar-style
         # averaging across folds; not a Friedman/Nemenyi test). CI
         # printed in [low, high] form so a reader can spot ties.
@@ -5030,6 +5197,8 @@ class MLForecastLabApp:
                 drift=drift_stats,
                 did_not_complete=dnc_interval,
                 did_not_complete_daily=dnc_daily_only,
+                published=published,
+                selection_metric=selection_metric,
             )
 
         # Build a BenchmarkResult-compatible object for downstream use
@@ -5040,11 +5209,14 @@ class MLForecastLabApp:
             rankings=rankings,
             best_model=best_model_name or "",
             best_metric_value=best_metric_value,
-            metric_used=runner.production_metric,
+            metric_used=selection_metric,
             cv_strategy=runner.cv_strategy,
             n_folds=runner.cv_folds,
             did_not_complete=dnc_interval,
             did_not_complete_daily=dnc_daily_only,
+            published_scores=(published or {}).get("rows", []),
+            published_evaluation_days=(published or {}).get("evaluation_days", 0.0),
+            published_enough_evidence=(published or {}).get("enough_evidence", False),
         )
 
         # 7. Generate holdout predictions from each model for visualisation
@@ -5099,8 +5271,7 @@ class MLForecastLabApp:
                 try:
                     m = self.model_registry.create(m_name)
                     overrides = self.config.model_overrides.get(m_name, {})
-                    if m.is_neural and hasattr(m, 'loss_fn') and 'loss_fn' not in overrides:
-                        m.set_params(loss_fn=exp_cfg.loss_fn)
+                    _apply_experiment_loss(m, exp_cfg, overrides)
                     _apply_patience(m, exp_cfg, overrides)
                     if (m.is_neural and hasattr(m, 'optimiser')
                             and 'optimiser' not in overrides):
@@ -5447,7 +5618,7 @@ class MLForecastLabApp:
                 f"{'#' + str(rank):>5}{marker}"
             )
         logger.info(f"  {'─' * 56}")
-        logger.info(f"  Best model: {best_model_name} ({runner.production_metric}={best_metric_value:.4f})")
+        logger.info(f"  Best model: {best_model_name} ({selection_metric}={best_metric_value:.4f})")
         logger.info(f"{'=' * 60}")
         logger.info(f"")
 
@@ -5467,13 +5638,14 @@ class MLForecastLabApp:
                 work[c] = df_slice[c]
         idx = df_slice.index
         if isinstance(idx, pd.DatetimeIndex):
-            hour_rad = 2 * np.pi * idx.hour / 24
-            dow_rad = 2 * np.pi * idx.dayofweek / 7
+            _cal = calendar_index(idx)
+            hour_rad = 2 * np.pi * _cal.hour / 24
+            dow_rad = 2 * np.pi * _cal.dayofweek / 7
             work['hour_sin'] = np.sin(hour_rad)
             work['hour_cos'] = np.cos(hour_rad)
             work['dow_sin'] = np.sin(dow_rad)
             work['dow_cos'] = np.cos(dow_rad)
-            work['is_weekend'] = (idx.dayofweek >= 5).astype(np.float32)
+            work['is_weekend'] = (_cal.dayofweek >= 5).astype(np.float32)
         return work.values.astype(np.float32)
 
     async def _run_production_inference(self, exp_cfg):
@@ -5535,8 +5707,7 @@ class MLForecastLabApp:
         # 4. Train model on full data
         model = self.model_registry.create(prod_model_name)
         overrides = self.config.model_overrides.get(prod_model_name, {})
-        if model.is_neural and hasattr(model, 'loss_fn') and 'loss_fn' not in overrides:
-            model.set_params(loss_fn=exp_cfg.loss_fn)
+        _apply_experiment_loss(model, exp_cfg, overrides)
         _apply_patience(model, exp_cfg, overrides)
         if (model.is_neural and hasattr(model, 'optimiser')
                 and 'optimiser' not in overrides):
@@ -5627,9 +5798,13 @@ class MLForecastLabApp:
                 await asyncio.get_running_loop().run_in_executor(None, _train_neural)
             else:
                 is_neural = False
-                await asyncio.get_running_loop().run_in_executor(None, model.fit, X, y)
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: model.fit(X, y, feature_names=feature_cols),
+                )
         else:
-            await asyncio.get_running_loop().run_in_executor(None, model.fit, X, y)
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: model.fit(X, y, feature_names=feature_cols),
+            )
 
         train_time = time.time() - train_start
         logger.info(f"Training completed in {train_time:.1f}s")
@@ -5867,19 +6042,10 @@ class MLForecastLabApp:
             def _build_feature_row(ts, buf, step_idx):
                 row = {}
                 # Temporal
-                row['hour_of_day'] = ts.hour
-                row['day_of_week'] = ts.dayofweek
-                row['is_weekend'] = 1.0 if ts.dayofweek >= 5 else 0.0
-                row['month'] = ts.month
-                row['day_of_month'] = ts.day
-                hr_rad = 2 * np.pi * ts.hour / 24
-                dw_rad = 2 * np.pi * ts.dayofweek / 7
-                row['hour_sin'] = float(np.sin(hr_rad))
-                row['hour_cos'] = float(np.cos(hr_rad))
-                row['dow_sin'] = float(np.sin(dw_rad))
-                row['dow_cos'] = float(np.cos(dw_rad))
+                # v2.58.0: one shared construction, in the calendar zone.
+                row.update(calendar_row(ts, exp_cfg.interval_minutes))
                 if 'is_holiday' in feature_cols:
-                    row['is_holiday'] = float(is_holiday(ts, exp_cfg.country))
+                    row['is_holiday'] = float(is_holiday(calendar_timestamp(ts), exp_cfg.country))
                 # Lag features
                 for lag in range(1, n_lags + 1):
                     row[f'y_lag_{lag}'] = float(buf[-lag]) if lag <= len(buf) else 0.0
@@ -6784,8 +6950,7 @@ class MLForecastLabApp:
         exp_params = getattr(exp_cfg, 'model_params', {}).get(prod_model_name, {})
         if exp_params:
             overrides.update(exp_params)
-        if model.is_neural and hasattr(model, 'loss_fn') and 'loss_fn' not in overrides:
-            model.set_params(loss_fn=exp_cfg.loss_fn)
+        _apply_experiment_loss(model, exp_cfg, overrides)
         _apply_patience(model, exp_cfg, overrides)
         if (model.is_neural and hasattr(model, 'optimiser')
                 and 'optimiser' not in overrides):
@@ -6838,12 +7003,22 @@ class MLForecastLabApp:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(
                     None,
-                    lambda: model.fit(X, y, epoch_callback=_cancel_cb),
+                    lambda: model.fit(
+                        X, y, epoch_callback=_cancel_cb,
+                        feature_names=feature_cols,
+                    ),
                 )
         else:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(
-                None, lambda: model.fit(X, y, epoch_callback=_cancel_cb),
+                # v2.58.0: tabular backends get the column names, as the
+                # benchmark gives them — a backend that reads a column by
+                # name (seasonal_profile) could not be retrained without
+                # them, and stored feature importances were unlabelled.
+                None, lambda: model.fit(
+                    X, y, epoch_callback=_cancel_cb,
+                    feature_names=feature_cols,
+                ),
             )
 
         # Debug bundle: capture training inputs for offline analysis. Gated
@@ -7118,8 +7293,8 @@ class MLForecastLabApp:
                 if meta.get("schema_version") != CACHE_SCHEMA_VERSION:
                     logger.info(
                         f"  Cached model for {exp_cfg.name} has schema "
-                        f"v{meta.get('schema_version')}, ignoring (v2.51.0 "
-                        f"complete-grid windows require schema_version="
+                        f"v{meta.get('schema_version')}, ignoring (this "
+                        f"version requires schema_version="
                         f"{CACHE_SCHEMA_VERSION} — a fresh "
                         f"benchmark + retrain will be scheduled)"
                     )
@@ -7581,6 +7756,10 @@ class MLForecastLabApp:
         source_is_cumulative = bool(
             getattr(exp_cfg, "source_is_cumulative", False)
         )
+        asymmetric = _interval_is_asymmetric(exp_cfg)
+        # ``signed`` is passed only when set, so a symmetric experiment's
+        # query — and its replay-bundle key — is unchanged.
+        _cq_extra = {"signed": True} if asymmetric else {}
         # Offloaded: this query joins forecast_log against the
         # actuals grid and scales with both; running it inline
         # froze the event loop (web UI + scheduler) for the
@@ -7594,6 +7773,7 @@ class MLForecastLabApp:
             model_version=current_version,
             interval_minutes=exp_cfg.interval_minutes,
             source_is_cumulative=source_is_cumulative,
+            **_cq_extra,
         )
         pooled = False
         if (
@@ -7610,6 +7790,7 @@ class MLForecastLabApp:
                 model_version=None,
                 interval_minutes=exp_cfg.interval_minutes,
                 source_is_cumulative=source_is_cumulative,
+                **_cq_extra,
             )
             if cq_all.get("fallback_quantile") is not None:
                 logger.info(
@@ -7642,12 +7823,40 @@ class MLForecastLabApp:
         ], dtype=float)
         y_pred_upper = (y_pred + q_vec).astype(np.float32)
         y_pred_lower = (y_pred - q_vec).astype(np.float32)
-        if getattr(exp_cfg, "source_is_cumulative", False):
+        shape = "symmetric"
+        if asymmetric:
+            # v2.58.0: lower and upper offsets from past signed errors made
+            # when the forecast was of similar size. Falls back to the
+            # symmetric band above until enough pairs are calibrated.
+            from ml_forecast_lab.benchmark.horizon import (
+                level_conditioned_offsets,
+            )
+            pairs = np.asarray(
+                cq.get("signed_residuals") or [], dtype=float,
+            ).reshape(-1, 2)
+            offsets = level_conditioned_offsets(
+                pairs[:, 0], pairs[:, 1], np.asarray(y_pred, dtype=float),
+                [(1.0 - target_level) / 2.0, (1.0 + target_level) / 2.0],
+            )
+            if offsets is not None:
+                y_pred_lower = (y_pred + offsets[:, 0]).astype(np.float32)
+                y_pred_upper = (y_pred + offsets[:, 1]).astype(np.float32)
+                # The band always contains the point forecast.
+                y_pred_lower = np.minimum(y_pred_lower, y_pred).astype(np.float32)
+                y_pred_upper = np.maximum(y_pred_upper, y_pred).astype(np.float32)
+                q_vec = ((y_pred_upper - y_pred_lower) / 2.0).astype(float)
+                shape = "asymmetric"
+        if (
+            getattr(exp_cfg, "source_is_cumulative", False)
+            or (asymmetric and getattr(exp_cfg, "target_is_nonnegative", False))
+        ):
+            # Only where the band would go negative; the clip does not
+            # construct the band.
             y_pred_lower = np.maximum(y_pred_lower, 0.0)
         logger.info(
-            f"  Conformal {int(target_level*100)}% band: "
+            f"  Conformal {int(target_level*100)}% band ({shape}): "
             f"n={cq.get('total_samples', 0)} residuals, "
-            f"median width={float(np.median(q_vec*2)):.3f}"
+            f"median width={float(np.median(y_pred_upper - y_pred_lower)):.3f}"
         )
         return ConformalBands(
             level=target_level,
@@ -8810,19 +9019,10 @@ class MLForecastLabApp:
                 """Construct a single feature row matching the training schema."""
                 row = {}
                 # Temporal
-                row['hour_of_day'] = ts.hour
-                row['day_of_week'] = ts.dayofweek
-                row['is_weekend'] = 1.0 if ts.dayofweek >= 5 else 0.0
-                row['month'] = ts.month
-                row['day_of_month'] = ts.day
-                hr_rad = 2 * np.pi * ts.hour / 24
-                dw_rad = 2 * np.pi * ts.dayofweek / 7
-                row['hour_sin'] = float(np.sin(hr_rad))
-                row['hour_cos'] = float(np.cos(hr_rad))
-                row['dow_sin'] = float(np.sin(dw_rad))
-                row['dow_cos'] = float(np.cos(dw_rad))
+                # v2.58.0: one shared construction, in the calendar zone.
+                row.update(calendar_row(ts, exp_cfg.interval_minutes))
                 if 'is_holiday' in feature_cols:
-                    row['is_holiday'] = float(is_holiday(ts, exp_cfg.country))
+                    row['is_holiday'] = float(is_holiday(calendar_timestamp(ts), exp_cfg.country))
                 # Lag features (buf is chronological: oldest..newest,
                 # y_lag_i = i-th most recent past value)
                 for lag in range(1, n_lags + 1):
@@ -9489,6 +9689,16 @@ class MLForecastLabApp:
                     exp_cfg.production_metric,
                     result.metrics.get("mae", float("inf")),
                 )
+                # v2.58.0: where selection is made on the published
+                # forecast, tuning searches on it too, so the tuned model
+                # is tuned for what the leaderboard will rank.
+                if runner.selects_on_published_forecast():
+                    _pub = runner.published_objective(
+                        combined, result,
+                        tz=getattr(self.config, "timezone", None) or None,
+                    )
+                    if _pub is not None:
+                        primary = _pub
                 status = "completed"
             except Exception as e:
                 logger.warning(f"  Trial {trial.number} failed: {e}", exc_info=True)
@@ -9727,7 +9937,7 @@ class MLForecastLabApp:
                     p = aligned
                 else:
                     # Tree path: flat features
-                    m.fit(X_tr_h, y_tr_h)
+                    m.fit(X_tr_h, y_tr_h, feature_names=feature_cols)
                     p = m.predict(X_te_h)
                     p = p.ravel() if p.ndim > 1 else p
                 del m
@@ -10042,7 +10252,9 @@ class MLForecastLabApp:
                             X_tr, X_te = X[:split], X[split:]
                             y_tr_for_naive, y_te = y_all[:split], y_all[split:]
 
-                            model.fit(X_tr, y_tr_for_naive)
+                            model.fit(
+                                X_tr, y_tr_for_naive, feature_names=feature_cols,
+                            )
                             y_pred = model.predict(X_te)
                             y_pred_flat = y_pred.ravel() if y_pred.ndim > 1 else y_pred
 

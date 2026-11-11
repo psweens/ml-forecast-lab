@@ -246,6 +246,17 @@ class BenchmarkResult(BaseModel):
     # so a per-interval-ranked model isn't confusingly shown as
     # "did not complete".
     did_not_complete_daily: List[str] = []
+    # v2.58.0: each backend's published forecast (full horizon, many issue
+    # times) scored against the reference forecasts, best CRPS first.
+    # ``selection_metric`` is ``crps`` when that score chose the winner.
+    published_scores: List[Dict[str, Any]] = []
+    published_evaluation_days: float = 0.0
+    published_enough_evidence: bool = False
+    selection_metric: Optional[str] = None
+    # The top of the published-forecast table against the promoted
+    # production model (benchmark.horizon.compare_with_production): top,
+    # production, same, improvement, n_days, verdict. Informational.
+    production_comparison: Optional[Dict[str, Any]] = None
 
 
 class ExperimentStatus(BaseModel):
@@ -869,11 +880,16 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
 
     # ---- Model parameter schema (type, default, display label) ----
 
+    # v2.58.0: tree backends' learning rate starts at 0.01 and tree count
+    # at 50. Their product bounds how far boosting can move from the
+    # starting constant: at 0.001 × a few hundred rounds a tuned model was
+    # effectively unboosted — a flat line at the training mean — and on a
+    # noisy single-fold objective such a trial can win.
     MODEL_PARAM_SCHEMA: Dict[str, Dict[str, dict]] = {
         "lightgbm": {
-            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 10, "max": 5000},
+            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 50, "max": 5000},
             "max_depth": {"type": "int", "default": 6, "label": "Max tree depth", "min": 1, "max": 20},
-            "learning_rate": {"type": "float", "default": 0.05, "label": "Learning rate", "min": 0.001, "max": 1.0, "step": 0.001},
+            "learning_rate": {"type": "float", "default": 0.05, "label": "Learning rate", "min": 0.01, "max": 1.0, "step": 0.001},
             "num_leaves": {"type": "int", "default": 31, "label": "Max leaves", "min": 2, "max": 256},
             "min_child_samples": {"type": "int", "default": 10, "label": "Min samples per leaf", "min": 1, "max": 100},
             "subsample": {"type": "float", "default": 0.8, "label": "Row subsample ratio", "min": 0.1, "max": 1.0, "step": 0.05},
@@ -882,9 +898,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "reg_lambda": {"type": "float", "default": 0.1, "label": "L2 regularisation", "min": 0.0, "max": 10.0, "step": 0.01},
         },
         "xgboost": {
-            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 10, "max": 5000},
+            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 50, "max": 5000},
             "max_depth": {"type": "int", "default": 6, "label": "Max tree depth", "min": 1, "max": 20},
-            "learning_rate": {"type": "float", "default": 0.05, "label": "Learning rate", "min": 0.001, "max": 1.0, "step": 0.001},
+            "learning_rate": {"type": "float", "default": 0.05, "label": "Learning rate", "min": 0.01, "max": 1.0, "step": 0.001},
             "subsample": {"type": "float", "default": 0.8, "label": "Row subsample ratio", "min": 0.1, "max": 1.0, "step": 0.05},
             "colsample_bytree": {"type": "float", "default": 0.8, "label": "Column subsample ratio", "min": 0.1, "max": 1.0, "step": 0.05},
             "reg_alpha": {"type": "float", "default": 0.1, "label": "L1 regularisation", "min": 0.0, "max": 10.0, "step": 0.01},
@@ -1005,9 +1021,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             # 6-10). n_estimators capped at 2000 so a pathological
             # lr=0.001 trial that never triggers early-stopping still
             # finishes within the study budget.
-            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 10, "max": 2000},
+            "n_estimators": {"type": "int", "default": 500, "label": "Number of trees", "min": 50, "max": 2000},
             "max_depth": {"type": "int", "default": 6, "label": "Max tree depth", "min": 3, "max": 10},
-            "learning_rate": {"type": "float", "default": 0.05, "label": "Learning rate", "min": 0.001, "max": 1.0, "step": 0.001},
+            "learning_rate": {"type": "float", "default": 0.05, "label": "Learning rate", "min": 0.01, "max": 1.0, "step": 0.001},
             "l2_leaf_reg": {"type": "float", "default": 3.0, "label": "L2 leaf regularisation", "min": 0.0, "max": 30.0, "step": 0.1},
             "subsample": {"type": "float", "default": 0.8, "label": "Row subsample ratio", "min": 0.1, "max": 1.0, "step": 0.05},
             "colsample_bylevel": {"type": "float", "default": 0.8, "label": "Column subsample ratio", "min": 0.1, "max": 1.0, "step": 0.05},
@@ -1117,6 +1133,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         # dimensions.
         "seasonal_naive": {
             "seasonal_period": {"type": "int", "default": 48, "label": "Seasonal period (steps)", "min": 1, "max": 1440, "tunable": False},
+        },
+        "seasonal_profile": {
+            "split_weekend": {"type": "bool", "default": True, "label": "Separate weekday and weekend profiles", "tunable": False},
         },
         # Same non-tunable treatment as the other baselines: these are
         # properties of the data (how long a day is, how far back "recent"
@@ -1327,6 +1346,9 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         {"name": "seasonal_naive", "display_name": "Seasonal Naive", "model_type": "Baseline",
          "description": "Reference baseline: ŷ[t+h] = y[t+h-period]. No training.",
          "speed": "⚡ Instant", "best_for": "Sanity-check reference for all other models"},
+        {"name": "seasonal_profile", "display_name": "Seasonal Profile", "model_type": "Baseline",
+         "description": "The average at each time of day, weekdays and weekends separately. No training.",
+         "speed": "⚡ Instant", "best_for": "Values that are mostly near zero with events at habitual times of day"},
         {"name": "daily_profile", "display_name": "Daily Profile", "model_type": "Baseline",
          "description": "Hierarchical: the recent day's shape scaled toward a projected daily total. No training.",
          "speed": "⚡ Instant", "best_for": "Loads where the daily total matters more than the exact timing"},
@@ -5175,7 +5197,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "retrain_every_hours": lambda v: float(v) if float(v) >= 0.1 else None,
             "production_metric": lambda v: v if v in (
                 "mae", "rmse", "mase", "seasonal_mase",
-                "peak_weighted_mae", "pinball_q90",
+                "peak_weighted_mae", "pinball_q90", "crps",
             ) else None,
             "loss_fn": lambda v: v if v in ("mse", "mae", "huber", "tweedie", "dilate") else None,
             "optimiser": lambda v: v if v in ("adamw", "adam") else None,
@@ -5190,6 +5212,7 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "patience": lambda v: int(v) if 1 <= int(v) <= 500 else None,
             "max_increment": lambda v: float(v) if float(v) > 0 else None,
             "conformal_coverage": lambda v: float(v) if 0.5 <= float(v) <= 0.99 else None,
+            "interval_method": lambda v: v if v in ("auto", "symmetric", "asymmetric") else None,
             "country": lambda v: (str(v).strip().upper() or None) if v else None,
             "gap_handling": lambda v: v if v in ("ffill", "interpolate", "mask") else None,
             "gap_max_minutes": lambda v: int(v) if int(v) >= 1 else None,
@@ -5207,7 +5230,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
         }
 
         # Fields where None/null means "use global default" (valid, not an error)
-        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country", "patience"}
+        # production_metric: null removes the key, i.e. automatic (v2.58.0).
+        nullable_fields = {"forecast_every_minutes", "retrain_every_hours", "max_increment", "country", "patience", "production_metric"}
 
         updates = {}
         for field, validator in editable.items():
@@ -5268,6 +5292,11 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
                 for exp_cfg in cfg.experiments:
                     if exp_cfg.name == exp_name:
                         for k, v in updates.items():
+                            if k == "production_metric":
+                                # Keep the derived explicit flag in step.
+                                from ml_forecast_lab.config import DEFAULT_PRODUCTION_METRIC
+                                exp_cfg.production_metric_explicit = v is not None
+                                v = v or DEFAULT_PRODUCTION_METRIC
                             setattr(exp_cfg, k, v)
                         break
             except Exception:

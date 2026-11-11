@@ -39,6 +39,7 @@ The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add 
 | Classical | `ets` (statsforecast) | Exponential smoothing, good seasonal decomposition | Univariate only | Medium |
 | Classical | `theta` (statsforecast) | M3 competition winner, low-complexity | Univariate only | Fast |
 | Baseline | `seasonal_naive` | "Tomorrow looks like last week" — sanity check | Trivial — but if it wins, your sophisticated models are wasted | Trivial |
+| Baseline | `seasonal_profile` | The mean at each time of day, weekdays and weekends separately — the model to beat on intermittent targets | No lags or covariates: it cannot react to what just happened | Trivial |
 | Baseline | `daily_profile` | Hierarchical: the recent day's shape scaled toward a projected daily total — nails day-level amplitude | Within-day timing is still seasonal-naive's; no covariates yet | Trivial |
 
 ## Decision flow
@@ -56,6 +57,7 @@ The short version: **start with `lightgbm`, `xgboost`, `lstm`, and `cnn`.** Add 
 
 - **Strong daily / weekly seasonality** (e.g. household load, water demand): trees + `nhits` + `fits` are usually winners; `cyclenet` is built for exactly this shape (set `cycle_len` to your steps-per-day, e.g. 48 at 30-min sampling).
 - **Noisy, sparse, low SNR** (e.g. EV charging, intermittent appliances): trees + `seasonal_naive`. Neural models often struggle here — the noise overwhelms the signal. To train the neural backends to keep their peaks instead of flattening them, set `loss_fn: dilate` (or the Guided **"catching the peaks"** answer) — it scores shape and timing separately so a slightly-mistimed spike isn't double-penalised (costs more training time).
+- **Mostly near zero, with events at habitual times of day** (drawn-off or dispensed quantities, appliance cycles): add `seasonal_profile`. Whether an event lands in a given interval is close to unpredictable; how often and how large events are at that time of day is not, and that table is this model. With a few weeks of history the learned backends typically reproduce it with a shallower shape and a lower level — see `docs/investigations/2026-11-intermittent-demand-flat-forecast.md`.
 - **Daily total matters more than within-day timing** (e.g. hot-water / heat energy, daily demand): add `daily_profile` — it forecasts the recent day's shape scaled toward a projected daily total, so it tracks big-vs-small days where a flat seasonal-naive can't.
 - **Covariate-driven** (e.g. heating ~ outside temp, solar ~ irradiance): `tide`, `tft`, `tsmixer`, `timexer` shine when the target is mostly explained by external features — `timexer` is the only transformer in the catalogue designed *specifically* around exogenous variables.
 - **Univariate, no good covariates**: `arima` and `ets` (statsforecast) are surprisingly hard to beat, and `chronos_bolt` / `ttm` bring modern zero-shot accuracy to exactly this setting. Don't underestimate classical baselines.

@@ -106,3 +106,75 @@ future enhancement, not what the current per-experiment leaderboard does.
   (Argues for Bayesian alternatives — equally inapplicable here without
   independent datasets, but useful background on why CD-bar plots are
   often misleading.)
+
+## Selection on the published forecast (v2.58.0)
+
+The composite mean rank above scores every backend one step ahead with
+measured lags. Two things follow from that. A tabular backend publishes a
+recursive forecast in which every lag beyond the first step is its own
+output, so the leaderboard measures a forecast nobody receives. And two of
+the three rank metrics are an absolute error up to a constant, which the
+median minimises; on a non-negative target that sits near zero most of the
+time the median is the background level, and a near-constant forecast there
+outranks a correctly-levelled one.
+
+`BenchmarkRunner.score_published_forecasts` scores the published forecast
+instead: inside each test fold the fold's trained model issues a
+`future_periods`-step forecast from up to 24 issue times, seven steps apart
+(recursive for a tabular backend, with the frame's measured covariates as
+known-future inputs; the multi-horizon head's own output for a sequence
+backend). `benchmark.horizon` scores those with CRPS, RMSE, level bias and
+the remaining-in-day total error, alongside five reference forecasts. A
+point forecast's distribution is the forecast plus its own earlier
+out-of-sample signed errors grouped by forecast size — the same
+construction as the published asymmetric interval.
+
+**When it selects.** `selects_on_published_forecast` is true when
+`production_metric` is `crps`, or when it is left unset on a non-negative
+target (`source_is_cumulative` or `target_is_nonnegative`). An unset
+metric is automatic: `ExperimentCfg` resolves it to `seasonal_mase` for
+every consumer and records `production_metric_explicit = False`. A metric
+the user configured is honoured, including `mae`, `mase` or
+`seasonal_mase` on a non-negative target; the log then says that the
+metric favours near-constant forecasts there. A first cut overrode those
+three whenever the target was non-negative, which silently replaced a
+deliberate choice. When it selects, the winner is the lowest CRPS among
+backends passing the guardrail, the leaderboard follows that order, and
+tuning minimises the same score. Otherwise the composite rank selects and
+the table is informational. If any ranked backend could not be scored (no
+forecasts collected, or a fold too short for one horizon), the composite
+rank selects.
+
+**The guardrail.** Slot-level CRPS on such a target barely separates
+forecasts by level: a seasonal-mean and a seasonal-median profile share
+their quantiles and score identically while their totals differ by 40 %.
+A backend whose remaining-in-day total RMSE exceeds 1.25 × that of a
+constant at the history mean is not eligible. The tolerance is a fixed
+constant. If every backend fails, the lowest CRPS still wins and is
+marked. The remaining-in-day total is the sum of the forecast from the
+issue time to local midnight, for any target, not only one that resets
+daily: for a rate (W, W/m²) the sum is proportional to the energy still to
+come, and for a level-type target (a signed one under `production_metric:
+crps`) it is a check on the forecast's level over the rest of the day. An
+issue time is scored only when every slot to midnight is inside the
+horizon and measured.
+
+**Evidence.** Scores over fewer than 14 days are flagged. Model
+differences on this class of target are a few percent of the score and
+daily totals vary by a third from day to day, so a different model topping
+the table is not by itself a reason to switch.
+
+**Comparison with the production model.** The user decides which model
+publishes forecasts by promoting it, which pins `production_model`; a
+later benchmark only informs that decision. When a production model is
+set and was scored, `horizon.compare_with_production` compares the
+table's winner with it on the issue times both were scored on, using
+`horizon.paired_difference` — the per-origin CRPS difference with a
+day-block bootstrap, because issue times on the same day share their
+targets. The Results tab states the difference and whether it is
+consistent (95 % interval excludes zero) or within the day-to-day
+variation. It is never acted on. A first cut used the same comparison as
+a promotion gate that kept the previous winner as "Best" unless beaten by
+at least 1 %; with promotion in the user's hands that only made the
+"Best" label disagree with the table being chosen from, so it was
+replaced by this note.
