@@ -67,3 +67,16 @@ def test_production_model_on_top_is_stated(client, seeded_experiment, app):
     ))
     html = client.get(f"/experiment/{seeded_experiment}").text
     assert "Your production model, LightGBM, is the best model in this table" in html
+
+
+def test_leaderboard_crps_column_shows_the_published_score(client, seeded_experiment, app):
+    """With CRPS selection the leaderboard's ranking column showed
+    'nan ± nan': it read a per-fold 'crps' that does not exist."""
+    _seed(app, seeded_experiment, None)
+    br = app.state.appstate.benchmark_results[seeded_experiment]
+    for m, v in zip(br.models, (0.8198, 0.8459)):
+        m.selection_metric = "crps"
+        m.selection_value = MetricValue(mean=v, std=0.0)
+    html = client.get(f"/experiment/{seeded_experiment}").text
+    assert "0.8459" in html and "nan ± nan" not in html
+    assert "CRPS of each model's published forecast" in html

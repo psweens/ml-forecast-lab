@@ -282,3 +282,32 @@ class TestTuningObjective:
     def test_unscorable_model_has_no_objective(self):
         frame, runner = _frame().reset_index(drop=True), _runner()
         assert runner.published_objective(frame, ModelResult(model_name="m")) is None
+
+
+class TestCrpsIsNotAFoldMetric:
+    """v2.58.0: with production_metric crps the runner tried to compute a
+    one-step 'crps' per fold — not a registered metric — so every fold of
+    every model logged a warning and the leaderboard column was NaN."""
+
+    def test_fold_metrics_exclude_crps(self):
+        r = _runner(production_metric="crps", production_metric_explicit=True)
+        assert "crps" not in r._fold_metric_names()
+        assert r._fold_log_metric() == "mae"
+
+    def test_other_production_metrics_are_still_computed(self):
+        r = _runner(production_metric="pinball_q90", production_metric_explicit=True)
+        assert "pinball_q90" in r._fold_metric_names()
+
+    def test_final_web_update_keeps_the_published_scores(self):
+        # The last "completed" write of the benchmark replaced the
+        # published-forecast table and selection metric with defaults.
+        import inspect
+        from ml_forecast_lab import main
+        src = inspect.getsource(main.MLForecastLabApp._run_benchmark)
+        calls = src.split("self._update_web_benchmark(")[1:]
+        completed = [c for c in calls if 'status="completed"' in c.split(")")[0] or 'status="completed"' in c[:400]]
+        assert len(completed) >= 2
+        for c in completed:
+            head = c[:700]
+            assert "published=published" in head
+            assert "selection_metric=selection_metric" in head
